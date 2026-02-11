@@ -15,21 +15,44 @@ The React Compiler is not enabled on this template because of its impact on dev 
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
 
-## Deployment (Hostinger)
+## Development (Local)
 
-1. **Build the project:**
-   ```bash
-   npm run build
-   ```
-   This will create a `dist` folder containing all production files.
+1.  **Start the development server:**
+    ```bash
+    npm run dev
+    ```
+2.  **Open in Browser:**
+    The terminal will show a local URL (usually `http://localhost:5173`). Open this to see your changes instantly.
+3.  **Work on the App:**
+    Edit files in `src/`. The browser will automatically reload when you save changes.
 
-2. **Upload to Hostinger:**
-   - Log in to your Hostinger hPanel.
-   - Go to **Websites** -> **Manage** (for `immocontrol360.de`).
-   - Open **File Manager**.
-   - Navigate to `public_html` (primary domain) or `domains/immocontrol360.de/public_html` (addon domain).
-   - Delete existing default files (e.g., `default.php`).
-   - Upload **all contents** of the local `dist` folder (including `.htaccess`, `index.html`, `assets` folder).
+## Deployment to Hostinger (Live)
 
-3. **Routing:**
-   - The project includes a `.htaccess` file in `public/` which is automatically copied to `dist/`. This handles client-side routing so refreshing pages works correctly.
+Since you have connected your GitHub repository to Hostinger:
+
+1.  **Commit & Push your changes:**
+    When you are happy with your local changes, run these commands in the terminal:
+    ```bash
+    git add .
+    git commit -m "Describe your changes here"
+    git push origin master
+    ```
+2.  **Hostinger Updates Automatically:**
+    Hostinger will detect the new code on GitHub, build it, and update your website automatically (usually within a few minutes).
+
+---
+
+### Alternative: Manual Deployment (Fallback)
+
+If the automatic deployment fails, you can upload manually:
+
+1.  **Build the project:**
+    ```bash
+    npm run build
+    ```
+    This creates a `dist` folder.
+2.  **Upload to Hostinger:**
+    - Go to Hostinger File Manager (`public_html`).
+    - Upload the **contents** of the `dist` folder.
+3.  **Routing:**
+    - Ensure the `.htaccess` file is present (it is automatically copied to `dist/` during build).

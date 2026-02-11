@@ -17,10 +17,11 @@ const AuthLayout = ({ children, title, subtitle }) => {
                         src="/logo.png?v=3"
                         alt="ImmoControl Pro 360"
                         style={{
-                            maxHeight: '120px',
+                            maxHeight: '60px',
                             maxWidth: '100%',
                             height: 'auto',
-                            marginBottom: 'var(--spacing-md)'
+                            marginBottom: 'var(--spacing-md)',
+                            display: 'inline-block'
                         }}
                         onError={(e) => {
                             // Fallback if image not found, hide it or show text
