@@ -68,6 +68,7 @@ const UtilityCosts = () => {
     const [categories, setCategories] = useState([]);
     const [expenses, setExpenses] = useState([]);
     const [settlements, setSettlements] = useState([]); // Local state for saved settlements
+    const [distributionKeys, setDistributionKeys] = useState([]);
 
     // UI State
     const [expandedProperty, setExpandedProperty] = useState(null);
@@ -105,14 +106,15 @@ const UtilityCosts = () => {
     const fetchData = async () => {
         try {
             setLoading(true);
-            const [propRes, unitRes, leaseRes, tenantRes, catRes, expRes, settlementRes] = await Promise.all([
+            const [propRes, unitRes, leaseRes, tenantRes, catRes, expRes, settlementRes, distKeyRes] = await Promise.all([
                 supabase.from('properties').select('*').order('street'),
                 supabase.from('units').select('*, property:properties(*)').order('unit_name'),
                 supabase.from('leases').select('*, unit:units(*, property:properties(*)), tenant:tenants(*)'),
                 supabase.from('tenants').select('*'),
                 supabase.from('expense_categories').select('*').order('name'),
-                supabase.from('expenses').select('*, expense_categories(name, is_recoverable)').order('booking_date', { ascending: false }),
-                supabase.from('utility_settlements').select('*').order('created_at', { ascending: false })
+                supabase.from('expenses').select('*, expense_categories(name, is_recoverable, distribution_key_id)').order('booking_date', { ascending: false }),
+                supabase.from('utility_settlements').select('*').order('created_at', { ascending: false }),
+                supabase.from('distribution_keys').select('*').or(`user_id.is.null,user_id.eq.${user.id}`).order('name')
             ]);
 
             let props = propRes.data || [];
@@ -120,6 +122,7 @@ const UtilityCosts = () => {
             let allLeases = leaseRes.data || [];
             let allExpenses = expRes.data || [];
             let allSettlements = settlementRes.error ? [] : (settlementRes.data || []);
+            let keys = distKeyRes.data || [];
 
             if (selectedPortfolioID) {
                 props = props.filter(p => p.portfolio_id === selectedPortfolioID);
@@ -137,6 +140,7 @@ const UtilityCosts = () => {
             setCategories(catRes.data || []);
             setExpenses(allExpenses);
             setSettlements(allSettlements);
+            setDistributionKeys(keys);
         } catch (error) {
             console.error('UtilityCosts fetch error:', error);
         } finally {
@@ -212,8 +216,22 @@ const UtilityCosts = () => {
         periodExpenses.forEach(e => {
             const catId = e.category_id || 'other';
             const catName = e.expense_categories?.name || 'Sonstige';
+            const defaultKeyId = e.expense_categories?.distribution_key_id;
+
+            // Calculate default distribution key
+            // If expense category has a default key ID, use it.
+            // Otherwise use a fallback (e.g. area).
+            // We need to resolve key ID to a meaningful value if we were using strings.
+            // But now we prefer using IDs. 
+            // If the category has no default, we try to find 'Wohnfläche' in our keys list.
+            let distKey = defaultKeyId;
+            if (!distKey) {
+                const areaKey = distributionKeys.find(k => k.calculation_type === 'area');
+                distKey = areaKey?.id || 'wohnflaeche'; // Fallback to legacy string if no key found
+            }
+
             if (!byCategory[catId]) {
-                byCategory[catId] = { category_id: catId, category_name: catName, amount: 0, distribution_key: 'wohnflaeche' };
+                byCategory[catId] = { category_id: catId, category_name: catName, amount: 0, distribution_key: distKey };
             }
             byCategory[catId].amount += parseFloat(e.amount) || 0;
         });
@@ -251,26 +269,55 @@ const UtilityCosts = () => {
             // Only assign costs to selected units, but denominator = whole house
             const selectedUnits = propertyUnits.filter(u => selectedUnitIds.includes(u.id));
 
+            // Helper: Resolve distribution key to calculation type
+            // 1. If key is a UUID, find it in distributionKeys and get calculation_type
+            // 2. If key is a legacy string ('wohnflaeche'), map to type
+            const getKeyType = (keyVal) => {
+                const keyObj = distributionKeys.find(k => k.id === keyVal);
+                if (keyObj) return keyObj.calculation_type;
+
+                // Legacy mapping
+                if (keyVal === 'wohnflaeche') return 'area';
+                if (keyVal === 'personenanzahl') return 'persons';
+                if (keyVal === 'einheit') return 'units';
+                if (keyVal === 'anteil') return 'equal';
+                if (keyVal === 'verbrauch') return 'custom';
+                return 'area'; // Default
+            };
+
+            const type = getKeyType(key);
+
             selectedUnits.forEach(unit => {
                 let share = 0;
-                if (key === 'einheit') {
+                if (type === 'units' || type === 'equal') {
+                    // Per unit (equal share among selected units? Or all units?)
+                    // Typically 'equal' means divided by total units in property, then assigned to this unit.
                     share = totalAmount / allUnitsCount;
-                } else if (key === 'wohnflaeche') {
+                    // Note: if type is 'equal', usually it means equal share per unit.
+                } else if (type === 'area') {
                     share = totalAmount * (unit.sqm || 1) / totalArea;
-                } else if (key === 'personenanzahl') {
+                } else if (type === 'persons') {
                     share = totalAmount * getOccupants(unit) / totalPersons;
-                } else if (key === 'anteil') {
-                    share = totalAmount / allUnitsCount;
                 } else {
-                    share = totalAmount / allUnitsCount;
+                    // Custom -> simplistic fallback or 0
+                    // Ideally custom requires manual input per unit, which step 3 allows.
+                    // Step 3 allows overriding 'amount'. So we init with 0 or equal share.
+                    share = 0;
                 }
 
-                if (!result[unit.id]) result[unit.id] = [];
-                result[unit.id].push({
-                    label: item.category_name,
-                    amount: Math.round(share * 100) / 100
-                });
+                if (share > 0) {
+                    result[unit.id].push({
+                        label: item.category_name,
+                        amount: share,
+                        isCustom: false
+                    });
+                }
             });
+        });
+
+        // Initialize empty arrays if needed
+        selectedUnitIds.forEach(uid => {
+            if (!result[uid]) result[uid] = [];
         });
 
         // Merge with any existing custom costs
@@ -814,12 +861,13 @@ const UtilityCosts = () => {
                                                         }}
                                                         style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '160px' }}
                                                     >
-                                                        <option value="wohnflaeche">Wohnfläche</option>
-                                                        <option value="personenanzahl">Personenanzahl</option>
-                                                        <option value="einheit">Einheit (gleich)</option>
-                                                        <option value="anteil">Anteil</option>
-                                                        <option value="verbrauch">Verbrauch</option>
-                                                        <option value="eigene">Eigene</option>
+                                                        {distributionKeys.map(k => (
+                                                            <option key={k.id} value={k.id}>{k.name}</option>
+                                                        ))}
+                                                        {/* Fallback for legacy keys if not in db */}
+                                                        {!distributionKeys.some(k => k.id === item.distribution_key) && item.distribution_key && (
+                                                            <option value={item.distribution_key}>{item.distribution_key}</option>
+                                                        )}
                                                     </select>
                                                 </td>
                                                 <td style={{ padding: '10px 12px', textAlign: 'center' }}>
@@ -844,7 +892,13 @@ const UtilityCosts = () => {
                             </div>
 
                             <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
-                                setCostItems([...costItems, { category_id: '', category_name: 'Neue Kostenart', amount: 0, distribution_key: 'einheit' }]);
+                                const defaultKey = distributionKeys.find(k => k.calculation_type === 'units' || k.calculation_type === 'equal') || distributionKeys[0];
+                                setCostItems([...costItems, {
+                                    category_id: '',
+                                    category_name: 'Neue Kostenart',
+                                    amount: 0,
+                                    distribution_key: defaultKey ? defaultKey.id : 'einheit'
+                                }]);
                             }}>
                                 Kostenart hinzufügen
                             </Button>

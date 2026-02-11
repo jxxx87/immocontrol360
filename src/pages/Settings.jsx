@@ -52,7 +52,14 @@ const Settings = () => {
     const [loadingCategories, setLoadingCategories] = useState(false);
     const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
     const [editingCategory, setEditingCategory] = useState(null);
-    const [categoryForm, setCategoryForm] = useState({ name: '', is_recoverable: true });
+    const [categoryForm, setCategoryForm] = useState({ name: '', is_recoverable: true, distribution_key_id: '' });
+
+    // Distribution Keys State
+    const [distributionKeys, setDistributionKeys] = useState([]);
+    const [isManageKeysModalOpen, setIsManageKeysModalOpen] = useState(false);
+    const [isKeyEditModalOpen, setIsKeyEditModalOpen] = useState(false);
+    const [editingKey, setEditingKey] = useState(null);
+    const [keyForm, setKeyForm] = useState({ name: '', calculation_type: 'area', description: '' });
 
     // Seed Data
     const standardCategories = [
@@ -67,7 +74,12 @@ const Settings = () => {
     const fetchCategories = async () => {
         try {
             setLoadingCategories(true);
-            let { data, error } = await supabase.from('expense_categories').select('*').order('name');
+            // Include distribution_keys name in fetch
+            let { data, error } = await supabase
+                .from('expense_categories')
+                .select('*, distribution_keys(name, id)')
+                .order('name');
+
             if (error) throw error;
 
             // Auto-seed if no standard categories appear to exist (Initial setup or only custom categories exist)
@@ -85,7 +97,10 @@ const Settings = () => {
                 if (insertError) throw insertError;
 
                 // Re-fetch after seed
-                const { data: newData } = await supabase.from('expense_categories').select('*').order('name');
+                const { data: newData } = await supabase
+                    .from('expense_categories')
+                    .select('*, distribution_keys(name, id)')
+                    .order('name');
                 data = newData;
             }
 
@@ -97,21 +112,88 @@ const Settings = () => {
         }
     };
 
+    const fetchDistributionKeys = async () => {
+        try {
+            // Fetch global (user_id is null) AND user specific keys
+            const { data, error } = await supabase
+                .from('distribution_keys')
+                .select('*')
+                .or(`user_id.is.null,user_id.eq.${user.id}`)
+                .order('name');
+
+            if (error) {
+                // If table doesn't exist yet, we might get an error. 
+                // Don't crash, just log.
+                console.warn('Could not fetch distribution keys. Is migration applied?');
+                return;
+            }
+            setDistributionKeys(data || []);
+        } catch (error) {
+            console.error('Error fetching keys:', error);
+        }
+    };
+
     useEffect(() => {
         if (user) {
             fetchCategories();
+            fetchDistributionKeys();
         }
     }, [activeTab, user]);
 
+    // Key Management Handlers
+    const handleSaveKey = async () => {
+        try {
+            const dataToSave = {
+                user_id: user.id, // User created keys always have user_id
+                name: keyForm.name,
+                calculation_type: keyForm.calculation_type,
+                description: keyForm.description
+            };
+
+            if (editingKey) {
+                const { error } = await supabase.from('distribution_keys').update(dataToSave).eq('id', editingKey.id);
+                if (error) throw error;
+            } else {
+                const { error } = await supabase.from('distribution_keys').insert([dataToSave]);
+                if (error) throw error;
+            }
+            setIsKeyEditModalOpen(false);
+            fetchDistributionKeys();
+        } catch (error) {
+            alert(translateError(error));
+        }
+    };
+
+    const handleDeleteKey = async (id) => {
+        if (!confirm('Verteilerschlüssel wirklich löschen?')) return;
+        try {
+            const { error } = await supabase.from('distribution_keys').delete().eq('id', id);
+            if (error) throw error;
+            fetchDistributionKeys();
+        } catch (error) {
+            alert(translateError(error));
+        }
+    };
+
+    const openKeyEdit = (key = null) => {
+        setEditingKey(key);
+        setKeyForm(key ? { name: key.name, calculation_type: key.calculation_type, description: key.description || '' } : { name: '', calculation_type: 'area', description: '' });
+        setIsKeyEditModalOpen(true);
+    };
+
     const handleEditCategory = (cat) => {
         setEditingCategory(cat);
-        setCategoryForm({ name: cat.name, is_recoverable: cat.is_recoverable ?? true });
+        setCategoryForm({
+            name: cat.name,
+            is_recoverable: cat.is_recoverable ?? true,
+            distribution_key_id: cat.distribution_key_id || ''
+        });
         setIsCategoryModalOpen(true);
     };
 
     const handleNewCategory = () => {
         setEditingCategory(null);
-        setCategoryForm({ name: '', is_recoverable: true });
+        setCategoryForm({ name: '', is_recoverable: true, distribution_key_id: '' });
         setIsCategoryModalOpen(true);
     };
 
@@ -120,7 +202,8 @@ const Settings = () => {
             const dataToSave = {
                 user_id: user.id,
                 name: categoryForm.name,
-                is_recoverable: categoryForm.is_recoverable
+                is_recoverable: categoryForm.is_recoverable,
+                distribution_key_id: categoryForm.distribution_key_id || null
             };
 
             if (editingCategory) {
@@ -161,6 +244,15 @@ const Settings = () => {
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                     <X size={14} /> Nein
                 </span>
+            )
+        },
+        {
+            header: 'Verteilerschlüssel',
+            accessor: 'distribution_keys',
+            render: row => row.distribution_keys ? (
+                <Badge variant="secondary">{row.distribution_keys.name}</Badge>
+            ) : (
+                <span style={{ color: 'var(--text-disabled)', fontSize: '0.85rem' }}>Offen</span>
             )
         },
         {
@@ -440,6 +532,7 @@ const Settings = () => {
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
                                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600 }}>Kostenarten verwalten</h2>
                                 <div style={{ display: 'flex', gap: '10px' }}>
+                                    <Button variant="outline" onClick={() => setIsManageKeysModalOpen(true)}>Schlüssel verwalten</Button>
                                     <Button icon={Plus} onClick={handleNewCategory}>Neue Kostenart</Button>
                                 </div>
                             </div>
@@ -641,6 +734,19 @@ const Settings = () => {
                         onChange={(e) => setCategoryForm({ ...categoryForm, name: e.target.value })}
                         placeholder="z.B. Heizkosten"
                     />
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Standard-Verteilerschlüssel</label>
+                        <select
+                            style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
+                            value={categoryForm.distribution_key_id}
+                            onChange={e => setCategoryForm({ ...categoryForm, distribution_key_id: e.target.value })}
+                        >
+                            <option value="">(Kein Standard)</option>
+                            {distributionKeys.map(k => (
+                                <option key={k.id} value={k.id}>{k.name}</option>
+                            ))}
+                        </select>
+                    </div>
                     <div>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 500 }}>
                             <input

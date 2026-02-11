@@ -26,6 +26,15 @@ If you are developing a production application, we recommend using TypeScript wi
 3.  **Work on the App:**
     Edit files in `src/`. The browser will automatically reload when you save changes.
 
+## Database Updates
+This project uses Supabase for the database. When pulling code updates that involve database schema changes, you must apply the migrations:
+
+```bash
+npx supabase login
+npx supabase link --project-ref agsmqvvwfufenaiekuox
+npx supabase db push
+```
+
 ## Deployment to Hostinger (Live)
 
 Since you have connected your GitHub repository to Hostinger:
