@@ -26,6 +26,14 @@ If you are developing a production application, we recommend using TypeScript wi
 3.  **Work on the App:**
     Edit files in `src/`. The browser will automatically reload when you save changes.
 
+4.  **PDF Server (Required for Invoices):**
+    To generate perfect PDFs for invoices, you must run the local PDF server:
+    ```bash
+    cd server
+    node server.js
+    ```
+    Keep this terminal window open while using the app.
+
 ## Database Updates
 This project uses Supabase for the database. When pulling code updates that involve database schema changes, you must apply the migrations:
 

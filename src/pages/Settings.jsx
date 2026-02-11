@@ -5,6 +5,7 @@ import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
+import Badge from '../components/ui/Badge';
 import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -59,19 +60,46 @@ const Settings = () => {
     const [isManageKeysModalOpen, setIsManageKeysModalOpen] = useState(false);
     const [isKeyEditModalOpen, setIsKeyEditModalOpen] = useState(false);
     const [editingKey, setEditingKey] = useState(null);
-    const [keyForm, setKeyForm] = useState({ name: '', calculation_type: 'area', description: '' });
+    const [keyForm, setKeyForm] = useState({ name: '', calculation_type: 'custom', description: '' });
 
-    // Seed Data
-    const standardCategories = [
-        "Allgemeinstrom", "Abgasmessung", "Schmutzwasser", "Internet", "Aufzug", "Entwässerung",
-        "Kaltwasser", "Gehwegreinigung", "Gartenpflege", "Gebäudereinigung", "Grundsteuer",
-        "Hauswart", "Heizkosten", "Abfallentsorgungsgebühren", "Gebäudehaftpflicht", "Gebäudeversicherung",
-        "Schornsteinfeger", "Straßenreinigungskosten", "Heizungswartung", "Wartung Feuermelder",
-        "Winterdienstgebühr", "Wiederk. Beitr. Verkehrsanlagen", "Wiederk. Beitr. Oberflächenwasser",
-        "sonstige Betriebskosten"
+    // Standard Distribution Keys
+    const standardKeys = [
+        { name: "Wohnfläche", type: "area", description: "Verteilung nach Quadratmetern" },
+        { name: "Personenanzahl", type: "persons", description: "Verteilung nach gemeldeten Personen" },
+        { name: "Wohneinheiten", type: "units", description: "Verteilung pro Einheit" },
+        { name: "Verbrauch", type: "custom", description: "Nach gemessenem Verbrauch (z.B. Zähler)" },
+        { name: "Direktzuordnung", type: "direct", description: "Direkte Zuordnung zu einer Einheit" },
+        { name: "Miteigentumsanteile", type: "mea", description: "Verteilung nach MEA" }
     ];
 
-    const fetchCategories = async () => {
+    // Standard Categories with Default Key
+    const standardCategories = [
+        { name: "Abfallentsorgungsgebühren", defaultKey: "Direktzuordnung" },
+        { name: "Abgasmessung", defaultKey: "Wohnfläche" },
+        { name: "Allgemeinstrom", defaultKey: "Wohnfläche" },
+        { name: "Aufzug", defaultKey: "Wohnfläche" },
+        { name: "Entwässerung", defaultKey: "Personenanzahl" },
+        { name: "Gartenpflege", defaultKey: "Wohnfläche" },
+        { name: "Gebäudehaftpflicht", defaultKey: "Wohnfläche" },
+        { name: "Gebäudereinigung", defaultKey: "Wohnfläche" },
+        { name: "Gebäudeversicherung", defaultKey: "Wohnfläche" },
+        { name: "Gehwegreinigung", defaultKey: "Wohnfläche" },
+        { name: "Grundsteuer", defaultKey: "Wohnfläche" },
+        { name: "Hauswart", defaultKey: "Wohnfläche" },
+        { name: "Heizkosten", defaultKey: "Direktzuordnung" },
+        { name: "Heizungswartung", defaultKey: "Direktzuordnung" },
+        { name: "Internet", defaultKey: "Wohneinheiten" },
+        { name: "Kaltwasser", defaultKey: "Personenanzahl" },
+        { name: "Schmutzwasser", defaultKey: "Personenanzahl" },
+        { name: "Schornsteinfeger", defaultKey: "Wohnfläche" },
+        { name: "Straßenreinigungskosten", defaultKey: "Wohnfläche" },
+        { name: "Wartung Feuermelder", defaultKey: "Wohnfläche" },
+        { name: "Wiederk. Beitr. Oberflächenwasser", defaultKey: "Wohnfläche" },
+        { name: "Wiederk. Beitr. Verkehrsanlagen", defaultKey: "Wohnfläche" },
+        { name: "Winterdienstgebühr", defaultKey: "Wohnfläche" }
+    ];
+
+    const fetchCategories = async (keys = []) => {
         try {
             setLoadingCategories(true);
             // Include distribution_keys name in fetch
@@ -82,29 +110,62 @@ const Settings = () => {
 
             if (error) throw error;
 
-            // Auto-seed if no standard categories appear to exist (Initial setup or only custom categories exist)
-            const existingNames = new Set(data?.map(d => d.name) || []);
-            // Check if at least one standard category exists. If not, we seed all.
-            const hasStandard = standardCategories.some(cat => existingNames.has(cat));
+            // Getting keys to map names to IDs
+            const allKeys = keys.length > 0 ? keys : distributionKeys; // Use fetched keys or existing state
 
-            if (!hasStandard) {
-                const toInsert = standardCategories.map(name => ({
-                    user_id: user.id,
-                    name,
-                    is_recoverable: true
-                }));
-                const { error: insertError } = await supabase.from('expense_categories').insert(toInsert);
-                if (insertError) throw insertError;
+            // Helper to find key ID
+            const getKeyId = (name) => {
+                const k = allKeys.find(k => k.name === name);
+                return k ? k.id : null;
+            };
 
-                // Re-fetch after seed
-                const { data: newData } = await supabase
-                    .from('expense_categories')
-                    .select('*, distribution_keys(name, id)')
-                    .order('name');
-                data = newData;
+            const existingCategoryNames = new Set(data?.map(d => d.name) || []);
+            const categoriesToUpdate = [];
+            const categoriesToInsert = [];
+
+            for (const stdCat of standardCategories) {
+                const defaultKeyId = getKeyId(stdCat.defaultKey);
+                const existing = data?.find(d => d.name === stdCat.name);
+
+                if (existing) {
+                    // Update only if no key is currently assigned (initialize default)
+                    if (!existing.distribution_key_id && defaultKeyId) {
+                        categoriesToUpdate.push({
+                            id: existing.id,
+                            distribution_key_id: defaultKeyId
+                        });
+                    }
+                } else {
+                    // Insert
+                    categoriesToInsert.push({
+                        user_id: user.id,
+                        name: stdCat.name,
+                        is_recoverable: true,
+                        distribution_key_id: defaultKeyId
+                    });
+                }
             }
 
-            setCategories(data || []);
+            // Perform updates
+            if (categoriesToUpdate.length > 0) {
+                await Promise.all(categoriesToUpdate.map(cat =>
+                    supabase.from('expense_categories').update({ distribution_key_id: cat.distribution_key_id }).eq('id', cat.id)
+                ));
+            }
+
+            // Perform inserts
+            if (categoriesToInsert.length > 0) {
+                const { error: insertError } = await supabase.from('expense_categories').insert(categoriesToInsert);
+                if (insertError) throw insertError;
+            }
+
+            // Re-fetch final data
+            const { data: finalData } = await supabase
+                .from('expense_categories')
+                .select('*, distribution_keys(name, id)')
+                .order('name');
+
+            setCategories(finalData || []);
         } catch (error) {
             console.error('Error fetching categories:', error);
         } finally {
@@ -114,29 +175,59 @@ const Settings = () => {
 
     const fetchDistributionKeys = async () => {
         try {
-            // Fetch global (user_id is null) AND user specific keys
-            const { data, error } = await supabase
+            let { data, error } = await supabase
                 .from('distribution_keys')
                 .select('*')
                 .or(`user_id.is.null,user_id.eq.${user.id}`)
                 .order('name');
 
             if (error) {
-                // If table doesn't exist yet, we might get an error. 
-                // Don't crash, just log.
                 console.warn('Could not fetch distribution keys. Is migration applied?');
-                return;
+                return [];
             }
+
+            // Check and Seed Standard Keys if missing (e.g. initial load)
+            // Ideally this is empty only if system keys are missing.
+            // We check if "Wohnfläche" exists (global or local).
+            const existingKeyNames = new Set(data?.map(d => d.name));
+            const missingStandards = standardKeys.filter(k => !existingKeyNames.has(k.name));
+
+            if (missingStandards.length > 0) {
+                // Insert missing standard keys (as user keys or system keys? User keys for now to avoid permission issues if RLS relies on user_id)
+                // Actually, best to insert as system keys (user_id: null) but user usually can't if RLS prevents it.
+                // Let's insert as USER keys so they can manage them, OR rely on migration.
+                // Re-reading user request: "Im Standard soll es folgende Schlüssel geben..."
+                // Since I ran migration with "Wohnfläche", etc., they SHOULD be there as system keys.
+                // If not, let's add them as user keys.
+
+                const toInsert = missingStandards.map(k => ({
+                    user_id: user.id,
+                    name: k.name,
+                    calculation_type: k.type,
+                    description: k.description
+                }));
+
+                if (toInsert.length > 0) {
+                    await supabase.from('distribution_keys').insert(toInsert);
+                    // Refetch
+                    const res = await supabase.from('distribution_keys').select('*').or(`user_id.is.null,user_id.eq.${user.id}`).order('name');
+                    data = res.data;
+                }
+            }
+
             setDistributionKeys(data || []);
+            return data || [];
         } catch (error) {
             console.error('Error fetching keys:', error);
+            return [];
         }
     };
 
     useEffect(() => {
         if (user) {
-            fetchCategories();
-            fetchDistributionKeys();
+            fetchDistributionKeys().then(keys => {
+                fetchCategories(keys);
+            });
         }
     }, [activeTab, user]);
 
@@ -146,7 +237,8 @@ const Settings = () => {
             const dataToSave = {
                 user_id: user.id, // User created keys always have user_id
                 name: keyForm.name,
-                calculation_type: keyForm.calculation_type,
+                // For new keys, default to 'custom'. For existing, preserve original type.
+                calculation_type: editingKey ? editingKey.calculation_type : 'custom',
                 description: keyForm.description
             };
 
@@ -177,7 +269,9 @@ const Settings = () => {
 
     const openKeyEdit = (key = null) => {
         setEditingKey(key);
-        setKeyForm(key ? { name: key.name, calculation_type: key.calculation_type, description: key.description || '' } : { name: '', calculation_type: 'area', description: '' });
+        // For new keys, default calculation_type to 'custom' and hide the selector.
+        // For editing existing keys, preserve its calculation_type.
+        setKeyForm(key ? { name: key.name, calculation_type: key.calculation_type, description: key.description || '' } : { name: '', calculation_type: 'custom', description: '' });
         setIsKeyEditModalOpen(true);
     };
 
@@ -532,7 +626,7 @@ const Settings = () => {
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
                                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600 }}>Kostenarten verwalten</h2>
                                 <div style={{ display: 'flex', gap: '10px' }}>
-                                    <Button variant="outline" onClick={() => setIsManageKeysModalOpen(true)}>Schlüssel verwalten</Button>
+                                    <Button onClick={() => setIsManageKeysModalOpen(true)}>Verteilerschlüssel verwalten</Button>
                                     <Button icon={Plus} onClick={handleNewCategory}>Neue Kostenart</Button>
                                 </div>
                             </div>
@@ -715,6 +809,90 @@ const Settings = () => {
                 </div>
             </Modal>
 
+            {/* Manage Keys List Modal */}
+            <Modal
+                isOpen={isManageKeysModalOpen}
+                onClose={() => setIsManageKeysModalOpen(false)}
+                title="Verteilerschlüssel verwalten"
+                maxWidth="800px"
+                footer={
+                    <Button variant="secondary" onClick={() => setIsManageKeysModalOpen(false)}>Schließen</Button>
+                }
+            >
+                <div>
+                    {/* Filter local duplicates if any exist (e.g. standard key also in user keys with same name) */}
+                    <h4 style={{ marginBottom: '1rem', color: 'var(--text-secondary)' }}>Verfügbare Verteilerschlüssel</h4>
+                    <Table
+                        data={distributionKeys.filter((k, index, self) =>
+                            index === self.findIndex((t) => (
+                                t.name === k.name
+                            ))
+                        )}
+                        columns={[
+                            { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
+                            { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                            { header: 'Beschreibung', accessor: 'description' },
+                            { header: '', accessor: 'actions', render: r => <span style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic' }}>{r.user_id ? 'Eigener' : 'Standard'}</span> }
+                        ]}
+                    />
+
+                    <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                        <h4 style={{ color: 'var(--text-secondary)', margin: 0 }}>Eigene Verteilerschlüssel</h4>
+                        <Button icon={Plus} size="sm" onClick={() => openKeyEdit(null)}>Eigene hinzufügen</Button>
+                    </div>
+                    <Table
+                        data={distributionKeys.filter(k => k.user_id)} // Filter for user-defined keys
+                        columns={[
+                            { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
+                            { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                            { header: 'Beschreibung', accessor: 'description' },
+                            {
+                                header: '',
+                                accessor: 'actions',
+                                align: 'right',
+                                render: r => (
+                                    <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
+                                        <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openKeyEdit(r)} />
+                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteKey(r.id)} />
+                                    </div>
+                                )
+                            }
+                        ]}
+                    />
+                    {distributionKeys.filter(k => k.user_id).length === 0 && (
+                        <div style={{ padding: '1rem', fontStyle: 'italic', color: 'var(--text-secondary)', textAlign: 'center' }}>Keine eigenen Schlüssel angelegt.</div>
+                    )}
+                </div>
+            </Modal>
+
+            {/* Edit Key Modal */}
+            <Modal
+                isOpen={isKeyEditModalOpen}
+                onClose={() => setIsKeyEditModalOpen(false)}
+                title={editingKey ? 'Schlüssel bearbeiten' : 'Neuer Verteilerschlüssel'}
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={() => setIsKeyEditModalOpen(false)}>Abbrechen</Button>
+                        <Button onClick={handleSaveKey}>Speichern</Button>
+                    </>
+                }
+            >
+                <div style={{ display: 'grid', gap: '1rem' }}>
+                    <Input
+                        label="Bezeichnung"
+                        value={keyForm.name}
+                        onChange={e => setKeyForm({ ...keyForm, name: e.target.value })}
+                        placeholder="z.B. Sonderumlage"
+                    />
+                    {/* Only Name & Description requested. Type hidden, defaulting to 'custom' via state init and handleSaveKey logic */}
+                    <Input
+                        label="Beschreibung (optional)"
+                        value={keyForm.description}
+                        onChange={e => setKeyForm({ ...keyForm, description: e.target.value })}
+                    />
+                </div>
+            </Modal>
+
             {/* Category Modal */}
             <Modal
                 isOpen={isCategoryModalOpen}
@@ -741,8 +919,13 @@ const Settings = () => {
                             value={categoryForm.distribution_key_id}
                             onChange={e => setCategoryForm({ ...categoryForm, distribution_key_id: e.target.value })}
                         >
-                            <option value="">(Kein Standard)</option>
-                            {distributionKeys.map(k => (
+                            <option value="">Bitte wählen...</option>
+                            {/* Deduplicate keys for dropdown */}
+                            {distributionKeys.filter((k, index, self) =>
+                                index === self.findIndex((t) => (
+                                    t.name === k.name
+                                ))
+                            ).map(k => (
                                 <option key={k.id} value={k.id}>{k.name}</option>
                             ))}
                         </select>

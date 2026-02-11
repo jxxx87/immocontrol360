@@ -68,6 +68,11 @@ const UtilityCosts = () => {
     const [categories, setCategories] = useState([]);
     const [expenses, setExpenses] = useState([]);
     const [settlements, setSettlements] = useState([]); // Local state for saved settlements
+    const [isCreateKeyModalOpen, setIsCreateKeyModalOpen] = useState(false);
+    const [newKeyName, setNewKeyName] = useState('');
+    const [newKeyDescription, setNewKeyDescription] = useState('');
+    const [newKeyType, setNewKeyType] = useState('custom');
+    const [pendingKeyIndex, setPendingKeyIndex] = useState(null); // Which row triggered creation
     const [distributionKeys, setDistributionKeys] = useState([]);
 
     // UI State
@@ -242,7 +247,43 @@ const UtilityCosts = () => {
         }
     };
 
-    // Calculate cost distribution for step 3
+    const handleCreateNewKey = async (permanent) => {
+        try {
+            // Updated to be always permanent and simplified
+            let keyObj;
+
+            const { data, error } = await supabase.from('distribution_keys').insert([{
+                user_id: user.id,
+                name: newKeyName,
+                calculation_type: newKeyType, // Default 'custom'
+                description: newKeyDescription || 'In Nebenkostenabrechnung erstellt'
+            }]).select().single();
+
+            if (error) throw error;
+            keyObj = data;
+
+            // Refresh keys
+            const { data: allKeys } = await supabase.from('distribution_keys').select('*').or(`user_id.is.null,user_id.eq.${user.id}`).order('name');
+            setDistributionKeys(allKeys || []);
+
+            // Update the row
+            if (pendingKeyIndex !== null) {
+                const updated = [...costItems];
+                updated[pendingKeyIndex].distribution_key = keyObj.id;
+                setCostItems(updated);
+            }
+
+            setIsCreateKeyModalOpen(false);
+            setNewKeyName('');
+            setNewKeyDescription('');
+            setNewKeyType('custom');
+            setPendingKeyIndex(null);
+
+        } catch (error) {
+            console.error('Error creating key:', error);
+            alert('Fehler beim Erstellen des Schlüssels');
+        }
+    };
     // IMPORTANT: Denominator uses ALL units in the property (the whole house),
     // not just the selected ones, to get correct proportional shares.
     const calculateUnitCosts = () => {
@@ -752,635 +793,678 @@ const UtilityCosts = () => {
     if (wizardOpen) {
         const prop = properties.find(p => p.id === wizardPropertyId);
         return (
-            <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: 'var(--spacing-lg)' }}>
-                    <button onClick={() => setWizardOpen(false)} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
-                        <ArrowLeft size={20} />
-                    </button>
-                    <div>
-                        <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Nebenkostenabrechnung</h1>
-                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{prop ? `${prop.street} ${prop.house_number}, ${prop.zip} ${prop.city} ` : ''}</p>
-                    </div>
-                </div>
-
-                <Card>
-                    <StepIndicator steps={stepLabels} currentStep={wizardStep} />
-
-                    {/* ===== STEP 1: Unit Selection ===== */}
-                    {wizardStep === 0 && (
+            <>
+                <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: 'var(--spacing-lg)' }}>
+                        <button onClick={() => setWizardOpen(false)} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
+                            <ArrowLeft size={20} />
+                        </button>
                         <div>
-                            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Abrechnungszeitraum & Einheiten</h3>
+                            <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Nebenkostenabrechnung</h1>
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{prop ? `${prop.street} ${prop.house_number}, ${prop.zip} ${prop.city} ` : ''}</p>
+                        </div>
+                    </div>
 
-                            <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', alignItems: 'flex-end' }}>
-                                <Input label="Von" type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} />
-                                <Input label="Bis" type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} />
-                            </div>
+                    <Card>
+                        <StepIndicator steps={stepLabels} currentStep={wizardStep} />
 
-                            <div style={{ marginBottom: '1rem' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500, marginBottom: '0.5rem' }}>
-                                    <input type="checkbox" checked={selectedUnitIds.length === propertyUnits.length && propertyUnits.length > 0} onChange={toggleAllUnits} style={{ width: 16, height: 16 }} />
-                                    Alle Einheiten auswählen ({propertyUnits.length})
-                                </label>
-                            </div>
+                        {/* ===== STEP 1: Unit Selection ===== */}
+                        {wizardStep === 0 && (
+                            <div>
+                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Abrechnungszeitraum & Einheiten</h3>
 
-                            <div style={{ display: 'grid', gap: '8px' }}>
-                                {propertyUnits.filter(unit => getTenantForUnit(unit.id)).map(unit => {
-                                    const tenant = getTenantForUnit(unit.id);
-                                    return (
-                                        <div key={unit.id}
-                                            onClick={() => toggleUnit(unit.id)}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: '12px',
-                                                padding: '12px 16px', borderRadius: 'var(--radius-md)',
-                                                border: `2px solid ${selectedUnitIds.includes(unit.id) ? 'var(--primary-color)' : 'var(--border-color)'} `,
-                                                cursor: 'pointer', transition: 'all 0.2s',
-                                                backgroundColor: selectedUnitIds.includes(unit.id) ? '#EFF6FF' : 'transparent'
-                                            }}>
-                                            <input type="checkbox" checked={selectedUnitIds.includes(unit.id)} onChange={() => { }} style={{ width: 16, height: 16, pointerEvents: 'none' }} />
-                                            <div style={{ flex: 1 }}>
-                                                <div style={{ fontWeight: 500 }}>{unit.unit_name}</div>
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                                    {tenant}
-                                                    {unit.sqm ? ` · ${unit.sqm} m²` : ''}
+                                <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', alignItems: 'flex-end' }}>
+                                    <Input label="Von" type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} />
+                                    <Input label="Bis" type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} />
+                                </div>
+
+                                <div style={{ marginBottom: '1rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 500, marginBottom: '0.5rem' }}>
+                                        <input type="checkbox" checked={selectedUnitIds.length === propertyUnits.length && propertyUnits.length > 0} onChange={toggleAllUnits} style={{ width: 16, height: 16 }} />
+                                        Alle Einheiten auswählen ({propertyUnits.length})
+                                    </label>
+                                </div>
+
+                                <div style={{ display: 'grid', gap: '8px' }}>
+                                    {propertyUnits.filter(unit => getTenantForUnit(unit.id)).map(unit => {
+                                        const tenant = getTenantForUnit(unit.id);
+                                        return (
+                                            <div key={unit.id}
+                                                onClick={() => toggleUnit(unit.id)}
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', gap: '12px',
+                                                    padding: '12px 16px', borderRadius: 'var(--radius-md)',
+                                                    border: `2px solid ${selectedUnitIds.includes(unit.id) ? 'var(--primary-color)' : 'var(--border-color)'} `,
+                                                    cursor: 'pointer', transition: 'all 0.2s',
+                                                    backgroundColor: selectedUnitIds.includes(unit.id) ? '#EFF6FF' : 'transparent'
+                                                }}>
+                                                <input type="checkbox" checked={selectedUnitIds.includes(unit.id)} onChange={() => { }} style={{ width: 16, height: 16, pointerEvents: 'none' }} />
+                                                <div style={{ flex: 1 }}>
+                                                    <div style={{ fontWeight: 500 }}>{unit.unit_name}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                        {tenant}
+                                                        {unit.sqm ? ` · ${unit.sqm} m²` : ''}
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* ===== STEP 2: Cost Types & Distribution Keys ===== */}
-                    {wizardStep === 1 && (
-                        <div>
-                            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Aufstellung Kosten & Verteilerschlüssel</h3>
-                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
-                                Umlagefähige Kosten aus Ihren Buchungen ({formatDate(periodStart)} – {formatDate(periodEnd)}) wurden automatisch geladen.
-                            </p>
-
-                            <div style={{ overflowX: 'auto' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                    <thead>
-                                        <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                            <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
-                                            <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamtkosten (€)</th>
-                                            <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Verteilerschlüssel</th>
-                                            <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {costItems.map((item, idx) => (
-                                            <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                <td style={{ padding: '10px 12px', fontWeight: 500 }}>
-                                                    <input type="text" value={item.category_name}
-                                                        onChange={e => {
-                                                            const updated = [...costItems];
-                                                            updated[idx].category_name = e.target.value;
-                                                            setCostItems(updated);
-                                                        }}
-                                                        style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
-                                                    />
-                                                </td>
-                                                <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                    <input type="number" step="0.01" value={item.amount}
-                                                        onChange={e => {
-                                                            const updated = [...costItems];
-                                                            updated[idx].amount = parseFloat(e.target.value) || 0;
-                                                            setCostItems(updated);
-                                                        }}
-                                                        style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
-                                                    />
-                                                </td>
-                                                <td style={{ padding: '10px 12px' }}>
-                                                    <select value={item.distribution_key}
-                                                        onChange={e => {
-                                                            const updated = [...costItems];
-                                                            updated[idx].distribution_key = e.target.value;
-                                                            setCostItems(updated);
-                                                        }}
-                                                        style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '160px' }}
-                                                    >
-                                                        {distributionKeys.map(k => (
-                                                            <option key={k.id} value={k.id}>{k.name}</option>
-                                                        ))}
-                                                        {/* Fallback for legacy keys if not in db */}
-                                                        {!distributionKeys.some(k => k.id === item.distribution_key) && item.distribution_key && (
-                                                            <option value={item.distribution_key}>{item.distribution_key}</option>
-                                                        )}
-                                                    </select>
-                                                </td>
-                                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                                    <button onClick={() => setCostItems(costItems.filter((_, i) => i !== idx))}
-                                                        style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
-                                                        <Trash2 size={16} />
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                    <tfoot>
-                                        <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                            <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
-                                            <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
-                                                {costItems.reduce((sum, i) => sum + (i.amount || 0), 0).toFixed(2)} €
-                                            </td>
-                                            <td colSpan={2}></td>
-                                        </tr>
-                                    </tfoot>
-                                </table>
-                            </div>
-
-                            <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
-                                const defaultKey = distributionKeys.find(k => k.calculation_type === 'units' || k.calculation_type === 'equal') || distributionKeys[0];
-                                setCostItems([...costItems, {
-                                    category_id: '',
-                                    category_name: 'Neue Kostenart',
-                                    amount: 0,
-                                    distribution_key: defaultKey ? defaultKey.id : 'einheit'
-                                }]);
-                            }}>
-                                Kostenart hinzufügen
-                            </Button>
-                        </div>
-                    )}
-
-                    {/* ===== STEP 3: Costs per Unit ===== */}
-                    {wizardStep === 2 && (() => {
-                        const activeUid = step3SelectedUnit || selectedUnitIds[0];
-                        const activeUnit = units.find(u => u.id === activeUid);
-                        const activeCosts = unitCosts[activeUid] || [];
-                        const activeTotal = activeCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
-                        const activeTenant = getTenantForUnit(activeUid);
-                        const activeLease = leases.find(l => l.unit_id === activeUid && l.status === 'active');
-
-                        return (
-                            <div>
-                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Kosten je Einheit</h3>
-                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
-                                    Wählen Sie eine Einheit aus, um die anteiligen Kosten zu prüfen und zu bearbeiten.
-                                </p>
-
-                                {/* Unit Selector Tabs */}
-                                <div style={{ display: 'flex', gap: '8px', marginBottom: '1.5rem', overflowX: 'auto', paddingBottom: '4px' }}>
-                                    {selectedUnitIds.map(uid => {
-                                        const unit = units.find(u => u.id === uid);
-                                        if (!unit) return null;
-                                        const tenant = getTenantForUnit(uid);
-                                        const isActive = uid === activeUid;
-                                        return (
-                                            <button key={uid}
-                                                onClick={() => setStep3SelectedUnit(uid)}
-                                                style={{
-                                                    display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
-                                                    padding: '10px 16px', borderRadius: 'var(--radius-md)',
-                                                    border: `2px solid ${isActive ? 'var(--primary-color)' : 'var(--border-color)'} `,
-                                                    backgroundColor: isActive ? '#EFF6FF' : 'transparent',
-                                                    cursor: 'pointer', transition: 'all 0.2s', minWidth: '140px',
-                                                    whiteSpace: 'nowrap'
-                                                }}>
-                                                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: isActive ? 'var(--primary-color)' : 'var(--text-primary)' }}>
-                                                    {unit.unit_name}
-                                                </span>
-                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                                                    {tenant || 'Leerstand'}
-                                                </span>
-                                            </button>
                                         );
                                     })}
                                 </div>
+                            </div>
+                        )}
 
-                                {/* Active Unit Detail */}
-                                {activeUnit && (
-                                    <Card>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', paddingBottom: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>
-                                            <div>
-                                                <div style={{ fontWeight: 600, fontSize: '1.05rem' }}>{activeUnit.unit_name}</div>
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                                    {activeTenant || 'Leerstand'}
-                                                    {activeUnit.sqm ? ` · ${activeUnit.sqm} m²` : ''}
-                                                    {activeLease?.tenant?.occupants ? ` · ${activeLease.tenant.occupants} Person(en)` : ''}
+                        {/* ===== STEP 2: Cost Types & Distribution Keys ===== */}
+                        {wizardStep === 1 && (
+                            <div>
+                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Aufstellung Kosten & Verteilerschlüssel</h3>
+                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                                    Umlagefähige Kosten aus Ihren Buchungen ({formatDate(periodStart)} – {formatDate(periodEnd)}) wurden automatisch geladen.
+                                </p>
+
+                                <div style={{ overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
+                                                <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamtkosten (€)</th>
+                                                <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Verteilerschlüssel</th>
+                                                <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {costItems.map((item, idx) => (
+                                                <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                    <td style={{ padding: '10px 12px', fontWeight: 500 }}>
+                                                        <input type="text" value={item.category_name}
+                                                            onChange={e => {
+                                                                const updated = [...costItems];
+                                                                updated[idx].category_name = e.target.value;
+                                                                setCostItems(updated);
+                                                            }}
+                                                            style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
+                                                        />
+                                                    </td>
+                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                                        <input type="number" step="0.01" value={item.amount}
+                                                            onChange={e => {
+                                                                const updated = [...costItems];
+                                                                updated[idx].amount = parseFloat(e.target.value) || 0;
+                                                                setCostItems(updated);
+                                                            }}
+                                                            style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
+                                                        />
+                                                    </td>
+                                                    <td style={{ padding: '10px 12px' }}>
+                                                        <select value={item.distribution_key}
+                                                            onChange={e => {
+                                                                if (e.target.value === 'NEW_KEY') {
+                                                                    setPendingKeyIndex(idx);
+                                                                    setNewKeyName('');
+                                                                    setNewKeyDescription('');
+                                                                    setNewKeyType('custom');
+                                                                    setIsCreateKeyModalOpen(true);
+                                                                } else {
+                                                                    const updated = [...costItems];
+                                                                    updated[idx].distribution_key = e.target.value;
+                                                                    setCostItems(updated);
+                                                                }
+                                                            }}
+                                                            style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '160px' }}
+                                                        >
+                                                            {distributionKeys.map(k => (
+                                                                <option key={k.id} value={k.id}>{k.name}</option>
+                                                            ))}
+                                                            {/* Fallback for legacy keys if not in db */}
+                                                            {!distributionKeys.some(k => k.id === item.distribution_key) && item.distribution_key && !item.distribution_key.startsWith('temp-') && (
+                                                                <option value={item.distribution_key}>{item.distribution_key}</option>
+                                                            )}
+                                                            <option disabled>──────────</option>
+                                                            <option value="NEW_KEY" style={{ fontWeight: 'bold' }}>+ Eigene hinzufügen</option>
+                                                        </select>
+                                                    </td>
+                                                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                                        <button onClick={() => setCostItems(costItems.filter((_, i) => i !== idx))}
+                                                            style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+                                                            <Trash2 size={16} />
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                        <tfoot>
+                                            <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                                <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
+                                                <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
+                                                    {costItems.reduce((sum, i) => sum + (i.amount || 0), 0).toFixed(2)} €
+                                                </td>
+                                                <td colSpan={2}></td>
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                </div>
+
+                                <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
+                                    const defaultKey = distributionKeys.find(k => k.calculation_type === 'units' || k.calculation_type === 'equal') || distributionKeys[0];
+                                    setCostItems([...costItems, {
+                                        category_id: '',
+                                        category_name: 'Neue Kostenart',
+                                        amount: 0,
+                                        distribution_key: defaultKey ? defaultKey.id : 'einheit'
+                                    }]);
+                                }}>
+                                    Kostenart hinzufügen
+                                </Button>
+                            </div>
+                        )}
+
+                        {/* ===== STEP 3: Costs per Unit ===== */}
+                        {wizardStep === 2 && (() => {
+                            const activeUid = step3SelectedUnit || selectedUnitIds[0];
+                            const activeUnit = units.find(u => u.id === activeUid);
+                            const activeCosts = unitCosts[activeUid] || [];
+                            const activeTotal = activeCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
+                            const activeTenant = getTenantForUnit(activeUid);
+                            const activeLease = leases.find(l => l.unit_id === activeUid && l.status === 'active');
+
+                            return (
+                                <div>
+                                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Kosten je Einheit</h3>
+                                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                                        Wählen Sie eine Einheit aus, um die anteiligen Kosten zu prüfen und zu bearbeiten.
+                                    </p>
+
+                                    {/* Unit Selector Tabs */}
+                                    <div style={{ display: 'flex', gap: '8px', marginBottom: '1.5rem', overflowX: 'auto', paddingBottom: '4px' }}>
+                                        {selectedUnitIds.map(uid => {
+                                            const unit = units.find(u => u.id === uid);
+                                            if (!unit) return null;
+                                            const tenant = getTenantForUnit(uid);
+                                            const isActive = uid === activeUid;
+                                            return (
+                                                <button key={uid}
+                                                    onClick={() => setStep3SelectedUnit(uid)}
+                                                    style={{
+                                                        display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+                                                        padding: '10px 16px', borderRadius: 'var(--radius-md)',
+                                                        border: `2px solid ${isActive ? 'var(--primary-color)' : 'var(--border-color)'} `,
+                                                        backgroundColor: isActive ? '#EFF6FF' : 'transparent',
+                                                        cursor: 'pointer', transition: 'all 0.2s', minWidth: '140px',
+                                                        whiteSpace: 'nowrap'
+                                                    }}>
+                                                    <span style={{ fontWeight: 600, fontSize: '0.9rem', color: isActive ? 'var(--primary-color)' : 'var(--text-primary)' }}>
+                                                        {unit.unit_name}
+                                                    </span>
+                                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                                        {tenant || 'Leerstand'}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Active Unit Detail */}
+                                    {activeUnit && (
+                                        <Card>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', paddingBottom: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '1.05rem' }}>{activeUnit.unit_name}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                        {activeTenant || 'Leerstand'}
+                                                        {activeUnit.sqm ? ` · ${activeUnit.sqm} m²` : ''}
+                                                        {activeLease?.tenant?.occupants ? ` · ${activeLease.tenant.occupants} Person(en)` : ''}
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
 
-                                        <div style={{ overflowX: 'auto' }}>
-                                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                                <thead>
-                                                    <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                                        <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
-                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamt (€)</th>
-                                                        {(() => {
-                                                            // Calculate periods for header
-                                                            const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                            // If single tenant covering whole period, no need for split, unless requested? 
-                                                            // User said "die beiden mieter sind zusammengefasst". So show split if > 1 period or partial period.
-                                                            // Actually even 1 tenant might have partial period (vacancy).
-                                                            if (periods.length === 0) return <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Leerstand</th>;
-                                                            return periods.map((p, idx) => (
-                                                                <th key={idx} style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                                                                    {p.tenant ? p.tenant.last_name : 'Leerstand'} ({Math.round(p.ratio * 100)}%)
-                                                                </th>
-                                                            ));
-                                                        })()}
-                                                        <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {activeCosts.map((c, i) => (
-                                                        <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                            <td style={{ padding: '10px 12px' }}>
-                                                                <input type="text" value={c.label}
-                                                                    onChange={e => {
+                                            <div style={{ overflowX: 'auto' }}>
+                                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                    <thead>
+                                                        <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                            <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
+                                                            <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamt (€)</th>
+                                                            {(() => {
+                                                                // Calculate periods for header
+                                                                const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                                // If single tenant covering whole period, no need for split, unless requested? 
+                                                                // User said "die beiden mieter sind zusammengefasst". So show split if > 1 period or partial period.
+                                                                // Actually even 1 tenant might have partial period (vacancy).
+                                                                if (periods.length === 0) return <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Leerstand</th>;
+                                                                return periods.map((p, idx) => (
+                                                                    <th key={idx} style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                                                        {p.tenant ? p.tenant.last_name : 'Leerstand'} ({Math.round(p.ratio * 100)}%)
+                                                                    </th>
+                                                                ));
+                                                            })()}
+                                                            <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {activeCosts.map((c, i) => (
+                                                            <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                                <td style={{ padding: '10px 12px' }}>
+                                                                    <input type="text" value={c.label}
+                                                                        onChange={e => {
+                                                                            const updated = { ...unitCosts };
+                                                                            updated[activeUid] = [...(updated[activeUid] || [])];
+                                                                            updated[activeUid][i] = { ...updated[activeUid][i], label: e.target.value };
+                                                                            setUnitCosts(updated);
+                                                                        }}
+                                                                        style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
+                                                                    />
+                                                                </td>
+                                                                <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                                                    <input type="number" step="0.01" value={c.amount}
+                                                                        onChange={e => {
+                                                                            const updated = { ...unitCosts };
+                                                                            updated[activeUid] = [...(updated[activeUid] || [])];
+                                                                            updated[activeUid][i] = { ...updated[activeUid][i], amount: parseFloat(e.target.value) || 0 };
+                                                                            setUnitCosts(updated);
+                                                                        }}
+                                                                        style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
+                                                                    />
+                                                                </td>
+                                                                {(() => {
+                                                                    const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                                    if (periods.length === 0) {
+                                                                        // Full vacancy
+                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                        const val = (key === 'personenanzahl') ? 0 : c.amount;
+                                                                        return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{val.toFixed(2)} €</td>;
+                                                                    }
+                                                                    return periods.map((p, idx) => {
+                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                        let factor = p.ratio;
+                                                                        const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
+                                                                        if (key === 'personenanzahl' && occ === 0) factor = 0;
+
+                                                                        return (
+                                                                            <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', color: '#666', fontSize: '0.9em' }}>
+                                                                                {((c.amount || 0) * factor).toFixed(2)} €
+                                                                            </td>
+                                                                        );
+                                                                    });
+                                                                })()}
+                                                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                                                    <button onClick={() => {
                                                                         const updated = { ...unitCosts };
-                                                                        updated[activeUid] = [...(updated[activeUid] || [])];
-                                                                        updated[activeUid][i] = { ...updated[activeUid][i], label: e.target.value };
+                                                                        updated[activeUid] = updated[activeUid].filter((_, idx) => idx !== i);
                                                                         setUnitCosts(updated);
-                                                                    }}
-                                                                    style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
-                                                                />
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                                <input type="number" step="0.01" value={c.amount}
-                                                                    onChange={e => {
-                                                                        const updated = { ...unitCosts };
-                                                                        updated[activeUid] = [...(updated[activeUid] || [])];
-                                                                        updated[activeUid][i] = { ...updated[activeUid][i], amount: parseFloat(e.target.value) || 0 };
-                                                                        setUnitCosts(updated);
-                                                                    }}
-                                                                    style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
-                                                                />
+                                                                    }} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+                                                                        <Trash2 size={16} />
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                    <tfoot>
+                                                        <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                                            <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
+                                                            <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
+                                                                {activeTotal.toFixed(2)} €
                                                             </td>
                                                             {(() => {
                                                                 const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                                if (periods.length === 0) {
-                                                                    // Full vacancy
-                                                                    const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                    const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                    const val = (key === 'personenanzahl') ? 0 : c.amount;
-                                                                    return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{val.toFixed(2)} €</td>;
-                                                                }
+                                                                if (periods.length === 0) return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{activeTotal.toFixed(2)} €</td>;
                                                                 return periods.map((p, idx) => {
-                                                                    const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                    const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                    let factor = p.ratio;
-                                                                    const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
-                                                                    if (key === 'personenanzahl' && occ === 0) factor = 0;
+                                                                    // Calculate correct total for this period by summing adjusted item costs
+                                                                    const periodTotal = activeCosts.reduce((sum, c) => {
+                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                        let factor = p.ratio;
+                                                                        const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
+                                                                        if (key === 'personenanzahl' && occ === 0) factor = 0;
+                                                                        return sum + (c.amount || 0) * factor;
+                                                                    }, 0);
 
                                                                     return (
-                                                                        <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', color: '#666', fontSize: '0.9em' }}>
-                                                                            {((c.amount || 0) * factor).toFixed(2)} €
+                                                                        <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '0.9em', color: '#666' }}>
+                                                                            {periodTotal.toFixed(2)} €
                                                                         </td>
                                                                     );
                                                                 });
                                                             })()}
-                                                            <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                                                <button onClick={() => {
-                                                                    const updated = { ...unitCosts };
-                                                                    updated[activeUid] = updated[activeUid].filter((_, idx) => idx !== i);
-                                                                    setUnitCosts(updated);
-                                                                }} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
-                                                                    <Trash2 size={16} />
-                                                                </button>
-                                                            </td>
+                                                            <td></td>
                                                         </tr>
-                                                    ))}
-                                                </tbody>
-                                                <tfoot>
-                                                    <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                                        <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
-                                                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
-                                                            {activeTotal.toFixed(2)} €
-                                                        </td>
-                                                        {(() => {
-                                                            const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                            if (periods.length === 0) return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{activeTotal.toFixed(2)} €</td>;
-                                                            return periods.map((p, idx) => {
-                                                                // Calculate correct total for this period by summing adjusted item costs
-                                                                const periodTotal = activeCosts.reduce((sum, c) => {
-                                                                    const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                    const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                    let factor = p.ratio;
-                                                                    const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
-                                                                    if (key === 'personenanzahl' && occ === 0) factor = 0;
-                                                                    return sum + (c.amount || 0) * factor;
-                                                                }, 0);
+                                                    </tfoot>
+                                                </table>
+                                            </div>
 
-                                                                return (
-                                                                    <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '0.9em', color: '#666' }}>
-                                                                        {periodTotal.toFixed(2)} €
-                                                                    </td>
-                                                                );
-                                                            });
-                                                        })()}
-                                                        <td></td>
-                                                    </tr>
-                                                </tfoot>
-                                            </table>
-                                        </div>
+                                            <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
+                                                const updated = { ...unitCosts };
+                                                if (!updated[activeUid]) updated[activeUid] = [];
+                                                updated[activeUid] = [...updated[activeUid], { label: 'Neue Kostenart', amount: 0, isCustom: true }];
+                                                setUnitCosts(updated);
+                                            }}>
+                                                Kostenart hinzufügen
+                                            </Button>
+                                        </Card>
+                                    )}
+                                </div>
+                            );
+                        })()}
 
-                                        <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
-                                            const updated = { ...unitCosts };
-                                            if (!updated[activeUid]) updated[activeUid] = [];
-                                            updated[activeUid] = [...updated[activeUid], { label: 'Neue Kostenart', amount: 0, isCustom: true }];
-                                            setUnitCosts(updated);
-                                        }}>
-                                            Kostenart hinzufügen
-                                        </Button>
-                                    </Card>
-                                )}
-                            </div>
-                        );
-                    })()}
+                        {/* ===== STEP 4: Review ===== */}
+                        {wizardStep === 3 && (
+                            <div>
+                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Prüfen & Abschließen</h3>
+                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                                    Klicken Sie auf eine Einheit, um die individuelle Abrechnung zu prüfen und zu bearbeiten.
+                                </p>
 
-                    {/* ===== STEP 4: Review ===== */}
-                    {wizardStep === 3 && (
-                        <div>
-                            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Prüfen & Abschließen</h3>
-                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
-                                Klicken Sie auf eine Einheit, um die individuelle Abrechnung zu prüfen und zu bearbeiten.
-                            </p>
+                                <div style={{ display: 'grid', gap: '8px' }}>
+                                    {selectedUnitIds.map(uid => {
+                                        const unit = units.find(u => u.id === uid);
+                                        if (!unit) return null;
+                                        const costs = unitCosts[uid] || [];
 
-                            <div style={{ display: 'grid', gap: '8px' }}>
-                                {selectedUnitIds.map(uid => {
-                                    const unit = units.find(u => u.id === uid);
-                                    if (!unit) return null;
-                                    const costs = unitCosts[uid] || [];
+                                        // Calculate Settlement Total & Prepayment using periods
+                                        const pStart = new Date(periodStart);
+                                        const pEnd = new Date(periodEnd);
+                                        const settlementMonths = Math.max(1, (pEnd.getFullYear() - pStart.getFullYear()) * 12 + (pEnd.getMonth() - pStart.getMonth()) + 1);
 
-                                    // Calculate Settlement Total & Prepayment using periods
+                                        const periods = getTenantsForUnitInPeriod(uid, periodStart, periodEnd);
+
+                                        if (periods.length === 0) {
+                                            return (
+                                                <div key={uid}
+                                                    style={{
+                                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                        padding: '14px 16px', borderRadius: 'var(--radius-md)',
+                                                        border: '1px solid var(--border-color)', cursor: 'default', opacity: 0.6,
+                                                        backgroundColor: '#f9fafb'
+                                                    }}>
+                                                    <div>
+                                                        <div style={{ fontWeight: 600 }}>{unit.unit_name}</div>
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Leerstand</div>
+                                                    </div>
+                                                    <div style={{ textAlign: 'right', fontSize: '0.85rem', fontStyle: 'italic', color: '#666' }}>
+                                                        Keine Abrechnung
+                                                    </div>
+                                                </div>
+                                            );
+                                        }
+
+                                        const displayPeriods = periods.map(p => ({
+                                            ...p,
+                                            occupants: p.tenant?.occupants || 1,
+                                            sqm: unit.sqm || 1
+                                        }));
+
+                                        let total = 0;
+                                        let totalPrepayment = 0;
+
+                                        displayPeriods.forEach(page => {
+                                            // 1. Calculate Period Share of Costs
+                                            const periodShare = costs.reduce((sum, item) => {
+                                                const sourceItem = costItems.find(ci => ci.category_name === item.label);
+                                                const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                let factor = page.ratio;
+                                                if (key === 'personenanzahl' && (page.occupants || 0) === 0) factor = 0;
+                                                return sum + (item.amount || 0) * factor;
+                                            }, 0);
+                                            total += periodShare;
+
+                                            // 2. Calculate Prepayment for Period
+                                            const monthlySvc = page.lease ? (parseFloat(page.lease.service_charge) || 0) : 0;
+                                            const monthlyHeat = page.lease ? (parseFloat(page.lease.heating_cost) || 0) : 0;
+                                            const monthlyPrepay = monthlySvc + monthlyHeat;
+                                            const periodPrepay = monthlyPrepay * settlementMonths * page.ratio;
+                                            totalPrepayment += periodPrepay;
+                                        });
+
+                                        const tenant = getTenantForUnit(uid);
+                                        const result = total - totalPrepayment;
+
+                                        return (
+                                            <div key={uid}
+                                                onClick={() => setReviewUnit(uid)}
+                                                style={{
+                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                    padding: '14px 16px', borderRadius: 'var(--radius-md)',
+                                                    border: '1px solid var(--border-color)', cursor: 'pointer',
+                                                    transition: 'all 0.2s', backgroundColor: reviewUnit === uid ? '#EFF6FF' : 'transparent'
+                                                }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600 }}>{unit.unit_name}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{tenant || 'Leerstand'}</div>
+                                                </div>
+                                                <div style={{ textAlign: 'right' }}>
+                                                    <div style={{ fontWeight: 700 }}>{total.toFixed(2)} €</div>
+                                                    <div style={{
+                                                        fontSize: '0.8rem', fontWeight: 500,
+                                                        color: result > 0 ? 'var(--danger-color)' : 'var(--success-color)'
+                                                    }}>
+                                                        {result > 0 ? 'Nachzahlung' : 'Guthaben'}: {Math.abs(result).toFixed(2)} €
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Unit Detail Modal */}
+                                {reviewUnit && (() => {
+                                    const unit = units.find(u => u.id === reviewUnit);
+                                    const allPropertyUnits = units.filter(u => u.property_id === wizardPropertyId);
+
+                                    // Totals for distribution keys
+                                    const totalArea = allPropertyUnits.reduce((s, u) => s + (u.sqm || 1), 0);
+                                    const totalUnitCount = allPropertyUnits.length;
+                                    const totalPersons = allPropertyUnits.reduce((s, u) => {
+                                        const l = leases.find(l => l.unit_id === u.id && l.status === 'active');
+                                        return s + (l?.tenant?.occupants || 1);
+                                    }, 0);
+
+                                    const keyLabels = { wohnflaeche: 'Wohnfläche', personenanzahl: 'Personen', einheit: 'Einheit', anteil: 'Anteil' };
+                                    const unitCostsList = unitCosts[reviewUnit] || [];
+
+                                    // Calculate periods
+                                    const periods = getTenantsForUnitInPeriod(reviewUnit, periodStart, periodEnd);
+                                    let displayPeriods = [];
+                                    if (periods.length === 0) {
+                                        displayPeriods.push({
+                                            tenantName: 'Leerstand',
+                                            effectiveStart: periodStart,
+                                            effectiveEnd: periodEnd,
+                                            ratio: 1,
+                                            lease: null,
+                                            occupants: 0,
+                                            sqm: unit.sqm || 1
+                                        });
+                                    } else {
+                                        displayPeriods = periods.map(p => ({
+                                            ...p,
+                                            occupants: p.tenant?.occupants || 1,
+                                            sqm: unit.sqm || 1
+                                        }));
+                                    }
+
+                                    // Initial calculations for settlement duration
                                     const pStart = new Date(periodStart);
                                     const pEnd = new Date(periodEnd);
                                     const settlementMonths = Math.max(1, (pEnd.getFullYear() - pStart.getFullYear()) * 12 + (pEnd.getMonth() - pStart.getMonth()) + 1);
 
-                                    const periods = getTenantsForUnitInPeriod(uid, periodStart, periodEnd);
-
-                                    if (periods.length === 0) {
-                                        return (
-                                            <div key={uid}
-                                                style={{
-                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                    padding: '14px 16px', borderRadius: 'var(--radius-md)',
-                                                    border: '1px solid var(--border-color)', cursor: 'default', opacity: 0.6,
-                                                    backgroundColor: '#f9fafb'
-                                                }}>
-                                                <div>
-                                                    <div style={{ fontWeight: 600 }}>{unit.unit_name}</div>
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Leerstand</div>
-                                                </div>
-                                                <div style={{ textAlign: 'right', fontSize: '0.85rem', fontStyle: 'italic', color: '#666' }}>
-                                                    Keine Abrechnung
-                                                </div>
-                                            </div>
-                                        );
-                                    }
-
-                                    const displayPeriods = periods.map(p => ({
-                                        ...p,
-                                        occupants: p.tenant?.occupants || 1,
-                                        sqm: unit.sqm || 1
-                                    }));
-
-                                    let total = 0;
-                                    let totalPrepayment = 0;
-
-                                    displayPeriods.forEach(page => {
-                                        // 1. Calculate Period Share of Costs
-                                        const periodShare = costs.reduce((sum, item) => {
-                                            const sourceItem = costItems.find(ci => ci.category_name === item.label);
-                                            const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                            let factor = page.ratio;
-                                            if (key === 'personenanzahl' && (page.occupants || 0) === 0) factor = 0;
-                                            return sum + (item.amount || 0) * factor;
-                                        }, 0);
-                                        total += periodShare;
-
-                                        // 2. Calculate Prepayment for Period
-                                        const monthlySvc = page.lease ? (parseFloat(page.lease.service_charge) || 0) : 0;
-                                        const monthlyHeat = page.lease ? (parseFloat(page.lease.heating_cost) || 0) : 0;
-                                        const monthlyPrepay = monthlySvc + monthlyHeat;
-                                        const periodPrepay = monthlyPrepay * settlementMonths * page.ratio;
-                                        totalPrepayment += periodPrepay;
-                                    });
-
-                                    const tenant = getTenantForUnit(uid);
-                                    const result = total - totalPrepayment;
-
                                     return (
-                                        <div key={uid}
-                                            onClick={() => setReviewUnit(uid)}
-                                            style={{
-                                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                padding: '14px 16px', borderRadius: 'var(--radius-md)',
-                                                border: '1px solid var(--border-color)', cursor: 'pointer',
-                                                transition: 'all 0.2s', backgroundColor: reviewUnit === uid ? '#EFF6FF' : 'transparent'
-                                            }}>
-                                            <div>
-                                                <div style={{ fontWeight: 600 }}>{unit.unit_name}</div>
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{tenant || 'Leerstand'}</div>
-                                            </div>
-                                            <div style={{ textAlign: 'right' }}>
-                                                <div style={{ fontWeight: 700 }}>{total.toFixed(2)} €</div>
-                                                <div style={{
-                                                    fontSize: '0.8rem', fontWeight: 500,
-                                                    color: result > 0 ? 'var(--danger-color)' : 'var(--success-color)'
-                                                }}>
-                                                    {result > 0 ? 'Nachzahlung' : 'Guthaben'}: {Math.abs(result).toFixed(2)} €
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                                        <Modal isOpen={true} onClose={() => setReviewUnit(null)}
+                                            title={`Abrechnungsdetails: ${unit?.unit_name}`} maxWidth="900px"
+                                            footer={
+                                                <>
+                                                    <Button variant="secondary" onClick={() => setReviewUnit(null)}>Schließen</Button>
+                                                </>
+                                            }>
+                                            <div style={{ maxHeight: '70vh', overflowY: 'auto', paddingRight: '4px' }}>
+                                                {displayPeriods.map((page, idx) => {
+                                                    const tenantTotal = unitCostsList.reduce((sum, item) => {
+                                                        const sourceItem = costItems.find(ci => ci.category_name === item.label);
+                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                        let factor = page.ratio;
+                                                        if (key === 'personenanzahl' && (page.occupants || 0) === 0) factor = 0;
+                                                        return sum + (item.amount || 0) * factor;
+                                                    }, 0);
 
-                            {/* Unit Detail Modal */}
-                            {reviewUnit && (() => {
-                                const unit = units.find(u => u.id === reviewUnit);
-                                const allPropertyUnits = units.filter(u => u.property_id === wizardPropertyId);
+                                                    const monthlySvc = page.lease ? (parseFloat(page.lease.service_charge) || 0) : 0;
+                                                    const monthlyHeat = page.lease ? (parseFloat(page.lease.heating_cost) || 0) : 0;
+                                                    const monthlyPrepay = monthlySvc + monthlyHeat;
 
-                                // Totals for distribution keys
-                                const totalArea = allPropertyUnits.reduce((s, u) => s + (u.sqm || 1), 0);
-                                const totalUnitCount = allPropertyUnits.length;
-                                const totalPersons = allPropertyUnits.reduce((s, u) => {
-                                    const l = leases.find(l => l.unit_id === u.id && l.status === 'active');
-                                    return s + (l?.tenant?.occupants || 1);
-                                }, 0);
+                                                    const tenantPrepay = monthlyPrepay * settlementMonths * page.ratio;
+                                                    const balance = tenantTotal - tenantPrepay;
 
-                                const keyLabels = { wohnflaeche: 'Wohnfläche', personenanzahl: 'Personen', einheit: 'Einheit', anteil: 'Anteil' };
-                                const unitCostsList = unitCosts[reviewUnit] || [];
-
-                                // Calculate periods
-                                const periods = getTenantsForUnitInPeriod(reviewUnit, periodStart, periodEnd);
-                                let displayPeriods = [];
-                                if (periods.length === 0) {
-                                    displayPeriods.push({
-                                        tenantName: 'Leerstand',
-                                        effectiveStart: periodStart,
-                                        effectiveEnd: periodEnd,
-                                        ratio: 1,
-                                        lease: null,
-                                        occupants: 0,
-                                        sqm: unit.sqm || 1
-                                    });
-                                } else {
-                                    displayPeriods = periods.map(p => ({
-                                        ...p,
-                                        occupants: p.tenant?.occupants || 1,
-                                        sqm: unit.sqm || 1
-                                    }));
-                                }
-
-                                // Initial calculations for settlement duration
-                                const pStart = new Date(periodStart);
-                                const pEnd = new Date(periodEnd);
-                                const settlementMonths = Math.max(1, (pEnd.getFullYear() - pStart.getFullYear()) * 12 + (pEnd.getMonth() - pStart.getMonth()) + 1);
-
-                                return (
-                                    <Modal isOpen={true} onClose={() => setReviewUnit(null)}
-                                        title={`Abrechnungsdetails: ${unit?.unit_name}`} maxWidth="900px"
-                                        footer={
-                                            <>
-                                                <Button variant="secondary" onClick={() => setReviewUnit(null)}>Schließen</Button>
-                                            </>
-                                        }>
-                                        <div style={{ maxHeight: '70vh', overflowY: 'auto', paddingRight: '4px' }}>
-                                            {displayPeriods.map((page, idx) => {
-                                                const tenantTotal = unitCostsList.reduce((sum, item) => {
-                                                    const sourceItem = costItems.find(ci => ci.category_name === item.label);
-                                                    const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                    let factor = page.ratio;
-                                                    if (key === 'personenanzahl' && (page.occupants || 0) === 0) factor = 0;
-                                                    return sum + (item.amount || 0) * factor;
-                                                }, 0);
-
-                                                const monthlySvc = page.lease ? (parseFloat(page.lease.service_charge) || 0) : 0;
-                                                const monthlyHeat = page.lease ? (parseFloat(page.lease.heating_cost) || 0) : 0;
-                                                const monthlyPrepay = monthlySvc + monthlyHeat;
-
-                                                const tenantPrepay = monthlyPrepay * settlementMonths * page.ratio;
-                                                const balance = tenantTotal - tenantPrepay;
-
-                                                return (
-                                                    <div key={idx} style={{ marginBottom: '2rem', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
-                                                        <div style={{ backgroundColor: '#F9FAFB', padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                                                            <div style={{ fontWeight: 600, fontSize: '1rem' }}>{page.tenantName}</div>
-                                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                                                {formatDate(page.effectiveStart)} – {formatDate(page.effectiveEnd)} ({Math.round(page.ratio * 100)}%)
+                                                    return (
+                                                        <div key={idx} style={{ marginBottom: '2rem', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
+                                                            <div style={{ backgroundColor: '#F9FAFB', padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                                                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{page.tenantName}</div>
+                                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                                    {formatDate(page.effectiveStart)} – {formatDate(page.effectiveEnd)} ({Math.round(page.ratio * 100)}%)
+                                                                </div>
                                                             </div>
+
+                                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                                                                <thead style={{ backgroundColor: '#F3F4F6' }}>
+                                                                    <tr>
+                                                                        <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Kostenart</th>
+                                                                        <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Schlüssel</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Gesamt</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Einheiten</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ko./Einh.</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ihre Einh.</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Anteil</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {unitCostsList.map((item, i) => {
+                                                                        const sourceItem = costItems.find(ci => ci.category_name === item.label);
+                                                                        const totalCost = sourceItem ? sourceItem.amount : 0;
+                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+
+                                                                        let totalUnits = 0;
+                                                                        let myUnits = 0;
+                                                                        let unitLabel = '';
+
+                                                                        if (key === 'wohnflaeche') {
+                                                                            totalUnits = totalArea;
+                                                                            myUnits = page.sqm;
+                                                                            unitLabel = 'm²';
+                                                                        } else if (key === 'personenanzahl') {
+                                                                            totalUnits = totalPersons;
+                                                                            myUnits = page.occupants;
+                                                                            unitLabel = 'P.';
+                                                                        } else {
+                                                                            totalUnits = totalUnitCount;
+                                                                            myUnits = 1;
+                                                                            unitLabel = 'Einh.';
+                                                                        }
+
+                                                                        const costPerUnit = totalUnits > 0 ? totalCost / totalUnits : 0;
+                                                                        let factor = page.ratio;
+                                                                        if (key === 'personenanzahl' && page.occupants === 0) {
+                                                                            factor = 0;
+                                                                        }
+                                                                        const itemShare = (item.amount || 0) * factor;
+
+                                                                        return (
+                                                                            <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                                                <td style={{ padding: '8px 12px' }}>{item.label}</td>
+                                                                                <td style={{ padding: '8px 12px' }}>{keyLabels[key] || key}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalCost > 0 ? totalCost.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalUnits > 0 ? totalUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{costPerUnit > 0 ? costPerUnit.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{myUnits > 0 ? myUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600 }}>{itemShare.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                                </tbody>
+                                                                <tfoot style={{ backgroundColor: '#F9FAFB', fontWeight: 600 }}>
+                                                                    <tr>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px' }}>Gesamtsumme (zeitanteilig)</td>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right' }}>{tenantTotal.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                    </tr>
+                                                                    <tr>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>Vorauszahlungen (zeitanteilig)</td>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-secondary)' }}>- {tenantPrepay.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                    </tr>
+                                                                    <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
+                                                                            {balance > 0 ? 'Nachzahlung' : 'Guthaben'}
+                                                                        </td>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
+                                                                            {Math.abs(balance).toLocaleString('de-DE', { minimumFractionDigits: 2 })} €
+                                                                        </td>
+                                                                    </tr>
+                                                                </tfoot>
+                                                            </table>
                                                         </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </Modal>
+                                    );
+                                })()}
+                            </div>
+                        )}
 
-                                                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                                                            <thead style={{ backgroundColor: '#F3F4F6' }}>
-                                                                <tr>
-                                                                    <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Kostenart</th>
-                                                                    <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Schlüssel</th>
-                                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Gesamt</th>
-                                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Einheiten</th>
-                                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ko./Einh.</th>
-                                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ihre Einh.</th>
-                                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Anteil</th>
-                                                                </tr>
-                                                            </thead>
-                                                            <tbody>
-                                                                {unitCostsList.map((item, i) => {
-                                                                    const sourceItem = costItems.find(ci => ci.category_name === item.label);
-                                                                    const totalCost = sourceItem ? sourceItem.amount : 0;
-                                                                    const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-
-                                                                    let totalUnits = 0;
-                                                                    let myUnits = 0;
-                                                                    let unitLabel = '';
-
-                                                                    if (key === 'wohnflaeche') {
-                                                                        totalUnits = totalArea;
-                                                                        myUnits = page.sqm;
-                                                                        unitLabel = 'm²';
-                                                                    } else if (key === 'personenanzahl') {
-                                                                        totalUnits = totalPersons;
-                                                                        myUnits = page.occupants;
-                                                                        unitLabel = 'P.';
-                                                                    } else {
-                                                                        totalUnits = totalUnitCount;
-                                                                        myUnits = 1;
-                                                                        unitLabel = 'Einh.';
-                                                                    }
-
-                                                                    const costPerUnit = totalUnits > 0 ? totalCost / totalUnits : 0;
-                                                                    let factor = page.ratio;
-                                                                    if (key === 'personenanzahl' && page.occupants === 0) {
-                                                                        factor = 0;
-                                                                    }
-                                                                    const itemShare = (item.amount || 0) * factor;
-
-                                                                    return (
-                                                                        <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                                            <td style={{ padding: '8px 12px' }}>{item.label}</td>
-                                                                            <td style={{ padding: '8px 12px' }}>{keyLabels[key] || key}</td>
-                                                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalCost > 0 ? totalCost.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
-                                                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalUnits > 0 ? totalUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
-                                                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{costPerUnit > 0 ? costPerUnit.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
-                                                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{myUnits > 0 ? myUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
-                                                                            <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600 }}>{itemShare.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
-                                                                        </tr>
-                                                                    );
-                                                                })}
-                                                            </tbody>
-                                                            <tfoot style={{ backgroundColor: '#F9FAFB', fontWeight: 600 }}>
-                                                                <tr>
-                                                                    <td colSpan={6} style={{ padding: '10px 12px' }}>Gesamtsumme (zeitanteilig)</td>
-                                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>{tenantTotal.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
-                                                                </tr>
-                                                                <tr>
-                                                                    <td colSpan={6} style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>Vorauszahlungen (zeitanteilig)</td>
-                                                                    <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-secondary)' }}>- {tenantPrepay.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
-                                                                </tr>
-                                                                <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                                                    <td colSpan={6} style={{ padding: '10px 12px', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
-                                                                        {balance > 0 ? 'Nachzahlung' : 'Guthaben'}
-                                                                    </td>
-                                                                    <td style={{ padding: '10px 12px', textAlign: 'right', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
-                                                                        {Math.abs(balance).toLocaleString('de-DE', { minimumFractionDigits: 2 })} €
-                                                                    </td>
-                                                                </tr>
-                                                            </tfoot>
-                                                        </table>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </Modal>
-                                );
-                            })()}
+                        {/* ===== WIZARD FOOTER ===== */}
+                        <div style={{
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border-color)'
+                        }}>
+                            <div>
+                                {wizardStep > 0 && (
+                                    <Button variant="secondary" icon={ArrowLeft} onClick={goBack}>Zurück</Button>
+                                )}
+                                {wizardStep === 0 && (
+                                    <Button variant="secondary" onClick={() => setWizardOpen(false)}>Abbrechen</Button>
+                                )}
+                            </div>
+                            <div style={{ display: 'flex', gap: '10px' }}>
+                                {wizardStep > 0 && (
+                                    <Button variant="secondary" icon={Save} onClick={() => saveSettlement('draft')}>Entwurf speichern</Button>
+                                )}
+                                {wizardStep < 3 ? (
+                                    <Button icon={ArrowRight} onClick={goNext}>Weiter</Button>
+                                ) : (
+                                    <Button icon={Check} onClick={() => saveSettlement('done')} style={{ backgroundColor: 'var(--success-color)' }}>
+                                        Abrechnung fertigstellen
+                                    </Button>
+                                )}
+                            </div>
                         </div>
-                    )}
+                    </Card>
+                </div>
 
-                    {/* ===== WIZARD FOOTER ===== */}
-                    <div style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border-color)'
-                    }}>
-                        <div>
-                            {wizardStep > 0 && (
-                                <Button variant="secondary" icon={ArrowLeft} onClick={goBack}>Zurück</Button>
-                            )}
-                            {wizardStep === 0 && (
-                                <Button variant="secondary" onClick={() => setWizardOpen(false)}>Abbrechen</Button>
-                            )}
-                        </div>
-                        <div style={{ display: 'flex', gap: '10px' }}>
-                            {wizardStep > 0 && (
-                                <Button variant="secondary" icon={Save} onClick={() => saveSettlement('draft')}>Entwurf speichern</Button>
-                            )}
-                            {wizardStep < 3 ? (
-                                <Button icon={ArrowRight} onClick={goNext}>Weiter</Button>
-                            ) : (
-                                <Button icon={Check} onClick={() => saveSettlement('done')} style={{ backgroundColor: 'var(--success-color)' }}>
-                                    Abrechnung fertigstellen
-                                </Button>
-                            )}
-                        </div>
+                {/* Create Key Modal - MUST be inside wizard return block to render during wizard */}
+                <Modal
+                    isOpen={isCreateKeyModalOpen}
+                    onClose={() => setIsCreateKeyModalOpen(false)}
+                    title="Neuen Verteilerschlüssel erstellen"
+                    footer={
+                        <>
+                            <Button variant="secondary" onClick={() => setIsCreateKeyModalOpen(false)}>Abbrechen</Button>
+                            <Button onClick={() => handleCreateNewKey(true)}>Speichern</Button>
+                        </>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: '1rem' }}>
+                        <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                            Dieser Schlüssel wird in den Einstellungen gespeichert und steht für zukünftige Abrechnungen zur Verfügung.
+                        </p>
+                        <Input
+                            label="Bezeichnung"
+                            value={newKeyName}
+                            onChange={e => setNewKeyName(e.target.value)}
+                            placeholder="z.B. Sonderumlage Garten"
+                        />
+                        <Input
+                            label="Beschreibung (optional)"
+                            value={newKeyDescription}
+                            onChange={e => setNewKeyDescription(e.target.value)}
+                            placeholder="Kurze Beschreibung des Schlüssels"
+                        />
                     </div>
-                </Card>
-            </div>
+                </Modal>
+            </>
         );
     }
 
@@ -1553,7 +1637,53 @@ const UtilityCosts = () => {
                     })}
                 </div >
             )}
-        </div >
+            {/* Create Key Modal for Wizard */}
+            <Modal
+                isOpen={isCreateKeyModalOpen}
+                onClose={() => setIsCreateKeyModalOpen(false)}
+                title="Neuen Verteilerschlüssel erstellen"
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={() => setIsCreateKeyModalOpen(false)}>Abbrechen</Button>
+                        <Button onClick={() => handleCreateNewKey(true)}>Speichern</Button>
+                    </>
+                }
+            >
+                <div style={{ display: 'grid', gap: '1rem' }}>
+                    <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                        Dieser Schlüssel wird in den Einstellungen gespeichert und steht für zukünftige Abrechnungen zur Verfügung.
+                    </p>
+                    <Input
+                        label="Bezeichnung"
+                        value={newKeyName}
+                        onChange={e => setNewKeyName(e.target.value)}
+                        placeholder="z.B. Sonderumlage Garten"
+                    />
+                    <Input
+                        label="Beschreibung (optional)"
+                        value={newKeyDescription}
+                        onChange={e => setNewKeyDescription(e.target.value)}
+                        placeholder="Kurze Beschreibung des Schlüssels"
+                    />
+                    {/* The Basistyp selector is now hidden as per instruction, defaulting to 'custom' */}
+                    {/* <div style={{ display: 'none' }}>
+                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Basistyp</label>
+                        <select
+                            style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
+                            value={newKeyType}
+                            onChange={e => setNewKeyType(e.target.value)}
+                        >
+                            <option value="area">Wohnfläche</option>
+                            <option value="persons">Personenanzahl</option>
+                            <option value="units">Wohneinheiten</option>
+                            <option value="mea">Miteigentumsanteile</option>
+                            <option value="direct">Direktzuordnung</option>
+                            <option value="custom">Manuell / Zähler</option>
+                        </select>
+                    </div> */}
+                </div>
+            </Modal>
+        </div>
     );
 };
 

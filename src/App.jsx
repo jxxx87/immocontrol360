@@ -8,6 +8,7 @@ import Tenants from './pages/Tenants';
 import Finance from './pages/Finance';
 import UtilityCosts from './pages/UtilityCosts';
 import Invoices from './pages/Invoices';
+import InvoiceForm from './pages/InvoiceForm';
 import Meters from './pages/Meters';
 import Contacts from './pages/Contacts';
 import Documents from './pages/Documents';
@@ -47,6 +48,8 @@ function App() {
               <Route path="finance" element={<Finance />} />
               <Route path="utility-costs" element={<UtilityCosts />} />
               <Route path="invoices" element={<Invoices />} />
+              <Route path="invoices/new" element={<InvoiceForm />} />
+              <Route path="invoices/edit/:id" element={<InvoiceForm />} />
               <Route path="meters" element={<Meters />} />
               <Route path="contacts" element={<Contacts />} />
               <Route path="documents" element={<Documents />} />
