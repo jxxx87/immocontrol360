@@ -6,7 +6,7 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { Plus, Building2, MapPin, LayoutGrid, ChevronDown, ChevronRight, Home, Trash2, Key, AlertCircle, MoreVertical, Edit } from 'lucide-react';
+import { Plus, Building2, MapPin, LayoutGrid, ChevronDown, ChevronRight, Home, Trash2, Key, AlertCircle, MoreVertical, Edit, Edit3, Calendar } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
@@ -538,153 +538,214 @@ const Properties = () => {
                         Keine Immobilien gefunden.
                     </div>
                 ) : (
-                    <div>
-                        {/* Custom Table Rendering to support expansion */}
-                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                            <thead>
-                                <tr>
-                                    {propertyColumns.map((col, idx) => (
-                                        <th key={idx} style={{ textAlign: col.align || 'left', width: col.width }}>{col.header}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {properties.map(property => (
-                                    <React.Fragment key={property.id}>
-                                        <tr className="table-row" style={{ borderBottom: expandedPropertyId === property.id ? 'none' : '1px solid var(--border-color)' }}>
-                                            {propertyColumns.map((col, idx) => (
-                                                <td key={idx} style={{ textAlign: col.align || 'left' }}>
-                                                    {col.render ? col.render(property) : property[col.accessor]}
-                                                </td>
-                                            ))}
-                                        </tr>
-                                        {expandedPropertyId === property.id && (
-                                            <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
-                                                <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl)' }}>
-                                                    <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                        <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                            <Home size={16} /> Einheiten
-                                                        </h4>
-                                                        <Button size="sm" icon={Plus} onClick={() => handleOpenUnitModal(property)}>Neue Einheit</Button>
-                                                    </div>
-
-                                                    {loadingUnits[property.id] ? (
-                                                        <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
-                                                    ) : (
-                                                        !units[property.id] || units[property.id].length === 0 ? (
-                                                            <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
-                                                        ) : (
-                                                            <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
-                                                                <thead style={{ backgroundColor: 'var(--background-color)' }}>
-                                                                    <tr>
-                                                                        <th style={{ padding: '8px' }}>Name</th>
-                                                                        <th style={{ padding: '8px' }}>Etage</th>
-                                                                        <th style={{ padding: '8px' }}>Fläche</th>
-                                                                        <th style={{ padding: '8px' }}>Zimmer</th>
-                                                                        <th style={{ padding: '8px' }}>Status</th>
-                                                                        <th style={{ padding: '8px' }}></th>
-                                                                    </tr>
-                                                                </thead>
-                                                                <tbody>
-                                                                    {units[property.id].map(unit => (
-                                                                        <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
-                                                                            <td style={{ padding: '8px' }}>{unit.unit_name}</td>
-                                                                            <td style={{ padding: '8px' }}>{unit.floor}</td>
-                                                                            <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
-                                                                            <td style={{ padding: '8px' }}>{unit.rooms}</td>
-                                                                            <td style={{ padding: '8px' }}>
-                                                                                {unit.status === 'rented' ? (
-                                                                                    <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                        <Key size={12} /> Vermietet
-                                                                                    </span>
-                                                                                ) : (
-                                                                                    <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                        <AlertCircle size={12} /> Leerstand
-                                                                                    </span>
-                                                                                )}
-                                                                            </td>
-                                                                            <td style={{ padding: '8px', textAlign: 'right' }}>
-                                                                                <div style={{ position: 'relative', display: 'inline-block' }}>
-                                                                                    <button
-                                                                                        onClick={(e) => {
-                                                                                            e.stopPropagation();
-                                                                                            if (openActionMenuId === unit.id) {
-                                                                                                setOpenActionMenuId(null);
-                                                                                            } else {
-                                                                                                const rect = e.currentTarget.getBoundingClientRect();
-                                                                                                setMenuPos({ top: rect.bottom, left: rect.right }); // Position below default
-                                                                                                setOpenActionMenuId(unit.id);
-                                                                                            }
-                                                                                        }}
-                                                                                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
-                                                                                    >
-                                                                                        <MoreVertical size={16} color="var(--text-secondary)" />
-                                                                                    </button>
-
-                                                                                    {openActionMenuId === unit.id && (
-                                                                                        <>
-                                                                                            <div
-                                                                                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
-                                                                                                onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
-                                                                                            />
-                                                                                            <div style={{
-                                                                                                position: 'fixed',
-                                                                                                top: menuPos.top + 5, // Add tiny offset
-                                                                                                left: menuPos.left,
-                                                                                                transform: 'translateX(-100%)', // Align right edge
-                                                                                                backgroundColor: 'var(--surface-color)',
-                                                                                                border: '1px solid var(--border-color)',
-                                                                                                borderRadius: 'var(--radius-md)',
-                                                                                                boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                                                                                                zIndex: 9999,
-                                                                                                minWidth: '160px',
-                                                                                                display: 'flex',
-                                                                                                flexDirection: 'column',
-                                                                                                padding: '4px'
-                                                                                            }}>
-                                                                                                {unit.status === 'vacant' && (
-                                                                                                    <button
-                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${property.id}&unitId=${unit.id}`); }}
-                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
-                                                                                                        title="Einheit vermieten"
-                                                                                                    >
-                                                                                                        <Plus size={14} /> Vermieten
-                                                                                                    </button>
-                                                                                                )}
-                                                                                                <button
-                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(property, unit); }}
-                                                                                                    style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
-                                                                                                    title="Einheit bearbeiten"
-                                                                                                >
-                                                                                                    <Edit size={14} /> Bearbeiten
-                                                                                                </button>
-                                                                                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                                                <button
-                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(property.id, unit.id); }}
-                                                                                                    style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
-                                                                                                    title="Einheit löschen"
-                                                                                                >
-                                                                                                    <Trash2 size={14} /> Löschen
-                                                                                                </button>
-                                                                                            </div>
-                                                                                        </>
-                                                                                    )}
-                                                                                </div>
-                                                                            </td>
-                                                                        </tr>
-                                                                    ))}
-                                                                </tbody>
-                                                            </table>
-                                                        )
-                                                    )}
-                                                </td>
+                    <>
+                        <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
+                            {/* Custom Table Rendering to support expansion */}
+                            <table style={{ width: '100%', minWidth: '800px', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr>
+                                        {propertyColumns.map((col, idx) => (
+                                            <th key={idx} style={{ textAlign: col.align || 'left', width: col.width }}>{col.header}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {properties.map(property => (
+                                        <React.Fragment key={property.id}>
+                                            <tr className="table-row" style={{ borderBottom: expandedPropertyId === property.id ? 'none' : '1px solid var(--border-color)' }}>
+                                                {propertyColumns.map((col, idx) => (
+                                                    <td key={idx} style={{ textAlign: col.align || 'left' }}>
+                                                        {col.render ? col.render(property) : property[col.accessor]}
+                                                    </td>
+                                                ))}
                                             </tr>
-                                        )}
-                                    </React.Fragment>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                                            {expandedPropertyId === property.id && (
+                                                <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
+                                                    <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl)' }}>
+                                                        <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                            <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                <Home size={16} /> Einheiten
+                                                            </h4>
+                                                            <Button size="sm" icon={Plus} onClick={() => handleOpenUnitModal(property)}>Neue Einheit</Button>
+                                                        </div>
+
+                                                        {loadingUnits[property.id] ? (
+                                                            <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
+                                                        ) : (
+                                                            !units[property.id] || units[property.id].length === 0 ? (
+                                                                <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
+                                                            ) : (
+                                                                <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
+                                                                    <thead style={{ backgroundColor: 'var(--background-color)' }}>
+                                                                        <tr>
+                                                                            <th style={{ padding: '8px' }}>Name</th>
+                                                                            <th style={{ padding: '8px' }}>Etage</th>
+                                                                            <th style={{ padding: '8px' }}>Fläche</th>
+                                                                            <th style={{ padding: '8px' }}>Zimmer</th>
+                                                                            <th style={{ padding: '8px' }}>Status</th>
+                                                                            <th style={{ padding: '8px' }}></th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {units[property.id].map(unit => (
+                                                                            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
+                                                                                <td style={{ padding: '8px' }}>{unit.unit_name}</td>
+                                                                                <td style={{ padding: '8px' }}>{unit.floor}</td>
+                                                                                <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                <td style={{ padding: '8px' }}>{unit.rooms}</td>
+                                                                                <td style={{ padding: '8px' }}>
+                                                                                    {unit.status === 'rented' ? (
+                                                                                        <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                            <Key size={12} /> Vermietet
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                            <AlertCircle size={12} /> Leerstand
+                                                                                        </span>
+                                                                                    )}
+                                                                                </td>
+                                                                                <td style={{ padding: '8px', textAlign: 'right' }}>
+                                                                                    <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                                        <button
+                                                                                            onClick={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                                if (openActionMenuId === unit.id) {
+                                                                                                    setOpenActionMenuId(null);
+                                                                                                } else {
+                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right }); // Position below default
+                                                                                                    setOpenActionMenuId(unit.id);
+                                                                                                }
+                                                                                            }}
+                                                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
+                                                                                        >
+                                                                                            <MoreVertical size={16} color="var(--text-secondary)" />
+                                                                                        </button>
+
+                                                                                        {openActionMenuId === unit.id && (
+                                                                                            <>
+                                                                                                <div
+                                                                                                    style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
+                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
+                                                                                                />
+                                                                                                <div style={{
+                                                                                                    position: 'fixed',
+                                                                                                    top: menuPos.top + 5, // Add tiny offset
+                                                                                                    left: menuPos.left,
+                                                                                                    transform: 'translateX(-100%)', // Align right edge
+                                                                                                    backgroundColor: 'var(--surface-color)',
+                                                                                                    border: '1px solid var(--border-color)',
+                                                                                                    borderRadius: 'var(--radius-md)',
+                                                                                                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                                    zIndex: 9999,
+                                                                                                    minWidth: '160px',
+                                                                                                    display: 'flex',
+                                                                                                    flexDirection: 'column',
+                                                                                                    padding: '4px'
+                                                                                                }}>
+                                                                                                    {unit.status === 'vacant' && (
+                                                                                                        <button
+                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${property.id}&unitId=${unit.id}`); }}
+                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
+                                                                                                            title="Einheit vermieten"
+                                                                                                        >
+                                                                                                            <Plus size={14} /> Vermieten
+                                                                                                        </button>
+                                                                                                    )}
+                                                                                                    <button
+                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(property, unit); }}
+                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
+                                                                                                        title="Einheit bearbeiten"
+                                                                                                    >
+                                                                                                        <Edit size={14} /> Bearbeiten
+                                                                                                    </button>
+                                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                                    <button
+                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(property.id, unit.id); }}
+                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
+                                                                                                        title="Einheit löschen"
+                                                                                                    >
+                                                                                                        <Trash2 size={14} /> Löschen
+                                                                                                    </button>
+                                                                                                </div>
+                                                                                            </>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            )
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {properties.map(property => {
+                                const totalSqm = property.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
+                                // Calculate unit details for quick view
+                                const unitCount = property.units?.length || 0;
+                                const rentedUnits = property.units?.filter(u => u.status === 'rented').length || 0;
+
+                                return (
+                                    <div key={property.id}
+                                        onClick={() => handleEditProperty(property)}
+                                        style={{
+                                            border: '1px solid var(--border-color)',
+                                            borderRadius: 'var(--radius-md)',
+                                            padding: 'var(--spacing-md)',
+                                            backgroundColor: 'var(--surface-color)',
+                                            cursor: 'pointer'
+                                        }}>
+
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                            <div>
+                                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{property.street} {property.house_number}</div>
+                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{property.zip} {property.city}</div>
+                                            </div>
+                                            <div style={{
+                                                padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 600,
+                                                backgroundColor: property.property_type === 'commercial' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+                                                color: property.property_type === 'commercial' ? 'var(--warning-color)' : 'var(--primary-color)'
+                                            }}>
+                                                {property.property_type === 'commercial' ? 'Gewerbe' : 'Wohnen'}
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                <Home size={14} className="text-secondary" />
+                                                <span>
+                                                    {unitCount === 0 ? 'Keine Einheiten' : `${rentedUnits}/${unitCount} Vermietet`}
+                                                </span>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                <LayoutGrid size={14} className="text-secondary" />
+                                                <span>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', gap: '8px' }}>
+                                            <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); handleEditProperty(property); }}>
+                                                <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                            </Button>
+                                            <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); handleOpenUnitModal(property); }}>
+                                                <Plus size={14} style={{ marginRight: '6px' }} /> Einheit
+                                            </Button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </>
                 )}
             </Card>
 

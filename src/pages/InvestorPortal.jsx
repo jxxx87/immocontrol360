@@ -371,48 +371,98 @@ const InvestorPortal = () => {
                         <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>Klicken Sie auf "Neuen Deal schnell rechnen" um zu starten.</p>
                     </div>
                 ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                            <thead>
-                                <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                    {['Name', 'Kaufpreis', 'Gesamtinvest.', 'Kaltmiete IST', 'Kaltmiete SOLL', 'EK', 'Darlehen', 'Erstellt', 'Aktionen'].map(h => (
-                                        <th key={h} style={{ padding: '10px 12px', textAlign: 'left', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{h}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {deals.map(deal => (
-                                    <tr key={deal.id} style={{ borderBottom: '1px solid var(--border-color)', cursor: 'pointer', transition: 'background-color 0.15s' }}
-                                        onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
-                                        onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                                        onClick={() => loadDeal(deal)}>
-                                        <td style={{ padding: '12px', fontWeight: 600 }}>{deal.name}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.purchase_price)}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.total_investment)}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.cold_rent_ist)}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap', color: deal.cold_rent_soll > 0 ? '#3B82F6' : 'var(--text-secondary)' }}>
-                                            {deal.cold_rent_soll > 0 ? formatCurrency(deal.cold_rent_soll) : '–'}
-                                        </td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.equity)}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.loan_total)}</td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                            {new Date(deal.created_at).toLocaleDateString('de-DE')}
-                                        </td>
-                                        <td style={{ padding: '12px', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
-                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                <span style={{ cursor: 'pointer', color: 'var(--primary-color)' }} onClick={() => loadDeal(deal)} title="Bearbeiten">
-                                                    <Edit3 size={15} />
-                                                </span>
-                                                <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7 }} onClick={() => deleteDeal(deal.id)} title="Löschen">
-                                                    <Trash2 size={15} />
-                                                </span>
-                                            </div>
-                                        </td>
+                    <>
+                        <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                                <thead>
+                                    <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                        {['Name', 'Kaufpreis', 'Gesamtinvest.', 'Kaltmiete IST', 'Kaltmiete SOLL', 'EK', 'Darlehen', 'Erstellt', 'Aktionen'].map(h => (
+                                            <th key={h} style={{ padding: '10px 12px', textAlign: 'left', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-secondary)', whiteWhiteSpace: 'nowrap' }}>{h}</th>
+                                        ))}
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                                </thead>
+                                <tbody>
+                                    {deals.map(deal => (
+                                        <tr key={deal.id} style={{ borderBottom: '1px solid var(--border-color)', cursor: 'pointer', transition: 'background-color 0.15s' }}
+                                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
+                                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                                            onClick={() => loadDeal(deal)}>
+                                            <td style={{ padding: '12px', fontWeight: 600 }}>{deal.name}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.purchase_price)}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.total_investment)}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.cold_rent_ist)}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap', color: deal.cold_rent_soll > 0 ? '#3B82F6' : 'var(--text-secondary)' }}>
+                                                {deal.cold_rent_soll > 0 ? formatCurrency(deal.cold_rent_soll) : '–'}
+                                            </td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.equity)}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }}>{formatCurrency(deal.loan_total)}</td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                {new Date(deal.created_at).toLocaleDateString('de-DE')}
+                                            </td>
+                                            <td style={{ padding: '12px', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <span style={{ cursor: 'pointer', color: 'var(--primary-color)' }} onClick={() => loadDeal(deal)} title="Bearbeiten">
+                                                        <Edit3 size={15} />
+                                                    </span>
+                                                    <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7 }} onClick={() => deleteDeal(deal.id)} title="Löschen">
+                                                        <Trash2 size={15} />
+                                                    </span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Mobile View for Deals */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {deals.map(deal => (
+                                <div key={deal.id}
+                                    onClick={() => loadDeal(deal)}
+                                    style={{
+                                        border: '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: 'var(--spacing-md)',
+                                        backgroundColor: 'var(--surface-color)',
+                                        cursor: 'pointer'
+                                    }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                        <div style={{ fontWeight: 600, fontSize: '1rem' }}>{deal.name}</div>
+                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(deal.created_at).toLocaleDateString('de-DE')}</div>
+                                    </div>
+
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' }}>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Kaufpreis</div>
+                                            <div style={{ fontWeight: 500 }}>{formatCurrency(deal.purchase_price)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
+                                            <div style={{ fontWeight: 500 }}>{formatCurrency(deal.total_investment)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST</div>
+                                            <div style={{ fontWeight: 500 }}>{formatCurrency(deal.cold_rent_ist)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL</div>
+                                            <div style={{ fontWeight: 500 }}>{deal.cold_rent_soll > 0 ? formatCurrency(deal.cold_rent_soll) : '–'}</div>
+                                        </div>
+                                    </div>
+
+                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '8px', display: 'flex', justifyContent: 'flex-end', gap: '16px' }}>
+                                        <button onClick={(e) => { e.stopPropagation(); loadDeal(deal); }} style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                            <Edit3 size={16} /> Bearbeiten
+                                        </button>
+                                        <button onClick={(e) => { e.stopPropagation(); deleteDeal(deal.id); }} style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                            <Trash2 size={16} /> Löschen
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </Card>
         </div>
@@ -447,7 +497,8 @@ const InvestorPortal = () => {
 
             {/* Portfolio Table */}
             <Card title="Portfolio Management & Objekt-Sicht">
-                <div style={{ overflowX: 'auto' }}>
+                {/* Desktop View */}
+                <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1100px' }}>
                         <thead>
                             <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
@@ -573,6 +624,108 @@ const InvestorPortal = () => {
                             )}
                         </tbody>
                     </table>
+                </div>
+
+                {/* Mobile View: Cards */}
+                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                    {properties.map(p => {
+                        const totalSqm = p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
+                        const rentIstMo = getPropertyRentIst(p);
+                        const rentSollMo = getPropertyRentSoll(p);
+                        const debt = getPropertyDebt(p.id);
+                        const marketValue = parseFloat(p.market_value_total) || 0;
+
+                        return (
+                            <div key={p.id} style={{
+                                border: '1px solid var(--border-color)',
+                                borderRadius: 'var(--radius-md)',
+                                padding: 'var(--spacing-md)',
+                                backgroundColor: 'var(--surface-color)',
+                                display: 'flex', flexDirection: 'column', gap: '12px'
+                            }}>
+                                {/* Header */}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                    <div>
+                                        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
+                                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city} • {totalSqm > 0 ? `${totalSqm} m²` : ''}</div>
+                                    </div>
+
+                                    <button
+                                        onClick={() => {
+                                            setDetailProperty(p);
+                                            setIsDetailOpen(true);
+                                        }}
+                                        style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer' }}
+                                    >
+                                        <Eye size={20} />
+                                    </button>
+                                </div>
+
+                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+
+                                {/* Key Stats Grid */}
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
+                                        <div style={{ fontWeight: 500 }}>
+                                            {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
+                                        <div style={{ fontWeight: 500 }}>
+                                            {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST (p.a.)</div>
+                                        <div style={{ fontWeight: 500 }}>{formatCurrency(rentIstMo * 12)}</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL (p.a.)</div>
+                                        <div style={{ fontWeight: 500 }}>{formatCurrency(rentSollMo * 12)}</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
+                                        <div style={{ fontWeight: 500 }}>
+                                            {marketValue > 0 ? formatCurrency(marketValue) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Restschuld</div>
+                                        <div style={{ fontWeight: 500 }}>
+                                            {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+
+                                {/* Action Buttons */}
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <Button size="sm" variant="secondary" onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)} style={{ flex: 1 }}>
+                                        <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                    </Button>
+                                    <Button size="sm" variant="secondary" onClick={() => {
+                                        if (auditPropertyId === p.id) setAuditPropertyId(null);
+                                        else setAuditPropertyId(p.id);
+                                    }} style={{ flex: 1, borderColor: auditPropertyId === p.id ? 'var(--primary-color)' : 'var(--border-color)' }}>
+                                        <ShieldCheck size={14} style={{ marginRight: '6px' }} /> Zustand
+                                    </Button>
+                                </div>
+
+                                {/* Inline Audit Mobile */}
+                                {auditPropertyId === p.id && (
+                                    <div ref={auditRef} style={{ marginTop: '8px' }}>
+                                        {renderInlineAudit(p)}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                    {properties.length === 0 && (
+                        <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)' }}>Keine Immobilien gefunden.</div>
+                    )}
                 </div>
             </Card>
 

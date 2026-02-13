@@ -426,3 +426,25 @@ tr:last-child td {
 [data-theme="dark"] .btn-ghost:hover {
   background-color: rgba(255, 255, 255, 0.1);
 }
+
+/* ── RESPONSIVE UTILITIES ─────────────────────────────────── */
+@media (max-width: 768px) {
+  .hidden-mobile {
+    display: none !important;
+  }
+  
+  .visible-mobile-only {
+    display: block !important;
+  }
+  
+  /* Adjust container padding for mobile */
+  .container {
+    padding: 0 var(--spacing-sm);
+  }
+}
+
+@media (min-width: 769px) {
+  .hidden-desktop {
+    display: none !important;
+  }
+}
