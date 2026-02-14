@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Send, Paperclip, Image, X, Bot, Clock, ChevronLeft } from 'lucide-react';
+import { Send, Paperclip, Image, X, Bot, Clock } from 'lucide-react';
 
-const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, onBack }) => {
+const Messenger = ({ conversationUserId, conversationUserName, ticketId = null }) => {
     const { user } = useAuth();
     const [messages, setMessages] = useState([]);
     const [newMessage, setNewMessage] = useState('');
@@ -224,11 +224,6 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                 alignItems: 'center',
                 gap: '12px'
             }}>
-                {onBack && (
-                    <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: 'none', padding: '0', cursor: 'pointer', color: 'var(--text-primary)', marginRight: '-4px' }}>
-                        <ChevronLeft size={24} />
-                    </button>
-                )}
                 <div style={{
                     width: '36px', height: '36px', borderRadius: '50%',
                     background: 'linear-gradient(135deg, #0066CC 0%, #0EA5E9 100%)',

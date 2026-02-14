@@ -1504,7 +1504,7 @@ const UtilityCosts = () => {
                                     onClick={() => setExpandedProperty(isExpanded ? null : prop.id)}
                                     style={{
                                         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                        cursor: 'pointer', padding: '4px 0', flexWrap: 'wrap', gap: '10px'
+                                        cursor: 'pointer', padding: '4px 0'
                                     }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                         {isExpanded ? <ChevronDown size={20} /> : <ChevronRight size={20} />}

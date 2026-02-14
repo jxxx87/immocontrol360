@@ -1108,7 +1108,7 @@ const InvestorPortal = () => {
                     {savingDeal ? 'Speichert...' : (editingDealId ? 'Aktualisieren' : 'Speichern')}
                 </Button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) 1fr', gap: 'var(--spacing-xl)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                     {/* 1. Investition */}
                     <Card title="1. Investition">

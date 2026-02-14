@@ -4,8 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import {
     DndContext,
     closestCorners,
-    TouchSensor,
-    MouseSensor,
+    PointerSensor,
     useSensor,
     useSensors,
     DragOverlay,
@@ -56,16 +55,8 @@ const TicketKanban = () => {
     const priorityLabels = { low: 'Niedrig', normal: 'Normal', high: 'Hoch', urgent: 'Dringend' };
 
     const sensors = useSensors(
-        useSensor(MouseSensor, {
-            activationConstraint: {
-                distance: 10,
-            },
-        }),
-        useSensor(TouchSensor, {
-            activationConstraint: {
-                delay: 250,
-                tolerance: 5,
-            },
+        useSensor(PointerSensor, {
+            activationConstraint: { distance: 8 }
         })
     );
 

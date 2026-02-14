@@ -352,7 +352,7 @@ const Loans = () => {
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)', flexWrap: 'wrap', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Finanzierungen</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwaltung Ihrer Immobilienfinanzierungen</p>
@@ -413,9 +413,7 @@ const Loans = () => {
                                 display: 'flex',
                                 justifyContent: 'space-between',
                                 alignItems: 'center',
-                                cursor: 'pointer',
-                                flexWrap: 'wrap',
-                                gap: '10px'
+                                cursor: 'pointer'
                             }}
                             onClick={() => toggleGroup(pid)}
                         >
@@ -430,7 +428,7 @@ const Loans = () => {
                                     </div>
                                 </div>
                             </div>
-                            <div style={{ display: 'flex', gap: '2rem', textAlign: 'right', flexWrap: 'wrap' }}>
+                            <div style={{ display: 'flex', gap: '2rem', textAlign: 'right' }}>
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtdarlehen</div>
                                     <div style={{ fontWeight: 600 }}>{group.totals.amount.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>

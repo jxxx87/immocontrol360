@@ -228,7 +228,7 @@ const Documents = () => {
                 border: '1px solid var(--border-color)',
                 padding: '16px 20px',
                 marginBottom: '20px',
-                display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap'
+                display: 'flex', alignItems: 'center', gap: '12px'
             }}>
                 <Building2 size={18} color="var(--primary-color)" />
                 <span style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Immobilie:</span>
@@ -305,7 +305,7 @@ const Documents = () => {
                 <div style={{
                     backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-lg)',
                     border: '1px solid #FDE68A', padding: '14px 20px',
-                    marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap'
+                    marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px'
                 }}>
                     <Users size={18} color="#D97706" />
                     <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#92400E' }}>Mieter:</span>

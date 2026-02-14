@@ -3,11 +3,9 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import Messenger from '../components/Messenger';
 import { MessageSquare, Users, Circle, Search } from 'lucide-react';
-import { useViewMode } from '../context/ViewModeContext';
 
 const InvestorMessages = () => {
     const { user } = useAuth();
-    const { isMobile } = useViewMode();
     const [conversations, setConversations] = useState([]);
     const [selectedConvo, setSelectedConvo] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -143,7 +141,7 @@ const InvestorMessages = () => {
             </div>
 
             <div style={{
-                display: 'grid', gridTemplateColumns: isMobile ? '100%' : '320px 1fr',
+                display: 'grid', gridTemplateColumns: '320px 1fr',
                 height: 'calc(100% - 70px)',
                 backgroundColor: 'var(--surface-color)',
                 borderRadius: 'var(--radius-lg)',
@@ -152,8 +150,8 @@ const InvestorMessages = () => {
             }}>
                 {/* ── LEFT: CONVERSATION LIST ── */}
                 <div style={{
-                    borderRight: isMobile ? 'none' : '1px solid var(--border-color)',
-                    display: (!isMobile || !selectedConvo) ? 'flex' : 'none', flexDirection: 'column'
+                    borderRight: '1px solid var(--border-color)',
+                    display: 'flex', flexDirection: 'column'
                 }}>
                     {/* Search */}
                     <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
@@ -266,12 +264,11 @@ const InvestorMessages = () => {
                 </div>
 
                 {/* ── RIGHT: MESSENGER ── */}
-                <div style={{ display: (!isMobile || selectedConvo) ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
                     {selectedConvo ? (
                         <Messenger
                             conversationUserId={selectedConvo.userId}
                             conversationUserName={selectedConvo.name}
-                            onBack={isMobile ? () => setSelectedConvo(null) : undefined}
                         />
                     ) : (
                         <div style={{

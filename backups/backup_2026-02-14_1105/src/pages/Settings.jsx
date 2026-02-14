@@ -12,12 +12,10 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import { translateError } from '../lib/errorTranslator';
-import { useViewMode } from '../context/ViewModeContext';
 import ImportPage from './Import'; // Import the Import page component
 
 const Settings = () => {
     const { user } = useAuth();
-    const { isMobile } = useViewMode();
     const { refreshPortfolios } = usePortfolio(); // Determine if we need to refresh global context
     const location = useLocation();
     const [activeTab, setActiveTab] = useState('profile');
@@ -584,10 +582,10 @@ const Settings = () => {
         <div>
             <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xl)' }}>Einstellungen</h1>
 
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '100%' : '250px 1fr', gap: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '250px 1fr', gap: 'var(--spacing-xl)' }}>
                 {/* Settings Sidebar */}
-                <Card style={{ padding: '0', height: 'fit-content', overflow: 'hidden' }}>
-                    <div style={{ display: 'flex', flexDirection: isMobile ? 'row' : 'column', overflowX: isMobile ? 'auto' : 'visible' }}>
+                <Card style={{ padding: '0', height: 'fit-content' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
                         {tabs.map(tab => (
                             <button
                                 key={tab.id}
@@ -597,14 +595,12 @@ const Settings = () => {
                                     alignItems: 'center',
                                     padding: 'var(--spacing-md)',
                                     backgroundColor: activeTab === tab.id ? '#F3F4F6' : 'transparent',
-                                    borderLeft: !isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '3px solid transparent',
-                                    borderBottom: isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '1px solid var(--border-color)',
+                                    borderLeft: activeTab === tab.id ? '3px solid var(--primary-color)' : '3px solid transparent',
                                     textAlign: 'left',
                                     cursor: 'pointer',
                                     fontWeight: activeTab === tab.id ? 500 : 400,
                                     transition: 'background 0.2s',
-                                    whiteSpace: 'nowrap',
-                                    borderRight: isMobile ? '1px solid var(--border-color)' : 'none'
+                                    borderBottom: '1px solid var(--border-color)'
                                 }}
                             >
                                 <tab.icon size={18} style={{ marginRight: '10px', color: activeTab === tab.id ? 'var(--primary-color)' : 'var(--text-secondary)' }} />
