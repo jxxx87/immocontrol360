@@ -11,6 +11,7 @@ import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
+import { useViewMode } from '../context/ViewModeContext';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
@@ -615,7 +616,7 @@ const Tenants = () => {
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)', flexWrap: 'wrap', gap: '10px' }}>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Mietverhältnisse</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Übersicht der Einheiten und Auslastung</p>
@@ -625,7 +626,7 @@ const Tenants = () => {
 
             {/* Filter Bar */}
             <Card style={{ marginBottom: 'var(--spacing-lg)', padding: 'var(--spacing-md)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)', flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <Filter size={18} style={{ color: 'var(--text-secondary)' }} />
                         <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Filter:</span>
@@ -653,7 +654,8 @@ const Tenants = () => {
             </Card>
 
             {/* KPIs */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
+            {/* KPIs */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
                 <Card>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>

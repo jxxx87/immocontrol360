@@ -11,6 +11,7 @@ import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
+import { useViewMode } from '../context/ViewModeContext';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
@@ -19,6 +20,7 @@ const Properties = () => {
     const location = useLocation();
     const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const { isMobile } = useViewMode();
     const [properties, setProperties] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
@@ -509,7 +511,7 @@ const Properties = () => {
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', marginBottom: 'var(--spacing-xl)', gap: isMobile ? '10px' : '0' }}>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Immobilien</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Übersicht Ihrer Wohn- und Gewerbeobjekte</p>

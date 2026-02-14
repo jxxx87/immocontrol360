@@ -221,8 +221,24 @@ const Topbar = () => {
             )}
 
             {isMobile && (
-                <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'center' }}>
-                    <img src="/logo.png?v=5" alt="ImmoControl Pro 360" style={{ maxHeight: '40px' }} />
+                <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between', padding: '0 var(--spacing-sm)' }}>
+                    <div style={{ width: '32px' }}></div> {/* Spacer to center logo */}
+                    <img src="/logo.png?v=5" alt="ImmoControl Pro 360" style={{ maxHeight: '32px' }} />
+                    <button
+                        onClick={handleLogout}
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '8px',
+                            color: 'var(--text-secondary)',
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        <LogOut size={20} />
+                    </button>
                 </div>
             )}
         </header>
