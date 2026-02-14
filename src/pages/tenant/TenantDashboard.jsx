@@ -225,7 +225,7 @@ const TenantDashboard = () => {
             </div>
 
             {/* Contract Details + Recent Tickets */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px' }}>
                 {/* Contract Details */}
                 <div style={{
                     backgroundColor: 'var(--surface-color)',

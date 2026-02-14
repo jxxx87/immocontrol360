@@ -178,8 +178,8 @@ const TenantTickets = () => {
                                 }}
                             >
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px', flexWrap: 'wrap' }}>
                                             <span style={{ fontWeight: 600, fontSize: '0.95rem' }}>{ticket.title}</span>
                                             <span style={{
                                                 padding: '2px 8px', borderRadius: '10px',

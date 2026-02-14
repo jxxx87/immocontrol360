@@ -795,7 +795,7 @@ const Tenants = () => {
                                     )}
 
                                     {/* Action Button */}
-                                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '8px' }}>
                                         {row.activeLease ? (
                                             <Button variant="secondary" size="sm" onClick={() => {
                                                 const l = row.activeLease;

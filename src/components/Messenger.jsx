@@ -404,7 +404,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                     placeholder="Nachricht schreiben..."
                     rows={1}
                     style={{
-                        flex: 1, padding: '9px 14px',
+                        flex: 1, padding: '8px 12px', minHeight: '40px',
                         borderRadius: '20px',
                         border: '1px solid var(--border-color)',
                         outline: 'none', resize: 'none',

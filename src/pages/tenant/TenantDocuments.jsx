@@ -181,13 +181,15 @@ const TenantDocuments = () => {
                             }}
                             onClick={() => handleDownload(doc)}
                         >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                                {getFileIcon(doc.file_name || doc.name)}
-                                <div>
-                                    <div style={{ fontSize: '0.9rem', fontWeight: 500 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1, minWidth: 0 }}>
+                                <div style={{ flexShrink: 0 }}>
+                                    {getFileIcon(doc.file_name || doc.name)}
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: '0.9rem', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                         {doc.name || doc.file_name || 'Dokument'}
                                     </div>
-                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                         {formatDate(doc.created_at)}
                                         {doc.description && ` • ${doc.description}`}
                                     </div>
@@ -199,11 +201,12 @@ const TenantDocuments = () => {
                                     padding: '6px 14px', borderRadius: 'var(--radius-md)',
                                     border: '1px solid var(--border-color)',
                                     backgroundColor: 'var(--surface-color)', color: 'var(--primary-color)',
-                                    fontSize: '0.8rem', cursor: 'pointer'
+                                    fontSize: '0.8rem', cursor: 'pointer',
+                                    flexShrink: 0, marginLeft: '8px'
                                 }}
                             >
                                 <Download size={14} />
-                                Download
+                                <span className="hidden-mobile">Download</span>
                             </button>
                         </div>
                     ))}

@@ -242,7 +242,7 @@ const Documents = () => {
                     style={{
                         flex: 1, padding: '8px 12px', borderRadius: 'var(--radius-md)',
                         border: '1px solid var(--border-color)', outline: 'none',
-                        fontSize: '0.9rem', fontFamily: 'inherit'
+                        fontSize: '0.9rem', fontFamily: 'inherit', minWidth: 0, maxWidth: '100%'
                     }}
                 >
                     {properties.map(p => (
@@ -318,7 +318,7 @@ const Documents = () => {
                         style={{
                             flex: 1, padding: '8px 12px', borderRadius: 'var(--radius-md)',
                             border: '1px solid #FDE68A', outline: 'none',
-                            fontSize: '0.9rem', fontFamily: 'inherit', backgroundColor: 'var(--surface-color)'
+                            fontSize: '0.9rem', fontFamily: 'inherit', minWidth: 0, maxWidth: '100%', backgroundColor: 'var(--surface-color)'
                         }}
                     >
                         <option value="">— Alle Mieter —</option>
