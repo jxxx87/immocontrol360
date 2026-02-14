@@ -35,6 +35,12 @@ const Sidebar = ({ mobileOpen, onClose }) => {
     const location = useLocation();
     const navigate = useNavigate();
 
+    const handleItemClick = () => {
+        if (isMobile && onClose) {
+            onClose();
+        }
+    };
+
     // Nav visibility from localStorage
     const [navVisibility, setNavVisibility] = useState(() => {
         try {
@@ -321,7 +327,10 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                                                     return (
                                                         <li key={subItem.path} style={{ marginBottom: '4px' }}>
                                                             <div
-                                                                onClick={() => navigate(subItem.path)}
+                                                                onClick={() => {
+                                                                    navigate(subItem.path);
+                                                                    handleItemClick();
+                                                                }}
                                                                 style={{
                                                                     display: 'block',
                                                                     padding: '6px 8px',
@@ -345,6 +354,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                                     <NavLink
                                         to={item.path}
                                         end={item.path === '/' || item.path === '/tenant'}
+                                        onClick={handleItemClick}
                                         style={({ isActive }) => ({
                                             display: 'flex',
                                             alignItems: 'center',

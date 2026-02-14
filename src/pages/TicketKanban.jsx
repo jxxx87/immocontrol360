@@ -22,7 +22,10 @@ import {
     X, ChevronRight, MessageSquare
 } from 'lucide-react';
 
+import { useViewMode } from '../context/ViewModeContext';
+
 const TicketKanban = () => {
+    const { isMobile } = useViewMode();
     const { user } = useAuth();
     const [tickets, setTickets] = useState([]);
     const [tenants, setTenants] = useState({});
@@ -303,6 +306,7 @@ const TicketKanban = () => {
                         setSelectedTicket(null);
                     }}
                     onClose={() => setSelectedTicket(null)}
+                    isMobile={isMobile}
                 />
             )}
         </div>
@@ -497,7 +501,7 @@ const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, prio
 };
 
 // ── TICKET DETAIL MODAL ─────────────────────────────────────────────
-const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLabels, priorityColors, getSignedUrl, user, onDelete, onClose }) => {
+const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLabels, priorityColors, getSignedUrl, user, onDelete, onClose, isMobile }) => {
     const [signedUrls, setSignedUrls] = useState([]);
     const [loadingImages, setLoadingImages] = useState(false);
     const [comments, setComments] = useState([]);
@@ -593,10 +597,16 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
             <div
                 style={{
                     backgroundColor: 'var(--surface-color)',
-                    borderRadius: 'var(--radius-lg)',
-                    width: '100%', maxWidth: '650px', maxHeight: '90vh',
-                    overflow: 'auto', padding: '28px',
-                    boxShadow: 'var(--shadow-lg)'
+                    borderRadius: isMobile ? 0 : 'var(--radius-lg)',
+                    width: isMobile ? '100%' : '100%',
+                    maxWidth: isMobile ? '100%' : '650px',
+                    height: isMobile ? '100vh' : 'auto',
+                    maxHeight: isMobile ? '100vh' : '90vh',
+                    overflow: 'auto',
+                    padding: isMobile ? '20px' : '28px',
+                    boxShadow: 'var(--shadow-lg)',
+                    display: 'flex',
+                    flexDirection: 'column'
                 }}
                 onClick={(e) => e.stopPropagation()}
             >
