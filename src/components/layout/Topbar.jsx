@@ -3,7 +3,7 @@ import { Search, Bell, User, LogOut, Plus, Clock } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useNavigate } from 'react-router-dom';
-import { useNavigate } from 'react-router-dom';
+
 import { supabase } from '../../lib/supabase';
 import { useViewMode } from '../../context/ViewModeContext';
 
