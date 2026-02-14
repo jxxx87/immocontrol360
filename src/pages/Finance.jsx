@@ -923,7 +923,96 @@ const Finance = () => {
                             {recentBookings.length === 0 ? (
                                 <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>Keine Buchungen gefunden.</div>
                             ) : (
-                                <Table columns={bookingColumns} data={recentBookings} />
+                                <>
+                                    <div className="hidden-mobile">
+                                        <Table columns={bookingColumns} data={recentBookings} />
+                                    </div>
+                                    <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                        {recentBookings.map((row) => (
+                                            <div key={row.id}
+                                                onClick={() => {
+                                                    if (deletingBookingId !== ('deleting-' + row.id) && deletingBookingId !== row.id) {
+                                                        // Maybe show details or simulate delete? 
+                                                        // For now just allow delete button inside to work
+                                                    }
+                                                }}
+                                                style={{
+                                                    border: '1px solid var(--border-color)',
+                                                    borderRadius: 'var(--radius-md)',
+                                                    padding: 'var(--spacing-md)',
+                                                    backgroundColor: 'var(--surface-color)',
+                                                    position: 'relative'
+                                                }}>
+
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                    <div>
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                            {new Date(row.date).toLocaleDateString()}
+                                                        </div>
+                                                        <div style={{ fontWeight: 600, fontSize: '1rem', marginTop: '2px', color: row.amount > 0 ? 'var(--success-color)' : 'var(--danger-color)' }}>
+                                                            {row.amount > 0 ? '+' : ''}{Math.abs(parseFloat(row.amount)).toFixed(2)} €
+                                                        </div>
+                                                    </div>
+                                                    <div>
+                                                        {row.type === 'expense' ?
+                                                            <span style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger-color)', padding: '2px 8px', borderRadius: '12px', fontSize: '0.7rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><ArrowUpRight size={10} /> Ausgabe</span> :
+                                                            <span style={{ backgroundColor: 'rgba(16, 185, 129, 0.1)', color: 'var(--success-color)', padding: '2px 8px', borderRadius: '12px', fontSize: '0.7rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><ArrowDownLeft size={10} /> Einnahme</span>
+                                                        }
+                                                    </div>
+                                                </div>
+
+                                                <div style={{ fontSize: '0.9rem', fontWeight: 500, marginBottom: '4px' }}>
+                                                    {row.type === 'expense' ? (row.expense_categories?.name || 'Ausgabe') : 'Miete'}
+                                                </div>
+                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                                    {row.note}
+                                                </div>
+
+                                                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '8px', marginTop: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                    <div>
+                                                        {row.type === 'income' ?
+                                                            (row.lease?.unit?.property ? `${row.lease.unit.property.street} ${row.lease.unit.property.house_number}, ${row.lease.unit.unit_name}` : '-') :
+                                                            (() => {
+                                                                const p = properties.find(p => p.id === row.property_id);
+                                                                return p ? `${p.street} ${p.house_number}` : 'Allgemein';
+                                                            })()
+                                                        }
+                                                    </div>
+
+                                                    {/* Delete Logic in Card */}
+                                                    <div onClick={(e) => e.stopPropagation()}>
+                                                        {deletingBookingId === row.id ? (
+                                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, color: '#EF4444' }}>
+                                                                Löschen?
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); handleDeleteBooking(row); }}
+                                                                    style={{ color: 'white', backgroundColor: '#EF4444', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600 }}
+                                                                >
+                                                                    Ja
+                                                                </button>
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); setDeletingBookingId(null); }}
+                                                                    style={{ color: '#6B7280', backgroundColor: 'var(--surface-color)', border: '1px solid #D1D5DB', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600 }}
+                                                                >
+                                                                    Nein
+                                                                </button>
+                                                            </span>
+                                                        ) : deletingBookingId === ('deleting-' + row.id) ? (
+                                                            <Loader2 className="animate-spin" size={14} color="#6B7280" />
+                                                        ) : (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setDeletingBookingId(row.id); }}
+                                                                style={{ color: 'var(--text-secondary)', padding: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', border: 'none', background: 'transparent' }}
+                                                            >
+                                                                <Trash2 size={16} />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
                             )}
                         </Card>
                     )}

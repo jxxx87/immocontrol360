@@ -598,6 +598,21 @@ const Tenants = () => {
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
 
+    // Calculate displayed units (handling ended leases toggle)
+    let displayedUnits = [...units];
+    if (showEndedLeases) {
+        units.forEach(u => {
+            (u.endedLeases || []).forEach(el => {
+                displayedUnits.push({
+                    ...u,
+                    id: u.id + '-' + el.id,
+                    activeLease: el,
+                    status: 'ended'
+                });
+            });
+        });
+    }
+
     return (
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
@@ -680,22 +695,150 @@ const Tenants = () => {
                         Keine Einheiten gefunden.
                     </div>
                 ) : (
-                    <Table columns={columns} data={(() => {
-                        let rows = [...units];
-                        if (showEndedLeases) {
-                            units.forEach(u => {
-                                (u.endedLeases || []).forEach(el => {
-                                    rows.push({
-                                        ...u,
-                                        id: u.id + '-' + el.id,
-                                        activeLease: el,
-                                        status: 'ended'
-                                    });
-                                });
-                            });
-                        }
-                        return rows;
-                    })()} />
+                    <>
+                        <div className="hidden-mobile">
+                            <Table columns={columns} data={displayedUnits} />
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {displayedUnits.map((row) => (
+                                <div key={row.id} style={{
+                                    border: '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)',
+                                    padding: 'var(--spacing-md)',
+                                    backgroundColor: 'var(--surface-color)',
+                                    position: 'relative'
+                                }}>
+                                    {/* Header: Status and Property */}
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                        <div>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{row.property?.street} {row.property?.house_number}</div>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                {row.property?.city} • {row.unit_name}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            {row.status === 'rented' ? (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                                                    color: 'var(--success-color)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <Key size={10} /> Vermietet
+                                                </span>
+                                            ) : row.status === 'ended' ? (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(107, 114, 128, 0.1)',
+                                                    color: '#6b7280',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <AlertCircle size={10} /> Beendet
+                                                </span>
+                                            ) : (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                                                    color: 'var(--danger-color)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <AlertCircle size={10} /> Leerstand
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Tenant Info */}
+                                    <div style={{ marginBottom: '12px', fontSize: '0.9rem' }}>
+                                        {row.activeLease ? (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <Users size={16} className="text-secondary" />
+                                                <span style={{ fontWeight: 500 }}>
+                                                    {row.activeLease.tenant?.first_name} {row.activeLease.tenant?.last_name}
+                                                </span>
+                                            </div>
+                                        ) : (
+                                            <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.85rem' }}>Kein Mieter zugeordnet</div>
+                                        )}
+                                    </div>
+
+                                    {/* Lease Dates */}
+                                    {row.activeLease && (
+                                        <div style={{
+                                            fontSize: '0.8rem',
+                                            color: 'var(--text-secondary)',
+                                            paddingTop: '8px',
+                                            borderTop: '1px solid var(--border-color)',
+                                            marginBottom: '12px'
+                                        }}>
+                                            Laufzeit: {new Date(row.activeLease.start_date).toLocaleDateString()} — {row.activeLease.end_date ? new Date(row.activeLease.end_date).toLocaleDateString() : 'Unbefristet'}
+                                        </div>
+                                    )}
+
+                                    {/* Action Button */}
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                        {row.activeLease ? (
+                                            <Button variant="secondary" size="sm" onClick={() => {
+                                                const l = row.activeLease;
+                                                setSelectedLease({ ...l, unit: row });
+                                                setEditTenantForm({
+                                                    id: l.tenant.id,
+                                                    first_name: l.tenant.first_name,
+                                                    last_name: l.tenant.last_name,
+                                                    email: l.tenant.email,
+                                                    phone: l.tenant.phone,
+                                                    occupants: l.tenant.occupants
+                                                });
+                                                setEditLeaseForm({
+                                                    id: l.id,
+                                                    start_date: l.start_date,
+                                                    end_date: l.end_date,
+                                                    cold_rent: l.cold_rent,
+                                                    service_charge: l.service_charge,
+                                                    heating_cost: l.heating_cost,
+                                                    other_costs: l.other_costs,
+                                                    deposit: l.deposit,
+                                                    payment_due_day: l.payment_due_day,
+                                                    last_rent_increase: l.last_rent_increase
+                                                });
+                                                setIsEditingDetails(false);
+                                                setIsDetailModalOpen(true);
+                                            }}>
+                                                <Eye size={14} style={{ marginRight: '4px' }} /> Details
+                                            </Button>
+                                        ) : (
+                                            <Button size="sm" icon={Plus} onClick={() => {
+                                                resetForms();
+                                                setLeaseForm(prev => ({
+                                                    ...prev,
+                                                    property_id: row.property_id,
+                                                    unit_id: row.id
+                                                }));
+                                                setIsCreateModalOpen(true);
+                                            }}>Vermieten</Button>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </Card>
 

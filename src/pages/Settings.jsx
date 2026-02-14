@@ -774,7 +774,44 @@ const Settings = () => {
                                             Noch keine Portfolios angelegt.
                                         </div>
                                     ) : (
-                                        <Table columns={portfolioColumns} data={portfolios} />
+                                        <>
+                                            <div className="hidden-mobile">
+                                                <Table columns={portfolioColumns} data={portfolios} />
+                                            </div>
+
+                                            {/* Mobile Card View */}
+                                            <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                                {portfolios.map((row) => (
+                                                    <div key={row.id} style={{
+                                                        border: '1px solid var(--border-color)',
+                                                        borderRadius: 'var(--radius-md)',
+                                                        padding: 'var(--spacing-md)',
+                                                        backgroundColor: 'var(--surface-color)',
+                                                        position: 'relative'
+                                                    }}>
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                            <div>
+                                                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{row.name}</div>
+                                                                {row.company_name && (
+                                                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{row.company_name}</div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        {(row.zip || row.city) && (
+                                                            <div style={{ marginBottom: '12px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                                                {row.zip} {row.city}
+                                                            </div>
+                                                        )}
+
+                                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                            <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
+                                                            <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </>
                                     )
                                 )}
                             </Card>
@@ -794,7 +831,38 @@ const Settings = () => {
                                 {loadingCategories ? (
                                     <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>
                                 ) : (
-                                    <Table columns={categoryColumns} data={categories} />
+                                    <>
+                                        <div className="hidden-mobile">
+                                            <Table columns={categoryColumns} data={categories} />
+                                        </div>
+
+                                        {/* Mobile Card View */}
+                                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                            {categories.map((row) => (
+                                                <div key={row.id} style={{
+                                                    border: '1px solid var(--border-color)',
+                                                    borderRadius: 'var(--radius-md)',
+                                                    padding: 'var(--spacing-md)',
+                                                    backgroundColor: 'var(--surface-color)',
+                                                    position: 'relative'
+                                                }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                        <div style={{ fontWeight: 600, fontSize: '1rem' }}>{row.name}</div>
+                                                        <Badge variant={row.is_recoverable ? 'success' : 'default'} size="sm">{row.is_recoverable ? 'Ja' : 'Nein'}</Badge>
+                                                    </div>
+
+                                                    <div style={{ marginBottom: '12px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                        Standard-Schlüssel: {row.distribution_key?.name || '-'}
+                                                    </div>
+
+                                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                        <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditCategory(row)}>Bearbeiten</Button>
+                                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteCategory(row.id)}>Löschen</Button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
                                 )}
                             </Card>
                         </div>
@@ -1094,43 +1162,100 @@ const Settings = () => {
                 <div>
                     {/* Filter local duplicates if any exist (e.g. standard key also in user keys with same name) */}
                     <h4 style={{ marginBottom: '1rem', color: 'var(--text-secondary)' }}>Verfügbare Verteilerschlüssel</h4>
-                    <Table
-                        data={distributionKeys.filter((k, index, self) =>
+                    <div className="hidden-mobile">
+                        <Table
+                            data={distributionKeys.filter((k, index, self) =>
+                                index === self.findIndex((t) => (
+                                    t.name === k.name
+                                ))
+                            )}
+                            columns={[
+                                { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
+                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                                { header: 'Beschreibung', accessor: 'description' },
+                                { header: '', accessor: 'actions', render: r => <span style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic' }}>{r.user_id ? 'Eigener' : 'Standard'}</span> }
+                            ]}
+                        />
+                    </div>
+
+                    {/* Mobile Card View for Available Keys */}
+                    <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                        {distributionKeys.filter((k, index, self) =>
                             index === self.findIndex((t) => (
                                 t.name === k.name
                             ))
-                        )}
-                        columns={[
-                            { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
-                            { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
-                            { header: 'Beschreibung', accessor: 'description' },
-                            { header: '', accessor: 'actions', render: r => <span style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic' }}>{r.user_id ? 'Eigener' : 'Standard'}</span> }
-                        ]}
-                    />
+                        ).map((row) => (
+                            <div key={row.id} style={{
+                                border: '1px solid var(--border-color)',
+                                borderRadius: 'var(--radius-md)',
+                                padding: 'var(--spacing-md)',
+                                backgroundColor: 'var(--surface-color)',
+                                position: 'relative'
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                    <div style={{ fontWeight: 600 }}>{row.name}</div>
+                                    <Badge>{row.calculation_type === 'area' ? 'Fläche' : row.calculation_type === 'persons' ? 'Personen' : row.calculation_type === 'units' ? 'Wohneinheiten' : row.calculation_type === 'equal' ? 'Gleich' : row.calculation_type === 'direct' ? 'Direkt' : row.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge>
+                                </div>
+                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                    {row.description}
+                                </div>
+                                <div style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic', textAlign: 'right' }}>
+                                    {row.user_id ? 'Eigener' : 'Standard'}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
 
                     <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                         <h4 style={{ color: 'var(--text-secondary)', margin: 0 }}>Eigene Verteilerschlüssel</h4>
                         <Button icon={Plus} size="sm" onClick={() => openKeyEdit(null)}>Eigene hinzufügen</Button>
                     </div>
-                    <Table
-                        data={distributionKeys.filter(k => k.user_id)} // Filter for user-defined keys
-                        columns={[
-                            { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
-                            { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
-                            { header: 'Beschreibung', accessor: 'description' },
-                            {
-                                header: '',
-                                accessor: 'actions',
-                                align: 'right',
-                                render: r => (
-                                    <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
-                                        <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openKeyEdit(r)} />
-                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteKey(r.id)} />
-                                    </div>
-                                )
-                            }
-                        ]}
-                    />
+                    <div className="hidden-mobile">
+                        <Table
+                            data={distributionKeys.filter(k => k.user_id)} // Filter for user-defined keys
+                            columns={[
+                                { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
+                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                                { header: 'Beschreibung', accessor: 'description' },
+                                {
+                                    header: '',
+                                    accessor: 'actions',
+                                    align: 'right',
+                                    render: r => (
+                                        <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
+                                            <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openKeyEdit(r)} />
+                                            <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteKey(r.id)} />
+                                        </div>
+                                    )
+                                }
+                            ]}
+                        />
+                    </div>
+
+                    {/* Mobile Card View for Own Keys */}
+                    <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                        {distributionKeys.filter(k => k.user_id).map((row) => (
+                            <div key={row.id} style={{
+                                border: '1px solid var(--border-color)',
+                                borderRadius: 'var(--radius-md)',
+                                padding: 'var(--spacing-md)',
+                                backgroundColor: 'var(--surface-color)',
+                                position: 'relative'
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                    <div style={{ fontWeight: 600 }}>{row.name}</div>
+                                    <Badge>{row.calculation_type === 'area' ? 'Fläche' : row.calculation_type === 'persons' ? 'Personen' : row.calculation_type === 'units' ? 'Wohneinheiten' : row.calculation_type === 'equal' ? 'Gleich' : row.calculation_type === 'direct' ? 'Direkt' : row.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge>
+                                </div>
+                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                                    {row.description}
+                                </div>
+                                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                    <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openKeyEdit(row)}>Bearbeiten</Button>
+                                    <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteKey(row.id)}>Löschen</Button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                     {distributionKeys.filter(k => k.user_id).length === 0 && (
                         <div style={{ padding: '1rem', fontStyle: 'italic', color: 'var(--text-secondary)', textAlign: 'center' }}>Keine eigenen Schlüssel angelegt.</div>
                     )}

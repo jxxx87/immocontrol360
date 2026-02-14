@@ -226,8 +226,8 @@ const TenantManagement = () => {
                 </div>
             )}
 
-            {/* Table */}
-            <div style={{
+            {/* Desktop Table */}
+            <div className="hidden-mobile" style={{
                 backgroundColor: 'var(--surface-color)',
                 borderRadius: 'var(--radius-lg)',
                 border: '1px solid var(--border-color)',
@@ -291,6 +291,56 @@ const TenantManagement = () => {
                         )}
                     </tbody>
                 </table>
+            </div>
+
+            {/* Mobile Card View */}
+            <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                {allTenantEntries.length === 0 ? (
+                    <div style={{
+                        textAlign: 'center', padding: '40px 20px', color: 'var(--text-secondary)',
+                        backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)'
+                    }}>
+                        Noch keine Mieter eingeladen. Klicken Sie auf "Mieter einladen".
+                    </div>
+                ) : (
+                    allTenantEntries.map((entry, idx) => (
+                        <div key={idx} style={{
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: 'var(--spacing-md)',
+                            backgroundColor: 'var(--surface-color)',
+                            position: 'relative'
+                        }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{getTenantName(entry.tenantId)}</div>
+                                <span style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                    padding: '3px 8px', borderRadius: '12px',
+                                    fontSize: '0.7rem', fontWeight: 500,
+                                    backgroundColor: entry.type === 'registered' ? '#D1FAE5' : '#FEF3C7',
+                                    color: entry.type === 'registered' ? '#065F46' : '#92400E',
+                                    whiteSpace: 'nowrap'
+                                }}>
+                                    {entry.type === 'registered' ? <CheckCircle2 size={10} /> : <Clock size={10} />}
+                                    {entry.type === 'registered' ? 'Registriert' : 'Invited'}
+                                </span>
+                            </div>
+
+                            <div style={{ marginBottom: '6px', fontSize: '0.9rem', color: 'var(--text-primary)' }}>
+                                {getUnitLabel(entry.unitId)}
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
+                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                    {entry.email || '—'}
+                                </div>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                    {formatDate(entry.createdAt)}
+                                </div>
+                            </div>
+                        </div>
+                    ))
+                )}
             </div>
 
             {/* ── INVITE MODAL ───────────────────────────────────────────── */}

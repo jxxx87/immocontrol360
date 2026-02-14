@@ -447,62 +447,118 @@ const Loans = () => {
                         {/* Loans Table */}
                         {expandedGroups[pid] && (
                             <div style={{ padding: '1rem' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
-                                    <thead style={{ color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-color)' }}>
-                                        <tr>
-                                            <th style={{ textAlign: 'left', padding: '0.5rem' }}>Bank / Konto</th>
-                                            <th style={{ textAlign: 'left', padding: '0.5rem' }}>Beginn</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Ursprungsbetrag</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Zins / Tilgung</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Rate</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Restschuld (akt.)</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Laufzeit bis</th>
-                                            <th style={{ textAlign: 'right', padding: '0.5rem' }}>Aktionen</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {group.loans.map(loan => (
-                                            <tr key={loan.id} className="table-row" style={{ borderBottom: '1px solid #eee' }}>
-                                                <td style={{ padding: '0.75rem 0.5rem' }}>
-                                                    <div style={{ fontWeight: 500 }}>{loan.bank_name}</div>
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{loan.account_number}</div>
-                                                </td>
-                                                <td style={{ padding: '0.75rem 0.5rem' }}>
-                                                    {new Date(loan.start_date).toLocaleDateString()}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
-                                                    {(loan.loan_amount ? parseFloat(loan.loan_amount) : 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
-                                                    <div>{loan.interest_rate}% Zins</div>
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{loan.initial_repayment_rate}% Tilgung</div>
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
-                                                    {(parseFloat(loan.fixed_annuity) || calculateStandardAnnuity(loan)).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem', fontWeight: 600 }}>
-                                                    {calculateCurrentDebt(loan).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
-                                                    {loan.end_date ? new Date(loan.end_date).toLocaleDateString() : 'Kein Datum'}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
-                                                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
-                                                        <Button variant="ghost" size="sm" onClick={() => openSchedule(loan)} title="Tilgungsplan">
-                                                            <Calculator size={16} />
-                                                        </Button>
-                                                        <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten">
-                                                            <Edit2 size={16} />
-                                                        </Button>
-                                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan.id)} title="Löschen">
-                                                            <Trash2 size={16} />
-                                                        </Button>
-                                                    </div>
-                                                </td>
+                                <div className="hidden-mobile">
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                        <thead style={{ color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                                            <tr>
+                                                <th style={{ textAlign: 'left', padding: '0.5rem' }}>Bank / Konto</th>
+                                                <th style={{ textAlign: 'left', padding: '0.5rem' }}>Beginn</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Ursprungsbetrag</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Zins / Tilgung</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Rate</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Restschuld (akt.)</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Laufzeit bis</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Aktionen</th>
                                             </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                                        </thead>
+                                        <tbody>
+                                            {group.loans.map(loan => (
+                                                <tr key={loan.id} className="table-row" style={{ borderBottom: '1px solid #eee' }}>
+                                                    <td style={{ padding: '0.75rem 0.5rem' }}>
+                                                        <div style={{ fontWeight: 500 }}>{loan.bank_name}</div>
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{loan.account_number}</div>
+                                                    </td>
+                                                    <td style={{ padding: '0.75rem 0.5rem' }}>
+                                                        {new Date(loan.start_date).toLocaleDateString()}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
+                                                        {(loan.loan_amount ? parseFloat(loan.loan_amount) : 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
+                                                        <div>{loan.interest_rate}% Zins</div>
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{loan.initial_repayment_rate}% Tilgung</div>
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
+                                                        {(parseFloat(loan.fixed_annuity) || calculateStandardAnnuity(loan)).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem', fontWeight: 600 }}>
+                                                        {calculateCurrentDebt(loan).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
+                                                        {loan.end_date ? new Date(loan.end_date).toLocaleDateString() : 'Kein Datum'}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '0.75rem 0.5rem' }}>
+                                                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                                                            <Button variant="ghost" size="sm" onClick={() => openSchedule(loan)} title="Tilgungsplan">
+                                                                <Calculator size={16} />
+                                                            </Button>
+                                                            <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten">
+                                                                <Edit2 size={16} />
+                                                            </Button>
+                                                            <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan.id)} title="Löschen">
+                                                                <Trash2 size={16} />
+                                                            </Button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Mobile Card View */}
+                                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                    {group.loans.map(loan => (
+                                        <div key={loan.id} style={{
+                                            border: '1px solid var(--border-color)',
+                                            borderRadius: 'var(--radius-md)',
+                                            padding: 'var(--spacing-md)',
+                                            backgroundColor: 'var(--surface-color)',
+                                            position: 'relative'
+                                        }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>{loan.bank_name}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{loan.account_number}</div>
+                                                </div>
+                                                <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--primary-color)' }}>
+                                                    {(loan.loan_amount ? parseFloat(loan.loan_amount) : 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                                                </div>
+                                            </div>
+
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem', marginBottom: '12px' }}>
+                                                <div>
+                                                    <div style={{ color: 'var(--text-secondary)' }}>Zins / Tilgung</div>
+                                                    <div>{loan.interest_rate}% / {loan.initial_repayment_rate}%</div>
+                                                </div>
+                                                <div>
+                                                    <div style={{ color: 'var(--text-secondary)' }}>Rate</div>
+                                                    <div>{(parseFloat(loan.fixed_annuity) || calculateStandardAnnuity(loan)).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+                                                </div>
+                                                <div>
+                                                    <div style={{ color: 'var(--text-secondary)' }}>Restschuld</div>
+                                                    <div style={{ fontWeight: 600 }}>{calculateCurrentDebt(loan).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+                                                </div>
+                                                <div>
+                                                    <div style={{ color: 'var(--text-secondary)' }}>Laufzeit bis</div>
+                                                    <div>{loan.end_date ? new Date(loan.end_date).toLocaleDateString() : 'Kein Datum'}</div>
+                                                </div>
+                                            </div>
+
+                                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                <Button variant="ghost" size="sm" onClick={() => openSchedule(loan)} title="Tilgungsplan" style={{ flex: 1 }}>
+                                                    <Calculator size={16} style={{ marginRight: '4px' }} /> Plan
+                                                </Button>
+                                                <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten" style={{ flex: 1 }}>
+                                                    <Edit2 size={16} style={{ marginRight: '4px' }} /> Bearbeiten
+                                                </Button>
+                                                <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan.id)} title="Löschen">
+                                                    <Trash2 size={16} />
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                                 <div style={{ marginTop: '1rem' }}>
                                     <Button size="sm" variant="secondary" icon={Plus} onClick={() => {
                                         setEditingLoan(null);

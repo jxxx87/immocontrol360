@@ -6,7 +6,7 @@ import Table from '../components/ui/Table';
 import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
-import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send } from 'lucide-react';
+import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
@@ -372,7 +372,93 @@ const Contacts = () => {
                         Keine Kontakte gefunden.
                     </div>
                 ) : (
-                    <Table columns={columns} data={filteredContacts} />
+                    <>
+                        <div className="hidden-mobile">
+                            <Table columns={columns} data={filteredContacts} />
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {filteredContacts.map((row) => (
+                                <div key={row.id} style={{
+                                    border: '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)',
+                                    padding: 'var(--spacing-md)',
+                                    backgroundColor: 'var(--surface-color)',
+                                    position: 'relative'
+                                }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                                            <div style={{
+                                                width: '32px',
+                                                height: '32px',
+                                                borderRadius: '50%',
+                                                backgroundColor: 'var(--background-color)',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                marginRight: 'var(--spacing-md)',
+                                                color: 'var(--text-secondary)'
+                                            }}>
+                                                <User size={16} />
+                                            </div>
+                                            <div>
+                                                <div style={{ fontWeight: 600 }}>{row.name}</div>
+                                                <div style={{ fontSize: '0.8rem', marginTop: '2px' }}>
+                                                    {(() => {
+                                                        const map = {
+                                                            'guest': 'Gast',
+                                                            'tenant': 'Mieter',
+                                                            'vendor': 'Dienstleister',
+                                                            'other': 'Sonstiges'
+                                                        };
+                                                        return <Badge variant={row.contact_type === 'vendor' ? 'blue' : 'default'} size="sm">
+                                                            {map[row.contact_type] || row.contact_type}
+                                                        </Badge>;
+                                                    })()}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem', marginBottom: '12px' }}>
+                                        {row.phone && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+                                                <Phone size={14} /> {row.phone}
+                                            </div>
+                                        )}
+                                        {row.email && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+                                                <Mail size={14} /> {row.email}
+                                            </div>
+                                        )}
+                                        {(row.street || row.city) && (
+                                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', color: 'var(--text-secondary)' }}>
+                                                <MapPin size={14} style={{ marginTop: '2px' }} />
+                                                <div>
+                                                    {row.street && <div>{row.street}</div>}
+                                                    {(row.zip || row.city) && <div>{row.zip} {row.city}</div>}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {row.contact_type === 'tenant' && row.unit_name && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+                                                <Home size={14} /> {row.unit_name}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                        <ActionMenu
+                                            onEdit={() => handleOpenEdit(row)}
+                                            onDelete={() => handleDelete(row.id)}
+                                            onMessage={() => alert('Nachricht senden: Funktion folgt.')}
+                                        />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </Card>
 

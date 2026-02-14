@@ -1528,58 +1528,178 @@ const UtilityCosts = () => {
                                                 Noch keine Abrechnungen für dieses Objekt.
                                             </div>
                                         ) : (
-                                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                                <thead>
-                                                    <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Abrechnungsjahr</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Zeitraum</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Erstellt am</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Status</th>
-                                                        <th style={{ textAlign: 'right', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Aktionen</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {propSettlements.map(s => (
-                                                        <tr key={s.id} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                            <td style={{ padding: '10px 12px', fontWeight: 500 }}>{s.year || new Date(s.period_start).getFullYear()}</td>
-                                                            <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
-                                                                {formatDate(s.period_start)} – {formatDate(s.period_end)}
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
-                                                                {formatDate(s.created_at)}
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px' }}>
-                                                                <StatusBadge status={s.status} />
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                                <div style={{ position: 'relative', display: 'inline-block' }}>
-                                                                    <Button variant="ghost" size="sm" icon={MoreVertical} onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setOpenSettlementMenuId(openSettlementMenuId === s.id ? null : s.id);
-                                                                    }}>Aktionen</Button>
+                                            <>
+                                                <div className="hidden-mobile">
+                                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                        <thead>
+                                                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Abrechnungsjahr</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Zeitraum</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Erstellt am</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Status</th>
+                                                                <th style={{ textAlign: 'right', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Aktionen</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {propSettlements.map(s => (
+                                                                <tr key={s.id} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                                    <td style={{ padding: '10px 12px', fontWeight: 500 }}>{s.year || new Date(s.period_start).getFullYear()}</td>
+                                                                    <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
+                                                                        {formatDate(s.period_start)} – {formatDate(s.period_end)}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
+                                                                        {formatDate(s.created_at)}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px' }}>
+                                                                        <StatusBadge status={s.status} />
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                                                        <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                            <Button variant="ghost" size="sm" icon={MoreVertical} onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                setOpenSettlementMenuId(openSettlementMenuId === s.id ? null : s.id);
+                                                                            }}>Aktionen</Button>
 
+                                                                            {openSettlementMenuId === s.id && (
+                                                                                <div onClick={(e) => e.stopPropagation()} style={{
+                                                                                    position: 'fixed', zIndex: 9999,
+                                                                                    backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)',
+                                                                                    borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                    minWidth: '200px', display: 'flex',
+                                                                                    flexDirection: 'column', padding: '4px',
+                                                                                    transform: 'translateY(-100%)', marginTop: '-4px'
+                                                                                }}>
+                                                                                    <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
+                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                        onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
+                                                                                        <Edit2 size={14} /> Bearbeiten
+                                                                                    </button>
+                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                    <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Vorschau / Drucken</div>
+                                                                                    {(s.data?.selectedUnitIds || []).flatMap(uid => {
+                                                                                        const u = units.find(x => x.id === uid);
+                                                                                        const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
+                                                                                        const validPeriods = periods.filter(p => p.tenant);
+                                                                                        if (validPeriods.length === 0) return [];
+
+                                                                                        return validPeriods.map((p, pIdx) => ({
+                                                                                            key: `${uid}-${pIdx}`,
+                                                                                            uid,
+                                                                                            unitName: u ? u.unit_name : uid,
+                                                                                            tenantId: p.tenant.id,
+                                                                                            label: p.tenantName
+                                                                                        }));
+                                                                                    }).map(item => (
+                                                                                        <button key={`prev-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); previewSettlement(s, item.uid, item.tenantId); }}
+                                                                                            style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                            onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
+                                                                                            <Eye size={12} /> {item.unitName} – {item.label}
+                                                                                        </button>
+                                                                                    ))}
+                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                    <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>PDF herunterladen</div>
+                                                                                    {(s.data?.selectedUnitIds || []).flatMap(uid => {
+                                                                                        const u = units.find(x => x.id === uid);
+                                                                                        const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
+                                                                                        const validPeriods = periods.filter(p => p.tenant);
+                                                                                        if (validPeriods.length === 0) return [];
+
+                                                                                        return validPeriods.map((p, pIdx) => ({
+                                                                                            key: `${uid}-${pIdx}`,
+                                                                                            uid,
+                                                                                            unitName: u ? u.unit_name : uid,
+                                                                                            tenantId: p.tenant.id,
+                                                                                            label: p.tenantName
+                                                                                        }));
+                                                                                    }).map(item => (
+                                                                                        <button key={`dl-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); downloadSettlement(s, item.uid, item.tenantId); }}
+                                                                                            style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                            onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
+                                                                                            <Download size={12} /> {item.unitName} – {item.label}
+                                                                                        </button>
+                                                                                    ))}
+                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                    <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s.id); }}
+                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
+                                                                                        onMouseEnter={(e) => e.target.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
+                                                                                        <Trash2 size={14} /> Löschen
+                                                                                    </button>
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+
+                                                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                                    {propSettlements.map(s => (
+                                                        <div key={s.id} style={{
+                                                            border: '1px solid var(--border-color)',
+                                                            borderRadius: 'var(--radius-md)',
+                                                            padding: 'var(--spacing-md)',
+                                                            backgroundColor: 'var(--surface-color)',
+                                                            position: 'relative'
+                                                        }}>
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                                <div>
+                                                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>{s.year || new Date(s.period_start).getFullYear()}</div>
+                                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                                        {formatDate(s.period_start)} – {formatDate(s.period_end)}
+                                                                    </div>
+                                                                </div>
+                                                                <StatusBadge status={s.status} />
+                                                            </div>
+
+                                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                                                                Erstellt: {formatDate(s.created_at)}
+                                                            </div>
+
+                                                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                                                                <div style={{ position: 'relative', display: 'block', width: '100%' }}>
+                                                                    <Button variant="secondary" size="sm" icon={Edit2} onClick={() => editSettlement(s)} style={{ width: '100%', justifyContent: 'center', marginBottom: '8px' }}>
+                                                                        Bearbeiten
+                                                                    </Button>
+
+                                                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                                                        <Button variant="ghost" size="sm" icon={FileText} onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setOpenSettlementMenuId(openSettlementMenuId === s.id ? null : s.id);
+                                                                        }} style={{ flex: 1 }}>
+                                                                            Optionen
+                                                                        </Button>
+                                                                        <Button variant="ghost" size="sm" icon={Trash2} onClick={() => deleteSettlement(s.id)} style={{ color: 'var(--danger-color)' }} />
+                                                                    </div>
+
+                                                                    {/* Mobile Menu Logic - Reusing same structure but positioned differently for mobile if needed, though fixed pos works */}
                                                                     {openSettlementMenuId === s.id && (
                                                                         <div onClick={(e) => e.stopPropagation()} style={{
                                                                             position: 'fixed', zIndex: 9999,
+                                                                            top: '50%', left: '50%', transform: 'translate(-50%, -50%)', // Center on mobile
                                                                             backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)',
-                                                                            borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                                                                            minWidth: '200px', display: 'flex',
-                                                                            flexDirection: 'column', padding: '4px',
-                                                                            transform: 'translateY(-100%)', marginTop: '-4px'
+                                                                            borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.25)',
+                                                                            width: '90%', maxWidth: '300px',
+                                                                            display: 'flex', flexDirection: 'column', padding: '4px',
+                                                                            maxHeight: '80vh', overflowY: 'auto'
                                                                         }}>
+                                                                            <div style={{ padding: '12px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                                <span style={{ fontWeight: 600 }}>Optionen</span>
+                                                                                <button onClick={() => setOpenSettlementMenuId(null)} style={{ border: 'none', background: 'none' }}><X size={16} /></button>
+                                                                            </div>
+
                                                                             <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
-                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                <Edit2 size={14} /> Bearbeiten
+                                                                                style={{ textAlign: 'left', padding: '12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid var(--border-color)' }}>
+                                                                                <Edit2 size={16} /> Bearbeiten
                                                                             </button>
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Vorschau / Drucken</div>
+
+                                                                            <div style={{ padding: '8px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, backgroundColor: 'var(--bg-secondary)' }}>Vorschau / Drucken</div>
                                                                             {(s.data?.selectedUnitIds || []).flatMap(uid => {
                                                                                 const u = units.find(x => x.id === uid);
                                                                                 const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
                                                                                 const validPeriods = periods.filter(p => p.tenant);
                                                                                 if (validPeriods.length === 0) return [];
-
                                                                                 return validPeriods.map((p, pIdx) => ({
                                                                                     key: `${uid}-${pIdx}`,
                                                                                     uid,
@@ -1589,19 +1709,17 @@ const UtilityCosts = () => {
                                                                                 }));
                                                                             }).map(item => (
                                                                                 <button key={`prev-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); previewSettlement(s, item.uid, item.tenantId); }}
-                                                                                    style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                    onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                    <Eye size={12} /> {item.unitName} – {item.label}
+                                                                                    style={{ textAlign: 'left', padding: '10px 12px 10px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid #eee' }}>
+                                                                                    <Eye size={16} /> {item.unitName} – {item.label}
                                                                                 </button>
                                                                             ))}
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>PDF herunterladen</div>
+
+                                                                            <div style={{ padding: '8px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, backgroundColor: 'var(--bg-secondary)' }}>PDF herunterladen</div>
                                                                             {(s.data?.selectedUnitIds || []).flatMap(uid => {
                                                                                 const u = units.find(x => x.id === uid);
                                                                                 const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
                                                                                 const validPeriods = periods.filter(p => p.tenant);
                                                                                 if (validPeriods.length === 0) return [];
-
                                                                                 return validPeriods.map((p, pIdx) => ({
                                                                                     key: `${uid}-${pIdx}`,
                                                                                     uid,
@@ -1611,25 +1729,18 @@ const UtilityCosts = () => {
                                                                                 }));
                                                                             }).map(item => (
                                                                                 <button key={`dl-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); downloadSettlement(s, item.uid, item.tenantId); }}
-                                                                                    style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                    onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                    <Download size={12} /> {item.unitName} – {item.label}
+                                                                                    style={{ textAlign: 'left', padding: '10px 12px 10px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid #eee' }}>
+                                                                                    <Download size={16} /> {item.unitName} – {item.label}
                                                                                 </button>
                                                                             ))}
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s.id); }}
-                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
-                                                                                onMouseEnter={(e) => e.target.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                <Trash2 size={14} /> Löschen
-                                                                            </button>
                                                                         </div>
                                                                     )}
                                                                 </div>
-                                                            </td>
-                                                        </tr>
+                                                            </div>
+                                                        </div>
                                                     ))}
-                                                </tbody>
-                                            </table>
+                                                </div>
+                                            </>
                                         )}
                                     </div>
                                 )}

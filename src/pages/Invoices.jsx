@@ -889,11 +889,67 @@ const Invoices = () => {
                         {hasFilters ? 'Keine Rechnungen für die gewählten Filter gefunden.' : 'Keine Rechnungen gefunden.'}
                     </div>
                 ) : (
-                    <Table
-                        columns={columns}
-                        data={filteredInvoices}
-                        getRowStyle={(row) => row.status === 'credited' ? { color: 'var(--text-secondary)', textDecoration: 'line-through' } : {}}
-                    />
+                    <>
+                        <div className="hidden-mobile">
+                            <Table
+                                columns={columns}
+                                data={filteredInvoices}
+                                getRowStyle={(row) => row.status === 'credited' ? { color: 'var(--text-secondary)', textDecoration: 'line-through' } : {}}
+                            />
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {filteredInvoices.map((row) => {
+                                const isCredited = row.status === 'credited';
+                                const unit = units.find(u => u.id === row.unit_id);
+                                const property = properties.find(p => p.id === unit?.property_id);
+
+                                return (
+                                    <div key={row.id} style={{
+                                        border: '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: 'var(--spacing-md)',
+                                        backgroundColor: 'var(--surface-color)',
+                                        position: 'relative',
+                                        opacity: isCredited ? 0.7 : 1
+                                    }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                            <div>
+                                                <div style={{ fontWeight: 600, fontSize: '1rem', textDecoration: isCredited ? 'line-through' : 'none' }}>
+                                                    {row.invoice_number}
+                                                </div>
+                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                    {row.invoice_date ? new Date(row.invoice_date).toLocaleDateString('de-DE') : '-'}
+                                                </div>
+                                            </div>
+                                            <div style={{ fontWeight: 700, fontSize: '1rem', color: isCredited ? 'var(--text-secondary)' : 'var(--text-primary)' }}>
+                                                {fmt(row.gross_amount || 0)} €
+                                            </div>
+                                        </div>
+
+                                        <div style={{ marginBottom: '12px', fontSize: '0.9rem' }}>
+                                            <div style={{ fontWeight: 500 }}>{row.recipient_name || row.contact?.name || '-'}</div>
+                                            {(unit || property) && (
+                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                    {unit?.unit_name} {property ? `• ${property.street}` : ''}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                                            <ActionMenu
+                                                onEdit={() => navigate(`/invoices/edit/${row.id}`)}
+                                                onPrint={() => handlePrint(row)}
+                                                onPDF={() => handlePDF(row)}
+                                                onCredit={() => handleCredit(row)}
+                                            />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </>
                 )}
             </Card>
         </div>

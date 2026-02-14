@@ -423,79 +423,145 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
     }
 
     return (
-        <div style={{
-            backgroundColor: 'var(--surface-color)',
-            borderRadius: 'var(--radius-lg)',
-            border: '1px solid var(--border-color)',
-            overflow: 'hidden'
-        }}>
-            {docs.map((doc, idx) => (
-                <div
-                    key={doc.id}
-                    style={{
-                        padding: '14px 22px',
-                        display: 'flex', alignItems: 'center',
-                        justifyContent: 'space-between',
-                        borderBottom: idx < docs.length - 1 ? '1px solid var(--border-color)' : 'none',
-                        transition: 'background 0.2s'
-                    }}
-                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F9FAFB'}
-                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = ''}
-                >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1, minWidth: 0 }}>
-                        {getFileIcon(doc.file_name)}
-                        <div style={{ minWidth: 0 }}>
-                            <div style={{
-                                fontSize: '0.9rem', fontWeight: 500,
-                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-                            }}>
-                                {doc.file_name}
+        <>
+            <div className="hidden-mobile" style={{
+                backgroundColor: 'var(--surface-color)',
+                borderRadius: 'var(--radius-lg)',
+                border: '1px solid var(--border-color)',
+                overflow: 'hidden'
+            }}>
+                {docs.map((doc, idx) => (
+                    <div
+                        key={doc.id}
+                        style={{
+                            padding: '14px 22px',
+                            display: 'flex', alignItems: 'center',
+                            justifyContent: 'space-between',
+                            borderBottom: idx < docs.length - 1 ? '1px solid var(--border-color)' : 'none',
+                            transition: 'background 0.2s'
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = ''}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1, minWidth: 0 }}>
+                            {getFileIcon(doc.file_name)}
+                            <div style={{ minWidth: 0 }}>
+                                <div style={{
+                                    fontSize: '0.9rem', fontWeight: 500,
+                                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+                                }}>
+                                    {doc.file_name}
+                                </div>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span>{formatDate(doc.created_at)}</span>
+                                    {doc.tenant && (
+                                        <span style={{
+                                            backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)',
+                                            padding: '0 6px', borderRadius: '4px', fontSize: '0.7rem'
+                                        }}>
+                                            {doc.tenant.first_name} {doc.tenant.last_name}
+                                        </span>
+                                    )}
+                                </div>
                             </div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                <span>{formatDate(doc.created_at)}</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                            <button
+                                onClick={() => onDownload(doc)}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: '4px',
+                                    padding: '6px 12px', borderRadius: 'var(--radius-md)',
+                                    border: '1px solid var(--border-color)',
+                                    backgroundColor: 'var(--surface-color)', color: 'var(--primary-color)',
+                                    fontSize: '0.78rem', cursor: 'pointer', fontFamily: 'inherit'
+                                }}
+                                title="Herunterladen"
+                            >
+                                <Download size={14} />
+                                Download
+                            </button>
+                            <button
+                                onClick={() => onDelete(doc)}
+                                style={{
+                                    display: 'flex', alignItems: 'center',
+                                    padding: '6px 8px', borderRadius: 'var(--radius-md)',
+                                    border: '1px solid var(--border-color)',
+                                    backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
+                                    cursor: 'pointer'
+                                }}
+                                title="Löschen"
+                            >
+                                <Trash2 size={14} />
+                            </button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                {docs.map((doc) => (
+                    <div key={doc.id} style={{
+                        border: '1px solid var(--border-color)',
+                        borderRadius: 'var(--radius-md)',
+                        padding: 'var(--spacing-md)',
+                        backgroundColor: 'var(--surface-color)',
+                        position: 'relative'
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '12px' }}>
+                            <div style={{ flexShrink: 0, marginTop: '2px' }}>
+                                {getFileIcon(doc.file_name)}
+                            </div>
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ fontWeight: 600, fontSize: '0.95rem', wordBreak: 'break-all' }}>{doc.file_name}</div>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                    {formatDate(doc.created_at)}
+                                </div>
                                 {doc.tenant && (
-                                    <span style={{
-                                        backgroundColor: 'var(--surface-color)', color: '#92400E',
-                                        padding: '0 6px', borderRadius: '4px', fontSize: '0.7rem'
-                                    }}>
-                                        {doc.tenant.first_name} {doc.tenant.last_name}
-                                    </span>
+                                    <div style={{ marginTop: '4px' }}>
+                                        <span style={{
+                                            backgroundColor: 'var(--bg-secondary)',
+                                            color: 'var(--text-primary)',
+                                            padding: '2px 6px',
+                                            borderRadius: '4px',
+                                            fontSize: '0.75rem'
+                                        }}>
+                                            {doc.tenant.first_name} {doc.tenant.last_name}
+                                        </span>
+                                    </div>
                                 )}
                             </div>
                         </div>
+                        <div style={{ display: 'flex', gap: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
+                            <button
+                                onClick={() => onDownload(doc)}
+                                style={{
+                                    flex: 1,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                                    padding: '8px', borderRadius: 'var(--radius-md)',
+                                    border: '1px solid var(--border-color)',
+                                    backgroundColor: 'var(--surface-color)', color: 'var(--primary-color)',
+                                    fontSize: '0.85rem', cursor: 'pointer'
+                                }}
+                            >
+                                <Download size={16} /> Download
+                            </button>
+                            <button
+                                onClick={() => onDelete(doc)}
+                                style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    padding: '8px 12px', borderRadius: 'var(--radius-md)',
+                                    border: '1px solid var(--border-color)',
+                                    backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-                        <button
-                            onClick={() => onDownload(doc)}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '4px',
-                                padding: '6px 12px', borderRadius: 'var(--radius-md)',
-                                border: '1px solid var(--border-color)',
-                                backgroundColor: 'var(--surface-color)', color: 'var(--primary-color)',
-                                fontSize: '0.78rem', cursor: 'pointer', fontFamily: 'inherit'
-                            }}
-                            title="Herunterladen"
-                        >
-                            <Download size={14} />
-                            Download
-                        </button>
-                        <button
-                            onClick={() => onDelete(doc)}
-                            style={{
-                                display: 'flex', alignItems: 'center',
-                                padding: '6px 8px', borderRadius: 'var(--radius-md)',
-                                border: '1px solid var(--border-color)',
-                                backgroundColor: 'var(--surface-color)', color: '#DC2626',
-                                cursor: 'pointer'
-                            }}
-                            title="Löschen"
-                        >
-                            <Trash2 size={14} />
-                        </button>
-                    </div>
-                </div>
-            ))}
-        </div>
+                ))}
+            </div>
+        </>
     );
 };
 

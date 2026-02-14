@@ -610,7 +610,66 @@ const Meters = () => {
                         <Loader2 className="animate-spin" />
                     </div>
                 ) : (
-                    <Table columns={columns} data={filteredMeters} />
+                    <>
+                        <div className="hidden-mobile">
+                            <Table columns={columns} data={filteredMeters} />
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {filteredMeters.map((row) => (
+                                <div key={row.id} style={{
+                                    border: '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)',
+                                    padding: 'var(--spacing-md)',
+                                    backgroundColor: 'var(--surface-color)',
+                                    position: 'relative'
+                                }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{
+                                                padding: '4px',
+                                                borderRadius: '4px',
+                                                backgroundColor: 'var(--background-color)',
+                                                display: 'flex',
+                                                color: 'var(--text-secondary)'
+                                            }}>
+                                                {getIcon(row.meter_type)}
+                                            </div>
+                                            <div>
+                                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{row.meter_type}</div>
+                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{row.meter_number}</div>
+                                            </div>
+                                        </div>
+                                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                                            {row.last_reading_value != null ? `${row.last_reading_value} ${row.unit}` : '-'}
+                                        </div>
+                                    </div>
+
+                                    <div style={{ marginBottom: '12px', fontSize: '0.9rem' }}>
+                                        <div style={{ fontWeight: 500 }}>{formatPropName(row)}</div>
+                                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                            {row.unit_ref ? `Einheit: ${row.unit_ref.unit_name}` : `Gebäudezähler`}
+                                        </div>
+                                        {row.last_reading_date && (
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                Stand vom: {new Date(row.last_reading_date).toLocaleDateString()}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                                        <ActionMenu
+                                            onReading={() => handleOpenReading(row)}
+                                            onHistory={() => handleOpenDetail(row)}
+                                            onEdit={() => handleOpenEdit(row)}
+                                            onDelete={() => handleDeleteMeter(row.id)}
+                                        />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </Card>
 
