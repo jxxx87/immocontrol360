@@ -500,9 +500,12 @@ const Settings = () => {
         }
     };
 
+    const [deleteProperties, setDeleteProperties] = useState(false);
+
     const handleOpenDeleteModal = (portfolio) => {
         setPortfolioToDelete(portfolio);
         setTargetPortfolioId('');
+        setDeleteProperties(false);
         setIsDeleteModalOpen(true);
     };
 
@@ -513,6 +516,14 @@ const Settings = () => {
             // Check if there are other portfolios avail
             const otherPortfolios = portfolios.filter(p => p.id !== portfolioToDelete.id);
 
+            // Check if properties exist
+            const { count, error: countError } = await supabase
+                .from('properties')
+                .select('*', { count: 'exact', head: true })
+                .eq('portfolio_id', portfolioToDelete.id);
+
+            if (countError) throw countError;
+
             // If user selected a target, transfer properties
             if (targetPortfolioId) {
                 const { error: updateError } = await supabase
@@ -521,18 +532,17 @@ const Settings = () => {
                     .eq('portfolio_id', portfolioToDelete.id);
 
                 if (updateError) throw updateError;
-            } else if (otherPortfolios.length > 0) {
-                // Check if properties exist
-                const { count, error: countError } = await supabase
-                    .from('properties')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('portfolio_id', portfolioToDelete.id);
-
-                if (countError) throw countError;
-
-                if (count > 0 && !targetPortfolioId) {
-                    alert('Dieses Portfolio enthält Immobilien. Bitte wählen Sie ein Ziel-Portfolio für den Transfer aus.');
+            } else if (count > 0) {
+                if (!deleteProperties) {
+                    alert('Dieses Portfolio enthält Immobilien. Bitte wähle ein Ziel-Portfolio für den Transfer aus ODER bestätige die Löschung der Immobilien.');
                     return;
+                } else {
+                    // Explicitly delete properties if user chose to not transfer and confirmed deletion
+                    const { error: propDelError } = await supabase
+                        .from('properties')
+                        .delete()
+                        .eq('portfolio_id', portfolioToDelete.id);
+                    if (propDelError) throw propDelError;
                 }
             }
 
@@ -1284,17 +1294,21 @@ const Settings = () => {
                     </p>
 
                     {portfolios.filter(p => p.id !== portfolioToDelete?.id).length > 0 && (
-                        <div style={{ backgroundColor: 'var(--surface-color)', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA' }}>
+                        <div style={{ backgroundColor: 'var(--surface-color)', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', marginBottom: 'var(--spacing-md)' }}>
                             <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#991B1B' }}>
                                 Immobilien übertragen an:
                             </label>
                             <p style={{ fontSize: '0.8rem', color: '#B91C1C', marginBottom: '10px' }}>
-                                Wenn dieses Portfolio Immobilien enthält, müssen diese einem anderen Portfolio zugewiesen werden.
+                                Wenn dieses Portfolio Immobilien enthält, müssen diese einem anderen Portfolio zugewiesen oder gelöscht werden.
                             </p>
                             <select
-                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA' }}
+                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', opacity: deleteProperties ? 0.5 : 1 }}
                                 value={targetPortfolioId}
-                                onChange={(e) => setTargetPortfolioId(e.target.value)}
+                                onChange={(e) => {
+                                    setTargetPortfolioId(e.target.value);
+                                    if(e.target.value) setDeleteProperties(false);
+                                }}
+                                disabled={deleteProperties}
                             >
                                 <option value="">Bitte wählen...</option>
                                 {portfolios.filter(p => p.id !== portfolioToDelete?.id).map(p => (
@@ -1303,6 +1317,22 @@ const Settings = () => {
                             </select>
                         </div>
                     )}
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: '#FEF2F2', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FCA5A5' }}>
+                        <input
+                            type="checkbox"
+                            id="deleteProperties"
+                            checked={deleteProperties}
+                            onChange={(e) => {
+                                setDeleteProperties(e.target.checked);
+                                if(e.target.checked) setTargetPortfolioId('');
+                            }}
+                            style={{ width: '18px', height: '18px', accentColor: 'var(--danger-color)' }}
+                        />
+                        <label htmlFor="deleteProperties" style={{ fontSize: '0.875rem', color: '#991B1B', fontWeight: 500, cursor: 'pointer' }}>
+                            Ich möchte alle Immobilien in diesem Portfolio endgültig löschen (statt sie zu übertragen).
+                        </label>
+                    </div>
 
                     {portfolios.filter(p => p.id !== portfolioToDelete?.id).length === 0 && (
                         <div style={{ color: 'var(--danger-color)', fontSize: '0.875rem' }}>
