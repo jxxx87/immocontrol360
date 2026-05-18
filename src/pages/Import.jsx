@@ -450,8 +450,11 @@ const Import = () => {
                         style={{ display: 'none' }}
                         id="file-upload"
                     />
-                    <label htmlFor="file-upload">
-                        <Button as="span" icon={Upload}>XLSX-Datei auswählen</Button>
+                    <label htmlFor="file-upload" style={{ display: 'inline-block', cursor: 'pointer' }}>
+                        <span className="btn btn-primary btn-md" style={{ display: 'inline-flex', alignItems: 'center' }}>
+                            <Upload size={18} style={{ marginRight: '0.5rem' }} />
+                            XLSX-Datei auswählen
+                        </span>
                     </label>
 
                     {file && (
