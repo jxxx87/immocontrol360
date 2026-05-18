@@ -115,7 +115,7 @@ const Properties = () => {
 
                 // Calculate Actual Rent (Sum of active leases' cold_rent)
                 const totalActualRent = units.reduce((sum, u) => {
-                    if (u.is_vacation_rental) return sum + (parseFloat(u.target_rent) || 0);
+                    if (u.is_vacation_rental) return sum + (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0);
                     const activeLease = u.leases?.find(l => l.status === 'active');
                     return sum + (activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0);
                 }, 0);
@@ -687,6 +687,7 @@ const Properties = () => {
                                                                             <th style={{ padding: '8px' }}>Fläche</th>
                                                                             <th style={{ padding: '8px' }}>Zimmer</th>
                                                                             <th style={{ padding: '8px' }}>Status</th>
+                                                                            <th style={{ padding: '8px' }}>Istmiete</th>
                                                                             <th style={{ padding: '8px' }}></th>
                                                                         </tr>
                                                                     </thead>
@@ -711,6 +712,12 @@ const Properties = () => {
                                                                                             <AlertCircle size={12} /> Leerstand
                                                                                         </span>
                                                                                     )}
+                                                                                </td>
+                                                                                <td style={{ padding: '8px', fontWeight: 600 }}>
+                                                                                    {unit.is_vacation_rental 
+                                                                                        ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                        : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                    }
                                                                                 </td>
                                                                                 <td style={{ padding: '8px', textAlign: 'right' }}>
                                                                                     <div style={{ position: 'relative', display: 'inline-block' }}>

@@ -218,7 +218,8 @@ const Tenants = () => {
         try {
             setIsSaving(true);
             const { error } = await supabase.from('units').update({
-                is_vacation_rental: true
+                is_vacation_rental: true,
+                cold_rent_ist: leaseForm.cold_rent || null
             }).eq('id', leaseForm.unit_id);
             if (error) throw error;
             setIsCreateModalOpen(false);
@@ -565,6 +566,10 @@ const Tenants = () => {
                         <MoreVertical size={18} />
                     </button>
                 </div>
+            ) : row.status === 'vacation_rental' ? (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>Ferienwohnung</span>
+                </div>
             ) : (
                 <Button variant="secondary" size="sm" icon={Plus} onClick={() => {
                     if (!checkGlobalAccess()) return;
@@ -846,8 +851,11 @@ const Tenants = () => {
                                             }}>
                                                 <Eye size={14} style={{ marginRight: '4px' }} /> Details
                                             </Button>
+                                        ) : row.status === 'vacation_rental' ? (
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>Ferienwohnung</span>
                                         ) : (
                                             <Button size="sm" icon={Plus} onClick={() => {
+                                                if (!checkGlobalAccess()) return;
                                                 resetForms();
                                                 setLeaseForm(prev => ({
                                                     ...prev,
@@ -892,7 +900,9 @@ const Tenants = () => {
                             <input type="checkbox" checked={isVacationRentalToggle} onChange={e => setIsVacationRentalToggle(e.target.checked)} style={{ width: '18px', height: '18px', accentColor: 'var(--primary-color)' }} />
                             <span style={{ fontWeight: 600, color: 'var(--primary-color)' }}>Diese Einheit als Ferienwohnung nutzen</span>
                         </label>
-                        {!isVacationRentalToggle && (
+                        {isVacationRentalToggle ? (
+                            <CurrencyInput label="Monatliche Einnahmen (Kaltmiete Ist) €" allowDecimals value={leaseForm.cold_rent} onChange={e => setLeaseForm({ ...leaseForm, cold_rent: e.target.value })} />
+                        ) : (
                             <>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                     <Input label="Vorname" value={tenantForm.first_name} onChange={e => setTenantForm({ ...tenantForm, first_name: e.target.value })} />
