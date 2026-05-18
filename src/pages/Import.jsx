@@ -76,14 +76,34 @@ const Import = () => {
             const propertiesMap = new Map(); // Key: strc-addr, Value: ID
 
             // Fetch Portfolios for mapping
-            // Fetch Portfolios for mapping
+            let currentPortfolios = [];
             const { data: portfolios, error: portError } = await supabase.from('portfolios').select('id, name');
-            if (portError) addLog('Warnung: Portfolios konnten nicht geladen werden.', 'error');
+            if (portError) {
+                addLog('Warnung: Portfolios konnten nicht geladen werden.', 'error');
+            } else if (portfolios) {
+                currentPortfolios = portfolios;
+            }
 
-            const findPortfolioId = (name) => {
-                if (!name || !portfolios) return null;
-                const normalizedSearch = name.trim().toLowerCase();
-                return portfolios.find(p => p.name.trim().toLowerCase() === normalizedSearch)?.id || null;
+            const getOrCreatePortfolioId = async (name) => {
+                const searchName = name ? name.trim() : 'Standard Portfolio';
+                const normalizedSearch = searchName.toLowerCase();
+                let found = currentPortfolios.find(p => p.name.trim().toLowerCase() === normalizedSearch);
+                if (found) return found.id;
+
+                // Create new portfolio
+                const { data: newPort, error } = await supabase
+                    .from('portfolios')
+                    .insert({ user_id: user.id, name: searchName })
+                    .select('id, name')
+                    .single();
+
+                if (newPort && !error) {
+                    currentPortfolios.push(newPort);
+                    return newPort.id;
+                }
+
+                // Fallback to first available or null
+                return currentPortfolios.length > 0 ? currentPortfolios[0].id : null;
             };
 
             // 1. Properties
@@ -110,11 +130,12 @@ const Import = () => {
                 if (existing) {
                     propertiesMap.set(prop.key, existing.id);
                 } else {
+                    const portId = await getOrCreatePortfolioId(prop.portfolio);
                     const { data: newProp, error } = await supabase
                         .from('properties')
                         .insert({
                             user_id: user.id,
-                            portfolio_id: findPortfolioId(prop.portfolio),
+                            portfolio_id: portId,
                             street: prop.street,
                             house_number: prop.house_number,
                             zip: prop.zip,
