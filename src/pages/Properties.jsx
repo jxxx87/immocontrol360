@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -482,6 +483,8 @@ const Properties = () => {
                             if (openPropertyActionMenuId === row.id) {
                                 setOpenPropertyActionMenuId(null);
                             } else {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                setPropertyMenuPos({ top: rect.bottom, left: rect.right });
                                 setOpenPropertyActionMenuId(row.id);
                             }
                         }}
@@ -490,16 +493,17 @@ const Properties = () => {
                         <MoreVertical size={16} color="var(--text-secondary)" />
                     </button>
 
-                    {openPropertyActionMenuId === row.id && (
+                    {openPropertyActionMenuId === row.id && createPortal(
                         <>
                             <div
                                 style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
                                 onClick={(e) => { e.stopPropagation(); setOpenPropertyActionMenuId(null); }}
                             />
                             <div style={{
-                                position: 'absolute',
-                                top: 'calc(100% + 4px)',
-                                right: 0,
+                                position: 'fixed',
+                                top: propertyMenuPos.top + 5,
+                                left: propertyMenuPos.left,
+                                transform: 'translateX(-100%)',
                                 backgroundColor: 'var(--surface-color)',
                                 border: '1px solid var(--border-color)',
                                 borderRadius: 'var(--radius-md)',
@@ -531,7 +535,8 @@ const Properties = () => {
                                     <Trash2 size={14} /> Löschen
                                 </button>
                             </div>
-                        </>
+                        </>,
+                        document.body
                     )}
                 </div>
             )
@@ -707,6 +712,8 @@ const Properties = () => {
                                                                                                 if (openActionMenuId === unit.id) {
                                                                                                     setOpenActionMenuId(null);
                                                                                                 } else {
+                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right });
                                                                                                     setOpenActionMenuId(unit.id);
                                                                                                 }
                                                                                             }}
@@ -715,16 +722,17 @@ const Properties = () => {
                                                                                             <MoreVertical size={16} color="var(--text-secondary)" />
                                                                                         </button>
 
-                                                                                        {openActionMenuId === unit.id && (
+                                                                                        {openActionMenuId === unit.id && createPortal(
                                                                                             <>
                                                                                                 <div
                                                                                                     style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
                                                                                                     onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
                                                                                                 />
                                                                                                 <div style={{
-                                                                                                    position: 'absolute',
-                                                                                                    top: 'calc(100% + 4px)',
-                                                                                                    right: 0,
+                                                                                                    position: 'fixed',
+                                                                                                    top: menuPos.top + 5,
+                                                                                                    left: menuPos.left,
+                                                                                                    transform: 'translateX(-100%)',
                                                                                                     backgroundColor: 'var(--surface-color)',
                                                                                                     border: '1px solid var(--border-color)',
                                                                                                     borderRadius: 'var(--radius-md)',
@@ -760,7 +768,8 @@ const Properties = () => {
                                                                                                         <Trash2 size={14} /> Löschen
                                                                                                     </button>
                                                                                                 </div>
-                                                                                            </>
+                                                                                            </>,
+                                                                                            document.body
                                                                                         )}
                                                                                     </div>
                                                                                 </td>
