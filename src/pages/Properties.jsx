@@ -482,8 +482,6 @@ const Properties = () => {
                             if (openPropertyActionMenuId === row.id) {
                                 setOpenPropertyActionMenuId(null);
                             } else {
-                                const rect = e.currentTarget.getBoundingClientRect();
-                                setPropertyMenuPos({ top: rect.bottom, left: rect.right });
                                 setOpenPropertyActionMenuId(row.id);
                             }
                         }}
@@ -499,10 +497,9 @@ const Properties = () => {
                                 onClick={(e) => { e.stopPropagation(); setOpenPropertyActionMenuId(null); }}
                             />
                             <div style={{
-                                position: 'fixed',
-                                top: propertyMenuPos.top + 5,
-                                left: propertyMenuPos.left,
-                                transform: 'translateX(-100%)',
+                                position: 'absolute',
+                                top: 'calc(100% + 4px)',
+                                right: 0,
                                 backgroundColor: 'var(--surface-color)',
                                 border: '1px solid var(--border-color)',
                                 borderRadius: 'var(--radius-md)',
@@ -710,8 +707,6 @@ const Properties = () => {
                                                                                                 if (openActionMenuId === unit.id) {
                                                                                                     setOpenActionMenuId(null);
                                                                                                 } else {
-                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
-                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right }); // Position below default
                                                                                                     setOpenActionMenuId(unit.id);
                                                                                                 }
                                                                                             }}
@@ -727,10 +722,9 @@ const Properties = () => {
                                                                                                     onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
                                                                                                 />
                                                                                                 <div style={{
-                                                                                                    position: 'fixed',
-                                                                                                    top: menuPos.top + 5, // Add tiny offset
-                                                                                                    left: menuPos.left,
-                                                                                                    transform: 'translateX(-100%)', // Align right edge
+                                                                                                    position: 'absolute',
+                                                                                                    top: 'calc(100% + 4px)',
+                                                                                                    right: 0,
                                                                                                     backgroundColor: 'var(--surface-color)',
                                                                                                     border: '1px solid var(--border-color)',
                                                                                                     borderRadius: 'var(--radius-md)',
