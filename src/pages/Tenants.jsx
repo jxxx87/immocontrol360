@@ -62,6 +62,7 @@ const Tenants = () => {
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [currentStep, setCurrentStep] = useState(1); // 1: Tenant, 2: Lease
     const [createdTenantId, setCreatedTenantId] = useState(null);
+    const [isVacationRentalToggle, setIsVacationRentalToggle] = useState(false);
 
     // Detail Modal State
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
@@ -212,6 +213,24 @@ const Tenants = () => {
     }, [user, selectedPortfolioID, filterPropertyId]); // Refetch/Recalc when filter changes
 
     // Handlers
+    const handleSetVacationRental = async () => {
+        if (!leaseForm.unit_id) return alert('Keine Einheit ausgewählt.');
+        try {
+            setIsSaving(true);
+            const { error } = await supabase.from('units').update({
+                is_vacation_rental: true
+            }).eq('id', leaseForm.unit_id);
+            if (error) throw error;
+            setIsCreateModalOpen(false);
+            resetForms();
+            fetchData();
+        } catch (err) {
+            alert(translateError(err));
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
     const handleCreateTenant = async () => {
         // Frontend-Validierung
         if (!tenantForm.first_name.trim()) return alert('Bitte geben Sie den Vornamen ein.');
@@ -329,6 +348,7 @@ const Tenants = () => {
         setLeaseForm({ property_id: '', unit_id: '', start_date: '', end_date: '', cold_rent: '', service_charge: '', heating_cost: '', other_costs: '', deposit: '', payment_due_day: 3, lease_type: 'normal' });
         setCurrentStep(1);
         setCreatedTenantId(null);
+        setIsVacationRentalToggle(false);
     };
 
     // Helper: calculate next possible rent increase date
@@ -854,7 +874,11 @@ const Tenants = () => {
                     <>
                         <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
                         {currentStep === 1 ? (
-                            <Button onClick={handleCreateTenant}>Weiter zu Mietvertrag</Button>
+                            isVacationRentalToggle ? (
+                                <Button onClick={handleSetVacationRental}>Als Ferienwohnung speichern</Button>
+                            ) : (
+                                <Button onClick={handleCreateTenant}>Weiter zu Mietvertrag</Button>
+                            )
                         ) : (
                             <Button onClick={handleCreateLease}>Speichern</Button>
                         )}
@@ -864,15 +888,23 @@ const Tenants = () => {
                 {isSaving && <LoadingOverlay message="Speichere Daten..." />}
                 {currentStep === 1 && (
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="Vorname" value={tenantForm.first_name} onChange={e => setTenantForm({ ...tenantForm, first_name: e.target.value })} />
-                            <Input label="Nachname" value={tenantForm.last_name} onChange={e => setTenantForm({ ...tenantForm, last_name: e.target.value })} />
-                        </div>
-                        <Input label="E-Mail" type="email" value={tenantForm.email} onChange={e => setTenantForm({ ...tenantForm, email: e.target.value })} />
-                        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="Telefon" value={tenantForm.phone} onChange={e => setTenantForm({ ...tenantForm, phone: e.target.value })} />
-                            <Input label="Personen" type="number" value={tenantForm.occupants} onChange={e => setTenantForm({ ...tenantForm, occupants: e.target.value })} />
-                        </div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '14px', borderRadius: 'var(--radius-md)', border: '1px solid var(--primary-color)' }}>
+                            <input type="checkbox" checked={isVacationRentalToggle} onChange={e => setIsVacationRentalToggle(e.target.checked)} style={{ width: '18px', height: '18px', accentColor: 'var(--primary-color)' }} />
+                            <span style={{ fontWeight: 600, color: 'var(--primary-color)' }}>Diese Einheit als Ferienwohnung nutzen</span>
+                        </label>
+                        {!isVacationRentalToggle && (
+                            <>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
+                                    <Input label="Vorname" value={tenantForm.first_name} onChange={e => setTenantForm({ ...tenantForm, first_name: e.target.value })} />
+                                    <Input label="Nachname" value={tenantForm.last_name} onChange={e => setTenantForm({ ...tenantForm, last_name: e.target.value })} />
+                                </div>
+                                <Input label="E-Mail" type="email" value={tenantForm.email} onChange={e => setTenantForm({ ...tenantForm, email: e.target.value })} />
+                                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--spacing-md)' }}>
+                                    <Input label="Telefon" value={tenantForm.phone} onChange={e => setTenantForm({ ...tenantForm, phone: e.target.value })} />
+                                    <Input label="Personen" type="number" value={tenantForm.occupants} onChange={e => setTenantForm({ ...tenantForm, occupants: e.target.value })} />
+                                </div>
+                            </>
+                        )}
                     </div>
                 )}
 
