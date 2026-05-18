@@ -1,10 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
-  <!-- Top Left: Light Gray -->
-  <rect x="5" y="5" width="42" height="42" rx="8" fill="#D1D5DB" />
-  <!-- Top Right: Blue -->
-  <rect x="53" y="5" width="42" height="42" rx="8" fill="#0066CC" />
-  <!-- Bottom Left: Dark Gray -->
-  <rect x="5" y="53" width="42" height="42" rx="8" fill="#4B5563" />
-  <!-- Bottom Right: Medium Gray -->
-  <rect x="53" y="53" width="42" height="42" rx="8" fill="#9CA3AF" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <style>
+      .cls-1 { fill: #dbeafe; } /* Lightest */
+      .cls-2 { fill: #3b82f6; } /* Medium */
+      .cls-3 { fill: #1d4ed8; } /* Medium-Dark */
+      .cls-4 { fill: #1e3a8a; } /* Darkest */
+    </style>
+  </defs>
+  <!-- Top Left -->
+  <rect class="cls-1" x="0" y="0" width="244" height="244" rx="40" />
+  <!-- Top Right -->
+  <rect class="cls-2" x="268" y="0" width="244" height="244" rx="40" />
+  <!-- Bottom Left -->
+  <rect class="cls-2" x="0" y="268" width="244" height="244" rx="40" />
+  <!-- Bottom Right -->
+  <rect class="cls-4" x="268" y="268" width="244" height="244" rx="40" />
 </svg>

@@ -4,13 +4,16 @@ import AuthLayout from '../../components/layout/AuthLayout';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { useAuth } from '../../context/AuthContext';
-import { AlertCircle } from 'lucide-react';
+import { supabase } from '../../lib/supabase';
+import { AlertCircle, Mail, CheckCircle2 } from 'lucide-react';
 
 const Login = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const [magicLinkMode, setMagicLinkMode] = useState(false);
+    const [magicLinkSent, setMagicLinkSent] = useState(false);
     const { signIn, signInWithGoogle } = useAuth();
     const navigate = useNavigate();
 
@@ -24,6 +27,30 @@ const Login = () => {
             navigate('/');
         } catch (error) {
             setError('Fehler beim Anmelden: ' + error.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleMagicLink = async (e) => {
+        e.preventDefault();
+        if (!email) {
+            setError('Bitte geben Sie Ihre E-Mail-Adresse ein.');
+            return;
+        }
+        try {
+            setError('');
+            setLoading(true);
+            const { error } = await supabase.auth.signInWithOtp({
+                email,
+                options: {
+                    shouldCreateUser: false // Only login, don't create new users
+                }
+            });
+            if (error) throw error;
+            setMagicLinkSent(true);
+        } catch (error) {
+            setError('Fehler: ' + error.message);
         } finally {
             setLoading(false);
         }
@@ -50,18 +77,90 @@ const Login = () => {
         </svg>
     );
 
+    // ── Magic Link sent success screen ──
+    if (magicLinkSent) {
+        return (
+            <AuthLayout title="E-Mail gesendet!" subtitle="Prüfen Sie Ihren Posteingang">
+                <div style={{
+                    textAlign: 'center', padding: '20px 0'
+                }}>
+                    <CheckCircle2 size={48} color="#10B981" style={{ marginBottom: '16px' }} />
+                    <p style={{ fontSize: '0.92rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: 1.6 }}>
+                        Wir haben einen Login-Link an <strong>{email}</strong> gesendet.
+                        Klicken Sie auf den Link in der E-Mail, um sich anzumelden.
+                    </p>
+                    <Button
+                        variant="secondary"
+                        onClick={() => { setMagicLinkSent(false); setMagicLinkMode(false); }}
+                        style={{ width: '100%' }}
+                    >
+                        Zurück zum Login
+                    </Button>
+                </div>
+            </AuthLayout>
+        );
+    }
+
+    // ── Magic Link mode ──
+    if (magicLinkMode) {
+        return (
+            <AuthLayout title="Login per E-Mail-Link" subtitle="Kein Passwort nötig — wir senden Ihnen einen Link">
+                {error && (
+                    <div style={{
+                        backgroundColor: 'var(--surface-color)', color: '#991B1B', padding: '10px',
+                        borderRadius: 'var(--radius-md)', marginBottom: 'var(--spacing-md)',
+                        display: 'flex', alignItems: 'center', fontSize: '0.875rem'
+                    }}>
+                        <AlertCircle size={16} style={{ marginRight: '8px' }} />
+                        {error}
+                    </div>
+                )}
+
+                <form onSubmit={handleMagicLink}>
+                    <Input
+                        label="E-Mail"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                    />
+
+                    <Button
+                        type="submit"
+                        disabled={loading}
+                        style={{
+                            width: '100%', marginTop: 'var(--spacing-md)', marginBottom: 'var(--spacing-md)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+                        }}
+                    >
+                        <Mail size={16} />
+                        {loading ? 'Sende...' : 'Login-Link senden'}
+                    </Button>
+                </form>
+
+                <div style={{ textAlign: 'center', fontSize: '0.875rem' }}>
+                    <button
+                        onClick={() => { setMagicLinkMode(false); setError(''); }}
+                        style={{
+                            color: 'var(--primary-color)', fontWeight: 500, cursor: 'pointer',
+                            background: 'none', border: 'none', fontSize: 'inherit'
+                        }}
+                    >
+                        Mit Passwort anmelden
+                    </button>
+                </div>
+            </AuthLayout>
+        );
+    }
+
+    // ── Normal login ──
     return (
         <AuthLayout title="Willkommen zurück" subtitle="Melden Sie sich an, um fortzufahren">
             {error && (
                 <div style={{
-                    backgroundColor: '#FEE2E2',
-                    color: '#991B1B',
-                    padding: '10px',
-                    borderRadius: 'var(--radius-md)',
-                    marginBottom: 'var(--spacing-md)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    fontSize: '0.875rem'
+                    backgroundColor: 'var(--surface-color)', color: '#991B1B', padding: '10px',
+                    borderRadius: 'var(--radius-md)', marginBottom: 'var(--spacing-md)',
+                    display: 'flex', alignItems: 'center', fontSize: '0.875rem'
                 }}>
                     <AlertCircle size={16} style={{ marginRight: '8px' }} />
                     {error}
@@ -90,7 +189,6 @@ const Login = () => {
                     </Link>
                 </div>
 
-                {/* Submit button with spinner handled by children text usually, but disabled state handles click prevention */}
                 <Button
                     type="submit"
                     disabled={loading}
@@ -103,11 +201,8 @@ const Login = () => {
             <div style={{ position: 'relative', margin: 'var(--spacing-lg) 0', textAlign: 'center' }}>
                 <div style={{ borderBottom: '1px solid var(--border-color)', position: 'absolute', top: '50%', width: '100%' }}></div>
                 <span style={{
-                    position: 'relative',
-                    backgroundColor: 'var(--surface-color)',
-                    padding: '0 10px',
-                    color: 'var(--text-secondary)',
-                    fontSize: '0.875rem'
+                    position: 'relative', backgroundColor: 'var(--surface-color)',
+                    padding: '0 10px', color: 'var(--text-secondary)', fontSize: '0.875rem'
                 }}>
                     oder
                 </span>
@@ -117,12 +212,24 @@ const Login = () => {
                 variant="secondary"
                 onClick={handleGoogleLogin}
                 disabled={loading}
-                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 'var(--spacing-sm)' }}
             >
                 <div style={{ display: 'flex', alignItems: 'center' }}>
                     <GoogleIcon />
                     Mit Google anmelden
                 </div>
+            </Button>
+
+            <Button
+                variant="secondary"
+                onClick={() => setMagicLinkMode(true)}
+                style={{
+                    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                    marginTop: '8px', color: 'var(--primary-color)'
+                }}
+            >
+                <Mail size={16} />
+                Als Mieter per E-Mail-Link anmelden
             </Button>
 
             <div style={{ marginTop: 'var(--spacing-lg)', textAlign: 'center', fontSize: '0.875rem' }}>

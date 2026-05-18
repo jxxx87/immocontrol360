@@ -33,7 +33,7 @@ const ResetPassword = () => {
         <AuthLayout title="Passwort vergessen?" subtitle="Wir senden Ihnen einen Link zum Zurücksetzen">
             {error && (
                 <div style={{
-                    backgroundColor: '#FEE2E2',
+                    backgroundColor: 'var(--surface-color)',
                     color: '#991B1B',
                     padding: '10px',
                     borderRadius: 'var(--radius-md)',

@@ -17,6 +17,7 @@ import { usePortfolio } from '../context/PortfolioContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import CurrencyInput from '../components/ui/CurrencyInput';
 import Modal from '../components/ui/Modal';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
@@ -282,14 +283,21 @@ const InvoiceForm = () => {
                 setPositions(updated);
             }
         }
-    }, [nights, unitAddress, persons, selectedUnitId]);
+    }, [nights, unitAddress, persons, selectedUnitId, positions.length]);
 
     // ===== CALCULATIONS =====
     const updatePosition = (idx, field, value) => {
         const updated = [...positions];
         const item = { ...updated[idx] };
         const n = item.isFirst ? (nights || 1) : 1;
-        const numVal = parseFloat(value) || 0;
+
+        // Handle German format from CurrencyInput (1.000,00 -> 1000.00)
+        let numVal = 0;
+        if (typeof value === 'string') {
+            numVal = parseFloat(value.replace(/\./g, '').replace(',', '.')) || 0;
+        } else {
+            numVal = parseFloat(value) || 0;
+        }
 
         if (field === 'pricePerNight') {
             item.pricePerNight = numVal;
@@ -422,27 +430,31 @@ const InvoiceForm = () => {
         }
     };
 
-    // ===== PDF / PRINT =====
     const generateInvoiceHTML = (invoiceData) => {
-        const inv = invoiceData || {
-            sender_name: senderName,
-            sender_street: senderStreet,
-            sender_zip: senderZip,
-            sender_city: senderCity,
-            recipient_name: recipientName,
-            recipient_street: recipientStreet,
-            recipient_zip: recipientZip,
-            recipient_city: recipientCity,
-            invoice_date: invoiceDate,
-            invoice_number: invoiceNumber,
-            move_in: moveIn,
-            move_out: moveOut,
-            persons,
-            positions,
-            net_amount: totalNet,
-            vat_amount: totalVat,
-            gross_amount: totalGross
+        // Construct Sender Data from invoice (which might have portfolio info injected) or fallback
+        // Ideally, we should receive the portfolio object, but we might only have IDs.
+        // Let's try to find the portfolio from state if possible.
+        let portfolio = null;
+        if (invoiceData.portfolio_id) {
+            portfolio = portfolios.find(p => p.id === invoiceData.portfolio_id);
+        } else if (senderPortfolioId) {
+            portfolio = portfolios.find(p => p.id === senderPortfolioId);
+        }
+
+        const sender = {
+            name: invoiceData.sender_name || portfolio?.company_name || portfolio?.name || "ImmoControl pro 360",
+            street: invoiceData.sender_street || portfolio?.street ? `${portfolio?.street} ${portfolio?.house_number || ''}` : "Musterstraße 1",
+            city: invoiceData.sender_city || portfolio?.zip ? `${portfolio?.zip} ${portfolio?.city}` : "12345 Musterstadt",
+            email: portfolio?.email || "info@immocontrol.de",
+            phone: portfolio?.phone || "01234 / 567890",
+            bank: portfolio?.bank_name || "Musterbank",
+            iban: portfolio?.iban || "DE12 3456 7890 1234 5678 90",
+            bic: portfolio?.bic || "MUSDEFF"
         };
+
+        const senderLine = `${sender.name} • ${sender.street} • ${sender.city}`;
+
+        const inv = invoiceData || {};
 
         const posRows = (inv.positions || []).map(p => `
             <tr>
@@ -493,18 +505,17 @@ const InvoiceForm = () => {
 
                 /* DIN 5008 Form B Marks */
                 .mark { position: absolute; left: 0; width: 5mm; height: 1px; background: #000; }
-                .mark.fold-1 { top: 105mm; } /* Falzmarke 1 */
-                .mark.fold-2 { top: 210mm; } /* Falzmarke 2 */
-                .mark.center { top: 148.5mm; width: 10mm; } /* Lochmarke */
+                .mark.fold-1 { top: 105mm; } 
+                .mark.fold-2 { top: 210mm; } 
+                .mark.center { top: 148.5mm; width: 10mm; } 
                 
-                /* Address Zone: 45mm from top (+ protection zone) -> 20mm left */
+                /* Address Zone: 45mm from top */
                 .address-zone {
                     position: absolute;
                     top: 45mm;
                     left: 20mm;
                     width: 85mm;
                     height: 45mm;
-                    /* border: 1px dotted #ccc; remove for prod */ 
                 }
                 
                 .sender-line {
@@ -519,10 +530,10 @@ const InvoiceForm = () => {
                     line-height: 1.4;
                 }
 
-                /* Info Block: Top aligned with address, Right side */
+                /* Info Block */
                 .info-block {
                     position: absolute;
-                    top: 45mm; /* 32mm is strict Form B start, but often aligned with address for aesthetics */
+                    top: 45mm; 
                     left: 125mm;
                     right: 20mm;
                     font-size: 10pt;
@@ -539,8 +550,8 @@ const InvoiceForm = () => {
                 /* Content Area */
                 .content {
                     position: absolute;
-                    top: 98mm; /* Below marks */
-                    left: 25mm; /* Lochrand */
+                    top: 98mm; 
+                    left: 25mm; 
                     right: 20mm;
                 }
                 
@@ -556,26 +567,10 @@ const InvoiceForm = () => {
                 }
                 
                 /* Table Styles */
-                table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-bottom: 8mm;
-                }
-                
-                thead th {
-                    border-bottom: 2px solid #000;
-                    text-align: left;
-                    padding: 8px 0;
-                    font-weight: 700;
-                }
-                
-                tbody tr {
-                    border-bottom: 1px solid #ddd;
-                }
-
-                tbody td {
-                    padding: 8px 0;
-                }
+                table { width: 100%; border-collapse: collapse; margin-bottom: 8mm; }
+                thead th { border-bottom: 2px solid #000; text-align: left; padding: 8px 0; font-weight: 700; }
+                tbody tr { border-bottom: 1px solid #ddd; }
+                tbody td { padding: 8px 0; }
 
                 /* Totals */
                 .totals {
@@ -583,9 +578,7 @@ const InvoiceForm = () => {
                     justify-content: flex-end;
                     margin-bottom: 20mm;
                 }
-                .totals-box {
-                    width: 80mm;
-                }
+                .totals-box { width: 80mm; }
                 .t-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
                 .t-row.final { 
                     border-top: 2px solid #000; 
@@ -626,7 +619,7 @@ const InvoiceForm = () => {
 
                 <!-- Address -->
                 <div class="address-zone">
-                    <div class="sender-line">${inv.sender_name} • ${inv.sender_street} • ${inv.sender_zip} ${inv.sender_city}</div>
+                    <div class="sender-line">${senderLine}</div>
                     <div class="recipient">
                         ${inv.recipient_name}<br>
                         ${inv.recipient_street}<br>
@@ -675,8 +668,7 @@ const InvoiceForm = () => {
                     </div>
 
                     <div class="intro-text">
-                        Bitte überweisen Sie den Gesamtbetrag innerhalb von 14 Tagen auf das unten genannte Konto.<br>
-                        <small style="color:#666;">Es gelten unsere AGB.</small>
+                        Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.<br>
                     </div>
                 </div>
 
@@ -684,15 +676,15 @@ const InvoiceForm = () => {
                 <div class="footer">
                     <div class="f-col">
                         <h4>Anschrift</h4>
-                        <p>${inv.sender_name}<br>${inv.sender_street}<br>${inv.sender_zip} ${inv.sender_city}</p>
+                        <p>${sender.name}<br>${sender.street}<br>${sender.city}</p>
                     </div>
                     <div class="f-col">
                         <h4>Kontakt</h4>
-                        <p>Tel: -<br>Email: -<br>Web: -</p>
+                        <p>Tel: ${sender.phone}<br>Email: ${sender.email}</p>
                     </div>
                     <div class="f-col">
                         <h4>Bankverbindung</h4>
-                        <p>Bank: -<br>IBAN: -<br>BIC: -</p>
+                        <p>${sender.bank}<br>IBAN: ${sender.iban}<br>BIC: ${sender.bic}</p>
                     </div>
                 </div>
             </div>
@@ -716,36 +708,231 @@ const InvoiceForm = () => {
         }, 800);
     };
 
+    // ===== PDF (Client-Side Vector Drawing) =====
     const handlePDF = async (data) => {
         setPdfGenerating(true);
         try {
-            const html = generateInvoiceHTML(data);
-            const inv = data || {};
-            const filename = `Rechnung_${inv.invoice_number || invoiceNumber}.pdf`;
+            // Lazy load jsPDF to avoid large bundle size
+            if (!window.jspdf) {
+                await new Promise((resolve) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+                    script.onload = resolve;
+                    document.head.appendChild(script);
+                });
+            }
 
-            // Use environemnt variable or fallback to localhost
-            const apiUrl = import.meta.env.VITE_PDF_API_URL || 'http://localhost:3001/generate-pdf';
-
-            // Call PDF server
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ html })
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({
+                orientation: 'portrait',
+                unit: 'mm',
+                format: 'a4'
             });
 
-            if (!response.ok) throw new Error('PDF Server Error');
+            // --- DATA PREPARATION ---
+            // Construct Sender Data
+            let portfolio = null;
+            if (data.portfolio_id) {
+                portfolio = portfolios.find(p => p.id === data.portfolio_id);
+            } else if (senderPortfolioId) {
+                portfolio = portfolios.find(p => p.id === senderPortfolioId);
+            }
 
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+            const sender = {
+                name: data.sender_name || portfolio?.company_name || portfolio?.name || "ImmoControl pro 360",
+                street: data.sender_street || portfolio?.street ? (portfolio?.street + (portfolio?.house_number ? ' ' + portfolio.house_number : '')) : "Musterstraße 1",
+                city: data.sender_city || portfolio?.zip ? `${portfolio?.zip} ${portfolio?.city}` : "12345 Musterstadt",
+                email: portfolio?.email || "info@immocontrol.de",
+                phone: portfolio?.phone || "01234 / 567890",
+                bank: portfolio?.bank_name || "Musterbank",
+                iban: portfolio?.iban || "DE12 3456 7890 1234 5678 90",
+                bic: portfolio?.bic || "MUSDEFF"
+            };
+
+            const inv = data || {};
+            const recipientName = inv.recipient_name || (inv.tenant?.name || 'Unbekannt');
+            const recipientAddress = inv.recipient_street ? `${inv.recipient_street}\n${inv.recipient_zip} ${inv.recipient_city}` : (inv.tenant?.address || '');
+
+            const invoiceDate = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : new Date().toLocaleDateString('de-DE');
+            const invoiceNum = inv.invoice_number || 'ENTWURF';
+            // Use move_in / move_out as service period for invoice form
+            const servicePeriod = inv.move_in && inv.move_out
+                ? `${new Date(inv.move_in).toLocaleDateString('de-DE')} - ${new Date(inv.move_out).toLocaleDateString('de-DE')}`
+                : (inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : '');
+
+            // --- FONTS ---
+            doc.setFont("helvetica"); // Standard font
+
+            // --- LAYOUT CONSTANTS (DIN 5008 Form B) ---
+            const leftMargin = 25;
+            const rightMargin = 20;
+            // const contentWidth = 210 - leftMargin - rightMargin;
+            let y = 0;
+
+            // 1. Sender Line (Small) - 45mm from top
+            y = 45;
+            doc.setFontSize(8);
+            doc.setTextColor(100);
+            doc.text(`${sender.name} • ${sender.street} • ${sender.city}`, leftMargin, y);
+
+            // 2. Recipient Address - 50mm from top 
+            y = 55;
+            doc.setFontSize(11);
+            doc.setTextColor(0);
+            doc.text(recipientName, leftMargin, y);
+            y += 6;
+            if (recipientAddress) {
+                const addrLines = doc.splitTextToSize(recipientAddress.replace(/<br>/g, '\n'), 85);
+                doc.text(addrLines, leftMargin, y);
+            }
+
+            // 3. Info Block (Date, Number) - Right side
+            const infoX = 125;
+            let infoY = 50;
+            doc.setFontSize(10);
+
+            const addInfoRow = (label, value) => {
+                doc.text(label, infoX, infoY);
+                doc.text(value, infoX + 60, infoY, { align: 'right' });
+                infoY += 5;
+            };
+
+            addInfoRow("Rechnungsnummer:", invoiceNum);
+            addInfoRow("Rechnungsdatum:", invoiceDate);
+            addInfoRow("Leistungszeitraum:", servicePeriod);
+            addInfoRow("Anzahl Gäste:", `${inv.persons || 1}`);
+            if (inv.customer_id) addInfoRow("Kundennummer:", inv.customer_id);
+
+            // 4. Headline - 98.4mm from top (Subject line)
+            y = 105;
+            doc.setFontSize(14);
+            doc.setFont("helvetica", "bold");
+            doc.text(`Rechnung Nr. ${invoiceNum}`, leftMargin, y);
+
+            // Intro Text
+            y += 10;
+            doc.setFontSize(11);
+            doc.setFont("helvetica", "normal");
+            doc.text("Sehr geehrte Damen und Herren,", leftMargin, y);
+            y += 6;
+            doc.text("vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen folgende Leistungen:", leftMargin, y);
+            y += 15;
+
+            // 5. Item Table
+            // Header
+            const col1 = leftMargin; // Pos
+            const col2 = leftMargin + 12; // Description
+            const col3 = 140; // Price per Night (Einzelpreis)
+            const col4 = 160; // Net Total
+            const col5 = 175; // VAT
+            const col6 = 190; // Gross Total
+
+            // Draw Header Line
+            doc.setDrawColor(0);
+            doc.setLineWidth(0.2);
+            doc.line(leftMargin, y, 210 - rightMargin, y); // Top line
+            y += 5;
+
+            doc.setFontSize(10);
+            doc.setFont("helvetica", "bold");
+            doc.text("Pos.", col1, y);
+            doc.text("Bezeichnung", col2, y);
+            doc.text("Einzel", col3, y, { align: 'right' });
+            doc.text("Netto", col4, y, { align: 'right' });
+            doc.text("MwSt", col5, y, { align: 'right' });
+            doc.text("Brutto", col6, y, { align: 'right' });
+
+            y += 2;
+            doc.line(leftMargin, y, 210 - rightMargin, y); // Bottom line
+            y += 6;
+
+            // Items
+            doc.setFont("helvetica", "normal");
+
+            (inv.positions || []).forEach((item) => {
+                // Determine description text
+                const descText = item.description || '';
+                const descLines = doc.splitTextToSize(descText, 85);
+                const lineHeight = descLines.length * 5;
+
+                // Check page break
+                if (y + lineHeight > 240) {
+                    doc.addPage();
+                    y = 30;
+                    // Reprint header? Usually yes, but simple version for now
+                }
+
+                doc.text(`${item.pos}`, col1, y);
+                doc.text(descLines, col2, y);
+                doc.text(item.isFirst ? fmt(item.pricePerNight) + ' €' : '', col3, y, { align: 'right' });
+                doc.text(fmt(item.netTotal) + " €", col4, y, { align: 'right' });
+                doc.text("7%", col5, y, { align: 'right' });
+                doc.text(fmt(item.grossTotal) + " €", col6, y, { align: 'right' });
+
+                y += Math.max(6, lineHeight + 2);
+            });
+
+            // 6. Totals
+            y += 5;
+
+            // Totals Box
+            const totalsX = 140; // Start X for totals labels
+            const totalsValX = 190; // End X for values
+
+            // Net
+            doc.text("Summe Netto:", totalsX, y);
+            doc.text(fmt(inv.net_amount || totalNet) + " €", totalsValX, y, { align: 'right' });
+            y += 5;
+
+            // VAT
+            doc.text("zzgl. 7% MwSt:", totalsX, y);
+            doc.text(fmt(inv.vat_amount || totalVat) + " €", totalsValX, y, { align: 'right' });
+            y += 2;
+
+            // Double Line / Bold Total
+            doc.line(totalsX, y, 210 - rightMargin, y);
+            y += 6;
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(11);
+            doc.text("Gesamtbetrag:", totalsX, y);
+            doc.text(fmt(inv.gross_amount || totalGross) + " €", totalsValX, y, { align: 'right' });
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(10);
+
+            // 7. Footer Instructions
+            y += 20;
+            if (y > 250) { doc.addPage(); y = 30; }
+
+            doc.text("Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.", leftMargin, y);
+
+            // 8. Bottom Footer (Bank Details) - Fixed at bottom
+            const footerY = 275;
+            doc.setFontSize(8);
+            doc.setTextColor(50);
+
+            // Column 1: Address
+            doc.text("Anschrift", 25, footerY);
+            doc.text(`${sender.name}`, 25, footerY + 4);
+            doc.text(`${sender.street}`, 25, footerY + 8);
+            doc.text(`${sender.city}`, 25, footerY + 12);
+
+            // Column 2: Contact
+            doc.text("Kontakt", 85, footerY);
+            doc.text(`Tel: ${sender.phone}`, 85, footerY + 4);
+            doc.text(`Email: ${sender.email}`, 85, footerY + 8);
+
+            // Column 3: Bank
+            doc.text("Bankverbindung", 145, footerY);
+            doc.text(`${sender.bank}`, 145, footerY + 4);
+            doc.text(`IBAN: ${sender.iban}`, 145, footerY + 8);
+            doc.text(`BIC: ${sender.bic}`, 145, footerY + 12);
+
+            // Save
+            doc.save(`${invoiceNum}.pdf`);
+
         } catch (error) {
             console.error(error);
-            alert('Fehler: PDF Server läuft nicht? Bitte "cd server && node server.js" ausführen.');
+            alert('PDF Fehler: ' + error.message);
         } finally {
             setPdfGenerating(false);
         }
@@ -809,7 +996,7 @@ const InvoiceForm = () => {
         border: '1px solid var(--border-color)',
         fontSize: '0.9rem',
         outline: 'none',
-        backgroundColor: 'white'
+        backgroundColor: 'var(--surface-color)'
     };
 
     const labelStyle = {
@@ -844,7 +1031,7 @@ const InvoiceForm = () => {
                         {isEdit ? 'Rechnung bearbeiten' : 'Rechnung erstellen'}
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>
-                        {isEdit ? `Rechnungs-Nr. ${invoiceNumber}` : 'Neue Rechnung mit automatischer Nummernvergabe'}
+                        {isEdit ? `Rechnungs - Nr.${invoiceNumber} ` : 'Neue Rechnung mit automatischer Nummernvergabe'}
                     </p>
                 </div>
             </div>
@@ -873,7 +1060,7 @@ const InvoiceForm = () => {
                                 type="text"
                                 value={invoiceNumber}
                                 readOnly
-                                style={{ ...selectStyle, backgroundColor: '#f3f4f6', cursor: 'not-allowed', color: '#6b7280' }}
+                                style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', color: '#6b7280' }}
                             />
                         </div>
                     </div>
@@ -883,7 +1070,7 @@ const InvoiceForm = () => {
                             <option value="">– Bitte wählen –</option>
                             {vacationUnits.map(u => {
                                 const prop = properties.find(p => p.id === u.property_id);
-                                const addr = prop ? `${prop.street} ${prop.house_number || ''}, ${prop.zip} ${prop.city}` : '';
+                                const addr = prop ? `${prop.street} ${prop.house_number || ''}, ${prop.zip} ${prop.city} ` : '';
                                 return <option key={u.id} value={u.id}>{u.unit_name} – {addr}</option>;
                             })}
                         </select>
@@ -893,7 +1080,7 @@ const InvoiceForm = () => {
                         <Input label="Auszug" type="date" value={moveOut} onChange={e => setMoveOut(e.target.value)} />
                         <div style={{ marginBottom: 'var(--spacing-md)' }}>
                             <label style={labelStyle}>Nächte</label>
-                            <input type="text" value={nights} readOnly style={{ ...selectStyle, backgroundColor: '#f3f4f6', cursor: 'not-allowed', textAlign: 'center', fontWeight: 600 }} />
+                            <input type="text" value={nights} readOnly style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', textAlign: 'center', fontWeight: 600 }} />
                         </div>
                     </div>
                     <div style={{ marginBottom: 'var(--spacing-md)' }}>
@@ -948,27 +1135,45 @@ const InvoiceForm = () => {
                         </thead>
                         <tbody>
                             {positions.map((p, idx) => (
-                                <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                <tr key={idx} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
                                     <td style={{ padding: '10px 8px', textAlign: 'center', fontWeight: 600 }}>{p.pos}</td>
-                                    <td style={{ padding: '10px 8px' }}>
+                                    <td style={{ padding: '10px 8px', position: 'relative' }}>
                                         <textarea
                                             value={p.description}
                                             onChange={e => updatePosition(idx, 'description', e.target.value)}
                                             readOnly={p.isFirst}
                                             rows={2}
+                                            onFocus={e => {
+                                                e.target.rows = 5;
+                                                e.target.style.position = 'absolute';
+                                                e.target.style.zIndex = '20';
+                                                e.target.style.width = 'calc(100% + 300px)';
+                                                e.target.style.boxShadow = '0 4px 24px rgba(0,0,0,0.18)';
+                                                e.target.style.borderColor = 'var(--primary-color)';
+                                            }}
+                                            onBlur={e => {
+                                                e.target.rows = 2;
+                                                e.target.style.position = 'static';
+                                                e.target.style.zIndex = 'auto';
+                                                e.target.style.width = '100%';
+                                                e.target.style.boxShadow = 'none';
+                                                e.target.style.borderColor = 'var(--border-color)';
+                                            }}
                                             style={{
                                                 width: '100%', padding: '8px 10px', borderRadius: '8px',
                                                 border: '1px solid var(--border-color)', resize: 'vertical',
                                                 fontSize: '0.9rem', fontFamily: 'inherit', outline: 'none',
-                                                backgroundColor: p.isFirst ? '#f9fafb' : 'white'
+                                                backgroundColor: p.isFirst ? '#f9fafb' : 'var(--surface-color)',
+                                                transition: 'all 0.2s ease',
+                                                left: 0, top: 0
                                             }}
                                         />
                                     </td>
                                     <td style={{ padding: '10px 8px' }}>
                                         {p.isFirst ? (
-                                            <input
-                                                type="number" step="0.01" min="0"
-                                                value={p.pricePerNight || ''}
+                                            <CurrencyInput
+                                                allowDecimals
+                                                value={p.pricePerNight}
                                                 onChange={e => updatePosition(idx, 'pricePerNight', e.target.value)}
                                                 style={{ ...selectStyle, textAlign: 'right' }}
                                             />
@@ -977,9 +1182,9 @@ const InvoiceForm = () => {
                                         )}
                                     </td>
                                     <td style={{ padding: '10px 8px' }}>
-                                        <input
-                                            type="number" step="0.01" min="0"
-                                            value={p.netTotal || ''}
+                                        <CurrencyInput
+                                            allowDecimals
+                                            value={p.netTotal}
                                             onChange={e => updatePosition(idx, 'netTotal', e.target.value)}
                                             style={{ ...selectStyle, textAlign: 'right' }}
                                         />
@@ -988,9 +1193,9 @@ const InvoiceForm = () => {
                                         {fmt(p.vat)} €
                                     </td>
                                     <td style={{ padding: '10px 8px' }}>
-                                        <input
-                                            type="number" step="0.01" min="0"
-                                            value={p.grossTotal || ''}
+                                        <CurrencyInput
+                                            allowDecimals
+                                            value={p.grossTotal}
                                             onChange={e => updatePosition(idx, 'grossTotal', e.target.value)}
                                             style={{ ...selectStyle, textAlign: 'right', fontWeight: 600 }}
                                         />

@@ -1,20 +1,49 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
+import CurrencyInput from '../components/ui/CurrencyInput';
 import { Plus, Users, Loader2, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
+import { useViewMode } from '../context/ViewModeContext';
+import { useSubscription } from '../context/SubscriptionContext';
+import ExportDropdown from '../components/ExportDropdown';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
 const Tenants = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const location = useLocation();
+    const navigate = useNavigate();
+    const { checkGlobalAccess } = useSubscription();
+
+    // Process URL Params
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const action = params.get('action');
+        const propertyId = params.get('propertyId');
+        const unitId = params.get('unitId');
+
+        if (action === 'create' && propertyId && unitId) {
+            setLeaseForm(prev => ({
+                ...prev,
+                property_id: propertyId,
+                unit_id: unitId
+            }));
+            setCurrentStep(1); // Start with Tenant creation
+            setIsCreateModalOpen(true);
+            // Clear URL
+            navigate(location.pathname, { replace: true });
+        }
+    }, [location.search, navigate, location.pathname]);
 
     // Data State
     const [units, setUnits] = useState([]);
@@ -44,6 +73,7 @@ const Tenants = () => {
     const [editLeaseForm, setEditLeaseForm] = useState({});
     const [openActionMenuId, setOpenActionMenuId] = useState(null);
     const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+    const [selectedActionRow, setSelectedActionRow] = useState(null);
 
     // Form Data
     const [tenantForm, setTenantForm] = useState({
@@ -59,7 +89,8 @@ const Tenants = () => {
         heating_cost: '',
         other_costs: '',
         deposit: '',
-        payment_due_day: 3
+        payment_due_day: 3,
+        lease_type: 'normal'
     });
 
     // Helper Data for Dropdowns
@@ -72,7 +103,7 @@ const Tenants = () => {
             setLoading(true);
 
             // 1. Fetch All Properties (for Filter & Dropdown)
-            let propQuery = supabase.from('properties').select('id, street, house_number, portfolio_id').order('street');
+            let propQuery = supabase.from('properties').select('id, street, house_number, zip, city, portfolio_id').order('street');
             const { data: propsData } = await propQuery;
 
             let allProps = propsData || [];
@@ -167,7 +198,7 @@ const Tenants = () => {
                 setUnitsDropdown([]);
                 return;
             }
-            const { data } = await supabase.from('units').select('id, unit_name').eq('property_id', leaseForm.property_id).order('unit_name');
+            const { data } = await supabase.from('units').select('id, unit_name, target_rent').eq('property_id', leaseForm.property_id).order('unit_name');
             setUnitsDropdown(data || []);
         };
         fetchUnitsDropdown();
@@ -182,6 +213,9 @@ const Tenants = () => {
 
     // Handlers
     const handleCreateTenant = async () => {
+        // Frontend-Validierung
+        if (!tenantForm.first_name.trim()) return alert('Bitte geben Sie den Vornamen ein.');
+        if (!tenantForm.last_name.trim()) return alert('Bitte geben Sie den Nachnamen ein.');
         try {
             setIsSaving(true);
             const { data, error } = await supabase.from('tenants').insert([
@@ -210,28 +244,74 @@ const Tenants = () => {
     };
 
     const handleCreateLease = async () => {
+        // Frontend-Validierung
+        if (!leaseForm.property_id) return alert('Bitte wählen Sie eine Immobilie aus.');
+        if (!leaseForm.unit_id) return alert('Bitte wählen Sie eine Einheit aus.');
+        if (!leaseForm.start_date) return alert('Bitte geben Sie das Mietbeginn-Datum ein.');
+        if (!leaseForm.cold_rent) return alert('Bitte geben Sie die Kaltmiete ein.');
         try {
             if (!createdTenantId) return alert('Kein Mieter erstellt.');
             setIsSaving(true);
 
-            const { error } = await supabase.from('leases').insert([
+            const coldRent = parseFloat(leaseForm.cold_rent) || 0;
+            const serviceCharge = parseFloat(leaseForm.service_charge) || 0;
+            const heatingCost = parseFloat(leaseForm.heating_cost) || 0;
+            const otherCosts = parseFloat(leaseForm.other_costs) || 0;
+            const deposit = parseFloat(leaseForm.deposit) || 0;
+
+            // 1. Create Lease
+            const { error: leaseError } = await supabase.from('leases').insert([
                 {
                     user_id: user.id,
                     tenant_id: createdTenantId,
                     unit_id: leaseForm.unit_id,
                     start_date: leaseForm.start_date,
                     end_date: leaseForm.end_date || null,
-                    cold_rent: parseFloat(leaseForm.cold_rent) || 0,
-                    service_charge: parseFloat(leaseForm.service_charge) || 0,
-                    heating_cost: parseFloat(leaseForm.heating_cost) || 0,
-                    other_costs: parseFloat(leaseForm.other_costs) || 0,
-                    deposit: parseFloat(leaseForm.deposit) || 0,
+                    cold_rent: coldRent,
+                    service_charge: serviceCharge,
+                    heating_cost: heatingCost,
+                    other_costs: otherCosts,
+                    deposit: deposit,
                     payment_due_day: parseInt(leaseForm.payment_due_day) || 3,
+                    lease_type: leaseForm.lease_type || 'normal',
                     status: 'active'
                 }
             ]);
 
-            if (error) throw error;
+            if (leaseError) throw leaseError;
+
+            // 2. Sync unit fields with lease values (same Supabase cells)
+            const { error: unitUpdateError } = await supabase.from('units').update({
+                cold_rent_ist: coldRent,
+                service_charge_soll: serviceCharge,
+                heating_cost_soll: heatingCost,
+                other_costs_soll: otherCosts,
+                deposit_soll: deposit
+            }).eq('id', leaseForm.unit_id);
+
+            if (unitUpdateError) console.error('Fehler beim Aktualisieren der Einheit:', unitUpdateError);
+
+            // 3. Create Contact automatically
+            const property = propertiesDropdown.find(p => p.id === leaseForm.property_id);
+            const unit = unitsDropdown.find(u => u.id === leaseForm.unit_id);
+
+            if (property) {
+                const { error: contactError } = await supabase.from('contacts').insert([
+                    {
+                        user_id: user.id,
+                        name: `${tenantForm.first_name} ${tenantForm.last_name}`,
+                        contact_type: 'tenant',
+                        email: tenantForm.email,
+                        phone: tenantForm.phone,
+                        street: `${property.street} ${property.house_number}`,
+                        zip: property.zip,
+                        city: property.city,
+                        unit_name: unit ? unit.unit_name : ''
+                    }
+                ]);
+                if (contactError) console.error('Fehler beim Erstellen des Kontakts:', contactError);
+            }
+
             await new Promise(resolve => setTimeout(resolve, 800));
 
             setIsCreateModalOpen(false);
@@ -246,15 +326,36 @@ const Tenants = () => {
 
     const resetForms = () => {
         setTenantForm({ first_name: '', last_name: '', email: '', phone: '', occupants: 1 });
-        setLeaseForm({ property_id: '', unit_id: '', start_date: '', end_date: '', cold_rent: '', service_charge: '', heating_cost: '', other_costs: '', deposit: '', payment_due_day: 3 });
+        setLeaseForm({ property_id: '', unit_id: '', start_date: '', end_date: '', cold_rent: '', service_charge: '', heating_cost: '', other_costs: '', deposit: '', payment_due_day: 3, lease_type: 'normal' });
         setCurrentStep(1);
         setCreatedTenantId(null);
     };
+
+    // Helper: calculate next possible rent increase date
+    const calcNextRentIncrease = (lease) => {
+        if (!lease) return null;
+        const type = lease.lease_type || 'normal';
+        const yearsToAdd = type === 'normal' ? 3 : 1;
+        const baseDate = lease.last_rent_increase || lease.start_date;
+        if (!baseDate) return null;
+        const d = new Date(baseDate);
+        d.setFullYear(d.getFullYear() + yearsToAdd);
+        return d;
+    };
+
+    const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietvertrag', index: 'Indexmietvertrag' };
 
     // Update / Delete Handlers (Logic reused)
     const handleUpdateLease = async () => {
         try {
             setIsSaving(true);
+
+            const coldRent = parseFloat(editLeaseForm.cold_rent) || 0;
+            const serviceCharge = parseFloat(editLeaseForm.service_charge) || 0;
+            const heatingCost = parseFloat(editLeaseForm.heating_cost) || 0;
+            const otherCosts = parseFloat(editLeaseForm.other_costs) || 0;
+            const deposit = parseFloat(editLeaseForm.deposit) || 0;
+
             // Update Tenant
             if (editTenantForm.id) {
                 const { error: tenantError } = await supabase.from('tenants').update({
@@ -271,16 +372,30 @@ const Tenants = () => {
             const { error: leaseError } = await supabase.from('leases').update({
                 start_date: editLeaseForm.start_date,
                 end_date: editLeaseForm.end_date || null,
-                cold_rent: parseFloat(editLeaseForm.cold_rent) || 0,
-                service_charge: parseFloat(editLeaseForm.service_charge) || 0,
-                heating_cost: parseFloat(editLeaseForm.heating_cost) || 0,
-                other_costs: parseFloat(editLeaseForm.other_costs) || 0,
-                deposit: parseFloat(editLeaseForm.deposit) || 0,
+                cold_rent: coldRent,
+                service_charge: serviceCharge,
+                heating_cost: heatingCost,
+                other_costs: otherCosts,
+                deposit: deposit,
                 payment_due_day: parseInt(editLeaseForm.payment_due_day) || 3,
-                last_rent_increase: editLeaseForm.last_rent_increase || null
+                last_rent_increase: editLeaseForm.last_rent_increase || null,
+                lease_type: editLeaseForm.lease_type || 'normal'
             }).eq('id', editLeaseForm.id);
 
             if (leaseError) throw leaseError;
+
+            // Sync unit fields with updated lease values
+            if (selectedLease?.unit_id) {
+                const { error: unitUpdateError } = await supabase.from('units').update({
+                    cold_rent_ist: coldRent,
+                    service_charge_soll: serviceCharge,
+                    heating_cost_soll: heatingCost,
+                    other_costs_soll: otherCosts,
+                    deposit_soll: deposit
+                }).eq('id', selectedLease.unit_id);
+
+                if (unitUpdateError) console.error('Fehler beim Aktualisieren der Einheit:', unitUpdateError);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 500));
             setIsDetailModalOpen(false);
@@ -393,113 +508,32 @@ const Tenants = () => {
             accessor: 'actions',
             align: 'right',
             render: (row) => row.activeLease ? (
-                <div style={{ position: 'relative', display: 'flex', justifyContent: 'flex-end' }}>
-                    <Button variant="ghost" size="sm" icon={MoreVertical} onClick={(e) => {
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <button onClick={(e) => {
                         e.stopPropagation();
+                        e.preventDefault();
+                        const rect = e.currentTarget.getBoundingClientRect();
                         if (openActionMenuId === row.activeLease.id) {
                             setOpenActionMenuId(null);
+                            setSelectedActionRow(null);
                         } else {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            setMenuPos({ top: rect.top, left: rect.right });
+                            const spaceBelow = window.innerHeight - rect.bottom;
+                            const openUp = spaceBelow < 200;
+                            setMenuPos({
+                                top: openUp ? rect.top : rect.bottom + 4,
+                                left: rect.left,
+                                openUp
+                            });
+                            setSelectedActionRow(row);
                             setOpenActionMenuId(row.activeLease.id);
                         }
-                    }}>Aktionen</Button>
-
-                    {openActionMenuId === row.activeLease.id && (
-                        <div style={{
-                            position: 'fixed',
-                            top: menuPos.top,
-                            left: menuPos.left,
-                            transform: 'translate(-100%, -100%)',
-                            backgroundColor: 'white',
-                            border: '1px solid var(--border-color)',
-                            borderRadius: 'var(--radius-md)',
-                            boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                            zIndex: 9999,
-                            minWidth: '180px',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            padding: '4px'
-                        }}>
-                            <button
-                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
-                                onClick={() => {
-                                    setOpenActionMenuId(null);
-                                    const l = row.activeLease;
-                                    setSelectedLease({ ...l, unit: row });
-                                    setEditTenantForm({
-                                        id: l.tenant.id,
-                                        first_name: l.tenant.first_name,
-                                        last_name: l.tenant.last_name,
-                                        email: l.tenant.email,
-                                        phone: l.tenant.phone,
-                                        occupants: l.tenant.occupants
-                                    });
-                                    setEditLeaseForm({
-                                        id: l.id,
-                                        start_date: l.start_date,
-                                        end_date: l.end_date,
-                                        cold_rent: l.cold_rent,
-                                        service_charge: l.service_charge,
-                                        heating_cost: l.heating_cost,
-                                        other_costs: l.other_costs,
-                                        deposit: l.deposit,
-                                        payment_due_day: l.payment_due_day,
-                                        last_rent_increase: l.last_rent_increase
-                                    });
-                                    setIsEditingDetails(false);
-                                    setIsDetailModalOpen(true);
-                                }}
-                            >
-                                <Eye size={14} /> Details
-                            </button>
-                            <button
-                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
-                                onClick={() => {
-                                    setOpenActionMenuId(null);
-                                    const l = row.activeLease;
-                                    setSelectedLease({ ...l, unit: row });
-                                    setEditTenantForm({
-                                        id: l.tenant.id,
-                                        first_name: l.tenant.first_name,
-                                        last_name: l.tenant.last_name,
-                                        email: l.tenant.email,
-                                        phone: l.tenant.phone,
-                                        occupants: l.tenant.occupants
-                                    });
-                                    setEditLeaseForm({
-                                        id: l.id,
-                                        start_date: l.start_date,
-                                        end_date: l.end_date,
-                                        cold_rent: l.cold_rent,
-                                        service_charge: l.service_charge,
-                                        heating_cost: l.heating_cost,
-                                        other_costs: l.other_costs,
-                                        deposit: l.deposit,
-                                        payment_due_day: l.payment_due_day,
-                                        last_rent_increase: l.last_rent_increase
-                                    });
-                                    setIsEditingDetails(true);
-                                    setIsDetailModalOpen(true);
-                                }}
-                            >
-                                <Edit size={14} /> Bearbeiten
-                            </button>
-                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                            <button
-                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
-                                onClick={() => {
-                                    setOpenActionMenuId(null);
-                                    handleDeleteLease(row.activeLease);
-                                }}
-                            >
-                                <Trash2 size={14} /> Löschen
-                            </button>
-                        </div>
-                    )}
+                    }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '8px', borderRadius: 'var(--radius-md)', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <MoreVertical size={18} />
+                    </button>
                 </div>
             ) : (
                 <Button variant="secondary" size="sm" icon={Plus} onClick={() => {
+                    if (!checkGlobalAccess()) return;
                     resetForms();
                     setLeaseForm(prev => ({
                         ...prev,
@@ -514,47 +548,86 @@ const Tenants = () => {
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
 
+    // Calculate displayed units (handling ended leases toggle)
+    let displayedUnits = [...units];
+    if (showEndedLeases) {
+        units.forEach(u => {
+            (u.endedLeases || []).forEach(el => {
+                displayedUnits.push({
+                    ...u,
+                    id: u.id + '-' + el.id,
+                    activeLease: el,
+                    status: 'ended'
+                });
+            });
+        });
+    }
+
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)', flexWrap: 'wrap', gap: '10px' }}>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Mietverhältnisse</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Übersicht der Einheiten und Auslastung</p>
                 </div>
-                <Button icon={Plus} onClick={() => { resetForms(); setIsCreateModalOpen(true); }}>Neuer Mieter</Button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <ExportDropdown
+                        reportType="mietverhaeltnisse"
+                        data={displayedUnits.map(u => ({
+                            property_id: u.property_id,
+                            mietername: u.activeLease?.tenant_name || '–',
+                            immobilie_einheit: `${u.propertyLabel || ''} / ${u.unit_name || ''}`.trim(),
+                            kaltmiete: u.activeLease?.cold_rent || 0,
+                            nebenkosten: u.activeLease?.utilities || 0,
+                            warmmiete: (u.activeLease?.cold_rent || 0) + (u.activeLease?.utilities || 0),
+                            mietbeginn: u.activeLease?.start_date || '',
+                            wohnflaeche: u.sqm || 0,
+                            kaution: u.activeLease?.deposit || 0,
+                            status: u.activeLease ? 'Vermietet' : 'Leer',
+                            _propertyLabel: u.propertyLabel || '–',
+                        }))}
+                        properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number}` }))}
+                        currentFilters={{ property_id: filterPropertyId }}
+                        totalRows={displayedUnits.length}
+                    />
+                    <Button icon={Plus} onClick={() => {
+                        if (!checkGlobalAccess()) return;
+                        resetForms();
+                        setIsCreateModalOpen(true);
+                    }}>Neuer Mieter</Button>
+                </div>
             </div>
 
             {/* Filter Bar */}
-            <Card style={{ marginBottom: 'var(--spacing-lg)', padding: 'var(--spacing-md)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <Filter size={18} style={{ color: 'var(--text-secondary)' }} />
-                        <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Filter:</span>
-                    </div>
-                    <div>
-                        <select
-                            value={filterPropertyId}
-                            onChange={e => setFilterPropertyId(e.target.value)}
-                            style={{ padding: '8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '200px' }}
-                        >
-                            <option value="">Alle Immobilien</option>
-                            {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
-                        </select>
-                    </div>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginLeft: 'auto', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-                        <input
-                            type="checkbox"
-                            checked={showEndedLeases}
-                            onChange={e => setShowEndedLeases(e.target.checked)}
-                            style={{ width: '16px', height: '16px', accentColor: 'var(--primary-color)', cursor: 'pointer' }}
-                        />
-                        Beendete Mietverhältnisse anzeigen
-                    </label>
+            <div style={{ marginBottom: 'var(--spacing-lg)', display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <Filter size={18} style={{ color: 'var(--text-secondary)' }} />
+                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Filter:</span>
                 </div>
-            </Card>
+                <div>
+                    <select
+                        value={filterPropertyId}
+                        onChange={e => setFilterPropertyId(e.target.value)}
+                        style={{ padding: '8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '200px' }}
+                    >
+                        <option value="">Alle Immobilien</option>
+                        {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
+                    </select>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginLeft: 'auto', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                    <input
+                        type="checkbox"
+                        checked={showEndedLeases}
+                        onChange={e => setShowEndedLeases(e.target.checked)}
+                        style={{ width: '16px', height: '16px', accentColor: 'var(--primary-color)', cursor: 'pointer' }}
+                    />
+                    Beendete Mietverhältnisse anzeigen
+                </label>
+            </div>
 
             {/* KPIs */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
+            {/* KPIs */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
                 <Card>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
@@ -596,22 +669,151 @@ const Tenants = () => {
                         Keine Einheiten gefunden.
                     </div>
                 ) : (
-                    <Table columns={columns} data={(() => {
-                        let rows = [...units];
-                        if (showEndedLeases) {
-                            units.forEach(u => {
-                                (u.endedLeases || []).forEach(el => {
-                                    rows.push({
-                                        ...u,
-                                        id: u.id + '-' + el.id,
-                                        activeLease: el,
-                                        status: 'ended'
-                                    });
-                                });
-                            });
-                        }
-                        return rows;
-                    })()} />
+                    <>
+                        <div className="hidden-mobile">
+                            <Table columns={columns} data={displayedUnits} />
+                        </div>
+
+                        {/* Mobile Card View */}
+                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            {displayedUnits.map((row) => (
+                                <div key={row.id} style={{
+                                    border: '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)',
+                                    padding: 'var(--spacing-md)',
+                                    backgroundColor: 'var(--surface-color)',
+                                    position: 'relative'
+                                }}>
+                                    {/* Header: Status and Property */}
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                        <div>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{row.property?.street} {row.property?.house_number}</div>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                {row.property?.city} • {row.unit_name}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            {row.status === 'rented' ? (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                                                    color: 'var(--success-color)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <Key size={10} /> Vermietet
+                                                </span>
+                                            ) : row.status === 'ended' ? (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(107, 114, 128, 0.1)',
+                                                    color: '#6b7280',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <AlertCircle size={10} /> Beendet
+                                                </span>
+                                            ) : (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                                                    color: 'var(--danger-color)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <AlertCircle size={10} /> Leerstand
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Tenant Info */}
+                                    <div style={{ marginBottom: '12px', fontSize: '0.9rem' }}>
+                                        {row.activeLease ? (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <Users size={16} className="text-secondary" />
+                                                <span style={{ fontWeight: 500 }}>
+                                                    {row.activeLease.tenant?.first_name} {row.activeLease.tenant?.last_name}
+                                                </span>
+                                            </div>
+                                        ) : (
+                                            <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.85rem' }}>Kein Mieter zugeordnet</div>
+                                        )}
+                                    </div>
+
+                                    {/* Lease Dates */}
+                                    {row.activeLease && (
+                                        <div style={{
+                                            fontSize: '0.8rem',
+                                            color: 'var(--text-secondary)',
+                                            paddingTop: '8px',
+                                            borderTop: '1px solid var(--border-color)',
+                                            marginBottom: '12px'
+                                        }}>
+                                            Laufzeit: {new Date(row.activeLease.start_date).toLocaleDateString()} — {row.activeLease.end_date ? new Date(row.activeLease.end_date).toLocaleDateString() : 'Unbefristet'}
+                                        </div>
+                                    )}
+
+                                    {/* Action Button */}
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '8px' }}>
+                                        {row.activeLease ? (
+                                            <Button variant="secondary" size="sm" onClick={() => {
+                                                const l = row.activeLease;
+                                                setSelectedLease({ ...l, unit: row });
+                                                setEditTenantForm({
+                                                    id: l.tenant.id,
+                                                    first_name: l.tenant.first_name,
+                                                    last_name: l.tenant.last_name,
+                                                    email: l.tenant.email,
+                                                    phone: l.tenant.phone,
+                                                    occupants: l.tenant.occupants
+                                                });
+                                                setEditLeaseForm({
+                                                    id: l.id,
+                                                    start_date: l.start_date,
+                                                    end_date: l.end_date,
+                                                    cold_rent: l.cold_rent,
+                                                    service_charge: l.service_charge,
+                                                    heating_cost: l.heating_cost,
+                                                    other_costs: l.other_costs,
+                                                    deposit: l.deposit,
+                                                    payment_due_day: l.payment_due_day,
+                                                    last_rent_increase: l.last_rent_increase,
+                                                    lease_type: l.lease_type
+                                                });
+                                                setIsEditingDetails(false);
+                                                setIsDetailModalOpen(true);
+                                            }}>
+                                                <Eye size={14} style={{ marginRight: '4px' }} /> Details
+                                            </Button>
+                                        ) : (
+                                            <Button size="sm" icon={Plus} onClick={() => {
+                                                resetForms();
+                                                setLeaseForm(prev => ({
+                                                    ...prev,
+                                                    property_id: row.property_id,
+                                                    unit_id: row.id
+                                                }));
+                                                setIsCreateModalOpen(true);
+                                            }}>Vermieten</Button>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </Card>
 
@@ -678,18 +880,47 @@ const Tenants = () => {
                             <Input label="Mietbeginn" type="date" value={leaseForm.start_date} onChange={e => setLeaseForm({ ...leaseForm, start_date: e.target.value })} />
                             <Input label="Mietende (optional)" type="date" value={leaseForm.end_date} onChange={e => setLeaseForm({ ...leaseForm, end_date: e.target.value })} />
                         </div>
+                        <div>
+                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Vertragsart</label>
+                            <select
+                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
+                                value={leaseForm.lease_type}
+                                onChange={e => setLeaseForm({ ...leaseForm, lease_type: e.target.value })}
+                            >
+                                <option value="normal">Unbefristeter Normalmietvertrag</option>
+                                <option value="staffel">Staffelmietvertrag</option>
+                                <option value="index">Indexmietvertrag</option>
+                            </select>
+                        </div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="Kaltmiete" type="number" value={leaseForm.cold_rent} onChange={e => setLeaseForm({ ...leaseForm, cold_rent: e.target.value })} />
-                            <Input label="Nebenkosten" type="number" value={leaseForm.service_charge} onChange={e => setLeaseForm({ ...leaseForm, service_charge: e.target.value })} />
+                            <Input label="Kaltmiete Soll (Einheit)" value={unitsDropdown.find(u => u.id === leaseForm.unit_id)?.target_rent || ''} readOnly />
+                            <CurrencyInput label="Kaltmiete (Vertrag) (€)" allowDecimals value={leaseForm.cold_rent} onChange={e => setLeaseForm({ ...leaseForm, cold_rent: e.target.value })} />
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="Heizkosten" type="number" value={leaseForm.heating_cost} onChange={e => setLeaseForm({ ...leaseForm, heating_cost: e.target.value })} />
-                            <Input label="Sonstige Kosten" type="number" value={leaseForm.other_costs} onChange={e => setLeaseForm({ ...leaseForm, other_costs: e.target.value })} />
+                            <CurrencyInput label="Nebenkosten (€)" allowDecimals value={leaseForm.service_charge} onChange={e => setLeaseForm({ ...leaseForm, service_charge: e.target.value })} />
+                            <CurrencyInput label="Heizkosten (€)" allowDecimals value={leaseForm.heating_cost} onChange={e => setLeaseForm({ ...leaseForm, heating_cost: e.target.value })} />
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="Kaution" type="number" value={leaseForm.deposit} onChange={e => setLeaseForm({ ...leaseForm, deposit: e.target.value })} />
-                            <Input label="Zahltag (1-31)" type="number" value={leaseForm.payment_due_day} onChange={e => setLeaseForm({ ...leaseForm, payment_due_day: e.target.value })} />
+                            <CurrencyInput label="Sonstige Kosten (€)" allowDecimals value={leaseForm.other_costs} onChange={e => setLeaseForm({ ...leaseForm, other_costs: e.target.value })} />
+                            <CurrencyInput label="Kaution (€)" allowDecimals value={leaseForm.deposit} onChange={e => setLeaseForm({ ...leaseForm, deposit: e.target.value })} />
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
+                            <Input
+                                label="Zahltag (1-31)"
+                                type="number"
+                                min="1"
+                                max="31"
+                                value={leaseForm.payment_due_day}
+                                onChange={e => {
+                                    let val = parseInt(e.target.value);
+                                    if (isNaN(val)) val = '';
+                                    else if (val > 31) val = 31;
+                                    else if (val < 1) val = 1;
+                                    setLeaseForm({ ...leaseForm, payment_due_day: val });
+                                }}
+                            />
+                            <div></div>
                         </div>
                     </div>
                 )}
@@ -720,7 +951,7 @@ const Tenants = () => {
                 {isSaving && <LoadingOverlay message="Speichere Änderungen..." />}
                 {selectedLease && (
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F9FAFB', padding: '10px', borderRadius: 'var(--radius-md)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--background-color)', padding: '10px', borderRadius: 'var(--radius-md)' }}>
                             <div style={{ fontWeight: 600 }}>{editTenantForm.first_name} {editTenantForm.last_name}</div>
                             <div style={{ fontSize: '0.875rem' }}>{selectedLease.unit?.property?.street} {selectedLease.unit?.property?.house_number} / {selectedLease.unit?.unit_name}</div>
                         </div>
@@ -746,17 +977,36 @@ const Tenants = () => {
                                             <div>{new Date(editLeaseForm.start_date).toLocaleDateString()} — {editLeaseForm.end_date ? new Date(editLeaseForm.end_date).toLocaleDateString() : 'Unbefristet'}</div>
                                         </div>
                                         <div>
+                                            <label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Vertragsart</label>
+                                            <div>{LEASE_TYPE_LABELS[editLeaseForm.lease_type] || 'Normalmietvertrag'}</div>
+                                        </div>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', fontSize: '0.9rem', marginTop: 'var(--spacing-md)' }}>
+                                        <div>
                                             <label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Letzte Mieterhöhung</label>
                                             <div>{editLeaseForm.last_rent_increase ? new Date(editLeaseForm.last_rent_increase).toLocaleDateString() : '—'}</div>
+                                        </div>
+                                        <div>
+                                            <label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Nächste mögliche Mieterhöhung</label>
+                                            {(() => {
+                                                const nextDate = calcNextRentIncrease(editLeaseForm);
+                                                if (!nextDate) return <div>—</div>;
+                                                const now = new Date();
+                                                const oneMonthBefore = new Date(nextDate);
+                                                oneMonthBefore.setMonth(oneMonthBefore.getMonth() - 1);
+                                                const isPending = now >= oneMonthBefore;
+                                                return <div style={{ fontWeight: isPending ? 700 : 400, color: isPending ? 'var(--warning-color)' : 'inherit' }}>{nextDate.toLocaleDateString()}{isPending ? ' ⚠️' : ''}</div>;
+                                            })()}
                                         </div>
                                     </div>
                                 </div>
                                 {/* Financial details similar to before */}
                                 <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-md)' }}>
                                     <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Zahlungen</h4>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', fontSize: '0.9rem' }}>
-                                        <div><label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Kaltmiete</label><div>{parseFloat(editLeaseForm.cold_rent).toFixed(2)} €</div></div>
-                                        <div><label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Nebenkosten</label><div>{parseFloat(editLeaseForm.service_charge).toFixed(2)} €</div></div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--spacing-md)', fontSize: '0.9rem' }}>
+                                        <div><label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Kaltmiete Soll (Einheit)</label><div>{selectedLease.unit?.target_rent ? parseFloat(selectedLease.unit.target_rent).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' }) : '—'}</div></div>
+                                        <div><label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Kaltmiete (Vertrag)</label><div>{parseFloat(editLeaseForm.cold_rent).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div></div>
+                                        <div><label style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Nebenkosten</label><div>{parseFloat(editLeaseForm.service_charge).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div></div>
                                     </div>
                                 </div>
                             </>
@@ -784,20 +1034,45 @@ const Tenants = () => {
                                         <Input label="Mietbeginn" type="date" value={editLeaseForm.start_date} onChange={e => setEditLeaseForm({ ...editLeaseForm, start_date: e.target.value })} />
                                         <Input label="Mietende" type="date" value={editLeaseForm.end_date || ''} onChange={e => setEditLeaseForm({ ...editLeaseForm, end_date: e.target.value })} />
                                     </div>
-                                    <div style={{ marginTop: 'var(--spacing-md)' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>
                                         <Input label="Letzte Mieterhöhung" type="date" value={editLeaseForm.last_rent_increase || ''} onChange={e => setEditLeaseForm({ ...editLeaseForm, last_rent_increase: e.target.value })} />
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Vertragsart</label>
+                                            <select
+                                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
+                                                value={editLeaseForm.lease_type || 'normal'}
+                                                onChange={e => setEditLeaseForm({ ...editLeaseForm, lease_type: e.target.value })}
+                                            >
+                                                <option value="normal">Normalmietvertrag</option>
+                                                <option value="staffel">Staffelmietvertrag</option>
+                                                <option value="index">Indexmietvertrag</option>
+                                            </select>
+                                        </div>
                                     </div>
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>
-                                        <Input label="Kaltmiete" type="number" value={editLeaseForm.cold_rent} onChange={e => setEditLeaseForm({ ...editLeaseForm, cold_rent: e.target.value })} />
-                                        <Input label="Nebenkosten" type="number" value={editLeaseForm.service_charge} onChange={e => setEditLeaseForm({ ...editLeaseForm, service_charge: e.target.value })} />
+                                        <CurrencyInput label="Kaltmiete (€)" allowDecimals value={editLeaseForm.cold_rent} onChange={e => setEditLeaseForm({ ...editLeaseForm, cold_rent: e.target.value })} />
+                                        <CurrencyInput label="Nebenkosten (€)" allowDecimals value={editLeaseForm.service_charge} onChange={e => setEditLeaseForm({ ...editLeaseForm, service_charge: e.target.value })} />
                                     </div>
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>
-                                        <Input label="Heizkosten" type="number" value={editLeaseForm.heating_cost} onChange={e => setEditLeaseForm({ ...editLeaseForm, heating_cost: e.target.value })} />
-                                        <Input label="Sonstige Kosten" type="number" value={editLeaseForm.other_costs} onChange={e => setEditLeaseForm({ ...editLeaseForm, other_costs: e.target.value })} />
+                                        <CurrencyInput label="Heizkosten (€)" allowDecimals value={editLeaseForm.heating_cost} onChange={e => setEditLeaseForm({ ...editLeaseForm, heating_cost: e.target.value })} />
+                                        <CurrencyInput label="Sonstige Kosten (€)" allowDecimals value={editLeaseForm.other_costs} onChange={e => setEditLeaseForm({ ...editLeaseForm, other_costs: e.target.value })} />
                                     </div>
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>
-                                        <Input label="Kaution" type="number" value={editLeaseForm.deposit} onChange={e => setEditLeaseForm({ ...editLeaseForm, deposit: e.target.value })} />
-                                        <Input label="Zahltag" type="number" value={editLeaseForm.payment_due_day} onChange={e => setEditLeaseForm({ ...editLeaseForm, payment_due_day: e.target.value })} />
+                                        <CurrencyInput label="Kaution (€)" allowDecimals value={editLeaseForm.deposit} onChange={e => setEditLeaseForm({ ...editLeaseForm, deposit: e.target.value })} />
+                                        <Input
+                                            label="Zahltag"
+                                            type="number"
+                                            min="1"
+                                            max="31"
+                                            value={editLeaseForm.payment_due_day}
+                                            onChange={e => {
+                                                let val = parseInt(e.target.value);
+                                                if (isNaN(val)) val = '';
+                                                else if (val > 31) val = 31;
+                                                else if (val < 1) val = 1;
+                                                setEditLeaseForm({ ...editLeaseForm, payment_due_day: val });
+                                            }}
+                                        />
                                     </div>
                                 </div>
                             </div>
@@ -806,6 +1081,119 @@ const Tenants = () => {
                     </div>
                 )}
             </Modal>
+
+            {/* Action Dropdown Menu — rendered via Portal to avoid overflow clipping from Table */}
+            {openActionMenuId && selectedActionRow && createPortal(
+                <>
+                    <div onClick={() => { setOpenActionMenuId(null); setSelectedActionRow(null); }} style={{ position: 'fixed', inset: 0, zIndex: 9998 }} />
+                    <div style={{
+                        position: 'fixed',
+                        top: menuPos.openUp ? 'auto' : menuPos.top,
+                        bottom: menuPos.openUp ? `${window.innerHeight - menuPos.top}px` : 'auto',
+                        left: menuPos.left,
+                        transform: 'translateX(-100%)',
+                        backgroundColor: 'var(--surface-color)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: 'var(--radius-md)',
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                        zIndex: 9999,
+                        minWidth: '180px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        padding: '4px'
+                    }}>
+                        <button
+                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
+                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                            onClick={() => {
+                                const row = selectedActionRow;
+                                const l = row.activeLease;
+                                setOpenActionMenuId(null);
+                                setSelectedActionRow(null);
+                                setSelectedLease({ ...l, unit: row });
+                                setEditTenantForm({
+                                    id: l.tenant.id,
+                                    first_name: l.tenant.first_name,
+                                    last_name: l.tenant.last_name,
+                                    email: l.tenant.email,
+                                    phone: l.tenant.phone,
+                                    occupants: l.tenant.occupants
+                                });
+                                setEditLeaseForm({
+                                    id: l.id,
+                                    start_date: l.start_date,
+                                    end_date: l.end_date,
+                                    cold_rent: l.cold_rent,
+                                    service_charge: l.service_charge,
+                                    heating_cost: l.heating_cost,
+                                    other_costs: l.other_costs,
+                                    deposit: l.deposit,
+                                    payment_due_day: l.payment_due_day,
+                                    last_rent_increase: l.last_rent_increase,
+                                    lease_type: l.lease_type
+                                });
+                                setIsEditingDetails(false);
+                                setIsDetailModalOpen(true);
+                            }}
+                        >
+                            <Eye size={14} /> Details
+                        </button>
+                        <button
+                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
+                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                            onClick={() => {
+                                const row = selectedActionRow;
+                                const l = row.activeLease;
+                                setOpenActionMenuId(null);
+                                setSelectedActionRow(null);
+                                setSelectedLease({ ...l, unit: row });
+                                setEditTenantForm({
+                                    id: l.tenant.id,
+                                    first_name: l.tenant.first_name,
+                                    last_name: l.tenant.last_name,
+                                    email: l.tenant.email,
+                                    phone: l.tenant.phone,
+                                    occupants: l.tenant.occupants
+                                });
+                                setEditLeaseForm({
+                                    id: l.id,
+                                    start_date: l.start_date,
+                                    end_date: l.end_date,
+                                    cold_rent: l.cold_rent,
+                                    service_charge: l.service_charge,
+                                    heating_cost: l.heating_cost,
+                                    other_costs: l.other_costs,
+                                    deposit: l.deposit,
+                                    payment_due_day: l.payment_due_day,
+                                    last_rent_increase: l.last_rent_increase,
+                                    lease_type: l.lease_type
+                                });
+                                setIsEditingDetails(true);
+                                setIsDetailModalOpen(true);
+                            }}
+                        >
+                            <Edit size={14} /> Bearbeiten
+                        </button>
+                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                        <button
+                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '6px' }}
+                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.06)'}
+                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                            onClick={() => {
+                                const lease = selectedActionRow.activeLease;
+                                setOpenActionMenuId(null);
+                                setSelectedActionRow(null);
+                                handleDeleteLease(lease);
+                            }}
+                        >
+                            <Trash2 size={14} /> Löschen
+                        </button>
+                    </div>
+                </>,
+                document.body
+            )}
         </div>
     );
 };

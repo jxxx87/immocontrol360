@@ -21,12 +21,10 @@ const Input = ({ label, type = 'text', placeholder, value, onChange, ...props })
                 onChange={onChange}
                 style={{
                     width: '100%',
-                    padding: '0.5rem 0.75rem',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-color)',
+                    // managed by global CSS
                     fontSize: '0.875rem',
                     outline: 'none',
-                    transition: 'border-color 0.2s',
+                    ...props.style
                 }}
                 {...props}
             />

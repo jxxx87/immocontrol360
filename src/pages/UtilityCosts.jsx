@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
 import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
+import CurrencyInput from '../components/ui/CurrencyInput';
 import {
     Plus, Loader2, ChevronDown, ChevronRight, Edit2, Trash2,
     Download, ArrowLeft, ArrowRight, Save, Check, X, FileText,
@@ -14,6 +16,8 @@ import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
+import { useViewMode } from '../context/ViewModeContext';
+import { usePdfTemplate, fetchPdfTemplate } from '../lib/usePdfTemplate';
 
 const formatDate = (dateStr) => {
     if (!dateStr) return '–';
@@ -22,43 +26,51 @@ const formatDate = (dateStr) => {
 };
 
 // ========== STEP INDICATOR ==========
-const StepIndicator = ({ steps, currentStep }) => (
-    <div style={{ display: 'flex', alignItems: 'center', marginBottom: '2rem', padding: '0 1rem' }}>
-        {steps.map((step, i) => (
-            <React.Fragment key={i}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div style={{
-                        width: 32, height: 32, borderRadius: '50%',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontWeight: 600, fontSize: '0.85rem',
-                        backgroundColor: i <= currentStep ? 'var(--primary-color)' : '#E5E7EB',
-                        color: i <= currentStep ? '#fff' : '#6B7280',
-                        transition: 'all 0.3s'
-                    }}>
-                        {i < currentStep ? <Check size={16} /> : i + 1}
+const StepIndicator = ({ steps, currentStep, onStepClick }) => (
+    <div style={{ marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', padding: '0 0.25rem' }}>
+            {steps.map((step, i) => (
+                <React.Fragment key={i}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', minWidth: 0, cursor: onStepClick ? 'pointer' : 'default' }}
+                        onClick={() => onStepClick && onStepClick(i)}>
+                        <div style={{
+                            width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontWeight: 600, fontSize: '0.8rem',
+                            backgroundColor: i <= currentStep ? 'var(--primary-color)' : '#E5E7EB',
+                            color: i <= currentStep ? '#fff' : '#6B7280',
+                            transition: 'all 0.3s'
+                        }}>
+                            {i < currentStep ? <Check size={14} /> : i + 1}
+                        </div>
+                        <span style={{
+                            fontSize: '0.65rem', fontWeight: i === currentStep ? 700 : 400,
+                            color: i <= currentStep ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            textAlign: 'center', lineHeight: 1.2, maxWidth: '80px',
+                            overflow: 'hidden', textOverflow: 'ellipsis',
+                            display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical'
+                        }}>{step}</span>
                     </div>
-                    <span style={{
-                        fontSize: '0.85rem', fontWeight: i === currentStep ? 600 : 400,
-                        color: i <= currentStep ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        whiteSpace: 'nowrap'
-                    }}>{step}</span>
-                </div>
-                {i < steps.length - 1 && (
-                    <div style={{
-                        flex: 1, height: 2, margin: '0 12px',
-                        backgroundColor: i < currentStep ? 'var(--primary-color)' : '#E5E7EB',
-                        transition: 'all 0.3s'
-                    }} />
-                )}
-            </React.Fragment>
-        ))}
+                    {i < steps.length - 1 && (
+                        <div style={{
+                            flex: 1, height: 2, marginTop: '13px',
+                            backgroundColor: i < currentStep ? 'var(--primary-color)' : '#E5E7EB',
+                            transition: 'all 0.3s'
+                        }} />
+                    )}
+                </React.Fragment>
+            ))}
+        </div>
     </div>
 );
+
 
 // ========== MAIN COMPONENT ==========
 const UtilityCosts = () => {
     const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const { isMobile } = useViewMode();
+    const pdfTemplate = usePdfTemplate('nebenkostenabrechnung');
 
     const [loading, setLoading] = useState(true);
     const [properties, setProperties] = useState([]);
@@ -78,6 +90,7 @@ const UtilityCosts = () => {
     // UI State
     const [expandedProperty, setExpandedProperty] = useState(null);
     const [openSettlementMenuId, setOpenSettlementMenuId] = useState(null);
+    const [settlementMenuPos, setSettlementMenuPos] = useState(null);
     const [wizardOpen, setWizardOpen] = useState(false);
     const [wizardStep, setWizardStep] = useState(0);
     const [editingSettlement, setEditingSettlement] = useState(null);
@@ -92,21 +105,13 @@ const UtilityCosts = () => {
     const [reviewUnit, setReviewUnit] = useState(null);
     const [step3SelectedUnit, setStep3SelectedUnit] = useState(null);
 
-    const stepLabels = ['Einheiten auswählen', 'Kosten & Verteilerschlüssel', 'Kosten je Einheit', 'Prüfen & Abschließen'];
+    const stepLabels = ['Einheiten', 'Kosten', 'Verteilung', 'Abschluss'];
 
     // ===== FETCH DATA =====
     useEffect(() => {
         if (user) fetchData();
     }, [user, selectedPortfolioID]);
-
-    // Close menu when clicking outside
-    useEffect(() => {
-        const handleClickOutside = () => setOpenSettlementMenuId(null);
-        if (openSettlementMenuId) {
-            document.addEventListener('click', handleClickOutside);
-        }
-        return () => document.removeEventListener('click', handleClickOutside);
-    }, [openSettlementMenuId]);
+    // Menu close on outside click is handled by the backdrop overlay in JSX
 
     const fetchData = async () => {
         try {
@@ -509,13 +514,15 @@ const UtilityCosts = () => {
     };
 
     // ===== SETTLEMENT HTML GENERATION =====
-    const generateSettlementHTML = (settlement, singleUnitId = null, targetTenantId = null) => {
+    const generateSettlementHTML = (settlement, singleUnitId = null, targetTenantId = null, templateOverride = null) => {
+        const tpl = templateOverride || pdfTemplate;
         const prop = getPropertyFull(settlement.property_id);
         const data = settlement.data || {};
         const sUnits = data.selectedUnitIds || [];
         const sCosts = data.unitCosts || {};
         const sCostItems = data.costItems || [];
-        const logoUrl = window.location.origin + '/logo.png';
+        const logoUrl = tpl.logoUrl || null;
+        const accentColor = tpl.accentColor || '#0ea5e9';
 
         const propAddress = prop ? `${prop.street} ${prop.house_number}` : '–';
         const propCity = prop ? `${prop.zip} ${prop.city}` : '';
@@ -598,20 +605,20 @@ const UtilityCosts = () => {
             // Generate Page 1
             pagesHTML += `
             <div style="page-break-before:${idx > 0 ? 'always' : 'auto'};min-height:250mm;position:relative;background:#fff">
-                <div style="text-align:right;margin-bottom:25px"><img src="${logoUrl}" style="height:135px" alt="Logo" /></div>
+                ${logoUrl ? `<div style="text-align:right;margin-bottom:25px"><img src="${logoUrl}" style="max-height:50px;max-width:200px;object-fit:contain" alt="Logo" /></div>` : ''}
                 <div style="margin-bottom:16px">
                     <div style="font-size:8px;color:#aaa;border-bottom:1px solid #ddd;display:inline-block;padding-bottom:1px;margin-bottom:3px">${(() => { const pf = portfolios.find(p => p.id === prop?.portfolio_id); return pf?.name || ''; })()}, ${propAddress}, ${propCity}</div>
                     <div style="font-size:11px;line-height:1.5">${page.tenantName}<br>${propAddress}<br>${propCity}</div>
                 </div>
                 <div style="text-align:right;font-size:11px;margin:10px 0">${formatDate(settlement.created_at)}</div>
                 <h2 style="font-size:15px;font-weight:700;margin:0 0 10px">Ihre Betriebskostenabrechnung</h2>
-                <div style="border:1px solid #0ea5e9;border-radius:3px;padding:10px 12px;margin-bottom:18px;position:relative">
-                    <div style="position:absolute;top:-8px;left:8px;background:#fff;padding:0 5px;font-weight:600;color:#0ea5e9;font-size:11px">Ihre Daten</div>
+                <div style="border:1px solid ${accentColor};border-radius:3px;padding:10px 12px;margin-bottom:18px;position:relative">
+                    <div style="position:absolute;top:-8px;left:8px;background:#fff;padding:0 5px;font-weight:600;color:${accentColor};font-size:11px">Ihre Daten</div>
                     <table style="width:100%;font-size:10px;margin-top:2px">
                         <tr>
                             <td style="width:40%;padding:1px 0"><span style="color:#aaa;font-size:9px">Adresse</span><br><b>${propAddress}<br>${propCity}</b></td>
                             <td style="width:30%;padding:1px 0"><span style="color:#aaa;font-size:9px">Lage</span><br><b>${page.unitName}</b></td>
-                            <td style="width:30%;padding:1px 0"><span style="color:#aaa;font-size:9px">Abrechnungszeitraum</span><br><b style="color:#0ea5e9">${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}</b></td>
+                            <td style="width:30%;padding:1px 0"><span style="color:#aaa;font-size:9px">Abrechnungszeitraum</span><br><b style="color:${accentColor}">${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}</b></td>
                         </tr>
                         <tr>
                             <td style="padding:5px 0 1px"><span style="color:#aaa;font-size:9px">Erstellungsdatum</span><br><b>${formatDate(settlement.created_at)}</b></td>
@@ -656,20 +663,25 @@ const UtilityCosts = () => {
                 const totalCost = sourceItem ? sourceItem.amount : 0;
                 const key = sourceItem ? sourceItem.distribution_key : 'anteil';
 
+                // Resolve key: check distributionKeys first, then legacy strings
+                const dkObj = distributionKeys.find(k => k.id === key);
+                const resolvedType = dkObj ? dkObj.calculation_type : (key === 'wohnflaeche' ? 'area' : key === 'personenanzahl' ? 'persons' : key === 'einheit' ? 'units' : key === 'anteil' ? 'equal' : 'area');
+                const resolvedName = dkObj ? dkObj.name : (keyLabels[key] || key);
+
                 let totalUnits = 0;
                 let myUnits = 0;
                 let unitLabel = '';
 
-                if (key === 'wohnflaeche') {
+                if (resolvedType === 'area') {
                     totalUnits = totalArea;
                     myUnits = page.sqm;
                     unitLabel = 'm²';
-                } else if (key === 'personenanzahl') {
+                } else if (resolvedType === 'persons') {
                     totalUnits = totalPersons;
                     myUnits = page.occupants;
                     unitLabel = 'P.';
                 } else {
-                    // Default or 'einheit'
+                    // Default or 'units'/'equal'
                     totalUnits = totalUnitCount;
                     myUnits = 1;
                     unitLabel = 'Einh.';
@@ -677,7 +689,7 @@ const UtilityCosts = () => {
 
                 const costPerUnit = totalUnits > 0 ? totalCost / totalUnits : 0;
                 let factor = page.ratio;
-                if (key === 'personenanzahl' && page.occupants === 0) {
+                if (resolvedType === 'persons' && page.occupants === 0) {
                     factor = 0;
                 }
                 const itemShare = (item.amount || 0) * factor;
@@ -685,7 +697,7 @@ const UtilityCosts = () => {
                 return `
                         <tr style="border-bottom:1px solid #eee">
                             <td style="padding:3px 2px;font-weight:700">${item.label}</td>
-                            <td style="padding:3px 2px">${keyLabels[key] || key}</td>
+                            <td style="padding:3px 2px">${resolvedName}</td>
                             <td style="padding:3px 2px;text-align:right">${totalCost > 0 ? fmt(totalCost) + ' €' : '--'}</td>
                             <td style="padding:3px 2px;text-align:right">${totalUnits > 0 ? fmt(totalUnits) + ' ' + unitLabel : '--'}</td>
                             <td style="padding:3px 2px;text-align:right">${costPerUnit > 0 ? fmt(costPerUnit) + ' €' : '--'}</td>
@@ -717,8 +729,13 @@ const UtilityCosts = () => {
     };
 
 
-    const previewSettlement = (settlement, unitId = null, tenantId = null) => {
-        const html = generateSettlementHTML(settlement, unitId, tenantId);
+    const previewSettlement = async (settlement, unitId = null, tenantId = null) => {
+        // Resolve the correct PDF template for this property's portfolio
+        const prop = getPropertyFull(settlement.property_id);
+        const tpl = prop?.portfolio_id
+            ? await fetchPdfTemplate(prop.portfolio_id, 'nebenkostenabrechnung')
+            : pdfTemplate;
+        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl);
         const win = window.open('', '_blank');
         win.document.write(html);
         win.document.close();
@@ -726,8 +743,12 @@ const UtilityCosts = () => {
     };
 
     const downloadSettlement = async (settlement, unitId = null, tenantId = null) => {
-        const html = generateSettlementHTML(settlement, unitId, tenantId);
+        // Resolve the correct PDF template for this property's portfolio
         const prop = getPropertyFull(settlement.property_id);
+        const tpl = prop?.portfolio_id
+            ? await fetchPdfTemplate(prop.portfolio_id, 'nebenkostenabrechnung')
+            : pdfTemplate;
+        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl);
 
         let suffix = '';
         if (unitId && tenantId) {
@@ -805,8 +826,8 @@ const UtilityCosts = () => {
                         </div>
                     </div>
 
-                    <Card>
-                        <StepIndicator steps={stepLabels} currentStep={wizardStep} />
+                    <Card style={isMobile ? { overflow: 'visible', height: 'auto' } : {}}>
+                        <StepIndicator steps={stepLabels} currentStep={wizardStep} onStepClick={(step) => setWizardStep(step)} />
 
                         {/* ===== STEP 1: Unit Selection ===== */}
                         {wizardStep === 0 && (
@@ -861,40 +882,144 @@ const UtilityCosts = () => {
                                     Umlagefähige Kosten aus Ihren Buchungen ({formatDate(periodStart)} – {formatDate(periodEnd)}) wurden automatisch geladen.
                                 </p>
 
-                                <div style={{ overflowX: 'auto' }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                        <thead>
-                                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                                <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
-                                                <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamtkosten (€)</th>
-                                                <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Verteilerschlüssel</th>
-                                                <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {costItems.map((item, idx) => (
-                                                <tr key={idx} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                    <td style={{ padding: '10px 12px', fontWeight: 500 }}>
-                                                        <input type="text" value={item.category_name}
+                                {!isMobile ? (
+                                    <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                                        <table style={{ width: '100%', minWidth: '600px', borderCollapse: 'collapse' }}>
+                                            <thead>
+                                                <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                    <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
+                                                    <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Betrag (€)</th>
+                                                    <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Verteiler</th>
+                                                    <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {costItems.map((item, idx) => (
+                                                    <tr key={idx} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                        <td style={{ padding: '10px 12px', fontWeight: 500, position: 'relative' }}>
+                                                            <textarea value={item.category_name}
+                                                                rows={1}
+                                                                onChange={e => {
+                                                                    const updated = [...costItems];
+                                                                    updated[idx].category_name = e.target.value;
+                                                                    setCostItems(updated);
+                                                                }}
+                                                                onFocus={e => {
+                                                                    e.target.rows = 3;
+                                                                    e.target.style.position = 'absolute';
+                                                                    e.target.style.zIndex = '20';
+                                                                    e.target.style.width = 'calc(100% + 200px)';
+                                                                    e.target.style.boxShadow = '0 4px 24px rgba(0,0,0,0.18)';
+                                                                    e.target.style.borderColor = 'var(--primary-color)';
+                                                                }}
+                                                                onBlur={e => {
+                                                                    e.target.rows = 1;
+                                                                    e.target.style.position = 'static';
+                                                                    e.target.style.zIndex = 'auto';
+                                                                    e.target.style.width = '100%';
+                                                                    e.target.style.boxShadow = 'none';
+                                                                    e.target.style.borderColor = 'var(--border-color)';
+                                                                }}
+                                                                style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500, fontFamily: 'inherit', fontSize: '0.9rem', resize: 'none', color: 'var(--text-primary)', backgroundColor: 'var(--surface-color)', transition: 'all 0.2s ease', left: 0, top: 0 }}
+                                                            />
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                                                            <CurrencyInput allowDecimals value={item.amount}
+                                                                onChange={e => {
+                                                                    const updated = [...costItems];
+                                                                    updated[idx].amount = e.target.value;
+                                                                    setCostItems(updated);
+                                                                }}
+                                                                style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right', fontSize: '0.85rem' }}
+                                                            />
+                                                        </td>
+                                                        <td style={{ padding: '10px 8px' }}>
+                                                            <select value={item.distribution_key}
+                                                                onChange={e => {
+                                                                    if (e.target.value === 'NEW_KEY') {
+                                                                        setPendingKeyIndex(idx);
+                                                                        setNewKeyName('');
+                                                                        setNewKeyDescription('');
+                                                                        setNewKeyType('custom');
+                                                                        setIsCreateKeyModalOpen(true);
+                                                                    } else {
+                                                                        const updated = [...costItems];
+                                                                        updated[idx].distribution_key = e.target.value;
+                                                                        setCostItems(updated);
+                                                                    }
+                                                                }}
+                                                                style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '160px', fontSize: '0.8rem' }}
+                                                            >
+                                                                {distributionKeys.map(k => {
+                                                                    const abbr = { area: 'Fläche', persons: 'Pers.', units: 'Einh.', equal: 'Gleich', custom: 'Verbr.' };
+                                                                    const short = abbr[k.calculation_type] || k.name;
+                                                                    return <option key={k.id} value={k.id}>{short}</option>;
+                                                                })}
+                                                                {!distributionKeys.some(k => k.id === item.distribution_key) && item.distribution_key && !item.distribution_key.startsWith('temp-') && (
+                                                                    <option value={item.distribution_key}>{item.distribution_key}</option>
+                                                                )}
+                                                                <option disabled>─────</option>
+                                                                <option value="NEW_KEY" style={{ fontWeight: 'bold' }}>+ Neu</option>
+                                                            </select>
+                                                        </td>
+                                                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                                            <button onClick={() => setCostItems(costItems.filter((_, i) => i !== idx))}
+                                                                style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+                                                                <Trash2 size={16} />
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                            <tfoot>
+                                                <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                                    <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
+                                                    <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
+                                                        {costItems.reduce((sum, i) => sum + (i.amount || 0), 0).toFixed(2)} €
+                                                    </td>
+                                                    <td colSpan={2}></td>
+                                                </tr>
+                                            </tfoot>
+                                        </table>
+                                    </div>
+                                ) : (
+                                    /* ===== MOBILE: Card Layout ===== */
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                        {costItems.map((item, idx) => (
+                                            <div key={idx} style={{
+                                                border: '1px solid var(--border-color)', borderRadius: '10px',
+                                                padding: '12px', backgroundColor: 'var(--surface-color)',
+                                                position: 'relative'
+                                            }}>
+                                                <button onClick={() => setCostItems(costItems.filter((_, i) => i !== idx))}
+                                                    style={{ position: 'absolute', top: '8px', right: '8px', color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px' }}>
+                                                    <Trash2 size={16} />
+                                                </button>
+                                                <div style={{ marginBottom: '8px' }}>
+                                                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Kostenart</label>
+                                                    <input type="text" value={item.category_name}
+                                                        onChange={e => {
+                                                            const updated = [...costItems];
+                                                            updated[idx].category_name = e.target.value;
+                                                            setCostItems(updated);
+                                                        }}
+                                                        style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', fontWeight: 500, fontSize: '0.9rem', color: 'var(--text-primary)', backgroundColor: 'var(--background-color)', marginTop: '4px' }}
+                                                    />
+                                                </div>
+                                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                                    <div>
+                                                        <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Betrag (€)</label>
+                                                        <CurrencyInput allowDecimals value={item.amount}
                                                             onChange={e => {
                                                                 const updated = [...costItems];
-                                                                updated[idx].category_name = e.target.value;
+                                                                updated[idx].amount = e.target.value;
                                                                 setCostItems(updated);
                                                             }}
-                                                            style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
+                                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', textAlign: 'right', fontSize: '0.9rem', marginTop: '4px' }}
                                                         />
-                                                    </td>
-                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                        <input type="number" step="0.01" value={item.amount}
-                                                            onChange={e => {
-                                                                const updated = [...costItems];
-                                                                updated[idx].amount = parseFloat(e.target.value) || 0;
-                                                                setCostItems(updated);
-                                                            }}
-                                                            style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
-                                                        />
-                                                    </td>
-                                                    <td style={{ padding: '10px 12px' }}>
+                                                    </div>
+                                                    <div>
+                                                        <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Verteiler</label>
                                                         <select value={item.distribution_key}
                                                             onChange={e => {
                                                                 if (e.target.value === 'NEW_KEY') {
@@ -909,39 +1034,34 @@ const UtilityCosts = () => {
                                                                     setCostItems(updated);
                                                                 }
                                                             }}
-                                                            style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '160px' }}
+                                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', fontSize: '0.85rem', marginTop: '4px', backgroundColor: 'var(--background-color)' }}
                                                         >
-                                                            {distributionKeys.map(k => (
-                                                                <option key={k.id} value={k.id}>{k.name}</option>
-                                                            ))}
-                                                            {/* Fallback for legacy keys if not in db */}
+                                                            {distributionKeys.map(k => {
+                                                                const abbr = { area: 'Fläche', persons: 'Pers.', units: 'Einh.', equal: 'Gleich', custom: 'Verbr.' };
+                                                                const short = abbr[k.calculation_type] || k.name;
+                                                                return <option key={k.id} value={k.id}>{short}</option>;
+                                                            })}
                                                             {!distributionKeys.some(k => k.id === item.distribution_key) && item.distribution_key && !item.distribution_key.startsWith('temp-') && (
                                                                 <option value={item.distribution_key}>{item.distribution_key}</option>
                                                             )}
-                                                            <option disabled>──────────</option>
-                                                            <option value="NEW_KEY" style={{ fontWeight: 'bold' }}>+ Eigene hinzufügen</option>
+                                                            <option disabled>─────</option>
+                                                            <option value="NEW_KEY" style={{ fontWeight: 'bold' }}>+ Neu</option>
                                                         </select>
-                                                    </td>
-                                                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                                        <button onClick={() => setCostItems(costItems.filter((_, i) => i !== idx))}
-                                                            style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
-                                                            <Trash2 size={16} />
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                        <tfoot>
-                                            <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                                <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
-                                                <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
-                                                    {costItems.reduce((sum, i) => sum + (i.amount || 0), 0).toFixed(2)} €
-                                                </td>
-                                                <td colSpan={2}></td>
-                                            </tr>
-                                        </tfoot>
-                                    </table>
-                                </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {/* Mobile Total */}
+                                        <div style={{
+                                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                            padding: '12px 16px', borderTop: '2px solid var(--border-color)',
+                                            fontWeight: 700, fontSize: '1.1rem', marginTop: '4px'
+                                        }}>
+                                            <span>Gesamt</span>
+                                            <span>{costItems.reduce((sum, i) => sum + (i.amount || 0), 0).toFixed(2)} €</span>
+                                        </div>
+                                    </div>
+                                )}
 
                                 <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
                                     const defaultKey = distributionKeys.find(k => k.calculation_type === 'units' || k.calculation_type === 'equal') || distributionKeys[0];
@@ -980,22 +1100,37 @@ const UtilityCosts = () => {
                                             if (!unit) return null;
                                             const tenant = getTenantForUnit(uid);
                                             const isActive = uid === activeUid;
+
+                                            // Mobile: shorten tenant names to "Nachname, V."
+                                            let displayTenant = tenant;
+                                            if (isMobile && tenant) {
+                                                const periods = getTenantsForUnitInPeriod(uid, periodStart, periodEnd);
+                                                if (periods.length > 0) {
+                                                    displayTenant = periods.map(tp => {
+                                                        if (!tp.tenant) return 'Leerstand';
+                                                        const first = tp.tenant.first_name ? tp.tenant.first_name.charAt(0) + '.' : '';
+                                                        return `${tp.tenant.last_name}${first ? ', ' + first : ''}`;
+                                                    }).join(' / ');
+                                                }
+                                            }
+
                                             return (
                                                 <button key={uid}
                                                     onClick={() => setStep3SelectedUnit(uid)}
                                                     style={{
                                                         display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
-                                                        padding: '10px 16px', borderRadius: 'var(--radius-md)',
-                                                        border: `2px solid ${isActive ? 'var(--primary-color)' : 'var(--border-color)'} `,
+                                                        padding: isMobile ? '8px 12px' : '10px 16px', borderRadius: 'var(--radius-md)',
+                                                        border: `2px solid ${isActive ? 'var(--primary-color)' : 'var(--border-color)'}`,
                                                         backgroundColor: isActive ? '#EFF6FF' : 'transparent',
-                                                        cursor: 'pointer', transition: 'all 0.2s', minWidth: '140px',
+                                                        cursor: 'pointer', transition: 'all 0.2s',
+                                                        minWidth: isMobile ? '100px' : '140px',
                                                         whiteSpace: 'nowrap'
                                                     }}>
-                                                    <span style={{ fontWeight: 600, fontSize: '0.9rem', color: isActive ? 'var(--primary-color)' : 'var(--text-primary)' }}>
+                                                    <span style={{ fontWeight: 600, fontSize: isMobile ? '0.8rem' : '0.9rem', color: isActive ? 'var(--primary-color)' : 'var(--text-primary)' }}>
                                                         {unit.unit_name}
                                                     </span>
-                                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                                                        {tenant || 'Leerstand'}
+                                                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                                        {displayTenant || 'Leerstand'}
                                                     </span>
                                                 </button>
                                             );
@@ -1016,32 +1151,157 @@ const UtilityCosts = () => {
                                                 </div>
                                             </div>
 
-                                            <div style={{ overflowX: 'auto' }}>
-                                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                                    <thead>
-                                                        <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                                            <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
-                                                            <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamt (€)</th>
-                                                            {(() => {
-                                                                // Calculate periods for header
-                                                                const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                                // If single tenant covering whole period, no need for split, unless requested? 
-                                                                // User said "die beiden mieter sind zusammengefasst". So show split if > 1 period or partial period.
-                                                                // Actually even 1 tenant might have partial period (vacancy).
-                                                                if (periods.length === 0) return <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Leerstand</th>;
-                                                                return periods.map((p, idx) => (
-                                                                    <th key={idx} style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                                                                        {p.tenant ? p.tenant.last_name : 'Leerstand'} ({Math.round(p.ratio * 100)}%)
-                                                                    </th>
-                                                                ));
-                                                            })()}
-                                                            <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {activeCosts.map((c, i) => (
-                                                            <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                                <td style={{ padding: '10px 12px' }}>
+                                            {!isMobile ? (
+                                                <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                                                    <table style={{ width: '100%', minWidth: '650px', borderCollapse: 'collapse' }}>
+                                                        <thead>
+                                                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                                <th style={{ textAlign: 'left', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kostenart</th>
+                                                                <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Gesamt (€)</th>
+                                                                {(() => {
+                                                                    const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                                    // If single tenant covering whole period, no need for split, unless requested? 
+                                                                    // User said "die beiden mieter sind zusammengefasst". So show split if > 1 period or partial period.
+                                                                    // Actually even 1 tenant might have partial period (vacancy).
+                                                                    if (periods.length === 0) return <th style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Leerstand</th>;
+                                                                    return periods.map((p, idx) => (
+                                                                        <th key={idx} style={{ textAlign: 'right', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                                                            {p.tenant ? p.tenant.last_name : 'Leerstand'} ({Math.round(p.ratio * 100)}%)
+                                                                        </th>
+                                                                    ));
+                                                                })()}
+                                                                <th style={{ textAlign: 'center', padding: '10px 12px', width: '50px' }}></th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {activeCosts.map((c, i) => (
+                                                                <tr key={i} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                                    <td style={{ padding: '10px 12px', position: 'relative' }}>
+                                                                        <textarea value={c.label}
+                                                                            rows={1}
+                                                                            onChange={e => {
+                                                                                const updated = { ...unitCosts };
+                                                                                updated[activeUid] = [...(updated[activeUid] || [])];
+                                                                                updated[activeUid][i] = { ...updated[activeUid][i], label: e.target.value };
+                                                                                setUnitCosts(updated);
+                                                                            }}
+                                                                            onFocus={e => {
+                                                                                e.target.rows = 3;
+                                                                                e.target.style.position = 'absolute';
+                                                                                e.target.style.zIndex = '20';
+                                                                                e.target.style.width = 'calc(100% + 200px)';
+                                                                                e.target.style.boxShadow = '0 4px 24px rgba(0,0,0,0.18)';
+                                                                                e.target.style.borderColor = 'var(--primary-color)';
+                                                                            }}
+                                                                            onBlur={e => {
+                                                                                e.target.rows = 1;
+                                                                                e.target.style.position = 'static';
+                                                                                e.target.style.zIndex = 'auto';
+                                                                                e.target.style.width = '100%';
+                                                                                e.target.style.boxShadow = 'none';
+                                                                                e.target.style.borderColor = 'var(--border-color)';
+                                                                            }}
+                                                                            style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500, fontFamily: 'inherit', fontSize: '0.9rem', resize: 'none', color: 'var(--text-primary)', backgroundColor: 'var(--surface-color)', transition: 'all 0.2s ease', left: 0, top: 0 }}
+                                                                        />
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                                                        <CurrencyInput allowDecimals value={c.amount}
+                                                                            onChange={e => {
+                                                                                const updated = { ...unitCosts };
+                                                                                updated[activeUid] = [...(updated[activeUid] || [])];
+                                                                                updated[activeUid][i] = { ...updated[activeUid][i], amount: e.target.value };
+                                                                                setUnitCosts(updated);
+                                                                            }}
+                                                                            style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
+                                                                        />
+                                                                    </td>
+                                                                    {(() => {
+                                                                        const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                                        if (periods.length === 0) {
+                                                                            // Full vacancy
+                                                                            const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                            const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                            const val = (key === 'personenanzahl') ? 0 : c.amount;
+                                                                            return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{val.toFixed(2)} €</td>;
+                                                                        }
+                                                                        return periods.map((p, idx) => {
+                                                                            const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                            const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                            let factor = p.ratio;
+                                                                            const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
+                                                                            if (key === 'personenanzahl' && occ === 0) factor = 0;
+
+                                                                            return (
+                                                                                <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', color: '#666', fontSize: '0.9em' }}>
+                                                                                    {((c.amount || 0) * factor).toFixed(2)} €
+                                                                                </td>
+                                                                            );
+                                                                        });
+                                                                    })()}
+                                                                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                                                        <button onClick={() => {
+                                                                            const updated = { ...unitCosts };
+                                                                            updated[activeUid] = updated[activeUid].filter((_, idx) => idx !== i);
+                                                                            setUnitCosts(updated);
+                                                                        }} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+                                                                            <Trash2 size={16} />
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                        <tfoot>
+                                                            <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                                                <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
+                                                                <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
+                                                                    {activeTotal.toFixed(2)} €
+                                                                </td>
+                                                                {(() => {
+                                                                    const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                                    if (periods.length === 0) return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{activeTotal.toFixed(2)} €</td>;
+                                                                    return periods.map((p, idx) => {
+                                                                        // Calculate correct total for this period by summing adjusted item costs
+                                                                        const periodTotal = activeCosts.reduce((sum, c) => {
+                                                                            const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                            const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                            let factor = p.ratio;
+                                                                            const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
+                                                                            if (key === 'personenanzahl' && occ === 0) factor = 0;
+                                                                            return sum + (c.amount || 0) * factor;
+                                                                        }, 0);
+
+                                                                        return (
+                                                                            <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '0.9em', color: '#666' }}>
+                                                                                {periodTotal.toFixed(2)} €
+                                                                            </td>
+                                                                        );
+                                                                    });
+                                                                })()}
+                                                                <td></td>
+                                                            </tr>
+                                                        </tfoot>
+                                                    </table>
+                                                </div>
+                                            ) : (
+                                                /* ===== MOBILE: Card Layout for Step 3 ===== */
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                    {activeCosts.map((c, i) => {
+                                                        const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
+                                                        return (
+                                                            <div key={i} style={{
+                                                                border: '1px solid var(--border-color)', borderRadius: '10px',
+                                                                padding: '12px', backgroundColor: 'var(--surface-color)',
+                                                                position: 'relative'
+                                                            }}>
+                                                                <button onClick={() => {
+                                                                    const updated = { ...unitCosts };
+                                                                    updated[activeUid] = updated[activeUid].filter((_, idx) => idx !== i);
+                                                                    setUnitCosts(updated);
+                                                                }} style={{ position: 'absolute', top: '8px', right: '8px', color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px' }}>
+                                                                    <Trash2 size={16} />
+                                                                </button>
+                                                                <div style={{ marginBottom: '8px' }}>
+                                                                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Kostenart</label>
                                                                     <input type="text" value={c.label}
                                                                         onChange={e => {
                                                                             const updated = { ...unitCosts };
@@ -1049,88 +1309,55 @@ const UtilityCosts = () => {
                                                                             updated[activeUid][i] = { ...updated[activeUid][i], label: e.target.value };
                                                                             setUnitCosts(updated);
                                                                         }}
-                                                                        style={{ width: '100%', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontWeight: 500 }}
+                                                                        style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', fontWeight: 500, fontSize: '0.9rem', color: 'var(--text-primary)', backgroundColor: 'var(--background-color)', marginTop: '4px' }}
                                                                     />
-                                                                </td>
-                                                                <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                                    <input type="number" step="0.01" value={c.amount}
+                                                                </div>
+                                                                <div style={{ marginBottom: periods.length > 0 ? '8px' : 0 }}>
+                                                                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Gesamt (€)</label>
+                                                                    <CurrencyInput allowDecimals value={c.amount}
                                                                         onChange={e => {
                                                                             const updated = { ...unitCosts };
                                                                             updated[activeUid] = [...(updated[activeUid] || [])];
-                                                                            updated[activeUid][i] = { ...updated[activeUid][i], amount: parseFloat(e.target.value) || 0 };
+                                                                            updated[activeUid][i] = { ...updated[activeUid][i], amount: e.target.value };
                                                                             setUnitCosts(updated);
                                                                         }}
-                                                                        style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', textAlign: 'right' }}
+                                                                        style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', textAlign: 'right', fontSize: '0.9rem', marginTop: '4px' }}
                                                                     />
-                                                                </td>
-                                                                {(() => {
-                                                                    const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                                    if (periods.length === 0) {
-                                                                        // Full vacancy
-                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                        const val = (key === 'personenanzahl') ? 0 : c.amount;
-                                                                        return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{val.toFixed(2)} €</td>;
-                                                                    }
-                                                                    return periods.map((p, idx) => {
-                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                        let factor = p.ratio;
-                                                                        const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
-                                                                        if (key === 'personenanzahl' && occ === 0) factor = 0;
-
-                                                                        return (
-                                                                            <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', color: '#666', fontSize: '0.9em' }}>
-                                                                                {((c.amount || 0) * factor).toFixed(2)} €
-                                                                            </td>
-                                                                        );
-                                                                    });
-                                                                })()}
-                                                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                                                    <button onClick={() => {
-                                                                        const updated = { ...unitCosts };
-                                                                        updated[activeUid] = updated[activeUid].filter((_, idx) => idx !== i);
-                                                                        setUnitCosts(updated);
-                                                                    }} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
-                                                                        <Trash2 size={16} />
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                    <tfoot>
-                                                        <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                                            <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '1.15rem' }}>Gesamt</td>
-                                                            <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '1.15rem' }}>
-                                                                {activeTotal.toFixed(2)} €
-                                                            </td>
-                                                            {(() => {
-                                                                const periods = getTenantsForUnitInPeriod(activeUid, periodStart, periodEnd);
-                                                                if (periods.length === 0) return <td style={{ padding: '10px 12px', textAlign: 'right', color: '#666' }}>{activeTotal.toFixed(2)} €</td>;
-                                                                return periods.map((p, idx) => {
-                                                                    // Calculate correct total for this period by summing adjusted item costs
-                                                                    const periodTotal = activeCosts.reduce((sum, c) => {
-                                                                        const sourceItem = costItems.find(ci => ci.category_name === c.label);
-                                                                        const key = sourceItem ? sourceItem.distribution_key : 'anteil';
-                                                                        let factor = p.ratio;
-                                                                        const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
-                                                                        if (key === 'personenanzahl' && occ === 0) factor = 0;
-                                                                        return sum + (c.amount || 0) * factor;
-                                                                    }, 0);
-
-                                                                    return (
-                                                                        <td key={idx} style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, fontSize: '0.9em', color: '#666' }}>
-                                                                            {periodTotal.toFixed(2)} €
-                                                                        </td>
-                                                                    );
-                                                                });
-                                                            })()}
-                                                            <td></td>
-                                                        </tr>
-                                                    </tfoot>
-                                                </table>
-                                            </div>
-
+                                                                </div>
+                                                                {periods.length > 0 && (
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                        {periods.map((p, idx) => {
+                                                                            const sourceItem = costItems.find(ci => ci.category_name === c.label);
+                                                                            const key = sourceItem ? sourceItem.distribution_key : 'anteil';
+                                                                            let factor = p.ratio;
+                                                                            const occ = p.tenant ? (p.tenant.occupants || 1) : 0;
+                                                                            if (key === 'personenanzahl' && occ === 0) factor = 0;
+                                                                            return (
+                                                                                <div key={idx} style={{
+                                                                                    padding: '6px 10px', borderRadius: '6px',
+                                                                                    backgroundColor: 'var(--background-color)', fontSize: '0.8rem', color: 'var(--text-secondary)',
+                                                                                    display: 'flex', justifyContent: 'space-between'
+                                                                                }}>
+                                                                                    <span>{p.tenant ? p.tenant.last_name : 'Leerstand'} ({Math.round(p.ratio * 100)}%)</span>
+                                                                                    <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{((c.amount || 0) * factor).toFixed(2)} €</span>
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    <div style={{
+                                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                        padding: '12px 16px', borderTop: '2px solid var(--border-color)',
+                                                        fontWeight: 700, fontSize: '1.1rem', marginTop: '4px'
+                                                    }}>
+                                                        <span>Gesamt</span>
+                                                        <span>{activeTotal.toFixed(2)} €</span>
+                                                    </div>
+                                                </div>
+                                            )}
                                             <Button variant="secondary" size="sm" icon={Plus} style={{ marginTop: '1rem' }} onClick={() => {
                                                 const updated = { ...unitCosts };
                                                 if (!updated[activeUid]) updated[activeUid] = [];
@@ -1217,23 +1444,36 @@ const UtilityCosts = () => {
                                         const tenant = getTenantForUnit(uid);
                                         const result = total - totalPrepayment;
 
+                                        // Mobile: shorten tenant name
+                                        let displayTenant = tenant;
+                                        if (isMobile && tenant) {
+                                            const pds = getTenantsForUnitInPeriod(uid, periodStart, periodEnd);
+                                            if (pds.length > 0) {
+                                                displayTenant = pds.map(tp => {
+                                                    if (!tp.tenant) return 'Leerstand';
+                                                    const fi = tp.tenant.first_name ? tp.tenant.first_name.charAt(0) + '.' : '';
+                                                    return `${tp.tenant.last_name}${fi ? ', ' + fi : ''}`;
+                                                }).join(' / ');
+                                            }
+                                        }
+
                                         return (
                                             <div key={uid}
                                                 onClick={() => setReviewUnit(uid)}
                                                 style={{
                                                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                    padding: '14px 16px', borderRadius: 'var(--radius-md)',
+                                                    padding: isMobile ? '10px 12px' : '14px 16px', borderRadius: 'var(--radius-md)',
                                                     border: '1px solid var(--border-color)', cursor: 'pointer',
                                                     transition: 'all 0.2s', backgroundColor: reviewUnit === uid ? '#EFF6FF' : 'transparent'
                                                 }}>
                                                 <div>
-                                                    <div style={{ fontWeight: 600 }}>{unit.unit_name}</div>
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{tenant || 'Leerstand'}</div>
+                                                    <div style={{ fontWeight: 600, fontSize: isMobile ? '0.85rem' : undefined }}>{unit.unit_name}</div>
+                                                    <div style={{ fontSize: isMobile ? '0.7rem' : '0.8rem', color: 'var(--text-secondary)' }}>{displayTenant || 'Leerstand'}</div>
                                                 </div>
-                                                <div style={{ textAlign: 'right' }}>
-                                                    <div style={{ fontWeight: 700 }}>{total.toFixed(2)} €</div>
+                                                <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    <div style={{ fontWeight: 700, fontSize: isMobile ? '0.85rem' : undefined }}>{total.toFixed(2)} €</div>
                                                     <div style={{
-                                                        fontSize: '0.8rem', fontWeight: 500,
+                                                        fontSize: isMobile ? '0.7rem' : '0.8rem', fontWeight: 500,
                                                         color: result > 0 ? 'var(--danger-color)' : 'var(--success-color)'
                                                     }}>
                                                         {result > 0 ? 'Nachzahlung' : 'Guthaben'}: {Math.abs(result).toFixed(2)} €
@@ -1313,40 +1553,44 @@ const UtilityCosts = () => {
 
                                                     return (
                                                         <div key={idx} style={{ marginBottom: '2rem', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
-                                                            <div style={{ backgroundColor: '#F9FAFB', padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                                                            <div style={{ backgroundColor: 'var(--background-color)', padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
                                                                 <div style={{ fontWeight: 600, fontSize: '1rem' }}>{page.tenantName}</div>
                                                                 <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                                                                     {formatDate(page.effectiveStart)} – {formatDate(page.effectiveEnd)} ({Math.round(page.ratio * 100)}%)
                                                                 </div>
                                                             </div>
 
-                                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                                                                <thead style={{ backgroundColor: '#F3F4F6' }}>
-                                                                    <tr>
-                                                                        <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Kostenart</th>
-                                                                        <th style={{ textAlign: 'left', padding: '10px 12px', fontWeight: 600 }}>Schlüssel</th>
-                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Gesamt</th>
-                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Einheiten</th>
-                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ko./Einh.</th>
-                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Ihre Einh.</th>
-                                                                        <th style={{ textAlign: 'right', padding: '10px 12px', fontWeight: 600 }}>Anteil</th>
+                                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', tableLayout: 'fixed', display: 'table', minWidth: '600px' }}>
+                                                                <thead style={{ backgroundColor: 'var(--background-color)', display: 'table-header-group' }}>
+                                                                    <tr style={{ display: 'table-row' }}>
+                                                                        <th style={{ textAlign: 'left', padding: '10px 8px', fontWeight: 600, width: '22%' }}>Kostenart</th>
+                                                                        <th style={{ textAlign: 'left', padding: '10px 8px', fontWeight: 600, width: '14%' }}>Schlüssel</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 600, width: '12%' }}>Gesamt</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 600, width: '12%' }}>Einheiten</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 600, width: '12%' }}>Ko./Einh.</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 600, width: '12%' }}>Ihre Einh.</th>
+                                                                        <th style={{ textAlign: 'right', padding: '10px 8px', fontWeight: 600, width: '16%' }}>Anteil</th>
                                                                     </tr>
                                                                 </thead>
-                                                                <tbody>
+                                                                <tbody style={{ display: 'table-row-group' }}>
                                                                     {unitCostsList.map((item, i) => {
                                                                         const sourceItem = costItems.find(ci => ci.category_name === item.label);
                                                                         const totalCost = sourceItem ? sourceItem.amount : 0;
                                                                         const key = sourceItem ? sourceItem.distribution_key : 'anteil';
 
+                                                                        // Resolve key: check distributionKeys first, then legacy strings
+                                                                        const dkObj = distributionKeys.find(k => k.id === key);
+                                                                        const resolvedType = dkObj ? dkObj.calculation_type : (key === 'wohnflaeche' ? 'area' : key === 'personenanzahl' ? 'persons' : key === 'einheit' ? 'units' : key === 'anteil' ? 'equal' : 'area');
+
                                                                         let totalUnits = 0;
                                                                         let myUnits = 0;
                                                                         let unitLabel = '';
 
-                                                                        if (key === 'wohnflaeche') {
+                                                                        if (resolvedType === 'area') {
                                                                             totalUnits = totalArea;
                                                                             myUnits = page.sqm;
                                                                             unitLabel = 'm²';
-                                                                        } else if (key === 'personenanzahl') {
+                                                                        } else if (resolvedType === 'persons') {
                                                                             totalUnits = totalPersons;
                                                                             myUnits = page.occupants;
                                                                             unitLabel = 'P.';
@@ -1358,38 +1602,78 @@ const UtilityCosts = () => {
 
                                                                         const costPerUnit = totalUnits > 0 ? totalCost / totalUnits : 0;
                                                                         let factor = page.ratio;
-                                                                        if (key === 'personenanzahl' && page.occupants === 0) {
+                                                                        if (resolvedType === 'persons' && page.occupants === 0) {
                                                                             factor = 0;
                                                                         }
                                                                         const itemShare = (item.amount || 0) * factor;
 
                                                                         return (
-                                                                            <tr key={i} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                                                <td style={{ padding: '8px 12px' }}>{item.label}</td>
-                                                                                <td style={{ padding: '8px 12px' }}>{keyLabels[key] || key}</td>
-                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalCost > 0 ? totalCost.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
-                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{totalUnits > 0 ? totalUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
-                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{costPerUnit > 0 ? costPerUnit.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
-                                                                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{myUnits > 0 ? myUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
-                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600 }}>{itemShare.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                            <tr key={i} className="table-row" style={{ borderBottom: '1px solid var(--border-color)', display: 'table-row' }}>
+                                                                                <td style={{ padding: '8px 8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        document.querySelectorAll('.cell-popup').forEach(el => el.remove());
+                                                                                        const rect = e.currentTarget.getBoundingClientRect();
+                                                                                        const popup = document.createElement('span');
+                                                                                        popup.className = 'cell-popup';
+                                                                                        popup.textContent = item.label;
+                                                                                        Object.assign(popup.style, {
+                                                                                            position: 'fixed', left: rect.left + 'px', top: rect.top + 'px', zIndex: '9999',
+                                                                                            background: 'var(--surface-color, #fff)', padding: '8px 10px',
+                                                                                            borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
+                                                                                            border: '1px solid var(--border-color)', whiteSpace: 'normal',
+                                                                                            maxWidth: '250px', fontSize: '0.85rem', color: 'var(--text-primary)'
+                                                                                        });
+                                                                                        document.body.appendChild(popup);
+                                                                                        const close = () => { popup.remove(); document.removeEventListener('click', close); };
+                                                                                        setTimeout(() => document.addEventListener('click', close), 0);
+                                                                                    }}>{item.label}</td>
+                                                                                <td style={{ padding: '8px 8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        document.querySelectorAll('.cell-popup').forEach(el => el.remove());
+                                                                                        const rect = e.currentTarget.getBoundingClientRect();
+                                                                                        const keyName = (() => { const dk = distributionKeys.find(k => k.id === key); return dk ? dk.name : (keyLabels[key] || key); })();
+                                                                                        const popup = document.createElement('span');
+                                                                                        popup.className = 'cell-popup';
+                                                                                        popup.textContent = keyName;
+                                                                                        Object.assign(popup.style, {
+                                                                                            position: 'fixed', left: rect.left + 'px', top: rect.top + 'px', zIndex: '9999',
+                                                                                            background: 'var(--surface-color, #fff)', padding: '8px 10px',
+                                                                                            borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
+                                                                                            border: '1px solid var(--border-color)', whiteSpace: 'normal',
+                                                                                            maxWidth: '250px', fontSize: '0.85rem', color: 'var(--text-primary)'
+                                                                                        });
+                                                                                        document.body.appendChild(popup);
+                                                                                        const close = () => { popup.remove(); document.removeEventListener('click', close); };
+                                                                                        setTimeout(() => document.addEventListener('click', close), 0);
+                                                                                    }}>{(() => {
+                                                                                        const dk = distributionKeys.find(k => k.id === key);
+                                                                                        return dk ? dk.name : (keyLabels[key] || key);
+                                                                                    })()}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>{totalCost > 0 ? totalCost.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>{totalUnits > 0 ? totalUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>{costPerUnit > 0 ? costPerUnit.toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' €' : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>{myUnits > 0 ? myUnits.toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ' + unitLabel : '--'}</td>
+                                                                                <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>{itemShare.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
                                                                             </tr>
                                                                         );
                                                                     })}
                                                                 </tbody>
-                                                                <tfoot style={{ backgroundColor: '#F9FAFB', fontWeight: 600 }}>
-                                                                    <tr>
-                                                                        <td colSpan={6} style={{ padding: '10px 12px' }}>Gesamtsumme (zeitanteilig)</td>
-                                                                        <td style={{ padding: '10px 12px', textAlign: 'right' }}>{tenantTotal.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                <tfoot style={{ backgroundColor: 'var(--background-color)', fontWeight: 600, display: 'table-footer-group' }}>
+                                                                    <tr style={{ display: 'table-row' }}>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>Gesamtsumme (zeitanteilig)</td>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>{tenantTotal.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
                                                                     </tr>
-                                                                    <tr>
-                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>Vorauszahlungen (zeitanteilig)</td>
-                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-secondary)' }}>- {tenantPrepay.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
+                                                                    <tr style={{ display: 'table-row' }}>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>Vorauszahlungen (zeitanteilig)</td>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>- {tenantPrepay.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €</td>
                                                                     </tr>
-                                                                    <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
+                                                                    <tr style={{ borderTop: '2px solid var(--border-color)', display: 'table-row' }}>
+                                                                        <td colSpan={6} style={{ padding: '10px 12px', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)', whiteSpace: 'nowrap' }}>
                                                                             {balance > 0 ? 'Nachzahlung' : 'Guthaben'}
                                                                         </td>
-                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)' }}>
+                                                                        <td style={{ padding: '10px 12px', textAlign: 'right', color: balance > 0 ? 'var(--danger-color)' : 'var(--success-color)', whiteSpace: 'nowrap' }}>
                                                                             {Math.abs(balance).toLocaleString('de-DE', { minimumFractionDigits: 2 })} €
                                                                         </td>
                                                                     </tr>
@@ -1406,31 +1690,56 @@ const UtilityCosts = () => {
                         )}
 
                         {/* ===== WIZARD FOOTER ===== */}
-                        <div style={{
-                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                            marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border-color)'
-                        }}>
-                            <div>
-                                {wizardStep > 0 && (
-                                    <Button variant="secondary" icon={ArrowLeft} onClick={goBack}>Zurück</Button>
-                                )}
-                                {wizardStep === 0 && (
-                                    <Button variant="secondary" onClick={() => setWizardOpen(false)}>Abbrechen</Button>
-                                )}
+                        {isMobile ? (
+                            <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
+                                <div style={{ marginBottom: '8px' }}>
+                                    {wizardStep > 0 && (
+                                        <Button variant="secondary" icon={ArrowLeft} onClick={goBack} style={{ width: '100%' }}>Zurück</Button>
+                                    )}
+                                    {wizardStep === 0 && (
+                                        <Button variant="secondary" onClick={() => setWizardOpen(false)} style={{ width: '100%' }}>Abbrechen</Button>
+                                    )}
+                                </div>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    {wizardStep > 0 && (
+                                        <Button variant="secondary" icon={Save} onClick={() => saveSettlement('draft')} style={{ flex: 1 }}>Entwurf</Button>
+                                    )}
+                                    {wizardStep < 3 ? (
+                                        <Button icon={ArrowRight} onClick={goNext} style={{ flex: 1 }}>Weiter</Button>
+                                    ) : (
+                                        <Button icon={Check} onClick={() => saveSettlement('done')} style={{ flex: 1, backgroundColor: 'var(--success-color)' }}>
+                                            Fertigstellen
+                                        </Button>
+                                    )}
+                                </div>
                             </div>
-                            <div style={{ display: 'flex', gap: '10px' }}>
-                                {wizardStep > 0 && (
-                                    <Button variant="secondary" icon={Save} onClick={() => saveSettlement('draft')}>Entwurf speichern</Button>
-                                )}
-                                {wizardStep < 3 ? (
-                                    <Button icon={ArrowRight} onClick={goNext}>Weiter</Button>
-                                ) : (
-                                    <Button icon={Check} onClick={() => saveSettlement('done')} style={{ backgroundColor: 'var(--success-color)' }}>
-                                        Abrechnung fertigstellen
-                                    </Button>
-                                )}
+                        ) : (
+                            <div style={{
+                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border-color)'
+                            }}>
+                                <div>
+                                    {wizardStep > 0 && (
+                                        <Button variant="secondary" icon={ArrowLeft} onClick={goBack}>Zurück</Button>
+                                    )}
+                                    {wizardStep === 0 && (
+                                        <Button variant="secondary" onClick={() => setWizardOpen(false)}>Abbrechen</Button>
+                                    )}
+                                </div>
+                                <div style={{ display: 'flex', gap: '10px' }}>
+                                    {wizardStep > 0 && (
+                                        <Button variant="secondary" icon={Save} onClick={() => saveSettlement('draft')}>Entwurf speichern</Button>
+                                    )}
+                                    {wizardStep < 3 ? (
+                                        <Button icon={ArrowRight} onClick={goNext}>Weiter</Button>
+                                    ) : (
+                                        <Button icon={Check} onClick={() => saveSettlement('done')} style={{ backgroundColor: 'var(--success-color)' }}>
+                                            Abrechnung fertigstellen
+                                        </Button>
+                                    )}
+                                </div>
                             </div>
-                        </div>
+                        )}
                     </Card>
                 </div>
 
@@ -1503,7 +1812,7 @@ const UtilityCosts = () => {
                                     onClick={() => setExpandedProperty(isExpanded ? null : prop.id)}
                                     style={{
                                         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                        cursor: 'pointer', padding: '4px 0'
+                                        cursor: 'pointer', padding: '4px 0', flexWrap: 'wrap', gap: '10px'
                                     }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                         {isExpanded ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
@@ -1527,80 +1836,184 @@ const UtilityCosts = () => {
                                                 Noch keine Abrechnungen für dieses Objekt.
                                             </div>
                                         ) : (
-                                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                                <thead>
-                                                    <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Abrechnungsjahr</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Zeitraum</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Erstellt am</th>
-                                                        <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Status</th>
-                                                        <th style={{ textAlign: 'right', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Aktionen</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {propSettlements.map(s => (
-                                                        <tr key={s.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                            <td style={{ padding: '10px 12px', fontWeight: 500 }}>{s.year || new Date(s.period_start).getFullYear()}</td>
-                                                            <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
-                                                                {formatDate(s.period_start)} – {formatDate(s.period_end)}
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
-                                                                {formatDate(s.created_at)}
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px' }}>
-                                                                <StatusBadge status={s.status} />
-                                                            </td>
-                                                            <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                                                <div style={{ position: 'relative', display: 'inline-block' }}>
-                                                                    <Button variant="ghost" size="sm" icon={MoreVertical} onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setOpenSettlementMenuId(openSettlementMenuId === s.id ? null : s.id);
-                                                                    }}>Aktionen</Button>
+                                            <>
+                                                <div className="hidden-mobile">
+                                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                        <thead>
+                                                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Abrechnungsjahr</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Zeitraum</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Erstellt am</th>
+                                                                <th style={{ textAlign: 'left', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Status</th>
+                                                                <th style={{ textAlign: 'right', padding: '8px 12px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Aktionen</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {propSettlements.map(s => (
+                                                                <tr key={s.id} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                                    <td style={{ padding: '10px 12px', fontWeight: 500 }}>{s.year || new Date(s.period_start).getFullYear()}</td>
+                                                                    <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
+                                                                        {formatDate(s.period_start)} – {formatDate(s.period_end)}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px', fontSize: '0.85rem' }}>
+                                                                        {formatDate(s.created_at)}
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px' }}>
+                                                                        <StatusBadge status={s.status} />
+                                                                    </td>
+                                                                    <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                                                        <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                            <button
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    if (openSettlementMenuId === s.id) {
+                                                                                        setOpenSettlementMenuId(null);
+                                                                                    } else {
+                                                                                        const rect = e.currentTarget.getBoundingClientRect();
+                                                                                        setSettlementMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                                                                                        setOpenSettlementMenuId(s.id);
+                                                                                    }
+                                                                                }}
+                                                                                style={{
+                                                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                                                    padding: '6px', border: 'none', background: 'none',
+                                                                                    cursor: 'pointer', borderRadius: 'var(--radius-sm)',
+                                                                                    color: 'var(--text-secondary)', transition: 'all 0.15s'
+                                                                                }}
+                                                                                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--background-color)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                                                                                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+                                                                            >
+                                                                                <MoreVertical size={18} />
+                                                                            </button>
 
+                                                                            {openSettlementMenuId === s.id && createPortal(
+                                                                                <>
+                                                                                    {/* Invisible backdrop to close menu on outside click */}
+                                                                                    <div onClick={() => setOpenSettlementMenuId(null)} style={{
+                                                                                        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998
+                                                                                    }} />
+                                                                                    <div style={{
+                                                                                        position: 'fixed', zIndex: 9999,
+                                                                                        top: settlementMenuPos?.top ?? 0,
+                                                                                        right: settlementMenuPos?.right ?? 0,
+                                                                                        backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)',
+                                                                                        borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                        minWidth: '220px', maxHeight: '60vh', overflowY: 'auto',
+                                                                                        display: 'flex',
+                                                                                        flexDirection: 'column', padding: '4px'
+                                                                                    }}>
+                                                                                        <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
+                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
+                                                                                            <Edit2 size={14} /> Bearbeiten
+                                                                                        </button>
+                                                                                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                        <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>PDF herunterladen</div>
+                                                                                        {(s.data?.selectedUnitIds || []).flatMap(uid => {
+                                                                                            const u = units.find(x => x.id === uid);
+                                                                                            const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
+                                                                                            const validPeriods = periods.filter(p => p.tenant);
+                                                                                            if (validPeriods.length === 0) return [];
+
+                                                                                            return validPeriods.map((p, pIdx) => ({
+                                                                                                key: `${uid}-${pIdx}`,
+                                                                                                uid,
+                                                                                                unitName: u ? u.unit_name : uid,
+                                                                                                tenantId: p.tenant.id,
+                                                                                                label: p.tenantName
+                                                                                            }));
+                                                                                        }).map(item => (
+                                                                                            <button key={`dl-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); downloadSettlement(s, item.uid, item.tenantId); }}
+                                                                                                style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
+                                                                                                <Download size={12} /> {item.unitName} – {item.label}
+                                                                                            </button>
+                                                                                        ))}
+                                                                                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                        <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s.id); }}
+                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
+                                                                                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
+                                                                                            <Trash2 size={14} /> Löschen
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </>,
+                                                                                document.body
+                                                                            )}
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+
+                                                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                                    {propSettlements.map(s => (
+                                                        <div key={s.id} style={{
+                                                            border: '1px solid var(--border-color)',
+                                                            borderRadius: 'var(--radius-md)',
+                                                            padding: 'var(--spacing-md)',
+                                                            backgroundColor: 'var(--surface-color)',
+                                                            position: 'relative'
+                                                        }}>
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                                <div>
+                                                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>{s.year || new Date(s.period_start).getFullYear()}</div>
+                                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                                        {formatDate(s.period_start)} – {formatDate(s.period_end)}
+                                                                    </div>
+                                                                </div>
+                                                                <StatusBadge status={s.status} />
+                                                            </div>
+
+                                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                                                                Erstellt: {formatDate(s.created_at)}
+                                                            </div>
+
+                                                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                                                                <div style={{ position: 'relative', display: 'block', width: '100%' }}>
+                                                                    <Button variant="secondary" size="sm" icon={Edit2} onClick={() => editSettlement(s)} style={{ width: '100%', justifyContent: 'center', marginBottom: '8px' }}>
+                                                                        Bearbeiten
+                                                                    </Button>
+
+                                                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                                                        <Button variant="ghost" size="sm" icon={FileText} onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setOpenSettlementMenuId(openSettlementMenuId === s.id ? null : s.id);
+                                                                        }} style={{ flex: 1 }}>
+                                                                            Optionen
+                                                                        </Button>
+                                                                        <Button variant="ghost" size="sm" icon={Trash2} onClick={() => deleteSettlement(s.id)} style={{ color: 'var(--danger-color)' }} />
+                                                                    </div>
+
+                                                                    {/* Mobile Menu Logic - Reusing same structure but positioned differently for mobile if needed, though fixed pos works */}
                                                                     {openSettlementMenuId === s.id && (
                                                                         <div onClick={(e) => e.stopPropagation()} style={{
                                                                             position: 'fixed', zIndex: 9999,
-                                                                            backgroundColor: 'white', border: '1px solid var(--border-color)',
-                                                                            borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                                                                            minWidth: '200px', display: 'flex',
-                                                                            flexDirection: 'column', padding: '4px',
-                                                                            transform: 'translateY(-100%)', marginTop: '-4px'
+                                                                            top: '50%', left: '50%', transform: 'translate(-50%, -50%)', // Center on mobile
+                                                                            backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)',
+                                                                            borderRadius: 'var(--radius-md)', boxShadow: '0 4px 20px rgba(0,0,0,0.25)',
+                                                                            width: '90%', maxWidth: '300px',
+                                                                            display: 'flex', flexDirection: 'column', padding: '4px',
+                                                                            maxHeight: '80vh', overflowY: 'auto'
                                                                         }}>
+                                                                            <div style={{ padding: '12px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                                <span style={{ fontWeight: 600 }}>Optionen</span>
+                                                                                <button onClick={() => setOpenSettlementMenuId(null)} style={{ border: 'none', background: 'none' }}><X size={16} /></button>
+                                                                            </div>
+
                                                                             <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
-                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                <Edit2 size={14} /> Bearbeiten
+                                                                                style={{ textAlign: 'left', padding: '12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid var(--border-color)' }}>
+                                                                                <Edit2 size={16} /> Bearbeiten
                                                                             </button>
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Vorschau / Drucken</div>
+
+
+                                                                            <div style={{ padding: '8px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, backgroundColor: 'var(--bg-secondary)' }}>PDF herunterladen</div>
                                                                             {(s.data?.selectedUnitIds || []).flatMap(uid => {
                                                                                 const u = units.find(x => x.id === uid);
                                                                                 const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
                                                                                 const validPeriods = periods.filter(p => p.tenant);
                                                                                 if (validPeriods.length === 0) return [];
-
-                                                                                return validPeriods.map((p, pIdx) => ({
-                                                                                    key: `${uid}-${pIdx}`,
-                                                                                    uid,
-                                                                                    unitName: u ? u.unit_name : uid,
-                                                                                    tenantId: p.tenant.id,
-                                                                                    label: p.tenantName
-                                                                                }));
-                                                                            }).map(item => (
-                                                                                <button key={`prev-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); previewSettlement(s, item.uid, item.tenantId); }}
-                                                                                    style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                    onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                    <Eye size={12} /> {item.unitName} – {item.label}
-                                                                                </button>
-                                                                            ))}
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>PDF herunterladen</div>
-                                                                            {(s.data?.selectedUnitIds || []).flatMap(uid => {
-                                                                                const u = units.find(x => x.id === uid);
-                                                                                const periods = getTenantsForUnitInPeriod(uid, s.period_start, s.period_end);
-                                                                                const validPeriods = periods.filter(p => p.tenant);
-                                                                                if (validPeriods.length === 0) return [];
-
                                                                                 return validPeriods.map((p, pIdx) => ({
                                                                                     key: `${uid}-${pIdx}`,
                                                                                     uid,
@@ -1610,25 +2023,18 @@ const UtilityCosts = () => {
                                                                                 }));
                                                                             }).map(item => (
                                                                                 <button key={`dl-${item.key}`} onClick={() => { setOpenSettlementMenuId(null); downloadSettlement(s, item.uid, item.tenantId); }}
-                                                                                    style={{ textAlign: 'left', padding: '6px 12px 6px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                    onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                    <Download size={12} /> {item.unitName} – {item.label}
+                                                                                    style={{ textAlign: 'left', padding: '10px 12px 10px 24px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid #eee' }}>
+                                                                                    <Download size={16} /> {item.unitName} – {item.label}
                                                                                 </button>
                                                                             ))}
-                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                            <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s.id); }}
-                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
-                                                                                onMouseEnter={(e) => e.target.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}>
-                                                                                <Trash2 size={14} /> Löschen
-                                                                            </button>
                                                                         </div>
                                                                     )}
                                                                 </div>
-                                                            </td>
-                                                        </tr>
+                                                            </div>
+                                                        </div>
                                                     ))}
-                                                </tbody>
-                                            </table>
+                                                </div>
+                                            </>
                                         )}
                                     </div>
                                 )}

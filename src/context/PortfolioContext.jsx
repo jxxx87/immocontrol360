@@ -13,6 +13,8 @@ export const PortfolioProvider = ({ children }) => {
     });
 
     const [loading, setLoading] = useState(true);
+    const [refreshCounter, setRefreshCounter] = useState(0);
+    const refreshPortfolios = () => setRefreshCounter(c => c + 1);
 
     // Persist selection change
     useEffect(() => {
@@ -77,13 +79,15 @@ export const PortfolioProvider = ({ children }) => {
         };
 
         fetchPortfolios();
-    }, [user]);
+    }, [user, refreshCounter]);
+
 
     const value = {
         portfolios,
         selectedPortfolioID,
         setSelectedPortfolioID,
-        loading
+        loading,
+        refreshPortfolios
     };
 
     return (

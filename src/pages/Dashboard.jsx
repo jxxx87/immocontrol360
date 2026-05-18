@@ -258,7 +258,6 @@ const Dashboard = () => {
     const kpis = [
         { title: 'Gesamteinnahmen', value: formatCurrency(incomeThisMonth), trend: incomeTrend.trend, trendValue: incomeTrend.value, icon: Wallet, color: '#0066CC' },
         { title: 'Ausgaben (Gesamt)', value: formatCurrency(expensesThisMonth), trend: expenseTrend.trend === 'up' ? 'down' : 'up', trendValue: expenseTrend.value, icon: TrendingDown, color: '#DC2626' },
-        { title: 'Netto-Cashflow', value: formatCurrency(netCurrent), trend: netTrend.trend, trendValue: netTrend.value, icon: TrendingUp, color: '#10B981' },
         { title: 'Leerstand', value: `${vacantUnits} Einheit${vacantUnits !== 1 ? 'en' : ''}`, trend: vacantUnits > 0 ? 'down' : 'up', trendValue: `${vacantUnits} / ${totalUnits}`, icon: Home, color: '#F59E0B' },
         { title: 'Offene Forderungen', value: formatCurrency(overdueRent), trend: overdueRent > 0 ? 'down' : 'up', trendValue: overdueRent > 0 ? 'Offen' : 'Alles bezahlt', icon: AlertCircle, color: '#EF4444' },
     ];
@@ -301,7 +300,7 @@ const Dashboard = () => {
             {/* KPI Grid */}
             <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
                 gap: 'var(--spacing-lg)',
                 marginBottom: 'var(--spacing-xl)'
             }}>
@@ -316,50 +315,89 @@ const Dashboard = () => {
                 gap: 'var(--spacing-xl)',
                 marginBottom: 'var(--spacing-xl)'
             }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--spacing-xl)' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--spacing-xl)' }}>
                     {/* Chart Section */}
-                    <Card title="Einnahmen & Ausgaben (letzte 6 Monate)">
-                        <div style={{ height: '300px', width: '100%' }}>
-                            <ResponsiveContainer width="100%" height="100%">
-                                <BarChart data={chartData}>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
-                                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6B7280' }} />
-                                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6B7280' }} />
-                                    <Tooltip
-                                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
-                                        formatter={(value) => `${value.toLocaleString('de-DE')} €`}
-                                    />
-                                    <Bar dataKey="einnahmen" name="Einnahmen" fill="var(--primary-color)" radius={[4, 4, 0, 0]} />
-                                    <Bar dataKey="ausgaben" name="Ausgaben" fill="#E5E7EB" radius={[4, 4, 0, 0]} />
-                                </BarChart>
-                            </ResponsiveContainer>
-                        </div>
-                    </Card>
+                    <div style={{ flex: '1 1 500px', minWidth: 0 }}>
+                        <Card title="Einnahmen & Ausgaben (letzte 6 Monate)">
+                            <div style={{ height: '300px', width: '100%' }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={chartData}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6B7280' }} />
+                                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6B7280' }} />
+                                        <Tooltip
+                                            contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+                                            formatter={(value) => `${value.toLocaleString('de-DE')} €`}
+                                        />
+                                        <Bar dataKey="einnahmen" name="Einnahmen" fill="var(--primary-color)" radius={[4, 4, 0, 0]} />
+                                        <Bar dataKey="ausgaben" name="Ausgaben" fill="#E5E7EB" radius={[4, 4, 0, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </Card>
+                    </div>
 
                     {/* Occupancy */}
-                    <Card title="Leerstände & Auslastung">
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', justifyContent: 'center', height: '100%', alignItems: 'center' }}>
-                            <div style={{ position: 'relative', width: '150px', height: '150px' }}>
-                                <svg viewBox="0 0 36 36" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
-                                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#E5E7EB" strokeWidth="3.8" />
-                                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="var(--primary-color)" strokeWidth="3.8" strokeDasharray={`${occupancyPct}, 100`} />
-                                </svg>
-                                <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center' }}>
-                                    <span style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{occupancyPct}%</span>
-                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Vermietet</div>
+                    <div style={{ flex: '1 1 300px', minWidth: 0 }}>
+                        <Card title="Leerstände & Auslastung">
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', justifyContent: 'center', height: '100%', alignItems: 'center' }}>
+                                <div style={{ position: 'relative', width: '150px', height: '150px' }}>
+                                    <svg viewBox="0 0 36 36" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
+                                        <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#E5E7EB" strokeWidth="3.8" />
+                                        <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="var(--primary-color)" strokeWidth="3.8" strokeDasharray={`${occupancyPct}, 100`} />
+                                    </svg>
+                                    <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center' }}>
+                                        <span style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{occupancyPct}%</span>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Vermietet</div>
+                                    </div>
+                                </div>
+                                <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                    {totalUnits - vacantUnits} von {totalUnits} Einheiten vermietet
                                 </div>
                             </div>
-                            <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                {totalUnits - vacantUnits} von {totalUnits} Einheiten vermietet
-                            </div>
-                        </div>
-                    </Card>
+                        </Card>
+                    </div>
                 </div>
             </div>
 
             {/* Recent Bookings */}
             <Card title="Letzte Buchungen">
-                <Table columns={bookingColumns} data={recentBookings} />
+                <div className="hidden-mobile">
+                    <Table columns={bookingColumns} data={recentBookings} />
+                </div>
+
+                {/* Mobile Card View */}
+                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                    {recentBookings.map((row) => (
+                        <div key={row.id} style={{
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: 'var(--spacing-md)',
+                            backgroundColor: 'var(--surface-color)',
+                            position: 'relative'
+                        }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                <div style={{ fontWeight: 500, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                    {new Date(row.date).toLocaleDateString('de-DE')}
+                                </div>
+                                <Badge variant={row.status === 'income' ? 'success' : 'danger'}>
+                                    {row.status === 'income' ? 'Einnahme' : 'Ausgabe'}
+                                </Badge>
+                            </div>
+
+                            <div style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '8px' }}>
+                                {row.text}
+                            </div>
+                            {row.note && (
+                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>{row.note}</div>
+                            )}
+
+                            <div style={{ textAlign: 'right', fontWeight: 700, fontSize: '1.1rem', color: row.status === 'income' ? 'var(--success-color)' : 'var(--danger-color)' }}>
+                                {row.status === 'income' ? '+' : '-'}{row.amount.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+                            </div>
+                        </div>
+                    ))}
+                </div>
             </Card>
         </div>
     );

@@ -19,7 +19,7 @@ const LoadingOverlay = ({ message = 'Wird gespeichert...' }) => {
             borderRadius: 'var(--radius-md)'
         }}>
             <div style={{
-                backgroundColor: 'white',
+                backgroundColor: 'var(--surface-color)',
                 padding: '24px 48px',
                 borderRadius: 'var(--radius-lg)',
                 boxShadow: 'var(--shadow-lg)',

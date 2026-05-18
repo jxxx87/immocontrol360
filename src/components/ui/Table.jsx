@@ -1,6 +1,6 @@
 import React from 'react';
 
-const Table = ({ columns, data, onRowClick }) => {
+const Table = ({ columns, data, onRowClick, getRowStyle }) => {
     return (
         <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -24,10 +24,11 @@ const Table = ({ columns, data, onRowClick }) => {
                     {data.map((row, rowIndex) => (
                         <tr
                             key={row.id || rowIndex}
+                            className="table-row"
                             onClick={() => onRowClick && onRowClick(row)}
                             style={{
                                 cursor: onRowClick ? 'pointer' : 'default',
-                                transition: 'background 0.2s'
+                                ...(getRowStyle ? getRowStyle(row) : {})
                             }}
                         >
                             {columns.map((col, colIndex) => (
