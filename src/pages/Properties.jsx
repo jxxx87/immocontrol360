@@ -89,6 +89,8 @@ const Properties = () => {
                         sqm,
                         rooms,
                         target_rent,
+                        cold_rent_ist,
+                        is_vacation_rental,
                         balcony,
                         fitted_kitchen,
                         leases (
@@ -156,7 +158,7 @@ const Properties = () => {
             setLoadingUnits(prev => ({ ...prev, [propertyId]: true }));
             const { data, error } = await supabase
                 .from('units')
-                .select('*, leases(status, start_date, end_date)')
+                .select('*, leases(status, start_date, end_date, cold_rent)')
                 .eq('property_id', propertyId)
                 .order('unit_name');
 
