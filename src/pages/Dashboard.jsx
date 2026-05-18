@@ -160,7 +160,7 @@ const Dashboard = () => {
                     l.start_date <= today &&
                     (!l.end_date || l.end_date >= today)
                 );
-                if (hasActiveLease) occupied++;
+                if (hasActiveLease || unit.is_vacation_rental) occupied++;
             });
             setTotalUnits(allUnits.length);
             setVacantUnits(allUnits.length - occupied);

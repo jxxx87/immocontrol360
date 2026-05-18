@@ -115,8 +115,9 @@ const Properties = () => {
 
                 // Calculate Actual Rent (Sum of active leases' cold_rent)
                 const totalActualRent = units.reduce((sum, u) => {
+                    if (u.is_vacation_rental) return sum + (parseFloat(u.target_rent) || 0);
                     const activeLease = u.leases?.find(l => l.status === 'active');
-                    return sum + (activeLease ? (activeLease.cold_rent || 0) : 0);
+                    return sum + (activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0);
                 }, 0);
 
                 return {
@@ -163,6 +164,9 @@ const Properties = () => {
 
             const today = new Date().toISOString().split('T')[0];
             const processedUnits = (data || []).map(u => {
+                if (u.is_vacation_rental) {
+                    return { ...u, status: 'vacation_rental' };
+                }
                 const activeLease = u.leases?.find(l =>
                     l.status === 'active' &&
                     l.start_date <= today &&
@@ -694,7 +698,11 @@ const Properties = () => {
                                                                                 <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
                                                                                 <td style={{ padding: '8px' }}>{unit.rooms}</td>
                                                                                 <td style={{ padding: '8px' }}>
-                                                                                    {unit.status === 'rented' ? (
+                                                                                    {unit.status === 'vacation_rental' ? (
+                                                                                        <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                            <Home size={12} /> Ferienwohnung
+                                                                                        </span>
+                                                                                    ) : unit.status === 'rented' ? (
                                                                                         <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
                                                                                             <Key size={12} /> Vermietet
                                                                                         </span>

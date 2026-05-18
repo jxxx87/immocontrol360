@@ -165,7 +165,7 @@ const Tenants = () => {
                     ...unit,
                     activeLease: activeLease || null,
                     endedLeases,
-                    status: activeLease ? 'rented' : 'vacant'
+                    status: unit.is_vacation_rental ? 'vacation_rental' : (activeLease ? 'rented' : 'vacant')
                 };
             });
 
@@ -180,7 +180,7 @@ const Tenants = () => {
             // 6. Calc KPIs
             setStats({
                 total: finalUnits.length,
-                rented: finalUnits.filter(u => u.status === 'rented').length,
+                rented: finalUnits.filter(u => u.status === 'rented' || u.status === 'vacation_rental').length,
                 vacant: finalUnits.filter(u => u.status === 'vacant').length
             });
 
@@ -441,7 +441,21 @@ const Tenants = () => {
         {
             header: 'Status',
             accessor: 'status',
-            render: (row) => row.status === 'rented' ? (
+            render: (row) => row.status === 'vacation_rental' ? (
+                <span style={{
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    color: 'var(--primary-color)',
+                    padding: '4px 8px',
+                    borderRadius: '12px',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                }}>
+                    <Home size={12} /> Ferienwohnung
+                </span>
+            ) : row.status === 'rented' ? (
                 <span style={{
                     backgroundColor: 'rgba(16, 185, 129, 0.1)',
                     color: 'var(--success-color)',
@@ -693,7 +707,21 @@ const Tenants = () => {
                                             </div>
                                         </div>
                                         <div>
-                                            {row.status === 'rented' ? (
+                                            {row.status === 'vacation_rental' ? (
+                                                <span style={{
+                                                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                                    color: 'var(--primary-color)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '12px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}>
+                                                    <Home size={10} /> Ferienwohnung
+                                                </span>
+                                            ) : row.status === 'rented' ? (
                                                 <span style={{
                                                     backgroundColor: 'rgba(16, 185, 129, 0.1)',
                                                     color: 'var(--success-color)',
