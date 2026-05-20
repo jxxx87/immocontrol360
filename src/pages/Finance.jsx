@@ -5,7 +5,7 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { Plus, Wallet, ArrowUpRight, ArrowDownLeft, Loader2, Filter, Trash2, CircleAlert, CircleCheck, ChevronDown, ChevronRight, EllipsisVertical, Send, CircleX } from 'lucide-react';
+import { Plus, Wallet, ArrowUpRight, ArrowDownLeft, Loader2, Filter, Trash2, CircleAlert, CircleCheck, ChevronDown, ChevronRight, EllipsisVertical, Send, CircleX, Banknote } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
@@ -1630,8 +1630,9 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                                             <span style={{ textAlign: 'right', color: '#EF4444', fontWeight: 700 }}>{entry.dueAmount.toFixed(2)} €</span>
                                             <div style={{ textAlign: 'right' }}>
                                                 <OverdueActionMenu
-                                                    onMarkPaid={() => onMarkPaid(entry.lease, entry.monthStr, entry.dueAmount)}
+                                                    onMarkPaid={(customAmount) => onMarkPaid(entry.lease, entry.monthStr, customAmount !== undefined ? customAmount : entry.dueAmount)}
                                                     isProcessing={processingPaymentId === `${entry.leaseId}-${entry.monthStr}`}
+                                                    dueAmount={entry.dueAmount}
                                                 />
                                             </div>
                                         </div>
@@ -1724,14 +1725,20 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
     );
 };
 
-const OverdueActionMenu = ({ onMarkPaid, isProcessing }) => {
+const OverdueActionMenu = ({ onMarkPaid, isProcessing, dueAmount }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [hoveredItem, setHoveredItem] = useState(null);
+    const [showPartial, setShowPartial] = useState(false);
+    const [partialValue, setPartialValue] = useState('');
 
     useEffect(() => {
         const close = () => setIsOpen(false);
         if (isOpen) window.addEventListener('click', close);
         return () => window.removeEventListener('click', close);
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen) { setShowPartial(false); setPartialValue(''); }
     }, [isOpen]);
 
     if (isProcessing) {
@@ -1756,32 +1763,77 @@ const OverdueActionMenu = ({ onMarkPaid, isProcessing }) => {
                     zIndex: 100, border: '1px solid #E5E7EB', padding: '4px',
                     animation: 'fadeIn 0.12s ease-out'
                 }}>
-                    <div
-                        onClick={() => { onMarkPaid(); setIsOpen(false); }}
-                        onMouseEnter={() => setHoveredItem('paid')}
-                        onMouseLeave={() => setHoveredItem(null)}
-                        style={{
-                            padding: '10px 12px', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '6px',
-                            display: 'flex', gap: '10px', alignItems: 'center',
-                            backgroundColor: hoveredItem === 'paid' ? '#F0FFF4' : 'transparent',
-                            transition: 'background-color 0.12s'
-                        }}
-                    >
-                        <CircleCheck size={15} color="#16a34a" /> Als bezahlt markieren
-                    </div>
-                    <div
-                        onClick={() => { alert('Mahnung wurde vorgemerkt (Kommt bald!)'); setIsOpen(false); }}
-                        onMouseEnter={() => setHoveredItem('reminder')}
-                        onMouseLeave={() => setHoveredItem(null)}
-                        style={{
-                            padding: '10px 12px', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '6px',
-                            display: 'flex', gap: '10px', alignItems: 'center',
-                            backgroundColor: hoveredItem === 'reminder' ? '#EFF6FF' : 'transparent',
-                            transition: 'background-color 0.12s'
-                        }}
-                    >
-                        <Send size={15} color="#2563EB" /> Mahnung senden
-                    </div>
+                    {!showPartial ? (
+                        <>
+                            <div
+                                onClick={() => { onMarkPaid(); setIsOpen(false); }}
+                                onMouseEnter={() => setHoveredItem('paid')}
+                                onMouseLeave={() => setHoveredItem(null)}
+                                style={{
+                                    padding: '10px 12px', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '6px',
+                                    display: 'flex', gap: '10px', alignItems: 'center',
+                                    backgroundColor: hoveredItem === 'paid' ? '#F0FFF4' : 'transparent',
+                                    transition: 'background-color 0.12s'
+                                }}
+                            >
+                                <CircleCheck size={15} color="#16a34a" /> Vollständig bezahlt
+                            </div>
+                            <div
+                                onClick={(e) => { e.stopPropagation(); setShowPartial(true); setPartialValue(dueAmount ? String(dueAmount) : ''); }}
+                                onMouseEnter={() => setHoveredItem('partial')}
+                                onMouseLeave={() => setHoveredItem(null)}
+                                style={{
+                                    padding: '10px 12px', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '6px',
+                                    display: 'flex', gap: '10px', alignItems: 'center',
+                                    backgroundColor: hoveredItem === 'partial' ? '#FFFBEB' : 'transparent',
+                                    transition: 'background-color 0.12s'
+                                }}
+                            >
+                                <Banknote size={15} color="#D97706" /> Teilzahlung erfassen
+                            </div>
+                            <div
+                                onClick={() => { alert('Mahnung wurde vorgemerkt (Kommt bald!)'); setIsOpen(false); }}
+                                onMouseEnter={() => setHoveredItem('reminder')}
+                                onMouseLeave={() => setHoveredItem(null)}
+                                style={{
+                                    padding: '10px 12px', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '6px',
+                                    display: 'flex', gap: '10px', alignItems: 'center',
+                                    backgroundColor: hoveredItem === 'reminder' ? '#EFF6FF' : 'transparent',
+                                    transition: 'background-color 0.12s'
+                                }}
+                            >
+                                <Send size={15} color="#2563EB" /> Mahnung senden
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{ padding: '8px' }} onClick={e => e.stopPropagation()}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#6B7280', marginBottom: '8px' }}>Teilbetrag eingeben:</div>
+                            <input 
+                                type="number" 
+                                step="0.01" 
+                                autoFocus
+                                value={partialValue} 
+                                onChange={e => setPartialValue(e.target.value)}
+                                style={{ width: '100%', padding: '6px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', marginBottom: '8px', fontSize: '0.85rem', boxSizing: 'border-box' }}
+                            />
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                                <button 
+                                    onClick={() => {
+                                        const val = parseFloat(partialValue);
+                                        if (val > 0) {
+                                            onMarkPaid(val);
+                                            setIsOpen(false);
+                                        }
+                                    }}
+                                    style={{ flex: 1, padding: '6px', background: '#16a34a', color: 'white', border: 'none', borderRadius: '4px', fontSize: '0.8rem', cursor: 'pointer', fontWeight: 600 }}
+                                >Speichern</button>
+                                <button 
+                                    onClick={() => setShowPartial(false)}
+                                    style={{ flex: 1, padding: '6px', background: '#F3F4F6', color: '#374151', border: '1px solid #D1D5DB', borderRadius: '4px', fontSize: '0.8rem', cursor: 'pointer' }}
+                                >Zurück</button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
