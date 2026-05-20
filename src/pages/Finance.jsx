@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
@@ -139,7 +140,7 @@ const Finance = () => {
 
         // Further filter payments by Prop/Unit
         if (filterPropertyId) {
-            filteredPayments = filteredPayments.filter(p => p.lease?.unit?.property_id === filterPropertyId);
+            filteredPayments = filteredPayments.filter(p => p.lease?.unit?.property_id === filterPropertyId || p.lease?.unit?.property?.id === filterPropertyId);
         }
         if (filterUnitId) {
             filteredPayments = filteredPayments.filter(p => p.lease?.unit_id === filterUnitId);
@@ -298,7 +299,7 @@ const Finance = () => {
             let expQuery = supabase.from('expenses').select('*, expense_categories(name)').order('booking_date', { ascending: false });
 
             // 2. Fetch Rent Payments (ALL for portfolio)
-            let rentQuery = supabase.from('rent_payments').select('*, lease:leases(*, unit:units(property:properties(id, street, house_number, portfolio_id)))').order('payment_date', { ascending: false });
+            let rentQuery = supabase.from('rent_payments').select('*, lease:leases(*, unit:units(*, property:properties(*)))').order('payment_date', { ascending: false });
 
             // 3. Fetch Leases (For Expected Calculation) - Fetch ALL to handle history
             let allLeaseQuery = supabase.from('leases').select('*, unit:units(*, property:properties(*))');
@@ -1734,11 +1735,33 @@ const OverdueActionMenu = ({ onMarkPaid, isProcessing, dueAmount }) => {
     const [hoveredItem, setHoveredItem] = useState(null);
     const [showPartial, setShowPartial] = useState(false);
     const [partialValue, setPartialValue] = useState('');
+    const menuRef = React.useRef(null);
+    const contentRef = React.useRef(null);
+    const [menuStyle, setMenuStyle] = useState({});
 
     useEffect(() => {
-        const close = () => setIsOpen(false);
-        if (isOpen) window.addEventListener('click', close);
-        return () => window.removeEventListener('click', close);
+        const handleClickOutside = (event) => {
+            const isOutsideTrigger = menuRef.current && !menuRef.current.contains(event.target);
+            const isOutsideContent = contentRef.current && !contentRef.current.contains(event.target);
+
+            if (isOutsideTrigger && isOutsideContent) {
+                setIsOpen(false);
+            }
+        };
+
+        if (isOpen) {
+            document.addEventListener('click', handleClickOutside);
+            if (menuRef.current) {
+                const rect = menuRef.current.getBoundingClientRect();
+                setMenuStyle({
+                    position: 'fixed',
+                    top: `${rect.bottom + 5}px`,
+                    left: `${rect.right - 220}px`,
+                    zIndex: 9999
+                });
+            }
+        }
+        return () => window.removeEventListener('click', handleClickOutside);
     }, [isOpen]);
 
     useEffect(() => {
@@ -1749,24 +1772,19 @@ const OverdueActionMenu = ({ onMarkPaid, isProcessing, dueAmount }) => {
         return <Loader2 className="animate-spin" size={16} />;
     }
 
-    return (
-        <div style={{ position: 'relative' }} onClick={e => e.stopPropagation()}>
-            <button
-                onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
-                style={{ padding: '4px 6px', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: '4px', transition: 'background 0.15s' }}
-                onMouseEnter={e => e.currentTarget.style.background = '#F3F4F6'}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-            >
-                <EllipsisVertical size={18} />
-            </button>
-            {isOpen && (
-                <div style={{
-                    position: 'absolute', right: 0, top: '100%', width: '220px',
-                    backgroundColor: 'var(--surface-color)', borderRadius: '8px',
-                    boxShadow: '0 10px 25px -3px rgba(0,0,0,0.15), 0 4px 6px -2px rgba(0,0,0,0.05)',
-                    zIndex: 100, border: '1px solid #E5E7EB', padding: '4px',
-                    animation: 'fadeIn 0.12s ease-out'
-                }}>
+    const MenuContent = (
+        <div
+            ref={contentRef}
+            style={{
+                ...menuStyle,
+                width: '220px',
+                backgroundColor: 'var(--surface-color)', borderRadius: '8px',
+                boxShadow: '0 10px 25px -3px rgba(0,0,0,0.15), 0 4px 6px -2px rgba(0,0,0,0.05)',
+                border: '1px solid #E5E7EB', padding: '4px',
+                animation: 'fadeIn 0.12s ease-out'
+            }}
+            onClick={e => e.stopPropagation()}
+        >
                     {!showPartial ? (
                         <>
                             <div
@@ -1839,7 +1857,19 @@ const OverdueActionMenu = ({ onMarkPaid, isProcessing, dueAmount }) => {
                         </div>
                     )}
                 </div>
-            )}
+    );
+
+    return (
+        <div style={{ position: 'relative' }} ref={menuRef}>
+            <button
+                onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
+                style={{ padding: '4px 6px', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: '4px', transition: 'background 0.15s' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#F3F4F6'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+                <EllipsisVertical size={18} />
+            </button>
+            {isOpen && createPortal(MenuContent, document.body)}
         </div>
     );
 };

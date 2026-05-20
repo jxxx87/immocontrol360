@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -16,99 +17,116 @@ const fmt = (v) => r2(v).toFixed(2).replace('.', ',');
 const ActionMenu = ({ onEdit, onPrint, onPDF, onCredit }) => {
     const [isOpen, setIsOpen] = useState(false);
     const menuRef = React.useRef(null);
+    const contentRef = React.useRef(null);
+    const [menuStyle, setMenuStyle] = useState({});
 
     useEffect(() => {
         const handleClickOutside = (event) => {
-            if (menuRef.current && !menuRef.current.contains(event.target)) {
+            const isOutsideTrigger = menuRef.current && !menuRef.current.contains(event.target);
+            const isOutsideContent = contentRef.current && !contentRef.current.contains(event.target);
+
+            if (isOutsideTrigger && isOutsideContent) {
                 setIsOpen(false);
             }
         };
 
         if (isOpen) {
             document.addEventListener('mousedown', handleClickOutside);
+            if (menuRef.current) {
+                const rect = menuRef.current.getBoundingClientRect();
+                setMenuStyle({
+                    position: 'fixed',
+                    top: `${rect.bottom + 5}px`,
+                    left: `${rect.right - 160}px`,
+                    zIndex: 9999
+                });
+            }
         }
         return () => {
             document.removeEventListener('mousedown', handleClickOutside);
         };
     }, [isOpen]);
 
+    const MenuContent = (
+        <div
+            ref={contentRef}
+            style={{
+                ...menuStyle,
+                backgroundColor: 'var(--surface-color)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
+                minWidth: '160px',
+                overflow: 'hidden'
+            }}
+            onClick={(e) => e.stopPropagation()}
+        >
+            <div style={{ display: 'flex', flexDirection: 'column', padding: '4px' }}>
+                <button
+                    onClick={(e) => { e.stopPropagation(); setIsOpen(false); onEdit(); }}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        padding: '8px 12px', width: '100%', textAlign: 'left',
+                        border: 'none', background: 'none', cursor: 'pointer',
+                        fontSize: '0.875rem', color: 'var(--text-primary)',
+                        borderRadius: '4px', transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                    <Edit2 size={16} /> Bearbeiten
+                </button>
+                <button
+                    onClick={(e) => { e.stopPropagation(); setIsOpen(false); onPrint(); }}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        padding: '8px 12px', width: '100%', textAlign: 'left',
+                        border: 'none', background: 'none', cursor: 'pointer',
+                        fontSize: '0.875rem', color: 'var(--text-primary)',
+                        borderRadius: '4px', transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                    <Printer size={16} /> Drucken
+                </button>
+                <button
+                    onClick={(e) => { e.stopPropagation(); setIsOpen(false); onPDF(); }}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        padding: '8px 12px', width: '100%', textAlign: 'left',
+                        border: 'none', background: 'none', cursor: 'pointer',
+                        fontSize: '0.875rem', color: 'var(--text-primary)',
+                        borderRadius: '4px', transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                    <Download size={16} /> Download PDF
+                </button>
+                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                <button
+                    onClick={(e) => { e.stopPropagation(); setIsOpen(false); onCredit(); }}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        padding: '8px 12px', width: '100%', textAlign: 'left',
+                        border: 'none', background: 'none', cursor: 'pointer',
+                        fontSize: '0.875rem', color: 'var(--text-primary)',
+                        borderRadius: '4px', transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                    <FileText size={16} /> Gutschreiben
+                </button>
+            </div>
+        </div>
+    );
+
     return (
         <div style={{ position: 'relative' }} ref={menuRef}>
             <Button variant="ghost" size="sm" icon={MoreVertical} onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }} />
-            {isOpen && (
-                <div style={{
-                    position: 'absolute',
-                    top: '100%',
-                    right: 0,
-                    backgroundColor: 'var(--surface-color)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: 'var(--radius-md)',
-                    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-                    zIndex: 50,
-                    minWidth: '160px',
-                    overflow: 'hidden'
-                }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', padding: '4px' }}>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setIsOpen(false); onEdit(); }}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '8px',
-                                padding: '8px 12px', width: '100%', textAlign: 'left',
-                                border: 'none', background: 'none', cursor: 'pointer',
-                                fontSize: '0.875rem', color: 'var(--text-primary)',
-                                borderRadius: '4px', transition: 'background 0.2s'
-                            }}
-                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
-                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <Edit2 size={16} /> Bearbeiten
-                        </button>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setIsOpen(false); onPrint(); }}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '8px',
-                                padding: '8px 12px', width: '100%', textAlign: 'left',
-                                border: 'none', background: 'none', cursor: 'pointer',
-                                fontSize: '0.875rem', color: 'var(--text-primary)',
-                                borderRadius: '4px', transition: 'background 0.2s'
-                            }}
-                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
-                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <Printer size={16} /> Drucken
-                        </button>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setIsOpen(false); onPDF(); }}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '8px',
-                                padding: '8px 12px', width: '100%', textAlign: 'left',
-                                border: 'none', background: 'none', cursor: 'pointer',
-                                fontSize: '0.875rem', color: 'var(--text-primary)',
-                                borderRadius: '4px', transition: 'background 0.2s'
-                            }}
-                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
-                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <Download size={16} /> Download PDF
-                        </button>
-                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setIsOpen(false); onCredit(); }}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '8px',
-                                padding: '8px 12px', width: '100%', textAlign: 'left',
-                                border: 'none', background: 'none', cursor: 'pointer',
-                                fontSize: '0.875rem', color: 'var(--text-primary)',
-                                borderRadius: '4px', transition: 'background 0.2s'
-                            }}
-                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
-                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <FileText size={16} /> Gutschreiben
-                        </button>
-                    </div>
-                </div>
-            )}
+            {isOpen && createPortal(MenuContent, document.body)}
         </div>
     );
 };
