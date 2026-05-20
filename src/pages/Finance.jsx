@@ -292,7 +292,7 @@ const Finance = () => {
     // Fetch Data
     const fetchData = async () => {
         try {
-            setLoading(true);
+            // setLoading(true); // Removed to prevent UI unmounting during background refreshes
 
             // 1. Fetch Expenses (ALL for portfolio, filter locally)
             let expQuery = supabase.from('expenses').select('*, expense_categories(name)').order('booking_date', { ascending: false });
@@ -1779,7 +1779,7 @@ const OverdueActionMenu = ({ onMarkPaid, isProcessing, dueAmount }) => {
                                 <CircleCheck size={15} color="#16a34a" /> Vollständig bezahlt
                             </div>
                             <div
-                                onClick={(e) => { e.stopPropagation(); setShowPartial(true); setPartialValue(dueAmount ? String(dueAmount) : ''); }}
+                                onClick={(e) => { e.stopPropagation(); setShowPartial(true); setPartialValue(''); }}
                                 onMouseEnter={() => setHoveredItem('partial')}
                                 onMouseLeave={() => setHoveredItem(null)}
                                 style={{
