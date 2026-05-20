@@ -936,6 +936,8 @@ const Finance = () => {
                             onMarkPaid={handleMarkAsPaid}
                             onMarkAllPaid={handleBatchMarkAsPaid}
                             processingPaymentId={processingPaymentId}
+                            filterPropertyId={filterPropertyId}
+                            filterUnitId={filterUnitId}
                         />
                     ) : (
                         <Card title="Buchungen im Zeitraum">
@@ -1400,7 +1402,7 @@ const Finance = () => {
 };
 
 // --- SUB-COMPONENTS FOR OVERDUE VIEW ---
-const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAllPaid, processingPaymentId }) => {
+const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAllPaid, processingPaymentId, filterPropertyId, filterUnitId }) => {
     const [expandedIds, setExpandedIds] = useState(new Set());
     const [confirmingAllId, setConfirmingAllId] = useState(null);
     const [markingAllId, setMarkingAllId] = useState(null);
@@ -1432,7 +1434,7 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
         setSelectedEntries(newSet);
     };
 
-    // Calculate overdue rents from leases and rent_payments (filter-independent)
+    // Calculate overdue rents from leases and rent_payments
     const overdueGroups = useMemo(() => {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -1440,6 +1442,8 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
 
         leases.forEach(lease => {
             if (!lease.start_date || !lease.unit) return;
+            if (filterPropertyId && lease.unit.property_id !== filterPropertyId) return;
+            if (filterUnitId && lease.unit_id !== filterUnitId) return;
 
             const tenant = tenants.find(t => t.id === lease.tenant_id);
             const tenantName = tenant ? `${tenant.last_name}, ${tenant.first_name}` : 'Unbekannt';
@@ -1502,7 +1506,7 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
         });
 
         return Array.from(groupMap.values()).sort((a, b) => b.totalOverdue - a.totalOverdue);
-    }, [leases, rentPayments, tenants]);
+    }, [leases, rentPayments, tenants, filterPropertyId, filterUnitId]);
 
     if (overdueGroups.length === 0) {
         return (
