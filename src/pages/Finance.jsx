@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -18,9 +19,18 @@ import LoadingOverlay from '../components/ui/LoadingOverlay';
 const Finance = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const location = useLocation();
+    const navigate = useNavigate();
 
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
+
+    useEffect(() => {
+        if (location.state?.view === 'overdue_details') {
+            setShowOverdueDetails(true);
+            navigate(location.pathname, { replace: true, state: {} });
+        }
+    }, [location.state, navigate, location.pathname]);
 
     // Data
     const [expenses, setExpenses] = useState([]);

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
@@ -25,8 +26,8 @@ import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 
-const KPICard = ({ title, value, trend, trendValue, icon: Icon, color }) => (
-    <Card className="kpi-card">
+const KPICard = ({ title, value, trend, trendValue, icon: Icon, color, onClick }) => (
+    <Card className="kpi-card" onClick={onClick} style={{ cursor: onClick ? 'pointer' : 'default' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--spacing-sm)' }}>
             <div>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>{title}</p>
@@ -61,6 +62,7 @@ const Dashboard = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
     const [loading, setLoading] = useState(true);
+    const navigate = useNavigate();
 
     // Live KPI state
     const [incomeThisMonth, setIncomeThisMonth] = useState(0);
@@ -256,10 +258,10 @@ const Dashboard = () => {
     const occupancyPct = totalUnits > 0 ? Math.round(((totalUnits - vacantUnits) / totalUnits) * 100) : 0;
 
     const kpis = [
-        { title: 'Gesamteinnahmen', value: formatCurrency(incomeThisMonth), trend: incomeTrend.trend, trendValue: incomeTrend.value, icon: Wallet, color: '#0066CC' },
-        { title: 'Ausgaben (Gesamt)', value: formatCurrency(expensesThisMonth), trend: expenseTrend.trend === 'up' ? 'down' : 'up', trendValue: expenseTrend.value, icon: TrendingDown, color: '#DC2626' },
-        { title: 'Leerstand', value: `${vacantUnits} Einheit${vacantUnits !== 1 ? 'en' : ''}`, trend: vacantUnits > 0 ? 'down' : 'up', trendValue: `${vacantUnits} / ${totalUnits}`, icon: Home, color: '#F59E0B' },
-        { title: 'Offene Forderungen', value: formatCurrency(overdueRent), trend: overdueRent > 0 ? 'down' : 'up', trendValue: overdueRent > 0 ? 'Offen' : 'Alles bezahlt', icon: AlertCircle, color: '#EF4444' },
+        { title: 'Gesamteinnahmen', value: formatCurrency(incomeThisMonth), trend: incomeTrend.trend, trendValue: incomeTrend.value, icon: Wallet, color: '#0066CC', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
+        { title: 'Ausgaben (Gesamt)', value: formatCurrency(expensesThisMonth), trend: expenseTrend.trend === 'up' ? 'down' : 'up', trendValue: expenseTrend.value, icon: TrendingDown, color: '#DC2626', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
+        { title: 'Leerstand', value: `${vacantUnits} Einheit${vacantUnits !== 1 ? 'en' : ''}`, trend: vacantUnits > 0 ? 'down' : 'up', trendValue: `${vacantUnits} / ${totalUnits}`, icon: Home, color: '#F59E0B', onClick: () => navigate('/tenants', { state: { filter: 'vacant' } }) },
+        { title: 'Offene Forderungen', value: formatCurrency(overdueRent), trend: overdueRent > 0 ? 'down' : 'up', trendValue: overdueRent > 0 ? 'Offen' : 'Alles bezahlt', icon: AlertCircle, color: '#EF4444', onClick: () => navigate('/finance', { state: { view: 'overdue_details' } }) },
     ];
 
     const bookingColumns = [

@@ -25,8 +25,14 @@ const Tenants = () => {
     const navigate = useNavigate();
     const { checkGlobalAccess } = useSubscription();
 
-    // Process URL Params
+    // Process URL Params & State
     useEffect(() => {
+        if (location.state?.filter) {
+            setFilterStatus(location.state.filter);
+            // Clear state so it doesn't persist on reload
+            navigate(location.pathname, { replace: true, state: {} });
+        }
+
         const params = new URLSearchParams(location.search);
         const action = params.get('action');
         const propertyId = params.get('propertyId');
@@ -43,7 +49,7 @@ const Tenants = () => {
             // Clear URL
             navigate(location.pathname, { replace: true });
         }
-    }, [location.search, navigate, location.pathname]);
+    }, [location.search, navigate, location.pathname, location.state]);
 
     // Data State
     const [units, setUnits] = useState([]);
@@ -53,6 +59,7 @@ const Tenants = () => {
 
     // Filter State
     const [filterPropertyId, setFilterPropertyId] = useState('');
+    const [filterStatus, setFilterStatus] = useState(''); // '' | 'vacant' | 'rented'
     const [showEndedLeases, setShowEndedLeases] = useState(false);
 
     // KPIs
@@ -175,6 +182,13 @@ const Tenants = () => {
             if (filterPropertyId) {
                 finalUnits = finalUnits.filter(u => u.property_id === filterPropertyId);
             }
+            if (filterStatus) {
+                if (filterStatus === 'vacant') {
+                    finalUnits = finalUnits.filter(u => u.status === 'vacant');
+                } else if (filterStatus === 'rented') {
+                    finalUnits = finalUnits.filter(u => u.status === 'rented' || u.status === 'vacation_rental');
+                }
+            }
 
             setUnits(finalUnits);
 
@@ -207,10 +221,8 @@ const Tenants = () => {
 
 
     useEffect(() => {
-        if (user) {
-            fetchData();
-        }
-    }, [user, selectedPortfolioID, filterPropertyId]); // Refetch/Recalc when filter changes
+        if (user) fetchData();
+    }, [user, selectedPortfolioID, filterPropertyId, filterStatus]); // Refetch/Recalc when filter changes
 
     // Handlers
     const handleSetVacationRental = async () => {
@@ -653,6 +665,17 @@ const Tenants = () => {
                         {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
                     </select>
                 </div>
+                <div>
+                    <select
+                        value={filterStatus}
+                        onChange={e => setFilterStatus(e.target.value)}
+                        style={{ padding: '8px', borderRadius: '6px', border: '1px solid var(--border-color)', minWidth: '150px' }}
+                    >
+                        <option value="">Alle (Leerstand & Vermietet)</option>
+                        <option value="rented">Nur Vermietet</option>
+                        <option value="vacant">Nur Leerstand</option>
+                    </select>
+                </div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginLeft: 'auto', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
                     <input
                         type="checkbox"
@@ -667,7 +690,7 @@ const Tenants = () => {
             {/* KPIs */}
             {/* KPIs */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
-                <Card>
+                <Card className="kpi-card" onClick={() => setFilterStatus('')} style={{ cursor: 'pointer' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>Gesamt (Einheiten)</div>
@@ -678,7 +701,7 @@ const Tenants = () => {
                         <Home size={28} style={{ color: 'var(--primary-color)', opacity: 0.2 }} />
                     </div>
                 </Card>
-                <Card>
+                <Card className="kpi-card" onClick={() => setFilterStatus('rented')} style={{ cursor: 'pointer' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>Vermietet</div>
@@ -689,7 +712,7 @@ const Tenants = () => {
                         <Key size={28} style={{ color: 'var(--success-color)', opacity: 0.2 }} />
                     </div>
                 </Card>
-                <Card>
+                <Card className="kpi-card" onClick={() => setFilterStatus('vacant')} style={{ cursor: 'pointer' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>Leerstand</div>
