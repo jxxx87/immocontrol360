@@ -286,16 +286,21 @@ const InvestorPortal = () => {
     };
 
     const calculateCurrentDebt = (loan) => {
-        const amount = parseFloat(loan.loan_amount) || 0;
+        const originalAmount = parseFloat(loan.loan_amount) || 0;
         const interestRate = (parseFloat(loan.interest_rate) || 0) / 100;
-        const startDate = new Date(loan.start_date);
-        const today = new Date();
-        if (isNaN(startDate.getTime())) return amount;
-        const monthsDiff = (today.getFullYear() - startDate.getFullYear()) * 12 + (today.getMonth() - startDate.getMonth());
-        if (monthsDiff <= 0) return amount;
-        let balance = amount;
         const repaymentRate = (parseFloat(loan.initial_repayment_rate) || 0) / 100;
-        const payment = loan.fixed_annuity ? parseFloat(loan.fixed_annuity) : (amount * (interestRate + repaymentRate) / 12);
+        const payment = loan.fixed_annuity ? parseFloat(loan.fixed_annuity) : (originalAmount * (interestRate + repaymentRate) / 12);
+
+        const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
+        let balance = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
+        const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
+
+        const startDate = new Date(startDateStr);
+        const today = new Date();
+        if (isNaN(startDate.getTime())) return balance;
+        const monthsDiff = (today.getFullYear() - startDate.getFullYear()) * 12 + (today.getMonth() - startDate.getMonth());
+        if (monthsDiff <= 0) return balance;
+
         for (let i = 0; i < monthsDiff; i++) {
             const interest = balance * interestRate / 12;
             balance -= (payment - interest);

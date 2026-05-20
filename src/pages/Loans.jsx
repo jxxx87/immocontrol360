@@ -53,6 +53,8 @@ const Loans = () => {
             interest_rate: '', // in %
             initial_repayment_rate: '', // in %
             fixed_annuity: '', // Optional monthly payment
+            actual_residual_debt: '', // Optional actual debt
+            actual_residual_debt_date: '', // Optional date for actual debt
             notes: ''
         };
     }
@@ -187,16 +189,20 @@ const Loans = () => {
     };
 
     const generateSchedule = (loan, untilDate = null) => {
-        const amount = parseFloat(loan.loan_amount || 0);
+        const originalAmount = parseFloat(loan.loan_amount || 0);
         const interestRate = parseFloat(loan.interest_rate) / 100; // 0.035
         let monthlyPayment = parseFloat(loan.fixed_annuity);
 
         if (!monthlyPayment) {
             const repaymentRate = parseFloat(loan.initial_repayment_rate) / 100; // 0.02
-            monthlyPayment = (amount * (interestRate + repaymentRate)) / 12;
+            monthlyPayment = (originalAmount * (interestRate + repaymentRate)) / 12;
         }
 
-        const startDate = new Date(loan.start_date);
+        const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
+        const amount = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
+        const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
+
+        const startDate = new Date(startDateStr);
         let endDateTarget = loan.end_date ? new Date(loan.end_date) : null;
 
         // If no end date, default to 50 years from start
@@ -261,6 +267,8 @@ const Loans = () => {
                 interest_rate: parseFloat(loanForm.interest_rate),
                 initial_repayment_rate: parseFloat(loanForm.initial_repayment_rate),
                 fixed_annuity: loanForm.fixed_annuity ? parseFloat(loanForm.fixed_annuity) : null,
+                actual_residual_debt: loanForm.actual_residual_debt ? parseFloat(loanForm.actual_residual_debt) : null,
+                actual_residual_debt_date: loanForm.actual_residual_debt_date || null,
                 notes: loanForm.notes
             };
 
@@ -304,6 +312,8 @@ const Loans = () => {
             interest_rate: loan.interest_rate,
             initial_repayment_rate: loan.initial_repayment_rate || '',
             fixed_annuity: loan.fixed_annuity || '',
+            actual_residual_debt: loan.actual_residual_debt || '',
+            actual_residual_debt_date: loan.actual_residual_debt_date || '',
             notes: loan.notes || ''
         });
         setIsModalOpen(true);
@@ -640,6 +650,21 @@ const Loans = () => {
                     <div style={{ display: 'flex', alignItems: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                         <AlertCircle size={16} style={{ marginRight: '5px' }} />
                         <span>Wenn leer, wird Rate aus Zins + Tilgung berechnet.</span>
+                    </div>
+
+                    <div style={{ gridColumn: 'span 2', borderTop: '1px solid var(--border-color)', paddingTop: '1rem', marginTop: '0.5rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                        <div style={{ gridColumn: 'span 2', fontWeight: 600, fontSize: '0.9rem', marginBottom: '-0.5rem' }}>Anpassung der Restschuld (Sondertilgung, Tilgungsaussetzung etc.)</div>
+                        <CurrencyInput label="Tatsächliche Restschuld (€) [Optional]" allowDecimals value={loanForm.actual_residual_debt} onChange={e => setLoanForm({ ...loanForm, actual_residual_debt: e.target.value })} />
+                        <Input
+                            label="Gültig ab Datum"
+                            type="date"
+                            value={loanForm.actual_residual_debt_date}
+                            onChange={e => setLoanForm({ ...loanForm, actual_residual_debt_date: e.target.value })}
+                        />
+                        <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '-0.5rem' }}>
+                            <AlertCircle size={16} style={{ marginRight: '5px', flexShrink: 0 }} />
+                            <span>Wenn angegeben, berechnet das Programm die Restschuld ab diesem Datum neu mit dem festen Betrag, anstatt ab dem Startdatum. Dies korrigiert z.B. Sondertilgungen. Die monatliche Rate bleibt unverändert.</span>
+                        </div>
                     </div>
 
                     <div style={{ gridColumn: 'span 2' }}>
