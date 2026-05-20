@@ -550,12 +550,13 @@ const Finance = () => {
         }
     };
 
-    const handleMarkAsPaid = async (lease, monthStr) => {
+    const handleMarkAsPaid = async (lease, monthStr, dueAmount) => {
         try {
             setProcessingPaymentId(`${lease.id}-${monthStr}`);
 
             // Calculate total rent from lease
-            const amount = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
+            const fullAmount = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
+            const amount = dueAmount !== undefined ? dueAmount : fullAmount;
 
             const { error } = await supabase.from('rent_payments').insert([{
                 user_id: user.id,
@@ -587,7 +588,8 @@ const Finance = () => {
             // Build all payment records at once
             const paymentRecords = entries.map(entry => {
                 const lease = entry.lease;
-                const amount = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
+                const fullAmount = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
+                const amount = entry.dueAmount !== undefined ? entry.dueAmount : fullAmount;
                 return {
                     user_id: user.id,
                     lease_id: lease.id,
@@ -1155,7 +1157,7 @@ const Finance = () => {
                                                 <Button
                                                     size="sm"
                                                     disabled={processingPaymentId === `${r.leaseId}-${m.str}`}
-                                                    onClick={() => handleMarkAsPaid(r.lease, m.str)}
+                                                    onClick={() => handleMarkAsPaid(r.lease, m.str, m.expected - m.paid)}
                                                     style={{ fontSize: '0.75rem', padding: '2px 8px', height: 'auto', minHeight: '24px' }}
                                                 >
                                                     {processingPaymentId === `${r.leaseId}-${m.str}` ? <Loader2 className="animate-spin" size={12} /> : 'Bezahlen'}
@@ -1402,11 +1404,32 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
     const [expandedIds, setExpandedIds] = useState(new Set());
     const [confirmingAllId, setConfirmingAllId] = useState(null);
     const [markingAllId, setMarkingAllId] = useState(null);
+    const [selectedEntries, setSelectedEntries] = useState(new Set());
 
     const toggleExpand = (id) => {
         const newSet = new Set(expandedIds);
         if (newSet.has(id)) newSet.delete(id); else newSet.add(id);
         setExpandedIds(newSet);
+    };
+
+    const toggleEntrySelection = (entryId, e) => {
+        e.stopPropagation();
+        const newSet = new Set(selectedEntries);
+        if (newSet.has(entryId)) newSet.delete(entryId);
+        else newSet.add(entryId);
+        setSelectedEntries(newSet);
+    };
+
+    const toggleAllInGroup = (groupEntries, e) => {
+        e.stopPropagation();
+        const newSet = new Set(selectedEntries);
+        const allSelected = groupEntries.every(en => newSet.has(en.id));
+        if (allSelected) {
+            groupEntries.forEach(en => newSet.delete(en.id));
+        } else {
+            groupEntries.forEach(en => newSet.add(en.id));
+        }
+        setSelectedEntries(newSet);
     };
 
     // Calculate overdue rents from leases and rent_payments (filter-independent)
@@ -1562,7 +1585,16 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                             {expandedIds.has(group.unitId) && (
                                 <div style={{ backgroundColor: 'var(--background-color)', padding: '4px 16px 8px' }}>
                                     {/* Sub-header */}
-                                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 0.6fr', padding: '8px 8px 6px', fontSize: '0.7rem', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', borderBottom: '1px solid #E5E7EB' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'auto 2fr 1fr 1fr 1fr 0.6fr', gap: '8px', padding: '8px 8px 6px', fontSize: '0.7rem', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', borderBottom: '1px solid #E5E7EB', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                                            <input 
+                                                type="checkbox" 
+                                                checked={group.entries.length > 0 && group.entries.every(en => selectedEntries.has(en.id))}
+                                                onChange={(e) => toggleAllInGroup(group.entries, e)}
+                                                onClick={e => e.stopPropagation()}
+                                                style={{ cursor: 'pointer', accentColor: 'var(--primary-color)', width: '14px', height: '14px' }}
+                                            />
+                                        </div>
                                         <div>Monat</div>
                                         <div style={{ textAlign: 'right' }}>Soll</div>
                                         <div style={{ textAlign: 'right' }}>Bezahlt</div>
@@ -1572,13 +1604,24 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                                     {group.entries.sort((a, b) => b.monthStr.localeCompare(a.monthStr)).map(entry => (
                                         <div
                                             key={entry.id}
+                                            onClick={(e) => toggleEntrySelection(entry.id, e)}
                                             style={{
-                                                display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 0.6fr',
-                                                padding: '10px 8px', alignItems: 'center',
+                                                display: 'grid', gridTemplateColumns: 'auto 2fr 1fr 1fr 1fr 0.6fr', gap: '8px',
+                                                padding: '10px 8px', alignItems: 'center', cursor: 'pointer',
                                                 borderBottom: '1px solid #F3F4F6',
-                                                fontSize: '0.88rem'
+                                                fontSize: '0.88rem',
+                                                backgroundColor: selectedEntries.has(entry.id) ? 'rgba(59,130,246,0.05)' : 'transparent',
+                                                transition: 'background-color 0.15s'
                                             }}
                                         >
+                                            <div style={{ display: 'flex', alignItems: 'center' }}>
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={selectedEntries.has(entry.id)}
+                                                    readOnly
+                                                    style={{ cursor: 'pointer', accentColor: 'var(--primary-color)', width: '14px', height: '14px' }}
+                                                />
+                                            </div>
                                             <span style={{ fontWeight: 600 }}>
                                                 {new Date(entry.periodMonth).toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })}
                                             </span>
@@ -1587,7 +1630,7 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                                             <span style={{ textAlign: 'right', color: '#EF4444', fontWeight: 700 }}>{entry.dueAmount.toFixed(2)} €</span>
                                             <div style={{ textAlign: 'right' }}>
                                                 <OverdueActionMenu
-                                                    onMarkPaid={() => onMarkPaid(entry.lease, entry.monthStr)}
+                                                    onMarkPaid={() => onMarkPaid(entry.lease, entry.monthStr, entry.dueAmount)}
                                                     isProcessing={processingPaymentId === `${entry.leaseId}-${entry.monthStr}`}
                                                 />
                                             </div>
@@ -1595,61 +1638,81 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                                     ))}
                                     {/* Alle als bezahlt markieren Button */}
                                     <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', padding: '12px 8px 8px', borderTop: '1px solid #E5E7EB', marginTop: '4px' }}>
-                                        {markingAllId === group.unitId ? (
-                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: '#6B7280' }}>
-                                                <Loader2 className="animate-spin" size={14} /> Wird markiert...
-                                            </span>
-                                        ) : confirmingAllId === group.unitId ? (
-                                            <>
-                                                <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#374151' }}>
-                                                    Wirklich alle {group.entries.length} Monate markieren?
+                                        {(() => {
+                                            const groupSelected = group.entries.filter(en => selectedEntries.has(en.id));
+                                            const hasSelection = groupSelected.length > 0;
+                                            const countToMark = hasSelection ? groupSelected.length : group.entries.length;
+                                            const labelToMark = hasSelection ? `${countToMark} ausgewählte als bezahlt markieren` : 'Alle als bezahlt markieren';
+
+                                            return markingAllId === group.unitId ? (
+                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: '#6B7280' }}>
+                                                    <Loader2 className="animate-spin" size={14} /> Wird markiert...
                                                 </span>
+                                            ) : confirmingAllId === group.unitId ? (
+                                                <>
+                                                    <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#374151' }}>
+                                                        Wirklich {countToMark} Monate markieren?
+                                                    </span>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setConfirmingAllId(null);
+                                                            setMarkingAllId(group.unitId);
+                                                            const markAll = async () => {
+                                                                const entriesToMark = hasSelection ? groupSelected : group.entries;
+                                                                await onMarkAllPaid(entriesToMark);
+                                                                // Clear selection after
+                                                                if (hasSelection) {
+                                                                    const newSet = new Set(selectedEntries);
+                                                                    groupSelected.forEach(en => newSet.delete(en.id));
+                                                                    setSelectedEntries(newSet);
+                                                                }
+                                                                setMarkingAllId(null);
+                                                            };
+                                                            markAll();
+                                                        }}
+                                                        style={{
+                                                            display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                                            padding: '6px 14px', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600,
+                                                            border: 'none', backgroundColor: '#16a34a', color: 'white',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        <CircleCheck size={13} /> Ja
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setConfirmingAllId(null); }}
+                                                        style={{
+                                                            padding: '6px 14px', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600,
+                                                            border: '1px solid #D1D5DB', backgroundColor: 'var(--surface-color)', color: '#6B7280',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        Abbrechen
+                                                    </button>
+                                                </>
+                                            ) : (
                                                 <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setConfirmingAllId(null);
-                                                        setMarkingAllId(group.unitId);
-                                                        const markAll = async () => {
-                                                            await onMarkAllPaid(group.entries);
-                                                            setMarkingAllId(null);
-                                                        };
-                                                        markAll();
-                                                    }}
+                                                    onClick={(e) => { e.stopPropagation(); setConfirmingAllId(group.unitId); }}
                                                     style={{
-                                                        display: 'inline-flex', alignItems: 'center', gap: '4px',
-                                                        padding: '6px 14px', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600,
-                                                        border: 'none', backgroundColor: '#16a34a', color: 'white',
-                                                        cursor: 'pointer'
+                                                        display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                                        padding: '8px 16px', borderRadius: '8px', fontSize: '0.82rem', fontWeight: 600,
+                                                        border: '1px solid #16a34a', backgroundColor: hasSelection ? '#16a34a' : 'var(--surface-color)', 
+                                                        color: hasSelection ? 'white' : '#16a34a',
+                                                        cursor: 'pointer', transition: 'all 0.15s'
+                                                    }}
+                                                    onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#16a34a'; e.currentTarget.style.color = 'white'; }}
+                                                    onMouseLeave={e => { 
+                                                        if (!hasSelection) {
+                                                            e.currentTarget.style.backgroundColor = '#F0FFF4'; 
+                                                            e.currentTarget.style.color = '#16a34a'; 
+                                                        }
                                                     }}
                                                 >
-                                                    <CircleCheck size={13} /> Ja
+                                                    <CircleCheck size={14} /> {labelToMark}
                                                 </button>
-                                                <button
-                                                    onClick={(e) => { e.stopPropagation(); setConfirmingAllId(null); }}
-                                                    style={{
-                                                        padding: '6px 14px', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600,
-                                                        border: '1px solid #D1D5DB', backgroundColor: 'var(--surface-color)', color: '#6B7280',
-                                                        cursor: 'pointer'
-                                                    }}
-                                                >
-                                                    Abbrechen
-                                                </button>
-                                            </>
-                                        ) : (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); setConfirmingAllId(group.unitId); }}
-                                                style={{
-                                                    display: 'inline-flex', alignItems: 'center', gap: '6px',
-                                                    padding: '8px 16px', borderRadius: '8px', fontSize: '0.82rem', fontWeight: 600,
-                                                    border: '1px solid #16a34a', backgroundColor: 'var(--surface-color)', color: '#16a34a',
-                                                    cursor: 'pointer', transition: 'all 0.15s'
-                                                }}
-                                                onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#16a34a'; e.currentTarget.style.color = 'white'; }}
-                                                onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#F0FFF4'; e.currentTarget.style.color = '#16a34a'; }}
-                                            >
-                                                <CircleCheck size={14} /> Alle als bezahlt markieren
-                                            </button>
-                                        )}
+                                            );
+                                        })()}
                                     </div>
                                 </div>
                             )}
