@@ -42,8 +42,10 @@ const Claims = () => {
                     tenants ( first_name, last_name, company_name ),
                     leases ( 
                         id, 
-                        units ( name ), 
-                        properties ( name ) 
+                        units ( 
+                            name,
+                            properties ( name )
+                        ) 
                     )
                 `)
                 .order('created_at', { ascending: false });
@@ -125,7 +127,7 @@ const Claims = () => {
 
     const getLeaseName = (lease) => {
         if (!lease) return '-';
-        const prop = lease.properties?.name || '';
+        const prop = lease.units?.properties?.name || '';
         const unit = lease.units?.name || '';
         if (prop && unit) return `${prop} - ${unit}`;
         return prop || unit || '-';
