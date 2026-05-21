@@ -5,7 +5,7 @@ import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight } from 'lucide-react';
 
 const Claims = () => {
     const [claims, setClaims] = useState([]);
@@ -24,7 +24,9 @@ const Claims = () => {
     const [createStep, setCreateStep] = useState(1);
     const [openLedgers, setOpenLedgers] = useState([]);
     const [loadingLedgers, setLoadingLedgers] = useState(false);
-    const [selectedLedgerId, setSelectedLedgerId] = useState(null);
+    
+    const [selectedLedgerIds, setSelectedLedgerIds] = useState([]);
+    const [expandedTenant, setExpandedTenant] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     const [form, setForm] = useState({
@@ -138,7 +140,8 @@ const Claims = () => {
 
     const openCreateModal = () => {
         setCreateStep(1);
-        setSelectedLedgerId(null);
+        setSelectedLedgerIds([]);
+        setExpandedTenant(null);
         
         const today = new Date();
         const fifthOfMonth = new Date(today.getFullYear(), today.getMonth(), 5);
@@ -156,11 +159,11 @@ const Claims = () => {
     };
 
     const handleCreateClaim = async () => {
-        if (!selectedLedgerId) return;
+        if (selectedLedgerIds.length === 0) return;
         setIsSubmitting(true);
         try {
-            const { error: rpcError } = await supabase.rpc('create_claim_from_rent_ledger', {
-                p_rent_ledger_id: selectedLedgerId,
+            const { error: rpcError } = await supabase.rpc('create_claim_from_rent_ledgers', {
+                p_rent_ledger_ids: selectedLedgerIds,
                 p_fee_amount: parseFloat(form.fee_amount) || 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
                 p_interest_start_date: form.interest_start_date,
@@ -238,9 +241,60 @@ const Claims = () => {
         return prop || unit || '-';
     };
 
-    const getSelectedLedger = () => {
-        return openLedgers.find(l => l.id === selectedLedgerId);
+    // Grouping Ledgers for Step 1
+    const groupedLedgers = openLedgers.reduce((acc, ledger) => {
+        const leaseId = ledger.leases?.id || 'unknown';
+        if (!acc[leaseId]) {
+            acc[leaseId] = {
+                lease: ledger.leases,
+                tenant: ledger.leases?.tenants,
+                ledgers: [],
+                totalOpen: 0
+            };
+        }
+        acc[leaseId].ledgers.push(ledger);
+        acc[leaseId].totalOpen += (Number(ledger.expected_rent || 0) - Number(ledger.paid_amount || 0));
+        return acc;
+    }, {});
+
+    const toggleTenantExpand = (leaseId) => {
+        if (expandedTenant === leaseId) {
+            setExpandedTenant(null);
+        } else {
+            setExpandedTenant(leaseId);
+        }
     };
+
+    const toggleLedgerSelection = (ledgerId, leaseId) => {
+        // Enforce that all selected items belong to the same lease
+        if (selectedLedgerIds.length > 0) {
+            const firstSelected = openLedgers.find(l => l.id === selectedLedgerIds[0]);
+            if (firstSelected && firstSelected.leases?.id !== leaseId) {
+                // If they click another tenant's row, clear the old selection and select the new one
+                setSelectedLedgerIds([ledgerId]);
+                return;
+            }
+        }
+
+        setSelectedLedgerIds(prev => 
+            prev.includes(ledgerId) ? prev.filter(id => id !== ledgerId) : [...prev, ledgerId]
+        );
+    };
+
+    const toggleAllForLease = (leaseId, ledgerIds) => {
+        // Check if all are already selected
+        const allSelected = ledgerIds.every(id => selectedLedgerIds.includes(id));
+        if (allSelected) {
+            setSelectedLedgerIds(prev => prev.filter(id => !ledgerIds.includes(id)));
+        } else {
+            // Enforce same lease rule: replace entirely
+            setSelectedLedgerIds(ledgerIds);
+        }
+    };
+
+    // Calculate totals for step 2
+    const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
+    const totalPrincipalSelected = selectedLedgerItems.reduce((sum, l) => sum + (Number(l.expected_rent || 0) - Number(l.paid_amount || 0)), 0);
 
     return (
         <div style={{ padding: 'var(--spacing-lg)' }}>
@@ -359,11 +413,11 @@ const Claims = () => {
 
             {/* Create Modal */}
             <Modal isOpen={isCreateModalOpen} onClose={() => !isSubmitting && setIsCreateModalOpen(false)} title="Forderung aus offener Miete erstellen">
-                <div style={{ padding: 'var(--spacing-md) 0' }}>
+                <div style={{ padding: 'var(--spacing-md) 0', maxWidth: '600px' }}>
                     {createStep === 1 && (
                         <div>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
-                                Wählen Sie eine offene Miete aus dem Mieterkonto, um den Forderungsprozess zu starten.
+                                Wählen Sie einen Mieter aus, um eine gebündelte oder einzelne Forderung zu erstellen.
                             </p>
                             
                             {loadingLedgers ? (
@@ -373,44 +427,82 @@ const Claims = () => {
                                     Es gibt aktuell keine offenen Mieten, die noch nicht in Bearbeitung sind.
                                 </div>
                             ) : (
-                                <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-                                        <thead>
-                                            <tr style={{ backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
-                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Auswahl</th>
-                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Monat</th>
-                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Mieter / Einheit</th>
-                                                <th style={{ padding: '12px', fontSize: '0.85rem', textAlign: 'right' }}>Offen</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {openLedgers.map(l => {
-                                                const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
-                                                const monthStr = l.period_month ? l.period_month.substring(0, 7) : '';
-                                                return (
-                                                    <tr key={l.id} style={{ borderBottom: '1px solid var(--border-color)', cursor: 'pointer', backgroundColor: selectedLedgerId === l.id ? '#EFF6FF' : 'transparent' }} onClick={() => setSelectedLedgerId(l.id)}>
-                                                        <td style={{ padding: '12px' }}>
-                                                            <input type="radio" name="ledger_select" checked={selectedLedgerId === l.id} onChange={() => setSelectedLedgerId(l.id)} />
-                                                        </td>
-                                                        <td style={{ padding: '12px', fontWeight: 500 }}>{monthStr}</td>
-                                                        <td style={{ padding: '12px', fontSize: '0.9rem' }}>
-                                                            <div>{getTenantName(l.leases?.tenants)}</div>
-                                                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{getLeaseName(l.leases)}</div>
-                                                        </td>
-                                                        <td style={{ padding: '12px', textAlign: 'right', fontWeight: 600, color: '#991B1B' }}>
-                                                            {formatCurrency(openAmount)}
-                                                        </td>
-                                                    </tr>
-                                                )
-                                            })}
-                                        </tbody>
-                                    </table>
+                                <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
+                                    {Object.entries(groupedLedgers).map(([leaseId, group]) => {
+                                        const isExpanded = expandedTenant === leaseId;
+                                        const ledgerIds = group.ledgers.map(l => l.id);
+                                        const allSelected = ledgerIds.every(id => selectedLedgerIds.includes(id));
+                                        const someSelected = ledgerIds.some(id => selectedLedgerIds.includes(id));
+                                        
+                                        return (
+                                            <div key={leaseId} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                {/* Tenant Row Header */}
+                                                <div 
+                                                    style={{ 
+                                                        display: 'flex', alignItems: 'center', padding: '12px 16px', 
+                                                        backgroundColor: (someSelected || allSelected) ? '#EFF6FF' : '#F9FAFB',
+                                                        cursor: 'pointer'
+                                                    }}
+                                                    onClick={() => toggleTenantExpand(leaseId)}
+                                                >
+                                                    <div style={{ marginRight: '12px' }} onClick={e => e.stopPropagation()}>
+                                                        <input 
+                                                            type="checkbox" 
+                                                            checked={allSelected}
+                                                            ref={input => { if(input) input.indeterminate = (someSelected && !allSelected) }}
+                                                            onChange={() => toggleAllForLease(leaseId, ledgerIds)}
+                                                            style={{ width: '16px', height: '16px' }}
+                                                        />
+                                                    </div>
+                                                    <div style={{ flex: 1 }}>
+                                                        <div style={{ fontWeight: 600 }}>{getTenantName(group.tenant)}</div>
+                                                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{getLeaseName(group.lease)}</div>
+                                                    </div>
+                                                    <div style={{ textAlign: 'right', marginRight: '16px' }}>
+                                                        <div style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(group.totalOpen)}</div>
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{group.ledgers.length} {group.ledgers.length === 1 ? 'Monat' : 'Monate'}</div>
+                                                    </div>
+                                                    <div>
+                                                        {isExpanded ? <ChevronDown size={20} color="var(--text-secondary)" /> : <ChevronRight size={20} color="var(--text-secondary)" />}
+                                                    </div>
+                                                </div>
+
+                                                {/* Expanded Details */}
+                                                {isExpanded && (
+                                                    <div style={{ padding: '8px 16px 16px 44px', backgroundColor: 'white' }}>
+                                                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                                            <tbody>
+                                                                {group.ledgers.map(l => {
+                                                                    const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
+                                                                    const monthStr = l.period_month ? l.period_month.substring(0, 7) : '';
+                                                                    const isSelected = selectedLedgerIds.includes(l.id);
+                                                                    return (
+                                                                        <tr key={l.id} style={{ borderBottom: '1px solid #E5E7EB' }}>
+                                                                            <td style={{ padding: '8px 0', width: '30px' }}>
+                                                                                <input 
+                                                                                    type="checkbox" 
+                                                                                    checked={isSelected}
+                                                                                    onChange={() => toggleLedgerSelection(l.id, leaseId)}
+                                                                                />
+                                                                            </td>
+                                                                            <td style={{ padding: '8px 0' }}>Miete {monthStr}</td>
+                                                                            <td style={{ padding: '8px 0', textAlign: 'right', fontWeight: 500 }}>{formatCurrency(openAmount)}</td>
+                                                                        </tr>
+                                                                    )
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )
+                                    })}
                                 </div>
                             )}
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-lg)' }}>
                                 <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                                <Button onClick={() => setCreateStep(2)} disabled={!selectedLedgerId} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Button onClick={() => setCreateStep(2)} disabled={selectedLedgerIds.length === 0} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     Weiter <ArrowRight size={16} />
                                 </Button>
                             </div>
@@ -420,19 +512,17 @@ const Claims = () => {
                     {createStep === 2 && (
                         <div>
                             {(() => {
-                                const l = getSelectedLedger();
-                                const openAmount = l ? (Number(l.expected_rent || 0) - Number(l.paid_amount || 0)) : 0;
-                                const total = openAmount + Number(form.fee_amount || 0);
+                                const total = totalPrincipalSelected + Number(form.fee_amount || 0);
                                 const deadlineDate = new Date();
                                 deadlineDate.setDate(deadlineDate.getDate() + Number(form.deadline_days || 0));
 
                                 return (
                                     <>
                                         <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
-                                            <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Zusammenfassung</h3>
+                                            <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Zusammenfassung ({selectedLedgerIds.length} {selectedLedgerIds.length === 1 ? 'Monat' : 'Monate'})</h3>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <span>Hauptforderung (Miete {l?.period_month?.substring(0,7)}):</span>
-                                                <span style={{ fontWeight: 600 }}>{formatCurrency(openAmount)}</span>
+                                                <span>Hauptforderung:</span>
+                                                <span style={{ fontWeight: 600 }}>{formatCurrency(totalPrincipalSelected)}</span>
                                             </div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                                                 <span>Mahnkosten:</span>
