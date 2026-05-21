@@ -204,6 +204,12 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     });
 
     yPos = doc.lastAutoTable.finalY + 15;
+    
+    // Check space for the Bank and Deadline block (needs approx 50mm)
+    if (yPos + 50 > pageHeight - margin) {
+        doc.addPage();
+        yPos = margin;
+    }
 
     // Zahlungsfrist & Bank
     const deadlineDate = new Date();
