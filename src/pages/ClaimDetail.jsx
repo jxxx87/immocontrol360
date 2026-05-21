@@ -356,10 +356,10 @@ const ClaimDetail = () => {
             </div>
 
             {/* Main Content Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--spacing-xl)' }}>
                 
                 {/* LEFT PANEL */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
+                <div style={{ flex: '2 1 400px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
                     
                     {/* Positionen */}
                     <Card>
@@ -370,29 +370,31 @@ const ClaimDetail = () => {
                         {items.length === 0 ? (
                             <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-secondary)' }}>Keine Forderungspositionen vorhanden</div>
                         ) : (
-                            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-                                <thead>
-                                    <tr style={{ backgroundColor: '#F9FAFB', borderBottom: '1px solid var(--border-color)' }}>
-                                        <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Beschreibung</th>
-                                        <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Ursprung</th>
-                                        <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Getilgt</th>
-                                        <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Offen</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {items.map(item => (
-                                        <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
-                                                <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.claim_items?.period_month ? formatDate(item.claim_items.period_month) : ''}</div>
-                                            </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(item.original_amount)}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(item.paid_principal)}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(item.open_amount)}</td>
+                            <div style={{ overflowX: 'auto' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '500px' }}>
+                                    <thead>
+                                        <tr style={{ backgroundColor: '#F9FAFB', borderBottom: '1px solid var(--border-color)' }}>
+                                            <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Beschreibung</th>
+                                            <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Ursprung</th>
+                                            <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Getilgt</th>
+                                            <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Offen</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody>
+                                        {items.map(item => (
+                                            <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
+                                                    <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.claim_items?.period_month ? formatDate(item.claim_items.period_month) : ''}</div>
+                                                </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(item.original_amount)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(item.paid_principal)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(item.open_amount)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
                         )}
                     </Card>
 
@@ -437,7 +439,7 @@ const ClaimDetail = () => {
                 </div>
 
                 {/* RIGHT PANEL */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
+                <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
                     <Card style={{ padding: '16px', height: 'auto' }}>
                         <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px', borderBottom: '1px solid #E5E7EB', paddingBottom: '8px' }}>Aktionen</h3>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
