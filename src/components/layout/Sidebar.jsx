@@ -17,6 +17,7 @@ import {
     ClipboardList,
     Pin,
     Home,
+    Scale,
     TicketCheck,
     Send,
     Sun,
@@ -91,6 +92,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
         { path: '/', label: 'Dashboard', icon: LayoutDashboard, navKey: 'dashboard' },
         { path: '/properties', label: 'Immobilien', icon: Building2, navKey: 'properties' },
         { path: '/tenants', label: 'Mietverhältnisse', icon: Users, navKey: 'tenants' },
+        { path: '/forderungen', label: 'Forderungen', icon: Scale, navKey: 'forderungen' },
         {
             label: 'Finanzen',
             icon: Wallet,
