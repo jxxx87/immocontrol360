@@ -15,6 +15,8 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const doc = new jsPDF('p', 'mm', 'a4');
     const margin = 20;
     const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const usableWidth = pageWidth - (margin * 2);
     let yPos = margin;
 
     // Fetch Sender Data
