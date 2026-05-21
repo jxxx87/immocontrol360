@@ -56,7 +56,7 @@ const ClaimDetail = () => {
                     id, user_id, lease_id, tenant_id, status, escalation_level,
                     interest_start_date, interest_rate, accumulated_unpaid_interest,
                     accumulated_unpaid_fees, deadline, next_action_at, created_at,
-                    tenants ( first_name, last_name, email, phone, street, house_number, zip, city, company ),
+                    tenants ( first_name, last_name, email, phone ),
                     leases ( 
                         id, 
                         units ( 

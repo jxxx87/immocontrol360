@@ -32,10 +32,10 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     // Tenant Data
     const tenant = claim.tenants || {};
     const tenantName = `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim();
-    // Fallback tenant address to property address if tenant address is missing
+    // Fallback tenant address to property address
     const prop = claim.leases?.units?.properties || {};
-    const tenantStreet = tenant.street ? `${tenant.street} ${tenant.house_number || ''}`.trim() : `${prop.street || ''} ${prop.house_number || ''}`.trim();
-    const tenantCity = tenant.zip ? `${tenant.zip} ${tenant.city || ''}`.trim() : `${prop.zip || ''} ${prop.city || ''}`.trim();
+    const tenantStreet = `${prop.street || ''} ${prop.house_number || ''}`.trim();
+    const tenantCity = `${prop.zip || ''} ${prop.city || ''}`.trim();
 
     // Setup Fonts
     doc.setFont('helvetica');
@@ -59,15 +59,9 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
     // 3. Empfängerblock
     doc.setFontSize(11);
-    if (tenant.company) {
-        doc.text('Firma', margin, yPos);
-        yPos += 5;
-        doc.text(tenant.company, margin, yPos);
-    } else {
-        doc.text('Herrn/Frau', margin, yPos);
-        yPos += 5;
-        doc.text(tenantName, margin, yPos);
-    }
+    doc.text('Herrn/Frau', margin, yPos);
+    yPos += 5;
+    doc.text(tenantName, margin, yPos);
     yPos += 5;
     doc.text(tenantStreet, margin, yPos);
     yPos += 5;
