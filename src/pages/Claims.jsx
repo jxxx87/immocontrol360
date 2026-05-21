@@ -6,13 +6,14 @@ import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical } from 'lucide-react';
 
 const Claims = () => {
     const navigate = useNavigate();
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [activeDropdown, setActiveDropdown] = useState(null);
     
     const [kpis, setKpis] = useState({
         openCount: 0,
@@ -50,6 +51,9 @@ const Claims = () => {
 
     useEffect(() => {
         loadData();
+        const handleClickOutside = () => setActiveDropdown(null);
+        window.addEventListener('click', handleClickOutside);
+        return () => window.removeEventListener('click', handleClickOutside);
     }, []);
 
     const loadData = async () => {
@@ -455,7 +459,13 @@ const Claims = () => {
                             </thead>
                             <tbody>
                                 {claims.map((claim) => (
-                                    <tr key={claim.id} style={{ borderBottom: '1px solid var(--border-color)', transition: 'background-color 0.2s' }}>
+                                    <tr 
+                                        key={claim.id} 
+                                        onClick={() => navigate(`/forderungen/${claim.id}`)}
+                                        style={{ borderBottom: '1px solid var(--border-color)', transition: 'background-color 0.2s', cursor: 'pointer' }}
+                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F9FAFB'}
+                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                    >
                                         <td style={{ padding: '16px', fontSize: '0.95rem', fontWeight: 500 }}>{getTenantName(claim.tenants)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>{getLeaseName(claim.leases)}</td>
                                         <td style={{ padding: '16px' }}>{getStatusBadge(claim.status)}</td>
@@ -474,30 +484,42 @@ const Claims = () => {
                                         <td style={{ padding: '16px', fontSize: '0.95rem', textAlign: 'right', fontWeight: 600, color: 'var(--text-primary)' }}>
                                             {formatCurrency(claim.total_due)}
                                         </td>
-                                        <td style={{ padding: '16px', textAlign: 'right' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                                                <button 
-                                                    onClick={() => navigate(`/forderungen/${claim.id}`)}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1E40AF', padding: '4px' }}
-                                                    title="Akte öffnen"
-                                                >
-                                                    <Eye size={16} />
-                                                </button>
-                                                <button 
-                                                    onClick={() => openEditModal(claim)}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary-color)', padding: '4px' }}
-                                                    title="Bearbeiten"
-                                                >
-                                                    <Edit size={16} />
-                                                </button>
-                                                <button 
-                                                    onClick={() => handleCancelClaim(claim.id)}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: '4px' }}
-                                                    title="Löschen / Stornieren"
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
-                                            </div>
+                                        <td style={{ padding: '16px', textAlign: 'right', position: 'relative' }}>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); setActiveDropdown(activeDropdown === claim.id ? null : claim.id); }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
+                                            >
+                                                <MoreVertical size={20} />
+                                            </button>
+                                            {activeDropdown === claim.id && (
+                                                <div style={{ position: 'absolute', right: '16px', top: '48px', backgroundColor: 'white', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)', border: '1px solid #E5E7EB', zIndex: 10, minWidth: '160px', overflow: 'hidden' }}>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); navigate(`/forderungen/${claim.id}`); }}
+                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)' }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F3F4F6'}
+                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                                    >
+                                                        <Eye size={16} /> Akte öffnen
+                                                    </button>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(claim); }}
+                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)' }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F3F4F6'}
+                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                                    >
+                                                        <Edit size={16} /> Bearbeiten
+                                                    </button>
+                                                    <div style={{ borderTop: '1px solid #E5E7EB' }}></div>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); handleCancelClaim(claim.id); }}
+                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B' }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#FEF2F2'}
+                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                                    >
+                                                        <Trash2 size={16} /> Stornieren
+                                                    </button>
+                                                </div>
+                                            )}
                                         </td>
                                     </tr>
                                 ))}
