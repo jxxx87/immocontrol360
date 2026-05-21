@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable';
 import { supabase } from './supabase';
 
 const formatCurrency = (amount) => {
@@ -125,7 +125,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     yPos += splitIntro.length * 5 + 10;
 
     // Forderungszusammenfassung Table
-    doc.autoTable({
+    autoTable(doc, {
         startY: yPos,
         margin: { left: margin },
         tableWidth: usableWidth * 0.8,
@@ -144,7 +144,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     
     yPos = doc.lastAutoTable.finalY;
     
-    doc.autoTable({
+    autoTable(doc, {
         startY: yPos,
         margin: { left: margin },
         tableWidth: usableWidth * 0.8,
@@ -214,7 +214,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.text('Anlage 1: Forderungsaufstellung', margin, currentY);
     currentY += 10;
 
-    doc.autoTable({
+    autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
         head: [['Monat', 'Sollmiete', 'Zahlung / Anrechnung', 'Offener Betrag']],
@@ -262,7 +262,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const diffTime = Math.abs(endDate - startDate);
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    doc.autoTable({
+    autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
         head: [['Monat', 'Verzinslicher Betrag', 'Zeitraum', 'Tage', 'Zinsen']],
@@ -296,7 +296,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.text('Anlage 3: Ablauf bei Mietrückstand und mögliche Folgekosten', margin, currentY);
     currentY += 10;
 
-    doc.autoTable({
+    autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
         head: [['Schritt', 'Erläuterung', 'Mögliche Folgekosten']],
