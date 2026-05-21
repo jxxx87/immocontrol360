@@ -43,8 +43,8 @@ const Claims = () => {
                     leases ( 
                         id, 
                         units ( 
-                            name,
-                            properties ( name )
+                            unit_name,
+                            properties ( street, house_number, zip, city )
                         ) 
                     )
                 `)
@@ -126,8 +126,9 @@ const Claims = () => {
 
     const getLeaseName = (lease) => {
         if (!lease) return '-';
-        const prop = lease.units?.properties?.name || '';
-        const unit = lease.units?.name || '';
+        const propData = lease.units?.properties;
+        const prop = propData ? `${propData.street} ${propData.house_number}`.trim() : '';
+        const unit = lease.units?.unit_name || '';
         if (prop && unit) return `${prop} - ${unit}`;
         return prop || unit || '-';
     };
