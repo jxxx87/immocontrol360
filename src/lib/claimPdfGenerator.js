@@ -472,18 +472,40 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         template_reference: "Abmahnung_Zahlungsverzug_Marco_Weber_2026-05-19(1).docx"
     };
 
-    // Save to claim_events
-    const { error: eventError } = await supabase.from('claim_events').insert([{
-        user_id: claim.user_id,
-        claim_id: claim.id,
-        event_type: 'dunning_sent',
-        description: `${documentType} generiert`,
-        event_metadata: eventMetadata
-    }]);
+    // Save to claim_events (Deduplicate by documentType)
+    const { data: existingEvents } = await supabase
+        .from('claim_events')
+        .select('id, event_metadata')
+        .eq('claim_id', claim.id)
+        .eq('event_type', 'dunning_sent');
 
-    if (eventError) {
-        console.error('Error saving claim_event:', eventError);
-        throw new Error('Fehler beim Speichern der Historie.');
+    const existingEvent = existingEvents?.find(e => e.event_metadata?.document_type === documentType);
+
+    if (existingEvent) {
+        // Update the existing event to refresh its timestamp and metadata
+        const { error: updateError } = await supabase
+            .from('claim_events')
+            .update({
+                event_date: new Date().toISOString(),
+                event_metadata: eventMetadata
+            })
+            .eq('id', existingEvent.id);
+            
+        if (updateError) console.error('Error updating claim_event:', updateError);
+    } else {
+        // Insert new event
+        const { error: eventError } = await supabase.from('claim_events').insert([{
+            user_id: claim.user_id,
+            claim_id: claim.id,
+            event_type: 'dunning_sent',
+            description: `${documentType} generiert`,
+            event_metadata: eventMetadata
+        }]);
+
+        if (eventError) {
+            console.error('Error saving claim_event:', eventError);
+            throw new Error('Fehler beim Speichern der Historie.');
+        }
     }
 
     // Optional: Upload to Supabase Storage if a bucket exists
