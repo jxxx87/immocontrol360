@@ -94,6 +94,9 @@ const Claims = () => {
     const loadOpenLedgers = async () => {
         setLoadingLedgers(true);
         try {
+            // Auto-Sync rent_ledger from payments before fetching
+            await supabase.rpc('sync_all_rent_ledgers').catch(e => console.warn('Sync ledger warning:', e));
+
             const { data: ledgerData, error: ledgerError } = await supabase
                 .from('rent_ledger')
                 .select(`
