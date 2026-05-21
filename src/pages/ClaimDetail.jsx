@@ -80,13 +80,33 @@ const ClaimDetail = () => {
             
             if (!totalsError) setTotals(totalsData);
 
-            // Fetch C) claim_item_totals_view joined with claim_items for description
-            const { data: itemsData, error: itemsError } = await supabase
-                .from('claim_item_totals_view')
-                .select('*, claim_items!inner(description, period_month, item_type)')
+            // Fetch C1) claim_items
+            const { data: rawItems, error: rawItemsError } = await supabase
+                .from('claim_items')
+                .select('*')
                 .eq('claim_id', claimId);
 
-            if (!itemsError) setItems(itemsData || []);
+            // Fetch C2) claim_item_totals_view
+            const { data: totalsItemsData, error: totalsItemsError } = await supabase
+                .from('claim_item_totals_view')
+                .select('*')
+                .eq('claim_id', claimId);
+
+            if (totalsItemsError) console.error('items error:', totalsItemsError);
+            if (rawItemsError) console.error('raw items error:', rawItemsError);
+
+            if (!rawItemsError && !totalsItemsError && rawItems && totalsItemsData) {
+                const mergedItems = totalsItemsData.map(tv => {
+                    const matchedItem = rawItems.find(ri => ri.id === tv.claim_item_id);
+                    return {
+                        ...tv,
+                        claim_items: matchedItem
+                    };
+                });
+                setItems(mergedItems);
+            } else {
+                setItems([]);
+            }
 
             // Fetch D) claim_events
             const { data: eventsData, error: eventsError } = await supabase

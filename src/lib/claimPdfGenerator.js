@@ -44,17 +44,15 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
     // 1. Absenderzeile (DIN 5008 Typ B: y=45)
     yPos = 45;
-    doc.setFontSize(8);
+    doc.setFontSize(6); // Max 2mm height
     doc.setTextColor(0, 0, 0);
     doc.text(senderLine, margin, yPos);
-    yPos += 2;
-    doc.setDrawColor(0, 0, 0);
-    doc.setLineWidth(0.2);
-    doc.line(margin, yPos, margin + 70, yPos);
-    yPos += 5;
+    
+    // Zone 2 is a 20mm blank space for Sendungskennzeichnung
+    yPos += 20;
 
-    // 2. Empfängerblock
-    doc.setFontSize(11);
+    // 2. Empfängerblock (Zone 3 starts at Y=65)
+    doc.setFontSize(9); // Min 9pt for 5 lines
     doc.text('Herrn/Frau', margin, yPos);
     yPos += 5;
     doc.text(tenantName, margin, yPos);
