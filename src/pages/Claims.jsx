@@ -422,7 +422,7 @@ const Claims = () => {
             </div>
 
             {/* Claims Table */}
-            <Card>
+            <Card style={{ overflow: 'visible' }}>
                 <div style={{ padding: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color)' }}>
                     <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Aktive Forderungen</h2>
                 </div>
@@ -441,7 +441,7 @@ const Claims = () => {
                         Noch keine Forderungen vorhanden.
                     </div>
                 ) : (
-                    <div style={{ overflowX: 'auto' }}>
+                    <div style={{ overflow: 'visible' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
                             <thead>
                                 <tr style={{ backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
