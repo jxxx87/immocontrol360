@@ -461,11 +461,11 @@ const ClaimDetail = () => {
                             </Button>
                             <Button 
                                 variant="secondary" 
-                                style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', backgroundColor: '#FEF2F2', color: '#991B1B', borderColor: '#FCA5A5' }}
+                                style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', backgroundColor: '#FEF2F2', color: '#991B1B', borderColor: '#FCA5A5', whiteSpace: 'normal', textAlign: 'left' }}
                                 onClick={() => setIsPdfModalOpen(true)}
                                 disabled={isLocked}
                             >
-                                <Printer size={16} /> Mahnschreiben PDF
+                                <Printer size={16} style={{ flexShrink: 0 }} /> PDF erzeugen
                             </Button>
                         </div>
                     </Card>
