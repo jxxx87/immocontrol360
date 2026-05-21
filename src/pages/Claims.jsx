@@ -6,6 +6,7 @@ import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
+import { createPortal } from 'react-dom';
 import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical } from 'lucide-react';
 
 const Claims = () => {
@@ -14,6 +15,8 @@ const Claims = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [activeDropdown, setActiveDropdown] = useState(null);
+    const [activeDropdownClaim, setActiveDropdownClaim] = useState(null);
+    const [menuPos, setMenuPos] = useState({ top: 0, left: 0, openUp: false });
     
     const [kpis, setKpis] = useState({
         openCount: 0,
@@ -484,42 +487,32 @@ const Claims = () => {
                                         <td style={{ padding: '16px', fontSize: '0.95rem', textAlign: 'right', fontWeight: 600, color: 'var(--text-primary)' }}>
                                             {formatCurrency(claim.total_due)}
                                         </td>
-                                        <td style={{ padding: '16px', textAlign: 'right', position: 'relative' }}>
-                                            <button 
-                                                onClick={(e) => { e.stopPropagation(); setActiveDropdown(activeDropdown === claim.id ? null : claim.id); }}
-                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
-                                            >
-                                                <MoreVertical size={20} />
-                                            </button>
-                                            {activeDropdown === claim.id && (
-                                                <div style={{ position: 'absolute', right: '16px', top: '48px', backgroundColor: 'white', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)', border: '1px solid #E5E7EB', zIndex: 10, minWidth: '160px', overflow: 'hidden' }}>
-                                                    <button 
-                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); navigate(`/forderungen/${claim.id}`); }}
-                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)' }}
-                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F3F4F6'}
-                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                                                    >
-                                                        <Eye size={16} /> Akte öffnen
-                                                    </button>
-                                                    <button 
-                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(claim); }}
-                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)' }}
-                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F3F4F6'}
-                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                                                    >
-                                                        <Edit size={16} /> Bearbeiten
-                                                    </button>
-                                                    <div style={{ borderTop: '1px solid #E5E7EB' }}></div>
-                                                    <button 
-                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); handleCancelClaim(claim.id); }}
-                                                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B' }}
-                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#FEF2F2'}
-                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                                                    >
-                                                        <Trash2 size={16} /> Stornieren
-                                                    </button>
-                                                </div>
-                                            )}
+                                        <td style={{ padding: '16px', textAlign: 'right' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                                <button 
+                                                    onClick={(e) => { 
+                                                        e.stopPropagation(); 
+                                                        if (activeDropdown === claim.id) {
+                                                            setActiveDropdown(null);
+                                                            setActiveDropdownClaim(null);
+                                                        } else {
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            const spaceBelow = window.innerHeight - rect.bottom;
+                                                            const openUp = spaceBelow < 200;
+                                                            setMenuPos({
+                                                                top: openUp ? rect.top : rect.bottom + 4,
+                                                                left: rect.left,
+                                                                openUp
+                                                            });
+                                                            setActiveDropdown(claim.id);
+                                                            setActiveDropdownClaim(claim);
+                                                        }
+                                                    }}
+                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
+                                                >
+                                                    <MoreVertical size={20} />
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -788,6 +781,55 @@ const Claims = () => {
                     )}
                 </div>
             </Modal>
+
+            {activeDropdown && activeDropdownClaim && createPortal(
+                <>
+                    <div onClick={() => { setActiveDropdown(null); setActiveDropdownClaim(null); }} style={{ position: 'fixed', inset: 0, zIndex: 9998 }} />
+                    <div style={{
+                        position: 'fixed',
+                        top: menuPos.openUp ? 'auto' : menuPos.top,
+                        bottom: menuPos.openUp ? `${window.innerHeight - menuPos.top}px` : 'auto',
+                        left: menuPos.left,
+                        transform: 'translateX(-100%)',
+                        backgroundColor: 'var(--surface-color, white)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: 'var(--radius-md)',
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                        zIndex: 9999,
+                        minWidth: '160px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        padding: '4px'
+                    }}>
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); navigate(`/forderungen/${activeDropdownClaim.id}`); }}
+                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                        >
+                            <Eye size={16} /> Akte öffnen
+                        </button>
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(activeDropdownClaim); }}
+                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                        >
+                            <Edit size={16} /> Bearbeiten
+                        </button>
+                        <div style={{ height: '1px', backgroundColor: 'var(--border-color, #E5E7EB)', margin: '4px 0' }} />
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); handleCancelClaim(activeDropdownClaim.id); }}
+                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B', borderRadius: '6px' }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.06)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                        >
+                            <Trash2 size={16} /> Stornieren
+                        </button>
+                    </div>
+                </>,
+                document.body
+            )}
         </div>
     );
 };
