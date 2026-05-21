@@ -239,15 +239,29 @@ const ClaimDetail = () => {
         try {
             const result = await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays);
             
+            // Determine new escalation level based on document sent
+            let newLevel = claim.escalation_level;
+            if (pdfForm.type === 'Zahlungserinnerung') newLevel = 1;
+            else if (pdfForm.type === 'Abmahnung' || pdfForm.type === 'Mahnung') newLevel = 2;
+            else if (pdfForm.type === 'Letzte Zahlungsaufforderung') newLevel = 3;
+
+            const updatePayload = {
+                escalation_level: newLevel,
+                updated_at: new Date().toISOString()
+            };
+
             // Optional: Update Claim status to sent if it was draft or open
             if (claim.status === 'draft' || claim.status === 'open') {
-                await supabase.from('claims').update({ status: 'sent', updated_at: new Date().toISOString() }).eq('id', claim.id);
+                updatePayload.status = 'sent';
             }
             
             // Also update the next action deadline automatically if they set a deadline
             const newDeadline = new Date();
             newDeadline.setDate(newDeadline.getDate() + parseInt(pdfForm.deadlineDays));
-            await supabase.from('claims').update({ deadline: newDeadline.toISOString(), next_action_at: newDeadline.toISOString() }).eq('id', claim.id);
+            updatePayload.deadline = newDeadline.toISOString();
+            updatePayload.next_action_at = newDeadline.toISOString();
+            
+            await supabase.from('claims').update(updatePayload).eq('id', claim.id);
 
             setIsPdfModalOpen(false);
             loadClaimData();
@@ -520,11 +534,16 @@ const ClaimDetail = () => {
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                 <span style={{ color: 'var(--text-secondary)' }}>Zinssatz</span>
-                                <span>{claim.interest_rate}% p.a.</span>
+                                <span>{Number(claim.interest_rate || 5.00).toFixed(2)}% p.a.</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                 <span style={{ color: 'var(--text-secondary)' }}>Mahnstufe</span>
-                                <span>Level {claim.escalation_level}</span>
+                                <span>
+                                    {claim.escalation_level === 1 ? 'Stufe 1 (Zahlungserinnerung)' : 
+                                     claim.escalation_level === 2 ? 'Stufe 2 (Abmahnung)' : 
+                                     claim.escalation_level === 3 ? 'Stufe 3 (Letzte Aufforderung)' : 
+                                     claim.escalation_level ? `Stufe ${claim.escalation_level}` : 'Keine'}
+                                </span>
                             </div>
                         </div>
                     </Card>
@@ -618,10 +637,9 @@ const ClaimDetail = () => {
                         onChange={(e) => setPdfForm({...pdfForm, type: e.target.value})}
                         style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid #D1D5DB', marginBottom: '16px', fontSize: '0.95rem' }}
                     >
-                        <option value="Zahlungserinnerung">Zahlungserinnerung</option>
-                        <option value="Mahnung">Mahnung</option>
-                        <option value="Abmahnung">Abmahnung wegen Zahlungsverzug</option>
-                        <option value="Letzte Zahlungsaufforderung">Letzte Zahlungsaufforderung</option>
+                        <option value="Zahlungserinnerung">Stufe 1: Zahlungserinnerung</option>
+                        <option value="Abmahnung">Stufe 2: Abmahnung wegen Zahlungsverzug</option>
+                        <option value="Letzte Zahlungsaufforderung">Stufe 3: Letzte Zahlungsaufforderung</option>
                     </select>
                     
                     <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
