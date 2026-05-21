@@ -39,7 +39,7 @@ const Claims = () => {
                 .from('claims')
                 .select(`
                     id, status, escalation_level, deadline, next_action_at,
-                    tenants ( first_name, last_name, company_name ),
+                    tenants ( first_name, last_name ),
                     leases ( 
                         id, 
                         units ( 
@@ -121,8 +121,7 @@ const Claims = () => {
 
     const getTenantName = (tenant) => {
         if (!tenant) return 'Unbekannt';
-        if (tenant.company_name) return tenant.company_name;
-        return `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim();
+        return `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim() || 'Unbekannt';
     };
 
     const getLeaseName = (lease) => {
