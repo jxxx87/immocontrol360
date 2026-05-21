@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2 } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye } from 'lucide-react';
 
 const Claims = () => {
+    const navigate = useNavigate();
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -474,6 +476,13 @@ const Claims = () => {
                                         </td>
                                         <td style={{ padding: '16px', textAlign: 'right' }}>
                                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                <button 
+                                                    onClick={() => navigate(`/forderungen/${claim.id}`)}
+                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1E40AF', padding: '4px' }}
+                                                    title="Akte öffnen"
+                                                >
+                                                    <Eye size={16} />
+                                                </button>
                                                 <button 
                                                     onClick={() => openEditModal(claim)}
                                                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary-color)', padding: '4px' }}

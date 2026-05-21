@@ -12,6 +12,7 @@ import InvoiceForm from './pages/InvoiceForm';
 import Meters from './pages/Meters';
 import Contacts from './pages/Contacts';
 import Claims from './pages/Claims';
+import ClaimDetail from './pages/ClaimDetail';
 import Loans from './pages/Loans';
 import Documents from './pages/Documents';
 import Settings from './pages/Settings';
@@ -91,6 +92,7 @@ function App() {
 
                     <Route path="tenants" element={<Tenants />} />
                     <Route path="forderungen" element={<Claims />} />
+                    <Route path="forderungen/:claimId" element={<ClaimDetail />} />
                     <Route path="finance" element={<Finance />} />
                     <Route path="loans" element={<Loans />} />
                     <Route path="utility-costs" element={<UtilityCosts />} />
