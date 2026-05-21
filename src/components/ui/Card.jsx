@@ -1,13 +1,13 @@
 import React from 'react';
 import { useViewMode } from '../../context/ViewModeContext';
 
-const Card = ({ children, className = '', title, action, style = {} }) => {
+const Card = ({ children, className = '', title, action, style = {}, onClick }) => {
     const { isMobile } = useViewMode();
 
     if (isMobile) {
         // Mobile: simple block layout, no flex, no overflow constraints
         return (
-            <div style={{
+            <div onClick={onClick} style={{
                 backgroundColor: 'var(--glass-bg)',
                 backdropFilter: 'blur(12px)',
                 WebkitBackdropFilter: 'blur(12px)',
@@ -39,7 +39,7 @@ const Card = ({ children, className = '', title, action, style = {} }) => {
 
     // Desktop: original flex layout
     return (
-        <div style={{
+        <div onClick={onClick} style={{
             backgroundColor: 'var(--glass-bg)',
             backdropFilter: 'blur(12px)',
             WebkitBackdropFilter: 'blur(12px)',
