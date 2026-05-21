@@ -58,10 +58,10 @@ const ClaimDetail = () => {
                     accumulated_unpaid_fees, deadline, next_action_at, created_at,
                     tenants ( first_name, last_name, email, phone ),
                     leases ( 
-                        id, 
+                        id, start_date,
                         units ( 
                             unit_name,
-                            properties ( street, house_number, zip, city )
+                            properties ( street, house_number, zip, city, portfolio_id )
                         ) 
                     )
                 `)

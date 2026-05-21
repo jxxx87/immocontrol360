@@ -42,14 +42,8 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     // Setup Fonts
     doc.setFont('helvetica');
 
-    // 1. Interner Titel Oben Links
-    doc.setFontSize(8);
-    doc.setTextColor(150, 150, 150);
-    const internalTitle = `${documentType} Zahlungsverzug ${tenantName}`;
-    doc.text(internalTitle, margin, yPos);
-    yPos += 15;
-
-    // 2. Absenderzeile
+    // 1. Absenderzeile (DIN 5008 Typ B: y=45)
+    yPos = 45;
     doc.setFontSize(8);
     doc.setTextColor(0, 0, 0);
     doc.text(senderLine, margin, yPos);
@@ -57,9 +51,9 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.2);
     doc.line(margin, yPos, margin + 70, yPos);
-    yPos += 10;
+    yPos += 5;
 
-    // 3. Empfängerblock
+    // 2. Empfängerblock
     doc.setFontSize(11);
     doc.text('Herrn/Frau', margin, yPos);
     yPos += 5;
@@ -69,13 +63,26 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     yPos += 5;
     doc.text(tenantCity, margin, yPos);
 
-    // 4. Ort, Datum rechts
+    // Fetch Portfolio Bank Data (if available)
+    const portfolioId = claim.leases?.units?.properties?.portfolio_id;
+    let portfolio = null;
+    if (portfolioId) {
+        const { data: pData } = await supabase
+            .from('portfolios')
+            .select('bank_name, iban, bic')
+            .eq('id', portfolioId)
+            .single();
+        portfolio = pData;
+    }
+
+    // 3. Ort, Datum rechts (DIN 5008: below fold 1, roughly y=105)
+    yPos = 105;
     doc.setFontSize(11);
     const docDate = new Date();
     const dateStr = docDate.toLocaleDateString('de-DE');
     const placeDate = `${profile?.city || 'Ort'}, den ${dateStr}`;
     doc.text(placeDate, pageWidth - margin - doc.getTextWidth(placeDate), yPos);
-    yPos += 25;
+    yPos += 15;
 
     // 5. Betreff
     doc.setFontSize(12);
@@ -118,11 +125,50 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     yPos += 10;
     
     // Create text lines for formatting
-    const introText = `zwischen uns besteht seit dem Mietbeginn ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.\n\nDie Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.\n\n${callToAction}`;
+    const leaseStart = claim.leases?.start_date ? formatDate(claim.leases.start_date) : 'Mietbeginn';
+    const intro1 = `zwischen uns besteht seit dem ${leaseStart} ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.\n\nDie Miete ist nach § 556b Abs. 1 BGB zu Beginn, `;
+    const introBold = `spätestens bis zum dritten Werktag`;
+    const intro2 = ` des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.`;
     
-    const splitIntro = doc.splitTextToSize(introText, usableWidth);
-    doc.text(splitIntro, margin, yPos);
-    yPos += splitIntro.length * 5 + 10;
+    // First part
+    const splitIntro1 = doc.splitTextToSize(intro1, usableWidth);
+    doc.text(splitIntro1, margin, yPos);
+    yPos += (splitIntro1.length - 1) * 5; // Move to the last line of splitIntro1
+    
+    // Calculate X position at the end of intro1
+    const lastLineText1 = splitIntro1[splitIntro1.length - 1];
+    let currentX = margin + doc.getTextWidth(lastLineText1);
+    
+    // Bold part
+    doc.setFont('helvetica', 'bold');
+    doc.text(introBold, currentX, yPos);
+    currentX += doc.getTextWidth(introBold);
+    
+    // Remaining part
+    doc.setFont('helvetica', 'normal');
+    const intro2Words = intro2.split(' ');
+    let currentLine = '';
+    for (let word of intro2Words) {
+        if (word === '') continue;
+        const wordWithSpace = currentLine.length === 0 && word.startsWith(',') ? word : ' ' + word;
+        if (currentX + doc.getTextWidth(currentLine + wordWithSpace) > margin + usableWidth) {
+            doc.text(currentLine, currentX, yPos);
+            yPos += 5;
+            currentX = margin;
+            currentLine = word; // Start new line
+        } else {
+            currentLine += wordWithSpace;
+        }
+    }
+    if (currentLine) {
+        doc.text(currentLine, currentX, yPos);
+        yPos += 10;
+    }
+    
+    // Render call to action
+    const splitCall = doc.splitTextToSize(callToAction, usableWidth);
+    doc.text(splitCall, margin, yPos);
+    yPos += splitCall.length * 5 + 10;
 
     // Forderungszusammenfassung Table
     autoTable(doc, {
@@ -167,22 +213,66 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const nextDay = new Date(deadlineDate);
     nextDay.setDate(nextDay.getDate() + 1);
 
-    const bankText = `Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von ${formatCurrency(totals.total_due)} spätestens bis zum ${deadlineDate.toLocaleDateString('de-DE')} auf folgendes Konto:\n\nKontoinhaber: ${senderName}\nIBAN: ${profile?.iban || '—'}\nBIC: ${profile?.bic || '—'}\nVerwendungszweck: Mietrückstand ${prop.street || ''}\n\nBitte beachten Sie, dass ab dem ${nextDay.toLocaleDateString('de-DE')} weitere Verzugszinsen bis zum vollständigen Zahlungseingang entstehen können.`;
-    const splitBank = doc.splitTextToSize(bankText, usableWidth);
-    doc.text(splitBank, margin, yPos);
-    yPos += splitBank.length * 5 + 10;
+    const introBank = `Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von ${formatCurrency(totals.total_due)} spätestens bis zum ${deadlineDate.toLocaleDateString('de-DE')} auf folgendes Konto:`;
+    const splitIntroBank = doc.splitTextToSize(introBank, usableWidth);
+    doc.text(splitIntroBank, margin, yPos);
+    yPos += splitIntroBank.length * 5 + 5;
+
+    // Determine bank data
+    const bankName = portfolio?.bank_name || profile?.bank_name;
+    const iban = portfolio?.iban || profile?.iban;
+    const bic = portfolio?.bic || profile?.bic;
+    const vwz = `Mietrückstand ${prop.street || ''}`;
+
+    doc.setFont('helvetica', 'bold');
+    if (iban && iban.trim() !== '') {
+        doc.text(`Kontoinhaber: ${senderName}`, margin, yPos);
+        yPos += 5;
+        if (bankName) {
+            doc.text(`Bank: ${bankName}`, margin, yPos);
+            yPos += 5;
+        }
+        doc.text(`IBAN: ${iban}`, margin, yPos);
+        yPos += 5;
+        if (bic) {
+            doc.text(`BIC: ${bic}`, margin, yPos);
+            yPos += 5;
+        }
+        doc.text(`Verwendungszweck: ${vwz}`, margin, yPos);
+        yPos += 10;
+    } else {
+        doc.text(`Bitte überweisen Sie den offenen Betrag auf das Ihnen bekannte Bankkonto.`, margin, yPos);
+        yPos += 5;
+        doc.text(`Verwendungszweck: ${vwz}`, margin, yPos);
+        yPos += 15;
+    }
+    
+    doc.setFont('helvetica', 'normal');
+    const warningBank = `Bitte beachten Sie, dass ab dem ${nextDay.toLocaleDateString('de-DE')} weitere Verzugszinsen bis zum vollständigen Zahlungseingang entstehen können.`;
+    const splitWarningBank = doc.splitTextToSize(warningBank, usableWidth);
+    doc.text(splitWarningBank, margin, yPos);
+    yPos += splitWarningBank.length * 5 + 10;
 
     // Legal Text
-    const splitLegal = doc.splitTextToSize(legalText, usableWidth);
-    
-    // Check if legal text fits on page, else new page
-    if (yPos + splitLegal.length * 5 > pageHeight - margin) {
-        doc.addPage();
-        yPos = margin;
+    const paragraphs = legalText.split('\n\n');
+    for (const p of paragraphs) {
+        if (p.includes('fristlosen Kündigung')) {
+            doc.setFont('helvetica', 'bold');
+        } else {
+            doc.setFont('helvetica', 'normal');
+        }
+        const splitP = doc.splitTextToSize(p, usableWidth);
+        
+        // Check if paragraph fits on page, else new page
+        if (yPos + splitP.length * 5 > pageHeight - margin) {
+            doc.addPage();
+            yPos = margin;
+        }
+        doc.text(splitP, margin, yPos);
+        yPos += splitP.length * 5 + 5;
     }
-
-    doc.text(splitLegal, margin, yPos);
-    yPos += splitLegal.length * 5 + 15;
+    doc.setFont('helvetica', 'normal');
+    yPos += 5;
 
     // Schluss
     if (yPos + 40 > pageHeight - margin) {
@@ -217,11 +307,11 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
-        head: [['Monat', 'Sollmiete', 'Zahlung / Anrechnung', 'Offener Betrag']],
+        head: [['Position', 'Sollmiete', 'Zahlung / Anrechnung', 'Offener Betrag']],
         body: items.map(item => [
-            formatDate(item.claim_items?.period_month),
+            item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
             formatCurrency(item.original_amount),
-            item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '—',
+            item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '0,00 €',
             formatCurrency(item.open_amount)
         ]),
         foot: [['Summe offener Miet-/Betriebskosten-/Heizkostenbetrag', '', '', formatCurrency(totals.current_principal_open)]],
@@ -251,31 +341,46 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    const zinsText = `Berechnet wurden Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz. Für die Berechnung wurde der im System hinterlegte Zinssatz von ${claim.interest_rate}% p.a. verwendet.`;
+    const zinsText = `Berechnet wurden Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz. Für die Berechnung wurde der im System hinterlegte Zinssatz von ${claim.interest_rate || 8.62}% p.a. verwendet.`;
     const splitZins = doc.splitTextToSize(zinsText, usableWidth);
     doc.text(splitZins, margin, currentY);
     currentY += splitZins.length * 5 + 5;
 
-    // Calculate days for the simple representation
-    const startDate = claim.interest_start_date ? new Date(claim.interest_start_date) : new Date();
     const endDate = new Date();
-    const diffTime = Math.abs(endDate - startDate);
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const interestRate = claim.interest_rate || 8.62;
+    let totalCalculatedInterest = 0;
+
+    const interestBody = items.filter(item => item.open_amount > 0).map(item => {
+        let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
+        // Fälligkeitstoleranz (3 Werktage) hier vereinfacht als +3 Tage
+        fM.setDate(fM.getDate() + 3);
+        if (fM > endDate) fM = endDate;
+
+        const diffTime = Math.max(0, endDate - fM);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const itemInterest = (item.open_amount * interestRate * diffDays) / (100 * 365);
+        totalCalculatedInterest += itemInterest;
+
+        return [
+            item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
+            formatCurrency(item.open_amount),
+            `${fM.toLocaleDateString('de-DE')} - ${endDate.toLocaleDateString('de-DE')}`,
+            diffDays.toString(),
+            formatCurrency(itemInterest)
+        ];
+    });
+
+    // If there is no item with open amount, show a fallback
+    if (interestBody.length === 0) {
+        interestBody.push(['Keine offenen Beträge für Zinsberechnung', '', '', '', '0,00 €']);
+    }
 
     autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
-        head: [['Monat', 'Verzinslicher Betrag', 'Zeitraum', 'Tage', 'Zinsen']],
-        body: [
-            [
-                'Gesamte Hauptforderung',
-                formatCurrency(totals.current_principal_open),
-                `${startDate.toLocaleDateString('de-DE')} - ${endDate.toLocaleDateString('de-DE')}`,
-                diffDays.toString(),
-                formatCurrency(totals.total_interest_open)
-            ]
-        ],
-        foot: [['Summe Verzugszinsen bis einschließlich ' + endDate.toLocaleDateString('de-DE'), '', '', '', formatCurrency(totals.total_interest_open)]],
+        head: [['Position', 'Verzinslicher Betrag', 'Zeitraum', 'Tage', 'Zinsen']],
+        body: interestBody,
+        foot: [['Summe berechneter Verzugszinsen', '', '', '', formatCurrency(totalCalculatedInterest)]],
         headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
