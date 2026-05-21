@@ -438,9 +438,9 @@ const ClaimDetail = () => {
 
                 {/* RIGHT PANEL */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
-                    <Card style={{ padding: '16px' }}>
+                    <Card style={{ padding: '16px', height: 'auto' }}>
                         <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px', borderBottom: '1px solid #E5E7EB', paddingBottom: '8px' }}>Aktionen</h3>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
                             <Button 
                                 variant="secondary" 
                                 style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
@@ -470,7 +470,7 @@ const ClaimDetail = () => {
                         </div>
                     </Card>
 
-                    <Card style={{ padding: '16px' }}>
+                    <Card style={{ padding: '16px', height: 'auto' }}>
                         <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px', borderBottom: '1px solid #E5E7EB', paddingBottom: '8px' }}>Mieter & Objekt</h3>
                         <div style={{ marginBottom: '12px' }}>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Mieter</div>
