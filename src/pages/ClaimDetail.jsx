@@ -152,12 +152,20 @@ const ClaimDetail = () => {
         }
     };
 
-    const handleDeleteEvent = async (eventId) => {
+    const handleDeleteEvent = async (eventId, eventType, eventMetadata) => {
         if (!window.confirm('Möchten Sie dieses Ereignis wirklich löschen?')) return;
         try {
+            // Reverse actual payment in the backend if this is a payment event
+            if (eventType === 'payment_received' && eventMetadata?.payment_id) {
+                const { error: rpcError } = await supabase.rpc('reverse_claim_payment', { p_payment_id: eventMetadata.payment_id });
+                if (rpcError) throw rpcError;
+            }
+
             const { error } = await supabase.from('claim_events').delete().eq('id', eventId);
             if (error) throw error;
+            
             loadClaimData();
+            alert('Gelöscht und ggf. rückabgewickelt.');
         } catch (err) {
             alert('Fehler beim Löschen des Ereignisses: ' + err.message);
         }
@@ -502,7 +510,7 @@ const ClaimDetail = () => {
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(event.event_date).toLocaleString('de-DE')}</div>
                                                     <button 
-                                                        onClick={() => handleDeleteEvent(event.id)}
+                                                        onClick={() => handleDeleteEvent(event.id, event.event_type, event.event_metadata)}
                                                         style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }}
                                                         title="Ereignis löschen"
                                                     >
