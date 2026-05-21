@@ -8,6 +8,7 @@ CREATE OR REPLACE FUNCTION create_claim_from_rent_ledgers(
     p_rent_ledger_ids uuid[],
     p_fee_amount numeric,
     p_interest_rate numeric,
+    p_accumulated_interest numeric,
     p_interest_start_date date,
     p_deadline_days int,
     p_note text
@@ -78,7 +79,7 @@ BEGIN
         LIMIT 1;
 
         IF v_active_claim_id IS NOT NULL THEN
-            RAISE EXCEPTION 'Für die Miete % existiert bereits eine aktive Forderung (Claim-ID: %).', v_ledger.period_month, v_active_claim_id;
+            RAISE EXCEPTION 'Für die Miete % existiert bereits eine aktive Forderung.', v_ledger.period_month;
         END IF;
 
         v_total_open_amount := v_total_open_amount + v_open_amount;
@@ -102,7 +103,7 @@ BEGIN
     )
     VALUES (
         v_user_id, v_lease_id, v_tenant_id, 'open', 0,
-        p_interest_start_date, p_interest_rate, 0, p_fee_amount,
+        p_interest_start_date, p_interest_rate, p_accumulated_interest, p_fee_amount,
         v_deadline, v_deadline
     )
     RETURNING id INTO v_new_claim_id;
@@ -134,6 +135,7 @@ BEGIN
             'items', v_metadata_items,
             'total_principal_amount', v_total_open_amount,
             'fee_amount', p_fee_amount,
+            'accumulated_interest', p_accumulated_interest,
             'interest_start_date', p_interest_start_date,
             'deadline', v_deadline,
             'note', p_note

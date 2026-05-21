@@ -32,7 +32,6 @@ const Claims = () => {
     const [form, setForm] = useState({
         fee_amount: 5.00,
         interest_rate: 5.0000,
-        interest_start_date: '',
         deadline_days: 7,
         note: ''
     });
@@ -143,13 +142,9 @@ const Claims = () => {
         setSelectedLedgerIds([]);
         setExpandedTenant(null);
         
-        const today = new Date();
-        const fifthOfMonth = new Date(today.getFullYear(), today.getMonth(), 5);
-        
         setForm({
             fee_amount: 5.00,
             interest_rate: 5.0000,
-            interest_start_date: fifthOfMonth.toISOString().split('T')[0],
             deadline_days: 7,
             note: ''
         });
@@ -162,11 +157,32 @@ const Claims = () => {
         if (selectedLedgerIds.length === 0) return;
         setIsSubmitting(true);
         try {
+            // Dynamische Zinsberechnung für RPC
+            const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
+            const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
+            let calculatedInterest = 0;
+            const todayDate = new Date();
+            
+            selectedLedgerItems.forEach(l => {
+                const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
+                let dueDate = l.due_date ? new Date(l.due_date) : null;
+                if (!dueDate && l.period_month) {
+                    const d = new Date(l.period_month);
+                    dueDate = new Date(d.getFullYear(), d.getMonth(), 5);
+                }
+                if (dueDate && todayDate > dueDate) {
+                    const diffTime = todayDate - dueDate;
+                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                    calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
+                }
+            });
+
             const { error: rpcError } = await supabase.rpc('create_claim_from_rent_ledgers', {
                 p_rent_ledger_ids: selectedLedgerIds,
                 p_fee_amount: parseFloat(form.fee_amount) || 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
-                p_interest_start_date: form.interest_start_date,
+                p_accumulated_interest: calculatedInterest, // NEU: Bereits aufgelaufene Zinsen
+                p_interest_start_date: todayDate.toISOString().split('T')[0], // NEU: Ab heute
                 p_deadline_days: parseInt(form.deadline_days, 10) || 7,
                 p_note: form.note || ''
             });
@@ -512,7 +528,25 @@ const Claims = () => {
                     {createStep === 2 && (
                         <div>
                             {(() => {
-                                const total = totalPrincipalSelected + Number(form.fee_amount || 0);
+                                const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
+                                let calculatedInterest = 0;
+                                const todayDate = new Date();
+                                
+                                selectedLedgerItems.forEach(l => {
+                                    const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
+                                    let dueDate = l.due_date ? new Date(l.due_date) : null;
+                                    if (!dueDate && l.period_month) {
+                                        const d = new Date(l.period_month);
+                                        dueDate = new Date(d.getFullYear(), d.getMonth(), 5); // Fallback: 5. des Monats
+                                    }
+                                    if (dueDate && todayDate > dueDate) {
+                                        const diffTime = todayDate - dueDate;
+                                        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                                        calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
+                                    }
+                                });
+
+                                const total = totalPrincipalSelected + Number(form.fee_amount || 0) + calculatedInterest;
                                 const deadlineDate = new Date();
                                 deadlineDate.setDate(deadlineDate.getDate() + Number(form.deadline_days || 0));
 
@@ -528,6 +562,10 @@ const Claims = () => {
                                                 <span>Mahnkosten:</span>
                                                 <span style={{ fontWeight: 600 }}>{formatCurrency(form.fee_amount)}</span>
                                             </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', color: '#B45309' }}>
+                                                <span>Verzugszinsen (bis heute):</span>
+                                                <span style={{ fontWeight: 600 }}>{formatCurrency(calculatedInterest)}</span>
+                                            </div>
                                             <div style={{ borderTop: '1px solid #D1D5DB', margin: '8px 0' }}></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#991B1B', fontSize: '1.1rem' }}>
                                                 <span style={{ fontWeight: 600 }}>Gesamtforderung (heute):</span>
@@ -537,27 +575,22 @@ const Claims = () => {
 
                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                             <div>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (% p.a.)</label>
+                                                <Input 
+                                                    type="number" step="0.0001" min="0" 
+                                                    value={form.interest_rate} 
+                                                    onChange={e => setForm({...form, interest_rate: e.target.value})} 
+                                                />
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                    Zinsen bis heute werden automatisch aus {form.interest_rate}% berechnet.
+                                                </div>
+                                            </div>
+                                            <div>
                                                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Mahnkosten (€)</label>
                                                 <Input 
                                                     type="number" step="0.01" min="0" 
                                                     value={form.fee_amount} 
                                                     onChange={e => setForm({...form, fee_amount: e.target.value})} 
-                                                />
-                                            </div>
-                                            <div>
-                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Verzugszins ab</label>
-                                                <Input 
-                                                    type="date" 
-                                                    value={form.interest_start_date} 
-                                                    onChange={e => setForm({...form, interest_start_date: e.target.value})} 
-                                                />
-                                            </div>
-                                            <div>
-                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (%)</label>
-                                                <Input 
-                                                    type="number" step="0.0001" min="0" 
-                                                    value={form.interest_rate} 
-                                                    onChange={e => setForm({...form, interest_rate: e.target.value})} 
                                                 />
                                             </div>
                                             <div>
