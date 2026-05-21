@@ -5,7 +5,7 @@ import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2 } from 'lucide-react';
 
 const Claims = () => {
     const [claims, setClaims] = useState([]);
@@ -19,7 +19,7 @@ const Claims = () => {
         paymentPlanCount: 0
     });
 
-    // Modal States
+    // Create Modal States
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [createStep, setCreateStep] = useState(1);
     const [openLedgers, setOpenLedgers] = useState([]);
@@ -34,6 +34,16 @@ const Claims = () => {
         interest_rate: 5.0000,
         deadline_days: 7,
         note: ''
+    });
+
+    // Edit Modal States
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [editingClaim, setEditingClaim] = useState(null);
+    const [editForm, setEditForm] = useState({
+        deadline: '',
+        interest_rate: 0,
+        accumulated_unpaid_interest: 0,
+        accumulated_unpaid_fees: 0
     });
 
     useEffect(() => {
@@ -55,6 +65,7 @@ const Claims = () => {
                 .from('claims')
                 .select(`
                     id, status, escalation_level, deadline, next_action_at,
+                    interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
                     tenants ( first_name, last_name ),
                     leases ( 
                         id, 
@@ -81,8 +92,11 @@ const Claims = () => {
                 return { ...claim, ...totals };
             });
 
-            setClaims(merged);
-            calculateKpis(merged);
+            // Filter out cancelled and archived claims from the main view (optional, but good for UI)
+            const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
+
+            setClaims(activeClaims);
+            calculateKpis(activeClaims);
 
         } catch (err) {
             console.error('Error loading claims:', err);
@@ -95,7 +109,6 @@ const Claims = () => {
     const loadOpenLedgers = async () => {
         setLoadingLedgers(true);
         try {
-            // Auto-Sync rent_ledger from payments before fetching
             const { error: syncError } = await supabase.rpc('sync_all_rent_ledgers');
             if (syncError) console.warn('Sync ledger warning:', syncError);
 
@@ -141,14 +154,7 @@ const Claims = () => {
         setCreateStep(1);
         setSelectedLedgerIds([]);
         setExpandedTenant(null);
-        
-        setForm({
-            fee_amount: 5.00,
-            interest_rate: 5.0000,
-            deadline_days: 7,
-            note: ''
-        });
-        
+        setForm({ fee_amount: 5.00, interest_rate: 5.0000, deadline_days: 7, note: '' });
         setIsCreateModalOpen(true);
         loadOpenLedgers();
     };
@@ -157,7 +163,6 @@ const Claims = () => {
         if (selectedLedgerIds.length === 0) return;
         setIsSubmitting(true);
         try {
-            // Dynamische Zinsberechnung für RPC
             const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
             const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
             let calculatedInterest = 0;
@@ -181,8 +186,8 @@ const Claims = () => {
                 p_rent_ledger_ids: selectedLedgerIds,
                 p_fee_amount: parseFloat(form.fee_amount) || 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
-                p_accumulated_interest: calculatedInterest, // NEU: Bereits aufgelaufene Zinsen
-                p_interest_start_date: todayDate.toISOString().split('T')[0], // NEU: Ab heute
+                p_accumulated_interest: calculatedInterest,
+                p_interest_start_date: todayDate.toISOString().split('T')[0],
                 p_deadline_days: parseInt(form.deadline_days, 10) || 7,
                 p_note: form.note || ''
             });
@@ -197,6 +202,71 @@ const Claims = () => {
             alert('Fehler: ' + (err.message || 'Forderung konnte nicht erstellt werden.'));
         } finally {
             setIsSubmitting(false);
+        }
+    };
+
+    const openEditModal = (claim) => {
+        setEditingClaim(claim);
+        setEditForm({
+            deadline: claim.deadline ? claim.deadline.split('T')[0] : '',
+            interest_rate: claim.interest_rate || 5,
+            accumulated_unpaid_interest: claim.accumulated_unpaid_interest || 0,
+            accumulated_unpaid_fees: claim.accumulated_unpaid_fees || 0
+        });
+        setIsEditModalOpen(true);
+    };
+
+    const handleEditClaim = async () => {
+        if (!editingClaim) return;
+        setIsSubmitting(true);
+        try {
+            const { error } = await supabase
+                .from('claims')
+                .update({
+                    deadline: editForm.deadline,
+                    interest_rate: parseFloat(editForm.interest_rate),
+                    accumulated_unpaid_interest: parseFloat(editForm.accumulated_unpaid_interest),
+                    accumulated_unpaid_fees: parseFloat(editForm.accumulated_unpaid_fees),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', editingClaim.id);
+
+            if (error) throw error;
+
+            setIsEditModalOpen(false);
+            setEditingClaim(null);
+            loadData();
+            alert('Forderung erfolgreich aktualisiert!');
+        } catch (err) {
+            console.error('Error updating claim:', err);
+            alert('Fehler beim Aktualisieren: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleCancelClaim = async (claimId) => {
+        if (!window.confirm('Möchten Sie diese Forderung wirklich stornieren/löschen? Die Mieten werden dadurch wieder als offen markiert und können neu angemahnt werden.')) {
+            return;
+        }
+        
+        try {
+            const { error } = await supabase
+                .from('claims')
+                .update({ 
+                    status: 'cancelled', 
+                    cancelled_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', claimId);
+
+            if (error) throw error;
+            
+            loadData();
+            alert('Forderung wurde erfolgreich storniert/gelöscht.');
+        } catch (err) {
+            console.error('Error cancelling claim:', err);
+            alert('Fehler beim Löschen: ' + err.message);
         }
     };
 
@@ -257,16 +327,10 @@ const Claims = () => {
         return prop || unit || '-';
     };
 
-    // Grouping Ledgers for Step 1
     const groupedLedgers = openLedgers.reduce((acc, ledger) => {
         const leaseId = ledger.leases?.id || 'unknown';
         if (!acc[leaseId]) {
-            acc[leaseId] = {
-                lease: ledger.leases,
-                tenant: ledger.leases?.tenants,
-                ledgers: [],
-                totalOpen: 0
-            };
+            acc[leaseId] = { lease: ledger.leases, tenant: ledger.leases?.tenants, ledgers: [], totalOpen: 0 };
         }
         acc[leaseId].ledgers.push(ledger);
         acc[leaseId].totalOpen += (Number(ledger.expected_rent || 0) - Number(ledger.paid_amount || 0));
@@ -274,41 +338,29 @@ const Claims = () => {
     }, {});
 
     const toggleTenantExpand = (leaseId) => {
-        if (expandedTenant === leaseId) {
-            setExpandedTenant(null);
-        } else {
-            setExpandedTenant(leaseId);
-        }
+        setExpandedTenant(expandedTenant === leaseId ? null : leaseId);
     };
 
     const toggleLedgerSelection = (ledgerId, leaseId) => {
-        // Enforce that all selected items belong to the same lease
         if (selectedLedgerIds.length > 0) {
             const firstSelected = openLedgers.find(l => l.id === selectedLedgerIds[0]);
             if (firstSelected && firstSelected.leases?.id !== leaseId) {
-                // If they click another tenant's row, clear the old selection and select the new one
                 setSelectedLedgerIds([ledgerId]);
                 return;
             }
         }
-
-        setSelectedLedgerIds(prev => 
-            prev.includes(ledgerId) ? prev.filter(id => id !== ledgerId) : [...prev, ledgerId]
-        );
+        setSelectedLedgerIds(prev => prev.includes(ledgerId) ? prev.filter(id => id !== ledgerId) : [...prev, ledgerId]);
     };
 
     const toggleAllForLease = (leaseId, ledgerIds) => {
-        // Check if all are already selected
         const allSelected = ledgerIds.every(id => selectedLedgerIds.includes(id));
         if (allSelected) {
             setSelectedLedgerIds(prev => prev.filter(id => !ledgerIds.includes(id)));
         } else {
-            // Enforce same lease rule: replace entirely
             setSelectedLedgerIds(ledgerIds);
         }
     };
 
-    // Calculate totals for step 2
     const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
     const totalPrincipalSelected = selectedLedgerItems.reduce((sum, l) => sum + (Number(l.expected_rent || 0) - Number(l.paid_amount || 0)), 0);
 
@@ -366,7 +418,7 @@ const Claims = () => {
             {/* Claims Table */}
             <Card>
                 <div style={{ padding: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color)' }}>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Alle Forderungen</h2>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Aktive Forderungen</h2>
                 </div>
                 
                 {error && (
@@ -394,8 +446,9 @@ const Claims = () => {
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Ursprung</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Getilgt</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Rest Miete</th>
-                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Kosten / Zinsen</th>
+                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Kosten/Zins</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 700, textAlign: 'right' }}>Gesamt Offen</th>
+                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Aktionen</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -419,6 +472,24 @@ const Claims = () => {
                                         <td style={{ padding: '16px', fontSize: '0.95rem', textAlign: 'right', fontWeight: 600, color: 'var(--text-primary)' }}>
                                             {formatCurrency(claim.total_due)}
                                         </td>
+                                        <td style={{ padding: '16px', textAlign: 'right' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                <button 
+                                                    onClick={() => openEditModal(claim)}
+                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary-color)', padding: '4px' }}
+                                                    title="Bearbeiten"
+                                                >
+                                                    <Edit size={16} />
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleCancelClaim(claim.id)}
+                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: '4px' }}
+                                                    title="Löschen / Stornieren"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            </div>
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -426,6 +497,64 @@ const Claims = () => {
                     </div>
                 )}
             </Card>
+
+            {/* Edit Modal */}
+            <Modal isOpen={isEditModalOpen} onClose={() => !isSubmitting && setIsEditModalOpen(false)} title="Forderung bearbeiten">
+                <div style={{ padding: 'var(--spacing-md) 0', maxWidth: '600px' }}>
+                    {editingClaim && (
+                        <>
+                            <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
+                                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                    <strong>Hinweis zur Miete:</strong> Die Werte für "Ursprung", "Getilgt" und "Rest Miete" basieren auf der Buchhaltung (Mietkonto). 
+                                    Wenn Sie die Miete oder eine Zahlung anpassen möchten, tun Sie dies bitte im Reiter "Finanzen". Diese Forderung aktualisiert sich dann automatisch!
+                                </p>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Fristdatum</label>
+                                    <Input 
+                                        type="date" 
+                                        value={editForm.deadline} 
+                                        onChange={e => setEditForm({...editForm, deadline: e.target.value})} 
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (% p.a.)</label>
+                                    <Input 
+                                        type="number" step="0.0001" min="0" 
+                                        value={editForm.interest_rate} 
+                                        onChange={e => setEditForm({...editForm, interest_rate: e.target.value})} 
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Verbuchte Zinsen (€)</label>
+                                    <Input 
+                                        type="number" step="0.01" min="0" 
+                                        value={editForm.accumulated_unpaid_interest} 
+                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_interest: e.target.value})} 
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Mahnkosten (€)</label>
+                                    <Input 
+                                        type="number" step="0.01" min="0" 
+                                        value={editForm.accumulated_unpaid_fees} 
+                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_fees: e.target.value})} 
+                                    />
+                                </div>
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-xl)' }}>
+                                <Button variant="secondary" onClick={() => setIsEditModalOpen(false)}>Abbrechen</Button>
+                                <Button onClick={handleEditClaim} disabled={isSubmitting} style={{ backgroundColor: '#1E40AF', color: 'white' }}>
+                                    {isSubmitting ? 'Wird gespeichert...' : 'Änderungen speichern'}
+                                </Button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </Modal>
 
             {/* Create Modal */}
             <Modal isOpen={isCreateModalOpen} onClose={() => !isSubmitting && setIsCreateModalOpen(false)} title="Forderung aus offener Miete erstellen">
@@ -452,7 +581,6 @@ const Claims = () => {
                                         
                                         return (
                                             <div key={leaseId} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                {/* Tenant Row Header */}
                                                 <div 
                                                     style={{ 
                                                         display: 'flex', alignItems: 'center', padding: '12px 16px', 
@@ -483,7 +611,6 @@ const Claims = () => {
                                                     </div>
                                                 </div>
 
-                                                {/* Expanded Details */}
                                                 {isExpanded && (
                                                     <div style={{ padding: '8px 16px 16px 44px', backgroundColor: 'white' }}>
                                                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
@@ -537,7 +664,7 @@ const Claims = () => {
                                     let dueDate = l.due_date ? new Date(l.due_date) : null;
                                     if (!dueDate && l.period_month) {
                                         const d = new Date(l.period_month);
-                                        dueDate = new Date(d.getFullYear(), d.getMonth(), 5); // Fallback: 5. des Monats
+                                        dueDate = new Date(d.getFullYear(), d.getMonth(), 5);
                                     }
                                     if (dueDate && todayDate > dueDate) {
                                         const diffTime = todayDate - dueDate;
