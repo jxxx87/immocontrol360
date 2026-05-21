@@ -23,6 +23,7 @@
     "@supabase/supabase-js": "^2.95.3",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.0",
+    "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.563.0",
     "pdfjs-dist": "^5.4.624",
     "pg": "^8.21.0",

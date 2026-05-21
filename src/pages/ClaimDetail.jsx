@@ -8,8 +8,9 @@ import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import { 
     ArrowLeft, Calendar, FileText, Activity, AlertCircle, 
-    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2 
+    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2, Printer 
 } from 'lucide-react';
+import { generateClaimPdf } from '../lib/claimPdfGenerator';
 
 const ClaimDetail = () => {
     const { claimId } = useParams();
@@ -33,6 +34,9 @@ const ClaimDetail = () => {
     const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
     const [statusForm, setStatusForm] = useState({ status: '', reason: '' });
 
+    const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
+    const [pdfForm, setPdfForm] = useState({ type: 'Abmahnung', deadlineDays: 14 });
+
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
@@ -52,7 +56,7 @@ const ClaimDetail = () => {
                     id, user_id, lease_id, tenant_id, status, escalation_level,
                     interest_start_date, interest_rate, accumulated_unpaid_interest,
                     accumulated_unpaid_fees, deadline, next_action_at, created_at,
-                    tenants ( first_name, last_name, email, phone ),
+                    tenants ( first_name, last_name, email, phone, street, house_number, zip, city, company ),
                     leases ( 
                         id, 
                         units ( 
@@ -205,6 +209,32 @@ const ClaimDetail = () => {
             alert('Status erfolgreich geändert');
         } catch (err) {
             alert('Fehler beim Ändern des Status: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleGeneratePdf = async () => {
+        setIsSubmitting(true);
+        try {
+            const result = await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays);
+            
+            // Optional: Update Claim status to sent if it was draft or open
+            if (claim.status === 'draft' || claim.status === 'open') {
+                await supabase.from('claims').update({ status: 'sent', updated_at: new Date().toISOString() }).eq('id', claim.id);
+            }
+            
+            // Also update the next action deadline automatically if they set a deadline
+            const newDeadline = new Date();
+            newDeadline.setDate(newDeadline.getDate() + parseInt(pdfForm.deadlineDays));
+            await supabase.from('claims').update({ deadline: newDeadline.toISOString(), next_action_at: newDeadline.toISOString() }).eq('id', claim.id);
+
+            setIsPdfModalOpen(false);
+            loadClaimData();
+            // window.open triggers in the generator script
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Erstellen des PDFs: ' + err.message);
         } finally {
             setIsSubmitting(false);
         }
@@ -429,6 +459,14 @@ const ClaimDetail = () => {
                             >
                                 <Calendar size={16} /> Frist ändern
                             </Button>
+                            <Button 
+                                variant="secondary" 
+                                style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', backgroundColor: '#FEF2F2', color: '#991B1B', borderColor: '#FCA5A5' }}
+                                onClick={() => setIsPdfModalOpen(true)}
+                                disabled={isLocked}
+                            >
+                                <Printer size={16} /> Mahnschreiben PDF
+                            </Button>
                         </div>
                     </Card>
 
@@ -542,6 +580,41 @@ const ClaimDetail = () => {
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                         <Button variant="secondary" onClick={() => setIsStatusModalOpen(false)}>Abbrechen</Button>
                         <Button onClick={handleUpdateStatus} disabled={isSubmitting || !statusForm.status}>Status übernehmen</Button>
+                    </div>
+                </div>
+            </Modal>
+
+            <Modal isOpen={isPdfModalOpen} onClose={() => !isSubmitting && setIsPdfModalOpen(false)} title="Mahnung / Abmahnung erzeugen">
+                <div style={{ padding: '16px 0' }}>
+                    <div style={{ backgroundColor: '#F3F4F6', padding: '12px', borderRadius: '8px', marginBottom: '20px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                        Erzeugt ein rechtssicheres PDF inklusive Forderungsaufstellung und Zinsberechnung auf Basis der Vorlage. Es wird automatisch ein Historien-Eintrag erstellt.
+                    </div>
+
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Dokumenttyp</label>
+                    <select 
+                        value={pdfForm.type} 
+                        onChange={(e) => setPdfForm({...pdfForm, type: e.target.value})}
+                        style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid #D1D5DB', marginBottom: '16px', fontSize: '0.95rem' }}
+                    >
+                        <option value="Zahlungserinnerung">Zahlungserinnerung</option>
+                        <option value="Mahnung">Mahnung</option>
+                        <option value="Abmahnung">Abmahnung wegen Zahlungsverzug</option>
+                        <option value="Letzte Zahlungsaufforderung">Letzte Zahlungsaufforderung</option>
+                    </select>
+                    
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
+                    <Input 
+                        type="number" 
+                        min="1"
+                        value={pdfForm.deadlineDays} 
+                        onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
+                    />
+                    
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
+                        <Button variant="secondary" onClick={() => setIsPdfModalOpen(false)}>Abbrechen</Button>
+                        <Button onClick={handleGeneratePdf} disabled={isSubmitting || !pdfForm.type} style={{ backgroundColor: '#991B1B', color: 'white' }}>
+                            {isSubmitting ? 'PDF wird erzeugt...' : 'PDF jetzt erzeugen'}
+                        </Button>
                     </div>
                 </div>
             </Modal>
