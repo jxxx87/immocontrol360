@@ -356,7 +356,7 @@ const ClaimDetail = () => {
             </div>
 
             {/* Main Content Grid */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--spacing-xl)', alignItems: 'flex-start' }}>
                 
                 {/* LEFT PANEL */}
                 <div style={{ flex: '2 1 400px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
