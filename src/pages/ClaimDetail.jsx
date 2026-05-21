@@ -37,6 +37,9 @@ const ClaimDetail = () => {
     const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
     const [pdfForm, setPdfForm] = useState({ type: 'Abmahnung', deadlineDays: 14 });
 
+    const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+    const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
+
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
@@ -157,6 +160,42 @@ const ClaimDetail = () => {
             loadClaimData();
         } catch (err) {
             alert('Fehler beim Löschen des Ereignisses: ' + err.message);
+        }
+    };
+
+    const handleRecordPayment = async () => {
+        if (!paymentForm.amount || parseFloat(paymentForm.amount) <= 0) {
+            alert('Bitte einen gültigen Betrag größer als 0 eingeben.');
+            return;
+        }
+        const amount = parseFloat(paymentForm.amount);
+        if (amount > totals.total_due + 0.01) {
+            alert('Zahlungsbetrag darf die offene Gesamtforderung nicht übersteigen.');
+            return;
+        }
+
+        setIsSubmitting(true);
+        try {
+            const { error } = await supabase.rpc('record_claim_payment', {
+                p_claim_id: claim.id,
+                p_payment_date: paymentForm.date,
+                p_amount: amount,
+                p_note: paymentForm.note
+            });
+
+            if (error) {
+                console.warn("SQL Error:", error);
+                throw error; 
+            }
+
+            setIsPaymentModalOpen(false);
+            setPaymentForm({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
+            loadClaimData();
+            alert('Zahlung wurde erfasst');
+        } catch (err) {
+            alert('Fehler beim Erfassen der Zahlung: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -500,6 +539,17 @@ const ClaimDetail = () => {
                             <Button 
                                 variant="secondary" 
                                 style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
+                                onClick={() => {
+                                    setPaymentForm({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
+                                    setIsPaymentModalOpen(true);
+                                }}
+                                disabled={isLocked}
+                            >
+                                <CheckCircle size={16} /> Zahlung erfassen
+                            </Button>
+                            <Button 
+                                variant="secondary" 
+                                style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
                                 onClick={() => setIsNoteModalOpen(true)}
                             >
                                 <MessageSquare size={16} /> Notiz hinzufügen
@@ -675,6 +725,92 @@ const ClaimDetail = () => {
                         <Button onClick={handleGeneratePdf} disabled={isSubmitting || !pdfForm.type} style={{ backgroundColor: '#991B1B', color: 'white' }}>
                             {isSubmitting ? 'PDF wird erzeugt...' : 'PDF jetzt erzeugen'}
                         </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            <Modal isOpen={isPaymentModalOpen} onClose={() => !isSubmitting && setIsPaymentModalOpen(false)} title="Zahlung erfassen">
+                <div style={{ padding: '16px 0' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px', padding: '12px', backgroundColor: '#F9FAFB', borderRadius: '8px' }}>
+                        <div>
+                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Hauptforderung</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.current_principal_open)}</div>
+                        </div>
+                        <div>
+                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Gebühren</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.total_fees_open)}</div>
+                        </div>
+                        <div>
+                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Zinsen</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.total_interest_open)}</div>
+                        </div>
+                        <div>
+                            <div style={{ fontSize: '0.85rem', color: '#991B1B', fontWeight: 600 }}>Gesamt Offen</div>
+                            <div style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(totals?.total_due)}</div>
+                        </div>
+                    </div>
+
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsdatum</label>
+                    <Input 
+                        type="date" 
+                        value={paymentForm.date} 
+                        onChange={(e) => setPaymentForm({...paymentForm, date: e.target.value})} 
+                        style={{ marginBottom: '16px' }}
+                    />
+                    
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Betrag (€)</label>
+                    <Input 
+                        type="number" 
+                        step="0.01"
+                        min="0.01"
+                        max={totals?.total_due}
+                        value={paymentForm.amount} 
+                        onChange={(e) => setPaymentForm({...paymentForm, amount: e.target.value})} 
+                        style={{ marginBottom: '16px' }}
+                    />
+
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Notiz (optional)</label>
+                    <Input 
+                        type="text" 
+                        value={paymentForm.note} 
+                        onChange={(e) => setPaymentForm({...paymentForm, note: e.target.value})} 
+                        placeholder="z.B. Überweisungseingang Sparkasse"
+                    />
+
+                    {paymentForm.amount && parseFloat(paymentForm.amount) > 0 && (
+                        <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '8px' }}>
+                            <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: '#166534', marginBottom: '12px' }}>Verteilungsvorschau</h4>
+                            {(() => {
+                                let rem = parseFloat(paymentForm.amount);
+                                const allocFees = Math.min(rem, totals?.total_fees_open || 0);
+                                rem -= allocFees;
+                                const allocInterest = Math.min(rem, totals?.total_interest_open || 0);
+                                rem -= allocInterest;
+                                const allocPrincipal = rem;
+
+                                return (
+                                    <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Mahnkosten:</span>
+                                            <span>{formatCurrency(allocFees)}</span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Zinsen:</span>
+                                            <span>{formatCurrency(allocInterest)}</span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Hauptforderung:</span>
+                                            <span style={{ fontWeight: 600 }}>{formatCurrency(allocPrincipal)}</span>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
+                        <Button variant="secondary" onClick={() => setIsPaymentModalOpen(false)}>Abbrechen</Button>
+                        <Button onClick={handleRecordPayment} disabled={isSubmitting || !paymentForm.amount || parseFloat(paymentForm.amount) <= 0}>Zahlung buchen</Button>
                     </div>
                 </div>
             </Modal>
