@@ -68,7 +68,7 @@ const Card = ({ children, className = '', title, action, style = {}, onClick }) 
                     {action && <div>{action}</div>}
                 </div>
             )}
-            <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+            <div style={{ flex: '1 1 auto', minWidth: 0, overflow: 'visible' }}>
                 {children}
             </div>
         </div>
