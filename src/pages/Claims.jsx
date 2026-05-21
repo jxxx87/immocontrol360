@@ -95,7 +95,8 @@ const Claims = () => {
         setLoadingLedgers(true);
         try {
             // Auto-Sync rent_ledger from payments before fetching
-            await supabase.rpc('sync_all_rent_ledgers').catch(e => console.warn('Sync ledger warning:', e));
+            const { error: syncError } = await supabase.rpc('sync_all_rent_ledgers');
+            if (syncError) console.warn('Sync ledger warning:', syncError);
 
             const { data: ledgerData, error: ledgerError } = await supabase
                 .from('rent_ledger')
