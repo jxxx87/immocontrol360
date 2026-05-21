@@ -8,7 +8,7 @@ import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import { 
     ArrowLeft, Calendar, FileText, Activity, AlertCircle, 
-    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2, Printer 
+    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2, Printer, Trash2
 } from 'lucide-react';
 import { generateClaimPdf } from '../lib/claimPdfGenerator';
 
@@ -146,6 +146,17 @@ const ClaimDetail = () => {
             alert('Fehler beim Speichern der Notiz: ' + err.message);
         } finally {
             setIsSubmitting(false);
+        }
+    };
+
+    const handleDeleteEvent = async (eventId) => {
+        if (!window.confirm('Möchten Sie dieses Ereignis wirklich löschen?')) return;
+        try {
+            const { error } = await supabase.from('claim_events').delete().eq('id', eventId);
+            if (error) throw error;
+            loadClaimData();
+        } catch (err) {
+            alert('Fehler beim Löschen des Ereignisses: ' + err.message);
         }
     };
 
@@ -449,7 +460,16 @@ const ClaimDetail = () => {
                                             <div style={{ position: 'absolute', left: '-21px', top: '4px', width: '12px', height: '12px', borderRadius: '50%', backgroundColor: 'var(--primary-color)', border: '2px solid white' }}></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
                                                 <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{translateEventType(event.event_type)}</div>
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(event.event_date).toLocaleString('de-DE')}</div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(event.event_date).toLocaleString('de-DE')}</div>
+                                                    <button 
+                                                        onClick={() => handleDeleteEvent(event.id)}
+                                                        style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }}
+                                                        title="Ereignis löschen"
+                                                    >
+                                                        <Trash2 size={14} />
+                                                    </button>
+                                                </div>
                                             </div>
                                             {event.description && (
                                                 <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
