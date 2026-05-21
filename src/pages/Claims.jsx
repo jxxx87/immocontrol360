@@ -29,9 +29,10 @@ const Claims = () => {
         setError(null);
         try {
             // 1. Call RPC to update overdue claims
-            await supabase.rpc('update_overdue_claims_status').catch(err => {
-                console.warn('Could not update overdue claims status:', err);
-            });
+            const { error: rpcError } = await supabase.rpc('update_overdue_claims_status');
+            if (rpcError) {
+                console.warn('Could not update overdue claims status:', rpcError);
+            }
 
             // 2. Fetch claims with tenant and lease data
             const { data: claimsData, error: claimsError } = await supabase
