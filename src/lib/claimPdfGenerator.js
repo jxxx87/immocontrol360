@@ -339,7 +339,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    const zinsText = `Berechnet wurden Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz. Für die Berechnung wurde der im System hinterlegte Zinssatz von ${claim.interest_rate || 8.62}% p.a. verwendet.`;
+    const zinsText = `Berechnet werden dürfen Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz. Für die Berechnung wurde aus Kulanz lediglich ein Zinssatz von ${Number(claim.interest_rate || 5.00).toFixed(2)}% p.a. verwendet.`;
     const splitZins = doc.splitTextToSize(zinsText, usableWidth);
     doc.text(splitZins, margin, currentY);
     currentY += splitZins.length * 5 + 5;
