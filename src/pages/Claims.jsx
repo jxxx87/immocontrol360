@@ -3,21 +3,36 @@ import { supabase } from '../lib/supabase';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
-import Table from '../components/ui/Table';
+import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft } from 'lucide-react';
 
 const Claims = () => {
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     
     const [kpis, setKpis] = useState({
         openCount: 0,
         totalDue: 0,
         actionRequiredCount: 0,
         paymentPlanCount: 0
+    });
+
+    // Modal States
+    const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+    const [createStep, setCreateStep] = useState(1);
+    const [openLedgers, setOpenLedgers] = useState([]);
+    const [loadingLedgers, setLoadingLedgers] = useState(false);
+    const [selectedLedgerId, setSelectedLedgerId] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const [form, setForm] = useState({
+        fee_amount: 5.00,
+        interest_rate: 5.0000,
+        interest_start_date: '',
+        deadline_days: 7,
+        note: ''
     });
 
     useEffect(() => {
@@ -73,6 +88,92 @@ const Claims = () => {
             setError(err.message || 'Fehler beim Laden der Forderungen');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const loadOpenLedgers = async () => {
+        setLoadingLedgers(true);
+        try {
+            const { data: ledgerData, error: ledgerError } = await supabase
+                .from('rent_ledger')
+                .select(`
+                    id, period_month, expected_rent, paid_amount, due_date,
+                    leases (
+                        id,
+                        units (
+                            unit_name,
+                            properties ( street, house_number, zip, city )
+                        ),
+                        tenants ( first_name, last_name )
+                    )
+                `)
+                .eq('status', 'open')
+                .order('period_month', { ascending: false });
+
+            if (ledgerError) throw ledgerError;
+
+            const { data: activeClaims, error: claimsError } = await supabase
+                .from('claim_items')
+                .select('rent_ledger_id, claims!inner(status)')
+                .not('claims.status', 'in', '("settled","cancelled","archived")')
+                .not('rent_ledger_id', 'is', null);
+
+            if (claimsError) throw claimsError;
+
+            const excludedIds = (activeClaims || []).map(c => c.rent_ledger_id);
+            const available = (ledgerData || []).filter(l => !excludedIds.includes(l.id));
+
+            setOpenLedgers(available);
+        } catch (err) {
+            console.error('Error loading ledgers:', err);
+            alert('Fehler beim Laden offener Mieten.');
+        } finally {
+            setLoadingLedgers(false);
+        }
+    };
+
+    const openCreateModal = () => {
+        setCreateStep(1);
+        setSelectedLedgerId(null);
+        
+        const today = new Date();
+        const fifthOfMonth = new Date(today.getFullYear(), today.getMonth(), 5);
+        
+        setForm({
+            fee_amount: 5.00,
+            interest_rate: 5.0000,
+            interest_start_date: fifthOfMonth.toISOString().split('T')[0],
+            deadline_days: 7,
+            note: ''
+        });
+        
+        setIsCreateModalOpen(true);
+        loadOpenLedgers();
+    };
+
+    const handleCreateClaim = async () => {
+        if (!selectedLedgerId) return;
+        setIsSubmitting(true);
+        try {
+            const { error: rpcError } = await supabase.rpc('create_claim_from_rent_ledger', {
+                p_rent_ledger_id: selectedLedgerId,
+                p_fee_amount: parseFloat(form.fee_amount) || 0,
+                p_interest_rate: parseFloat(form.interest_rate) || 0,
+                p_interest_start_date: form.interest_start_date,
+                p_deadline_days: parseInt(form.deadline_days, 10) || 7,
+                p_note: form.note || ''
+            });
+
+            if (rpcError) throw rpcError;
+
+            setIsCreateModalOpen(false);
+            loadData();
+            alert('Forderung wurde erfolgreich erstellt!');
+        } catch (err) {
+            console.error('Error creating claim:', err);
+            alert('Fehler: ' + (err.message || 'Forderung konnte nicht erstellt werden.'));
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -133,6 +234,10 @@ const Claims = () => {
         return prop || unit || '-';
     };
 
+    const getSelectedLedger = () => {
+        return openLedgers.find(l => l.id === selectedLedgerId);
+    };
+
     return (
         <div style={{ padding: 'var(--spacing-lg)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
@@ -143,7 +248,7 @@ const Claims = () => {
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwalten Sie Mietrückstände, Mahnungen und Ratenzahlungen.</p>
                 </div>
-                <Button onClick={() => setIsCreateModalOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Button onClick={openCreateModal} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Plus size={18} />
                     Forderung erstellen
                 </Button>
@@ -248,16 +353,154 @@ const Claims = () => {
                 )}
             </Card>
 
-            {/* Create Modal Placeholder */}
-            <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title="Forderung aus offener Miete erstellen">
+            {/* Create Modal */}
+            <Modal isOpen={isCreateModalOpen} onClose={() => !isSubmitting && setIsCreateModalOpen(false)} title="Forderung aus offener Miete erstellen">
                 <div style={{ padding: 'var(--spacing-md) 0' }}>
-                    <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
-                        Im nächsten Schritt werden hier offene Einträge aus dem Mieterkonto (rent_ledger) ausgewählt, um sie in den Forderungsprozess zu übergeben.
-                    </p>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-                        <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                        <Button disabled>Weiter</Button>
-                    </div>
+                    {createStep === 1 && (
+                        <div>
+                            <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
+                                Wählen Sie eine offene Miete aus dem Mieterkonto, um den Forderungsprozess zu starten.
+                            </p>
+                            
+                            {loadingLedgers ? (
+                                <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center' }}>Lade offene Mieten...</div>
+                            ) : openLedgers.length === 0 ? (
+                                <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
+                                    Es gibt aktuell keine offenen Mieten, die noch nicht in Bearbeitung sind.
+                                </div>
+                            ) : (
+                                <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                        <thead>
+                                            <tr style={{ backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Auswahl</th>
+                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Monat</th>
+                                                <th style={{ padding: '12px', fontSize: '0.85rem' }}>Mieter / Einheit</th>
+                                                <th style={{ padding: '12px', fontSize: '0.85rem', textAlign: 'right' }}>Offen</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {openLedgers.map(l => {
+                                                const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
+                                                const monthStr = l.period_month ? l.period_month.substring(0, 7) : '';
+                                                return (
+                                                    <tr key={l.id} style={{ borderBottom: '1px solid var(--border-color)', cursor: 'pointer', backgroundColor: selectedLedgerId === l.id ? '#EFF6FF' : 'transparent' }} onClick={() => setSelectedLedgerId(l.id)}>
+                                                        <td style={{ padding: '12px' }}>
+                                                            <input type="radio" name="ledger_select" checked={selectedLedgerId === l.id} onChange={() => setSelectedLedgerId(l.id)} />
+                                                        </td>
+                                                        <td style={{ padding: '12px', fontWeight: 500 }}>{monthStr}</td>
+                                                        <td style={{ padding: '12px', fontSize: '0.9rem' }}>
+                                                            <div>{getTenantName(l.leases?.tenants)}</div>
+                                                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{getLeaseName(l.leases)}</div>
+                                                        </td>
+                                                        <td style={{ padding: '12px', textAlign: 'right', fontWeight: 600, color: '#991B1B' }}>
+                                                            {formatCurrency(openAmount)}
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-lg)' }}>
+                                <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
+                                <Button onClick={() => setCreateStep(2)} disabled={!selectedLedgerId} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    Weiter <ArrowRight size={16} />
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+
+                    {createStep === 2 && (
+                        <div>
+                            {(() => {
+                                const l = getSelectedLedger();
+                                const openAmount = l ? (Number(l.expected_rent || 0) - Number(l.paid_amount || 0)) : 0;
+                                const total = openAmount + Number(form.fee_amount || 0);
+                                const deadlineDate = new Date();
+                                deadlineDate.setDate(deadlineDate.getDate() + Number(form.deadline_days || 0));
+
+                                return (
+                                    <>
+                                        <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
+                                            <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Zusammenfassung</h3>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <span>Hauptforderung (Miete {l?.period_month?.substring(0,7)}):</span>
+                                                <span style={{ fontWeight: 600 }}>{formatCurrency(openAmount)}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <span>Mahnkosten:</span>
+                                                <span style={{ fontWeight: 600 }}>{formatCurrency(form.fee_amount)}</span>
+                                            </div>
+                                            <div style={{ borderTop: '1px solid #D1D5DB', margin: '8px 0' }}></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#991B1B', fontSize: '1.1rem' }}>
+                                                <span style={{ fontWeight: 600 }}>Gesamtforderung (heute):</span>
+                                                <span style={{ fontWeight: 700 }}>{formatCurrency(total)}</span>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
+                                            <div>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Mahnkosten (€)</label>
+                                                <Input 
+                                                    type="number" step="0.01" min="0" 
+                                                    value={form.fee_amount} 
+                                                    onChange={e => setForm({...form, fee_amount: e.target.value})} 
+                                                />
+                                            </div>
+                                            <div>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Verzugszins ab</label>
+                                                <Input 
+                                                    type="date" 
+                                                    value={form.interest_start_date} 
+                                                    onChange={e => setForm({...form, interest_start_date: e.target.value})} 
+                                                />
+                                            </div>
+                                            <div>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (%)</label>
+                                                <Input 
+                                                    type="number" step="0.0001" min="0" 
+                                                    value={form.interest_rate} 
+                                                    onChange={e => setForm({...form, interest_rate: e.target.value})} 
+                                                />
+                                            </div>
+                                            <div>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Frist (Tage)</label>
+                                                <Input 
+                                                    type="number" min="1" 
+                                                    value={form.deadline_days} 
+                                                    onChange={e => setForm({...form, deadline_days: e.target.value})} 
+                                                />
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                    Fristdatum: {deadlineDate.toLocaleDateString('de-DE')}
+                                                </div>
+                                            </div>
+                                            <div style={{ gridColumn: 'span 2' }}>
+                                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Interne Notiz (Optional)</label>
+                                                <Input 
+                                                    type="text" 
+                                                    placeholder="Notiz zur Forderung"
+                                                    value={form.note} 
+                                                    onChange={e => setForm({...form, note: e.target.value})} 
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 'var(--spacing-xl)' }}>
+                                            <Button variant="secondary" onClick={() => setCreateStep(1)} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <ArrowLeft size={16} /> Zurück
+                                            </Button>
+                                            <Button onClick={handleCreateClaim} disabled={isSubmitting} style={{ backgroundColor: '#991B1B', color: 'white' }}>
+                                                {isSubmitting ? 'Wird erstellt...' : 'Forderung erstellen'}
+                                            </Button>
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
+                    )}
                 </div>
             </Modal>
         </div>
