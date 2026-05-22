@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import Modal from '../ui/Modal';
 import Input from '../ui/Input';
+import Button from '../ui/Button';
+import Badge from '../ui/Badge';
+import { Trash2, Shield, UserPlus, CheckCircle, Mail, Settings2 } from 'lucide-react';
 
 const CATEGORIES = [
     { id: 'immobilien', label: 'Immobilien' },
@@ -22,13 +25,15 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
     const [existingShares, setExistingShares] = useState([]);
 
     useEffect(() => {
-        // Initialize default permissions (all 'none')
+        // Initialize default permissions
         const initialPerms = {};
         CATEGORIES.forEach(cat => initialPerms[cat.id] = 'none');
         setPermissions(initialPerms);
         
         if (isOpen && portfolioId) {
             fetchExistingShares();
+            setMessage({ text: '', type: '' });
+            setEmail('');
         }
     }, [isOpen, portfolioId]);
 
@@ -93,6 +98,7 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
     };
 
     const handleRemoveShare = async (shareId) => {
+        if (!window.confirm("Zugang wirklich widerrufen?")) return;
         try {
             await supabase.from('portfolio_shares').delete().eq('id', shareId);
             fetchExistingShares();
@@ -104,49 +110,79 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
     if (!isOpen) return null;
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Portfolio teilen">
-            <div className="space-y-6">
-                <div>
-                    <h3 className="text-lg font-medium text-gray-900 mb-2">Neuen Nutzer einladen</h3>
-                    <p className="text-sm text-gray-500 mb-4">
-                        Gib die E-Mail-Adresse des Nutzers ein, mit dem du dieses Portfolio teilen möchtest. Der Nutzer muss bereits registriert sein.
-                    </p>
+        <Modal isOpen={isOpen} onClose={onClose} title="Portfolio Zugriff verwalten">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                
+                {/* Invite Section */}
+                <div style={{ backgroundColor: 'var(--surface-color)', padding: '20px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+                        <div style={{ backgroundColor: '#E0F2FE', padding: '8px', borderRadius: '8px', color: 'var(--primary-color)' }}>
+                            <UserPlus size={20} />
+                        </div>
+                        <div>
+                            <h3 style={{ fontSize: '1.05rem', fontWeight: 600, margin: 0, color: 'var(--text-color)' }}>Neuen Nutzer einladen</h3>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: 0 }}>Der Nutzer muss bereits ein Konto bei ImmoControlPro360 besitzen.</p>
+                        </div>
+                    </div>
                     
-                    <div className="mb-4">
-                        <Input
-                            label="E-Mail-Adresse"
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            placeholder="nutzer@beispiel.de"
-                        />
+                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end', marginBottom: '24px' }}>
+                        <div style={{ flex: 1 }}>
+                            <Input
+                                label="E-Mail-Adresse des Nutzers"
+                                type="email"
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                placeholder="name@beispiel.de"
+                                icon={Mail}
+                            />
+                        </div>
+                        <Button variant="primary" onClick={handleShare} disabled={loading} style={{ height: '40px' }}>
+                            {loading ? 'Lade...' : 'Einladen'}
+                        </Button>
                     </div>
 
-                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-                        <h4 className="text-sm font-semibold text-gray-700 mb-3">Berechtigungen festlegen</h4>
-                        <div className="space-y-4">
+                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+                        <h4 style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', color: 'var(--text-color)' }}>
+                            <Settings2 size={16} /> Berechtigungen konfigurieren
+                        </h4>
+                        
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '12px' }}>
                             {CATEGORIES.map(category => (
-                                <div key={category.id} className="flex items-center justify-between">
-                                    <span className="text-sm font-medium text-gray-700">{category.label}</span>
-                                    <div className="flex gap-2">
-                                        <label className="inline-flex items-center">
-                                            <input type="radio" className="form-radio text-blue-600 h-4 w-4" 
-                                                   checked={permissions[category.id] === 'none'}
-                                                   onChange={() => handlePermissionChange(category.id, 'none')} />
-                                            <span className="ml-2 text-xs text-gray-600">Kein Zugriff</span>
-                                        </label>
-                                        <label className="inline-flex items-center">
-                                            <input type="radio" className="form-radio text-blue-600 h-4 w-4" 
-                                                   checked={permissions[category.id] === 'read'}
-                                                   onChange={() => handlePermissionChange(category.id, 'read')} />
-                                            <span className="ml-2 text-xs text-gray-600">Lesen</span>
-                                        </label>
-                                        <label className="inline-flex items-center">
-                                            <input type="radio" className="form-radio text-blue-600 h-4 w-4" 
-                                                   checked={permissions[category.id] === 'write'}
-                                                   onChange={() => handlePermissionChange(category.id, 'write')} />
-                                            <span className="ml-2 text-xs text-gray-600">Schreiben</span>
-                                        </label>
+                                <div key={category.id} style={{ 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    justifyContent: 'space-between', 
+                                    padding: '12px', 
+                                    backgroundColor: '#F9FAFB', 
+                                    borderRadius: 'var(--radius-md)', 
+                                    border: '1px solid #E5E7EB' 
+                                }}>
+                                    <span style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-color)' }}>{category.label}</span>
+                                    <div style={{ display: 'flex', gap: '4px', backgroundColor: '#E5E7EB', padding: '4px', borderRadius: '8px' }}>
+                                        {[
+                                            { value: 'none', label: 'Kein' },
+                                            { value: 'read', label: 'Lesen' },
+                                            { value: 'write', label: 'Schreiben' }
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.value}
+                                                onClick={() => handlePermissionChange(category.id, opt.value)}
+                                                style={{
+                                                    padding: '4px 10px',
+                                                    fontSize: '0.75rem',
+                                                    fontWeight: permissions[category.id] === opt.value ? 600 : 400,
+                                                    color: permissions[category.id] === opt.value ? (opt.value === 'none' ? '#374151' : 'var(--primary-color)') : '#6B7280',
+                                                    backgroundColor: permissions[category.id] === opt.value ? 'white' : 'transparent',
+                                                    border: 'none',
+                                                    borderRadius: '6px',
+                                                    cursor: 'pointer',
+                                                    boxShadow: permissions[category.id] === opt.value ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                                                    transition: 'all 0.2s'
+                                                }}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
                                     </div>
                                 </div>
                             ))}
@@ -154,43 +190,70 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
                     </div>
 
                     {message.text && (
-                        <div className={`mt-4 p-3 rounded-md text-sm ${message.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+                        <div style={{ 
+                            marginTop: '20px', 
+                            padding: '12px', 
+                            borderRadius: '8px', 
+                            fontSize: '0.85rem', 
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            backgroundColor: message.type === 'error' ? '#FEF2F2' : '#F0FDF4', 
+                            color: message.type === 'error' ? '#991B1B' : '#166534',
+                            border: `1px solid ${message.type === 'error' ? '#FECACA' : '#BBF7D0'}`
+                        }}>
+                            {message.type === 'error' ? <Shield size={16} /> : <CheckCircle size={16} />}
                             {message.text}
                         </div>
                     )}
-
-                    <div className="mt-6 flex justify-end">
-                        <button
-                            onClick={handleShare}
-                            disabled={loading}
-                            className="inline-flex justify-center rounded-md border border-transparent bg-blue-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                        >
-                            {loading ? 'Wird geteilt...' : 'Freigeben'}
-                        </button>
-                    </div>
                 </div>
 
+                {/* Existing Shares Section */}
                 {existingShares.length > 0 && (
-                    <div className="mt-8 border-t border-gray-200 pt-6">
-                        <h3 className="text-lg font-medium text-gray-900 mb-4">Aktuelle Freigaben</h3>
-                        <ul className="divide-y divide-gray-200">
+                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '24px' }}>
+                        <h3 style={{ fontSize: '1.05rem', fontWeight: 600, margin: '0 0 16px 0', color: 'var(--text-color)' }}>Aktuelle Freigaben</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             {existingShares.map(share => (
-                                <li key={share.id} className="py-3 flex justify-between items-center">
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-900">{share.shared_with_email}</p>
-                                        <p className="text-xs text-gray-500">Status: {share.status === 'accepted' ? 'Akzeptiert' : 'Ausstehend'}</p>
+                                <div key={share.id} style={{ 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    justifyContent: 'space-between',
+                                    padding: '16px',
+                                    backgroundColor: 'white',
+                                    border: '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                        <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#F3F4F6', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6B7280' }}>
+                                            <Mail size={18} />
+                                        </div>
+                                        <div>
+                                            <p style={{ margin: 0, fontWeight: 500, fontSize: '0.95rem', color: 'var(--text-color)' }}>{share.shared_with_email}</p>
+                                            <div style={{ margin: '4px 0 0 0' }}>
+                                                {share.status === 'accepted' 
+                                                    ? <Badge variant="success">Akzeptiert</Badge> 
+                                                    : <Badge variant="warning">Ausstehend</Badge>
+                                                }
+                                            </div>
+                                        </div>
                                     </div>
-                                    <button 
+                                    <Button 
+                                        variant="ghost" 
+                                        icon={Trash2} 
+                                        style={{ color: 'var(--danger-color)' }}
                                         onClick={() => handleRemoveShare(share.id)}
-                                        className="text-sm text-red-600 hover:text-red-900"
                                     >
                                         Entfernen
-                                    </button>
-                                </li>
+                                    </Button>
+                                </div>
                             ))}
-                        </ul>
+                        </div>
                     </div>
                 )}
+            </div>
+            
+            <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+                <Button variant="ghost" onClick={onClose}>Schließen</Button>
             </div>
         </Modal>
     );
