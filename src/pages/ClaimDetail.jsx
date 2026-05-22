@@ -38,7 +38,7 @@ const ClaimDetail = () => {
     const [pdfForm, setPdfForm] = useState({ type: 'Abmahnung', deadlineDays: 14 });
 
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
-    const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', linkToInstallment: false, installmentId: '' });
+    const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', paymentType: 'installment', linkToInstallment: false, installmentId: '' });
 
     // Ratenzahlung Modal State
     const [isPaymentPlanModalOpen, setIsPaymentPlanModalOpen] = useState(false);
@@ -633,6 +633,26 @@ const ClaimDetail = () => {
 
     const isLocked = ['settled', 'cancelled', 'archived'].includes(claim.status);
 
+    let displayTotals = { ...totals };
+    let planItems = [];
+    let newItems = items;
+    
+    if (paymentPlan) {
+        const planDate = new Date(paymentPlan.created_at);
+        planItems = items.filter(item => new Date(item.claim_items?.created_at) <= planDate);
+        newItems = items.filter(item => new Date(item.claim_items?.created_at) > planDate);
+        
+        const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
+        const planPrincipalOpen = Number(paymentPlan.total_amount || 0) - Number(paymentPlan.paid_amount || 0);
+        
+        displayTotals = {
+            current_principal_open: planPrincipalOpen + newItemsPrincipalOpen,
+            total_fees_open: 0, 
+            total_interest_open: 0, 
+            total_due: planPrincipalOpen + newItemsPrincipalOpen
+        };
+    }
+
     return (
         <div style={{ padding: 'var(--spacing-lg)' }}>
             {/* Header */}
@@ -658,19 +678,19 @@ const ClaimDetail = () => {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #3B82F6' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Hauptforderung offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(totals?.current_principal_open)}</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.current_principal_open)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #F59E0B' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Gebühren offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(totals?.total_fees_open)}</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.total_fees_open)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #10B981' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinsen offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(totals?.total_interest_open)}</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.total_interest_open)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #EF4444', backgroundColor: '#FEF2F2' }}>
                     <div style={{ fontSize: '0.85rem', color: '#991B1B', marginBottom: '4px', fontWeight: 600 }}>Gesamt offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#991B1B' }}>{formatCurrency(totals?.total_due)}</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#991B1B' }}>{formatCurrency(displayTotals.total_due)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid var(--text-secondary)' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Aktuelle Frist</div>
@@ -706,7 +726,20 @@ const ClaimDetail = () => {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {items.map(item => (
+                                        {paymentPlan && (
+                                            <tr style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: '#F0FDF4' }}>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
+                                                    <div style={{ fontWeight: 600, color: '#166534' }}>Vereinbarte Ratenzahlung</div>
+                                                    <div style={{ fontSize: '0.8rem', color: '#166534', opacity: 0.8 }}>
+                                                        (Ursprung: {planItems.map(i => i.claim_items?.description || i.claim_items?.item_type).join(', ')})
+                                                    </div>
+                                                </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(paymentPlan.total_amount)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(paymentPlan.paid_amount)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(paymentPlan.total_amount - paymentPlan.paid_amount)}</td>
+                                            </tr>
+                                        )}
+                                        {newItems.map(item => (
                                             <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
                                                     <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
@@ -1042,22 +1075,50 @@ const ClaimDetail = () => {
 
             <Modal isOpen={isPaymentModalOpen} onClose={() => !isSubmitting && setIsPaymentModalOpen(false)} title="Zahlung erfassen">
                 <div style={{ padding: '16px 0' }}>
+                    {paymentPlan && newItems.length > 0 && (
+                        <div style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE' }}>
+                            <h4 style={{ fontSize: '0.95rem', fontWeight: 600, color: '#1E3A8A', marginBottom: '12px' }}>Was wird bezahlt?</h4>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                    <input 
+                                        type="radio" 
+                                        name="paymentType"
+                                        value="installment"
+                                        checked={paymentForm.paymentType === 'installment'}
+                                        onChange={() => setPaymentForm({...paymentForm, paymentType: 'installment', linkToInstallment: true, installmentId: installments.find(i => i.status !== 'paid')?.id || ''})}
+                                    />
+                                    <span style={{ fontWeight: 500 }}>Ratenplan (Rate)</span>
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                    <input 
+                                        type="radio" 
+                                        name="paymentType"
+                                        value="new_item"
+                                        checked={paymentForm.paymentType === 'new_item'}
+                                        onChange={() => setPaymentForm({...paymentForm, paymentType: 'new_item', linkToInstallment: false, installmentId: ''})}
+                                    />
+                                    <span style={{ fontWeight: 500 }}>Neue Forderungen (außerhalb Ratenplan)</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px', padding: '12px', backgroundColor: '#F9FAFB', borderRadius: '8px' }}>
                         <div>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Hauptforderung</div>
-                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.current_principal_open)}</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(paymentForm.paymentType === 'installment' ? totals?.current_principal_open : displayTotals.current_principal_open)}</div>
                         </div>
                         <div>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Gebühren</div>
-                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.total_fees_open)}</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(paymentForm.paymentType === 'installment' ? totals?.total_fees_open : displayTotals.total_fees_open)}</div>
                         </div>
                         <div>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Offene Zinsen</div>
-                            <div style={{ fontWeight: 500 }}>{formatCurrency(totals?.total_interest_open)}</div>
+                            <div style={{ fontWeight: 500 }}>{formatCurrency(paymentForm.paymentType === 'installment' ? totals?.total_interest_open : displayTotals.total_interest_open)}</div>
                         </div>
                         <div>
                             <div style={{ fontSize: '0.85rem', color: '#991B1B', fontWeight: 600 }}>Gesamt Offen</div>
-                            <div style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(totals?.total_due)}</div>
+                            <div style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(paymentForm.paymentType === 'installment' ? totals?.total_due : displayTotals.total_due)}</div>
                         </div>
                     </div>
 
@@ -1074,7 +1135,7 @@ const ClaimDetail = () => {
                         type="number" 
                         step="0.01"
                         min="0.01"
-                        max={totals?.total_due}
+                        max={paymentForm.paymentType === 'installment' ? totals?.total_due : displayTotals.total_due}
                         value={paymentForm.amount} 
                         onChange={(e) => setPaymentForm({...paymentForm, amount: e.target.value})} 
                         style={{ marginBottom: '16px' }}
@@ -1093,10 +1154,16 @@ const ClaimDetail = () => {
                             <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: '#166534', marginBottom: '12px' }}>Verteilungsvorschau</h4>
                             {(() => {
                                 let rem = parseFloat(paymentForm.amount);
-                                const allocFees = Math.min(rem, totals?.total_fees_open || 0);
-                                rem -= allocFees;
-                                const allocInterest = Math.min(rem, totals?.total_interest_open || 0);
-                                rem -= allocInterest;
+                                let allocFees = 0;
+                                let allocInterest = 0;
+                                
+                                if (paymentForm.paymentType === 'installment' || !paymentPlan) {
+                                    allocFees = Math.min(rem, totals?.total_fees_open || 0);
+                                    rem -= allocFees;
+                                    allocInterest = Math.min(rem, totals?.total_interest_open || 0);
+                                    rem -= allocInterest;
+                                }
+                                
                                 const allocPrincipal = rem;
 
                                 return (
@@ -1119,10 +1186,10 @@ const ClaimDetail = () => {
                         </div>
                     )}
                     
-                    {paymentPlan && installments.filter(i => i.status !== 'paid').length > 0 && (
+                    {paymentForm.paymentType === 'installment' && paymentPlan && installments.filter(i => i.status !== 'paid').length > 0 && (
                         <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px' }}>
                             <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: '#0F172A', marginBottom: '12px' }}>Ratenzahlung</h4>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', marginBottom: paymentForm.linkToInstallment ? '12px' : '0' }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', marginBottom: '12px' }}>
                                 <input 
                                     type="checkbox" 
                                     checked={paymentForm.linkToInstallment}
