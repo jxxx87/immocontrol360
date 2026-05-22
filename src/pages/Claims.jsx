@@ -116,37 +116,39 @@ const Claims = () => {
                     .select('payment_plan_id, paid_amount')
                     .in('payment_plan_id', planIds);
                 installmentsData = instData || [];
+            }
 
-                const activeClaimIds = plansData.map(p => p.claim_id);
+            // Fetch totals for ALL active claims
+            const allActiveClaimIds = claimsData ? claimsData.map(c => c.id) : [];
+            const { data: itemsTotalsData } = await supabase
+                .from('claim_item_totals_view')
+                .select('claim_item_id, claim_id, open_amount')
+                .in('claim_id', allActiveClaimIds);
                 
-                // Fetch totals
-                const { data: itemsTotalsData } = await supabase
-                    .from('claim_item_totals_view')
-                    .select('claim_item_id, claim_id, open_amount')
-                    .in('claim_id', activeClaimIds);
-                    
-                // Fetch original items for created_at
-                const { data: originalItemsData } = await supabase
-                    .from('claim_items')
-                    .select('id, created_at')
-                    .in('claim_id', activeClaimIds);
+            // Fetch original items for created_at
+            const { data: originalItemsData } = await supabase
+                .from('claim_items')
+                .select('id, created_at')
+                .in('claim_id', allActiveClaimIds);
 
-                // Merge them locally
-                if (itemsTotalsData && originalItemsData) {
-                    allClaimItems = itemsTotalsData.map(tot => {
-                        const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
-                        return {
-                            ...tot,
-                            created_at: orig ? orig.created_at : null
-                        };
-                    });
-                }
+            // Merge them locally
+            if (itemsTotalsData && originalItemsData) {
+                allClaimItems = itemsTotalsData.map(tot => {
+                    const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
+                    return {
+                        ...tot,
+                        created_at: orig ? orig.created_at : null
+                    };
+                });
             }
 
             // 6. Merge data
             const merged = (claimsData || []).map(claim => {
                 let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
                 
+                const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
+                const itemCount = claimItems.length;
+
                 const plan = (plansData || []).find(p => p.claim_id === claim.id);
                 if (plan) {
                     const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
@@ -154,7 +156,6 @@ const Claims = () => {
                     const planTotal = Number(plan.total_amount || 0);
                     const planOpen = planTotal - planPaid;
                     
-                    const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
                     const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
                     const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
                     
@@ -170,7 +171,7 @@ const Claims = () => {
                     };
                 }
                 
-                return { ...claim, ...totals };
+                return { ...claim, ...totals, itemCount };
             });
 
             // Filter out cancelled and archived claims from the main view (optional, but good for UI)
@@ -574,12 +575,14 @@ const Claims = () => {
                                     >
                                         <td style={{ padding: '16px', fontSize: '0.95rem', fontWeight: 500 }}>{getTenantName(claim.tenants)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>{getLeaseName(claim.leases)}</td>
-                                        <td style={{ padding: '16px' }}>{getStatusBadge(claim.status)}</td>
+                                        <td style={{ padding: '16px' }}>{claim.itemCount > 1 ? <span style={{ color: 'var(--text-secondary)' }}>-</span> : getStatusBadge(claim.status)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                <Clock size={14} />
-                                                {formatDate(claim.deadline)}
-                                            </div>
+                                            {claim.itemCount > 1 ? <span>-</span> : (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                    <Clock size={14} />
+                                                    {formatDate(claim.deadline)}
+                                                </div>
+                                            )}
                                         </td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(claim.current_principal_original)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(claim.principal_paid)}</td>

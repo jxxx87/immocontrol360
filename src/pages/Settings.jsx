@@ -252,9 +252,11 @@ const Settings = () => {
     const fetchCategories = async () => {
         try {
             setLoadingCategories(true);
+            if (!user) return;
             const { data, error } = await supabase
                 .from('expense_categories')
                 .select(`*, distribution_key:distribution_keys(name)`)
+                .or(`user_id.is.null,user_id.eq.${user.id}`)
                 .order('name');
             if (error) throw error;
             setCategories(data || []);
