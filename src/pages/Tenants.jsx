@@ -7,7 +7,7 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { Plus, Users, Loader2, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical } from 'lucide-react';
+import { Plus, Users, Loader2, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical, ChevronDown, ChevronRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
@@ -61,6 +61,7 @@ const Tenants = () => {
     const [filterPropertyId, setFilterPropertyId] = useState('');
     const [filterStatus, setFilterStatus] = useState(''); // '' | 'vacant' | 'rented'
     const [showEndedLeases, setShowEndedLeases] = useState(false);
+    const [expandedWEId, setExpandedWEId] = useState(null);
 
     // KPIs
     const [stats, setStats] = useState({ total: 0, rented: 0, vacant: 0 });
@@ -111,7 +112,7 @@ const Tenants = () => {
             setLoading(true);
 
             // 1. Fetch All Properties (for Filter & Dropdown)
-            let propQuery = supabase.from('properties').select('id, street, house_number, zip, city, portfolio_id').order('street');
+            let propQuery = supabase.from('properties').select('id, street, house_number, zip, city, portfolio_id, economic_unit_id').order('street');
             const { data: propsData } = await propQuery;
 
             let allProps = propsData || [];
@@ -597,22 +598,214 @@ const Tenants = () => {
         }
     ];
 
-    if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
-
     // Calculate displayed units (handling ended leases toggle)
-    let displayedUnits = [...units];
-    if (showEndedLeases) {
-        units.forEach(u => {
-            (u.endedLeases || []).forEach(el => {
-                displayedUnits.push({
-                    ...u,
-                    id: u.id + '-' + el.id,
-                    activeLease: el,
-                    status: 'ended'
+    const displayedUnits = React.useMemo(() => {
+        let disp = [...units];
+        if (showEndedLeases) {
+            units.forEach(u => {
+                (u.endedLeases || []).forEach(el => {
+                    disp.push({
+                        ...u,
+                        id: u.id + '-' + el.id,
+                        activeLease: el,
+                        status: 'ended'
+                    });
                 });
             });
+        }
+        return disp;
+    }, [units, showEndedLeases]);
+
+    // Group displayedUnits
+    const groupedUnits = React.useMemo(() => {
+        const groups = {};
+        const result = [];
+
+        displayedUnits.forEach(unit => {
+            const p = unit.property;
+            if (p && p.economic_unit_id) {
+                if (!groups[p.economic_unit_id]) {
+                    groups[p.economic_unit_id] = {
+                        id: 'we_' + p.economic_unit_id,
+                        isGroup: true,
+                        economic_unit_id: p.economic_unit_id,
+                        street: 'Wirtschaftseinheit',
+                        house_number: '',
+                        city: '',
+                        units: []
+                    };
+                }
+                groups[p.economic_unit_id].units.push(unit);
+            } else {
+                result.push(unit);
+            }
         });
-    }
+
+        Object.values(groups).forEach(g => {
+            if (g.units.length > 0) {
+                const uniqueProps = Array.from(new Set(g.units.map(u => u.property?.id)));
+                if (uniqueProps.length === 1) {
+                    // Only one property from this group is visible (maybe filtered), so just add the units directly
+                    g.units.forEach(u => result.push(u));
+                } else {
+                    const streets = Array.from(new Set(g.units.map(u => u.property?.street).filter(Boolean)));
+                    g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                    g.house_number = Array.from(new Set(g.units.map(u => u.property?.house_number).filter(Boolean))).join(' & ');
+                    const cities = Array.from(new Set(g.units.map(u => u.property?.city).filter(Boolean)));
+                    g.city = cities.join(', ');
+                    result.push(g);
+                }
+            }
+        });
+
+        const getStreet = (item) => item.isGroup ? item.street : (item.property?.street || '');
+        return result.sort((a, b) => getStreet(a).localeCompare(getStreet(b)));
+    }, [displayedUnits]);
+
+    if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
+
+    const renderMobileCard = (row) => (
+        <div key={row.id} style={{
+            border: '1px solid var(--border-color)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--spacing-md)',
+            backgroundColor: 'var(--surface-color)',
+            position: 'relative'
+        }}>
+            {/* Header: Status and Property */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                <div>
+                    <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{row.property?.street} {row.property?.house_number}</div>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                        {row.property?.city} • {row.unit_name}
+                    </div>
+                </div>
+                <div>
+                    {row.status === 'vacation_rental' ? (
+                        <span style={{
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            color: 'var(--primary-color)',
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}>
+                            <Home size={10} /> Ferienwohnung
+                        </span>
+                    ) : row.status === 'rented' ? (
+                        <span style={{
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            color: 'var(--success-color)',
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}>
+                            <Key size={10} /> Vermietet
+                        </span>
+                    ) : row.status === 'ended' ? (
+                        <span style={{
+                            backgroundColor: 'rgba(107, 114, 128, 0.1)',
+                            color: '#6b7280',
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}>
+                            <AlertCircle size={10} /> Beendet
+                        </span>
+                    ) : (
+                        <span style={{
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            color: 'var(--danger-color)',
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}>
+                            <AlertCircle size={10} /> Leerstand
+                        </span>
+                    )}
+                </div>
+            </div>
+
+            {/* Tenant Info */}
+            <div style={{ marginBottom: '12px' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Mieter</div>
+                {row.activeLease ? (
+                    <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>
+                        {row.activeLease.tenant?.first_name} {row.activeLease.tenant?.last_name}
+                    </div>
+                ) : (
+                    <div style={{ fontStyle: 'italic', color: 'var(--text-secondary)' }}>—</div>
+                )}
+            </div>
+
+            {/* Lease Info */}
+            {row.activeLease && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem', marginBottom: '12px' }}>
+                    <div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Mietbeginn</div>
+                        <div>{new Date(row.activeLease.start_date).toLocaleDateString()}</div>
+                    </div>
+                    <div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Mietende</div>
+                        <div>{row.activeLease.end_date ? new Date(row.activeLease.end_date).toLocaleDateString() : 'Unbefristet'}</div>
+                    </div>
+                    <div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Warmmiete</div>
+                        <div style={{ fontWeight: 600 }}>
+                            {((parseFloat(row.activeLease.cold_rent) || 0) + (parseFloat(row.activeLease.service_charge) || 0) + (parseFloat(row.activeLease.heating_cost) || 0) + (parseFloat(row.activeLease.other_costs) || 0)).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                        </div>
+                    </div>
+                    <div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Kaution</div>
+                        <div>{(parseFloat(row.activeLease.deposit) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Actions */}
+            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                {row.activeLease ? (
+                    <>
+                        <Button variant="ghost" size="sm" onClick={() => {
+                            setSelectedLease(row.activeLease);
+                            setEditTenantForm({ ...row.activeLease.tenant });
+                            setEditLeaseForm({ ...row.activeLease });
+                            setIsEditingDetails(false);
+                            setIsDetailModalOpen(true);
+                        }} title="Details anzeigen" style={{ flex: 1 }}>
+                            <Eye size={16} style={{ marginRight: '4px' }} /> Details
+                        </Button>
+                    </>
+                ) : row.status !== 'vacation_rental' ? (
+                    <Button variant="secondary" size="sm" icon={Plus} onClick={() => {
+                        if (!checkGlobalAccess()) return;
+                        resetForms();
+                        setLeaseForm(prev => ({
+                            ...prev,
+                            property_id: row.property_id,
+                            unit_id: row.id
+                        }));
+                        setIsCreateModalOpen(true);
+                    }}>Vermieten</Button>
+                ) : null}
+            </div>
+        </div>
+    );
 
     return (
         <div>
@@ -733,164 +926,79 @@ const Tenants = () => {
                 ) : (
                     <>
                         <div className="hidden-mobile">
-                            <Table columns={columns} data={displayedUnits} />
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr>
+                                        {columns.map((col, index) => (
+                                            <th key={index} style={{ textAlign: col.align || 'left', padding: '12px 16px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-color)', fontSize: '0.875rem', fontWeight: 600 }}>
+                                                {col.header}
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {groupedUnits.map(row => {
+                                        if (row.isGroup) {
+                                            return (
+                                                <React.Fragment key={row.id}>
+                                                    <tr style={{ borderBottom: expandedWEId === row.id ? 'none' : '1px solid var(--border-color)', backgroundColor: 'rgba(139, 92, 246, 0.03)', cursor: 'pointer' }} onClick={() => setExpandedWEId(expandedWEId === row.id ? null : row.id)}>
+                                                        <td colSpan={columns.length} style={{ padding: '12px 16px' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: 'var(--accent-color)' }}>
+                                                                {expandedWEId === row.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                                {row.street} {row.house_number} ({row.units.length} Einheiten)
+                                                            </div>
+                                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '26px' }}>{row.city}</div>
+                                                        </td>
+                                                    </tr>
+                                                    {expandedWEId === row.id && row.units.map(unit => (
+                                                        <tr key={unit.id} style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: 'rgba(0,0,0,0.01)' }}>
+                                                            {columns.map((col, cIndex) => (
+                                                                <td key={cIndex} style={{ textAlign: col.align || 'left', padding: '12px 16px', paddingLeft: cIndex === 0 ? '42px' : '16px' }}>
+                                                                    {col.render ? col.render(unit) : unit[col.accessor]}
+                                                                </td>
+                                                            ))}
+                                                        </tr>
+                                                    ))}
+                                                </React.Fragment>
+                                            );
+                                        }
+
+                                        return (
+                                            <tr key={row.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                {columns.map((col, cIndex) => (
+                                                    <td key={cIndex} style={{ textAlign: col.align || 'left', padding: '12px 16px' }}>
+                                                        {col.render ? col.render(row) : row[col.accessor]}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
                         </div>
 
                         {/* Mobile Card View */}
                         <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                            {displayedUnits.map((row) => (
-                                <div key={row.id} style={{
-                                    border: '1px solid var(--border-color)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 'var(--spacing-md)',
-                                    backgroundColor: 'var(--surface-color)',
-                                    position: 'relative'
-                                }}>
-                                    {/* Header: Status and Property */}
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                                        <div>
-                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{row.property?.street} {row.property?.house_number}</div>
-                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                                {row.property?.city} • {row.unit_name}
+                            {groupedUnits.map(row => {
+                                if (row.isGroup) {
+                                    return (
+                                        <div key={row.id} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                            <div 
+                                                onClick={() => setExpandedWEId(expandedWEId === row.id ? null : row.id)}
+                                                style={{ padding: '12px', backgroundColor: 'rgba(139, 92, 246, 0.05)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: 'var(--accent-color)' }}
+                                            >
+                                                {expandedWEId === row.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                <div>
+                                                    <div>{row.street} {row.house_number}</div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 400 }}>{row.units.length} Einheiten</div>
+                                                </div>
                                             </div>
+                                            {expandedWEId === row.id && row.units.map(unit => renderMobileCard(unit))}
                                         </div>
-                                        <div>
-                                            {row.status === 'vacation_rental' ? (
-                                                <span style={{
-                                                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                                                    color: 'var(--primary-color)',
-                                                    padding: '2px 8px',
-                                                    borderRadius: '12px',
-                                                    fontSize: '0.7rem',
-                                                    fontWeight: 600,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px'
-                                                }}>
-                                                    <Home size={10} /> Ferienwohnung
-                                                </span>
-                                            ) : row.status === 'rented' ? (
-                                                <span style={{
-                                                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                                                    color: 'var(--success-color)',
-                                                    padding: '2px 8px',
-                                                    borderRadius: '12px',
-                                                    fontSize: '0.7rem',
-                                                    fontWeight: 600,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px'
-                                                }}>
-                                                    <Key size={10} /> Vermietet
-                                                </span>
-                                            ) : row.status === 'ended' ? (
-                                                <span style={{
-                                                    backgroundColor: 'rgba(107, 114, 128, 0.1)',
-                                                    color: '#6b7280',
-                                                    padding: '2px 8px',
-                                                    borderRadius: '12px',
-                                                    fontSize: '0.7rem',
-                                                    fontWeight: 600,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px'
-                                                }}>
-                                                    <AlertCircle size={10} /> Beendet
-                                                </span>
-                                            ) : (
-                                                <span style={{
-                                                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                                                    color: 'var(--danger-color)',
-                                                    padding: '2px 8px',
-                                                    borderRadius: '12px',
-                                                    fontSize: '0.7rem',
-                                                    fontWeight: 600,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px'
-                                                }}>
-                                                    <AlertCircle size={10} /> Leerstand
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* Tenant Info */}
-                                    <div style={{ marginBottom: '12px', fontSize: '0.9rem' }}>
-                                        {row.activeLease ? (
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <Users size={16} className="text-secondary" />
-                                                <span style={{ fontWeight: 500 }}>
-                                                    {row.activeLease.tenant?.first_name} {row.activeLease.tenant?.last_name}
-                                                </span>
-                                            </div>
-                                        ) : (
-                                            <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.85rem' }}>Kein Mieter zugeordnet</div>
-                                        )}
-                                    </div>
-
-                                    {/* Lease Dates */}
-                                    {row.activeLease && (
-                                        <div style={{
-                                            fontSize: '0.8rem',
-                                            color: 'var(--text-secondary)',
-                                            paddingTop: '8px',
-                                            borderTop: '1px solid var(--border-color)',
-                                            marginBottom: '12px'
-                                        }}>
-                                            Laufzeit: {new Date(row.activeLease.start_date).toLocaleDateString()} — {row.activeLease.end_date ? new Date(row.activeLease.end_date).toLocaleDateString() : 'Unbefristet'}
-                                        </div>
-                                    )}
-
-                                    {/* Action Button */}
-                                    <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '8px' }}>
-                                        {row.activeLease ? (
-                                            <Button variant="secondary" size="sm" onClick={() => {
-                                                const l = row.activeLease;
-                                                setSelectedLease({ ...l, unit: row });
-                                                setEditTenantForm({
-                                                    id: l.tenant.id,
-                                                    first_name: l.tenant.first_name,
-                                                    last_name: l.tenant.last_name,
-                                                    email: l.tenant.email,
-                                                    phone: l.tenant.phone,
-                                                    occupants: l.tenant.occupants
-                                                });
-                                                setEditLeaseForm({
-                                                    id: l.id,
-                                                    start_date: l.start_date,
-                                                    end_date: l.end_date,
-                                                    cold_rent: l.cold_rent,
-                                                    service_charge: l.service_charge,
-                                                    heating_cost: l.heating_cost,
-                                                    other_costs: l.other_costs,
-                                                    deposit: l.deposit,
-                                                    payment_due_day: l.payment_due_day,
-                                                    last_rent_increase: l.last_rent_increase,
-                                                    lease_type: l.lease_type
-                                                });
-                                                setIsEditingDetails(false);
-                                                setIsDetailModalOpen(true);
-                                            }}>
-                                                <Eye size={14} style={{ marginRight: '4px' }} /> Details
-                                            </Button>
-                                        ) : row.status === 'vacation_rental' ? (
-                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>Ferienwohnung</span>
-                                        ) : (
-                                            <Button size="sm" icon={Plus} onClick={() => {
-                                                if (!checkGlobalAccess()) return;
-                                                resetForms();
-                                                setLeaseForm(prev => ({
-                                                    ...prev,
-                                                    property_id: row.property_id,
-                                                    unit_id: row.id
-                                                }));
-                                                setIsCreateModalOpen(true);
-                                            }}>Vermieten</Button>
-                                        )}
-                                    </div>
-                                </div>
-                            ))}
+                                    );
+                                }
+                                return renderMobileCard(row);
+                            })}
                         </div>
                     </>
                 )}

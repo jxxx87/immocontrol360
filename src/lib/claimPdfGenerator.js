@@ -135,19 +135,22 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             
             // Calculate interest for this specific item
             const endDate = new Date();
-            const interestRate = claim.interest_rate || 8.62;
+            const interestRate = claim.interest_rate || 5.0;
+            // Use due_date from claim_items, fallback to period_month, then interest_start_date
             let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
-            fM.setDate(fM.getDate() + 3);
             if (fM > endDate) fM = endDate;
             const diffTime = Math.max(0, endDate - fM);
             const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            const itemInterest = (item.open_amount * interestRate * diffDays) / (100 * 365);
+            const itemInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
+            
+            // Use the claim's actual accumulated fees
+            const claimFees = Number(claim.accumulated_unpaid_fees || 0);
             
             activeTotals = {
-                current_principal_open: item.open_amount,
+                current_principal_open: Number(item.open_amount),
                 total_interest_open: itemInterest,
-                total_fees_open: totals.total_fees_open, // We carry over the full claim fees to this dunning? Yes, usually they are for this letter.
-                total_due: item.open_amount + itemInterest + totals.total_fees_open
+                total_fees_open: claimFees,
+                total_due: Number(item.open_amount) + itemInterest + claimFees
             };
         }
     }
@@ -394,18 +397,17 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     currentY += splitZins.length * 5 + 5;
 
     const endDate = new Date();
-    const interestRate = claim.interest_rate || 8.62;
+    const interestRate = claim.interest_rate || 5.0;
     let totalCalculatedInterest = 0;
 
-    const interestBody = activeItems.filter(item => item.open_amount > 0).map(item => {
+    const interestBody = activeItems.filter(item => Number(item.open_amount) > 0).map(item => {
+        // Use due_date from claim_items first, then period_month, then claim interest_start_date
         let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
-        // Fälligkeitstoleranz (3 Werktage) hier vereinfacht als +3 Tage
-        fM.setDate(fM.getDate() + 3);
         if (fM > endDate) fM = endDate;
 
         const diffTime = Math.max(0, endDate - fM);
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        const itemInterest = (item.open_amount * interestRate * diffDays) / (100 * 365);
+        const itemInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
         totalCalculatedInterest += itemInterest;
 
         return [

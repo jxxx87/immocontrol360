@@ -160,14 +160,21 @@ const Claims = () => {
                     const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
                     
                     // We override the totals for the UI to prevent double counting fees included in plan
+                    // But for new items added AFTER the plan, show the claim-level fees/interest separately
+                    const claimFeesOpen = Number(totals.total_fees_open || claim.accumulated_unpaid_fees || 0);
+                    const claimInterestOpen = Number(totals.total_interest_open || claim.accumulated_unpaid_interest || 0);
+                    
+                    // If there are new items, the fees/interest on the claim are for those new items
+                    const newItemsFeesInterest = newItems.length > 0 ? (claimFeesOpen + claimInterestOpen) : 0;
+                    
                     totals = {
                         ...totals,
                         current_principal_original: planTotal + newItemsPrincipalOpen,
                         principal_paid: planPaid,
                         current_principal_open: planOpen + newItemsPrincipalOpen,
-                        total_fees_open: 0,
-                        total_interest_open: 0,
-                        total_due: planOpen + newItemsPrincipalOpen
+                        total_fees_open: newItems.length > 0 ? claimFeesOpen : 0,
+                        total_interest_open: newItems.length > 0 ? claimInterestOpen : 0,
+                        total_due: planOpen + newItemsPrincipalOpen + newItemsFeesInterest
                     };
                 }
                 
@@ -697,8 +704,8 @@ const Claims = () => {
             </Modal>
 
             {/* Create Modal */}
-            <Modal isOpen={isCreateModalOpen} onClose={() => !isSubmitting && setIsCreateModalOpen(false)} title="Forderung aus offener Miete erstellen">
-                <div style={{ padding: 'var(--spacing-md) 0', maxWidth: '600px' }}>
+            <Modal isOpen={isCreateModalOpen} onClose={() => !isSubmitting && setIsCreateModalOpen(false)} title="Forderung erstellen" maxWidth="700px">
+                <div style={{ padding: 'var(--spacing-md) 0' }}>
                     {createStep === 1 && (
                         <div>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
@@ -909,22 +916,31 @@ const Claims = () => {
                                         </div>
                                         
                                         <div style={{ marginBottom: '24px' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                                                 <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>Manuelle Positionen (Optional)</label>
                                                 <Button 
                                                     variant="secondary" 
                                                     size="sm"
-                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: 0, item_type: 'other', dueDate: new Date().toISOString().split('T')[0] }])}
+                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: '', item_type: 'other', dueDate: '' }])}
                                                     style={{ padding: '4px 8px', fontSize: '0.8rem' }}
                                                 >
                                                     <Plus size={14} /> Position hinzufügen
                                                 </Button>
                                             </div>
                                             
+                                            {manualItems.length > 0 && (
+                                                <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '4px' }}>
+                                                    <div style={{ flex: 2, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Bezeichnung</div>
+                                                    <div style={{ flex: 1, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Fällig am</div>
+                                                    <div style={{ flex: 1, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Betrag (€)</div>
+                                                    <div style={{ width: '24px' }}></div>
+                                                </div>
+                                            )}
+                                            
                                             {manualItems.map((item, idx) => (
                                                 <div key={idx} style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
                                                     <Input 
-                                                        placeholder="Bezeichnung (z.B. Betriebskosten 2024)" 
+                                                        placeholder="z.B. Betriebskosten 2024" 
                                                         value={item.description}
                                                         onChange={e => {
                                                             const newItems = [...manualItems];
@@ -942,15 +958,14 @@ const Claims = () => {
                                                             setManualItems(newItems);
                                                         }}
                                                         style={{ flex: 1 }}
-                                                        title="Fällig seit"
                                                     />
                                                     <Input 
                                                         type="number" step="0.01" 
-                                                        placeholder="Betrag" 
-                                                        value={item.amount}
+                                                        placeholder="0,00" 
+                                                        value={item.amount === '' || item.amount === 0 ? '' : item.amount}
                                                         onChange={e => {
                                                             const newItems = [...manualItems];
-                                                            newItems[idx].amount = parseFloat(e.target.value) || 0;
+                                                            newItems[idx].amount = e.target.value === '' ? '' : (parseFloat(e.target.value) || 0);
                                                             setManualItems(newItems);
                                                         }}
                                                         style={{ flex: 1 }}
