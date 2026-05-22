@@ -704,6 +704,7 @@ const ClaimDetail = () => {
                                         </div>
                                     ))}
                                 </div>
+                            )}
                         </div>
                     </Card>
 
