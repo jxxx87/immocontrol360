@@ -136,16 +136,14 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             // Use the stored fee_amount and interest_amount from the item
             const itemFee = Number(item.claim_items?.fee_amount || 0);
             const itemInterest = Number(item.claim_items?.interest_amount || 0);
-            // Principal = open_amount minus the fee/interest that are part of the total
-            // But open_amount already includes fee+interest in original_amount
-            // So principal_open = open_amount - itemFee - itemInterest (if not yet paid)
-            const principalOpen = Math.max(0, Number(item.open_amount) - itemFee - itemInterest);
+            // open_amount is purely principal now, no need to subtract fees or interest!
+            const principalOpen = Number(item.open_amount);
             
             activeTotals = {
                 current_principal_open: principalOpen,
                 total_interest_open: itemInterest,
                 total_fees_open: itemFee,
-                total_due: Number(item.open_amount)
+                total_due: principalOpen + itemInterest + itemFee
             };
         }
     } else {
@@ -159,7 +157,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             const itemInterest = Number(item.claim_items?.interest_amount || 0);
             totalFees += itemFee;
             totalInterest += itemInterest;
-            totalPrincipalOpen += Math.max(0, openAmt - itemFee - itemInterest);
+            totalPrincipalOpen += openAmt;
         });
         activeTotals = {
             current_principal_open: totalPrincipalOpen,
