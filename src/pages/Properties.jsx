@@ -41,7 +41,8 @@ const Properties = () => {
         city: '',
         construction_year: '',
         property_type: 'residential', // residential, commercial, mixed
-        linked_property_id: '' // For Economic Unit
+        economic_unit_members: [], // Array of property IDs
+        _original_economic_unit_id: null
     });
 
     // Units and Group Logic
@@ -206,22 +207,14 @@ const Properties = () => {
         try {
             setIsSaving(true);
             
-            let finalEconomicUnitId = null;
-            if (propertyForm.linked_property_id) {
-                const targetProp = properties.find(p => p.id === propertyForm.linked_property_id);
-                if (targetProp) {
-                    if (targetProp.economic_unit_id) {
-                        finalEconomicUnitId = targetProp.economic_unit_id;
-                    } else {
-                        finalEconomicUnitId = crypto.randomUUID();
-                        // Update target property to share the new group ID
-                        await supabase.from('properties').update({ economic_unit_id: finalEconomicUnitId }).eq('id', targetProp.id);
-                    }
+            let finalEconomicUnitId = propertyForm._original_economic_unit_id;
+
+            if (propertyForm.economic_unit_members && propertyForm.economic_unit_members.length > 0) {
+                if (!finalEconomicUnitId) {
+                    finalEconomicUnitId = crypto.randomUUID();
                 }
-            } else if (editingPropertyId) {
-                // If we edit and set linked_property_id to empty, we remove it from the unit
-                // We don't explicitly track the "old" value here, we just set it to null.
-                // It will just be removed from the unit.
+            } else {
+                // No members selected, current property leaves the unit
                 finalEconomicUnitId = null;
             }
 
@@ -236,27 +229,49 @@ const Properties = () => {
                 property_type: propertyForm.property_type,
                 total_investment_cost: parseFloat(propertyForm.total_investment_cost) || 0,
                 equity_invested: parseFloat(propertyForm.equity_invested) || 0,
-                economic_unit_id: finalEconomicUnitId !== undefined ? finalEconomicUnitId : null
+                economic_unit_id: finalEconomicUnitId
             };
-
-            // If we are editing and didn't change linked_property_id, we need to make sure we don't accidentally overwrite economic_unit_id with null
-            // Let's retrieve the original property to check if it had an economic_unit_id
-            if (editingPropertyId && !propertyForm.linked_property_id && propertyForm._original_economic_unit_id && propertyForm._keep_economic_unit) {
-                 propData.economic_unit_id = propertyForm._original_economic_unit_id;
-            } else if (editingPropertyId && !propertyForm.linked_property_id) {
-                 propData.economic_unit_id = null;
-            }
 
             let error;
             if (editingPropertyId) {
                 const { error: updateError } = await supabase.from('properties').update(propData).eq('id', editingPropertyId);
                 error = updateError;
             } else {
+                // Insert first to get the ID, but since we are inserting, we can just insert with the unit ID
                 const { error: insertError } = await supabase.from('properties').insert([propData]);
                 error = insertError;
             }
 
             if (error) throw error;
+            
+            // Now handle updating other members
+            if (finalEconomicUnitId) {
+                // Add newly checked members
+                const newMembers = propertyForm.economic_unit_members.filter(id => {
+                    const p = properties.find(prop => prop.id === id);
+                    return p && p.economic_unit_id !== finalEconomicUnitId;
+                });
+                
+                if (newMembers.length > 0) {
+                    await supabase.from('properties')
+                        .update({ economic_unit_id: finalEconomicUnitId })
+                        .in('id', newMembers);
+                }
+                
+                // Remove unchecked members that were previously in THIS unit
+                if (propertyForm._original_economic_unit_id) {
+                    const removedMembers = properties
+                        .filter(p => p.economic_unit_id === propertyForm._original_economic_unit_id && p.id !== editingPropertyId)
+                        .filter(p => !propertyForm.economic_unit_members.includes(p.id))
+                        .map(p => p.id);
+                        
+                    if (removedMembers.length > 0) {
+                        await supabase.from('properties')
+                            .update({ economic_unit_id: null })
+                            .in('id', removedMembers);
+                    }
+                }
+            }
 
             await new Promise(resolve => setTimeout(resolve, 500));
 
@@ -419,18 +434,11 @@ const Properties = () => {
             property_type: property.property_type || 'residential',
             total_investment_cost: property.total_investment_cost || '',
             equity_invested: property.equity_invested || '',
-            linked_property_id: '', // Reset in UI, but we know it might have an economic unit
-            _original_economic_unit_id: property.economic_unit_id,
-            _keep_economic_unit: !!property.economic_unit_id // Helper flag
+            economic_unit_members: property.economic_unit_id 
+                ? properties.filter(p => p.economic_unit_id === property.economic_unit_id && p.id !== property.id).map(p => p.id) 
+                : [],
+            _original_economic_unit_id: property.economic_unit_id
         });
-        
-        // If it already is in an economic unit, find a peer to show in the dropdown
-        if (property.economic_unit_id) {
-             const peer = properties.find(p => p.economic_unit_id === property.economic_unit_id && p.id !== property.id);
-             if (peer) {
-                 setPropertyForm(prev => ({ ...prev, linked_property_id: peer.id }));
-             }
-        }
         
         setIsPropertyModalOpen(true);
     };
@@ -1197,25 +1205,48 @@ const Properties = () => {
                     </div>
                 </div>
                 
-                {/* Economic Unit Selection */}
+                {/* Economic Unit Selection (Checkboxes) */}
                 <div style={{ marginTop: 'var(--spacing-md)' }}>
                     <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem', color: 'var(--accent-color)' }}>
-                        Wirtschaftseinheit bilden mit (Optional)
+                        Wirtschaftseinheit bilden mit (Mehrfachauswahl möglich)
                     </label>
-                    <select
-                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--accent-color)', backgroundColor: 'rgba(139, 92, 246, 0.05)' }}
-                        value={propertyForm.linked_property_id}
-                        onChange={(e) => setPropertyForm({ ...propertyForm, linked_property_id: e.target.value })}
-                    >
-                        <option value="">-- Keine Verknüpfung --</option>
-                        {properties
-                            .filter(p => p.id !== editingPropertyId && (!propertyForm.portfolio_id || p.portfolio_id === propertyForm.portfolio_id))
-                            .map(p => (
-                            <option key={p.id} value={p.id}>{p.street} {p.house_number} {p.city}</option>
-                        ))}
-                    </select>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                        Verknüpfte Immobilien werden im Dashboard und in Abrechnungen zusammengefasst.
+                    <div style={{ 
+                        border: '1px solid var(--accent-color)', 
+                        borderRadius: 'var(--radius-md)', 
+                        padding: '12px', 
+                        backgroundColor: 'rgba(139, 92, 246, 0.05)',
+                        maxHeight: '150px',
+                        overflowY: 'auto'
+                    }}>
+                        {properties.filter(p => p.id !== editingPropertyId && (!propertyForm.portfolio_id || p.portfolio_id === propertyForm.portfolio_id)).length === 0 ? (
+                            <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Keine weiteren Immobilien im Portfolio.</span>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {properties
+                                    .filter(p => p.id !== editingPropertyId && (!propertyForm.portfolio_id || p.portfolio_id === propertyForm.portfolio_id))
+                                    .map(p => (
+                                    <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', cursor: 'pointer' }}>
+                                        <input 
+                                            type="checkbox" 
+                                            checked={propertyForm.economic_unit_members?.includes(p.id)}
+                                            onChange={(e) => {
+                                                const checked = e.target.checked;
+                                                setPropertyForm(prev => {
+                                                    const members = prev.economic_unit_members || [];
+                                                    if (checked) return { ...prev, economic_unit_members: [...members, p.id] };
+                                                    return { ...prev, economic_unit_members: members.filter(id => id !== p.id) };
+                                                });
+                                            }}
+                                            style={{ accentColor: 'var(--accent-color)', width: '16px', height: '16px' }}
+                                        />
+                                        {p.street} {p.house_number} {p.city}
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                        Wähle alle Gebäude aus, die zu dieser Wirtschaftseinheit gehören. Sie werden im Dashboard zusammengefasst.
                     </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>
