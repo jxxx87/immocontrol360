@@ -35,9 +35,12 @@ If you are developing a production application, we recommend using TypeScript wi
     Keep this terminal window open while using the app.
 
 ## Database Updates
-This project uses Supabase for the database. When pulling code updates that involve database schema changes, you must apply the migrations:
+This project uses Supabase for the database. When pulling code updates that involve database schema changes, you can apply migrations manually via the Supabase Dashboard, or use a direct connection script if the CLI fails.
+
+**IMPORTANT:** See `SOP_DEPLOYS.md` for detailed instructions on how AI agents should independently run SQL migrations (using `pg` via direct endpoint) and push to GitHub on Windows.
 
 ```bash
+# Alternative: using CLI (if configured)
 npx supabase login
 npx supabase link --project-ref agsmqvvwfufenaiekuox
 npx supabase db push
