@@ -40,6 +40,18 @@ const ClaimDetail = () => {
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
 
+    // Ratenzahlung Modal State
+    const [isPaymentPlanModalOpen, setIsPaymentPlanModalOpen] = useState(false);
+    const [paymentPlanForm, setPaymentPlanForm] = useState({ 
+        startDate: new Date(new Date().setDate(1)).toISOString().split('T')[0],
+        installmentCount: 3, 
+        adjustmentAmount: 0, 
+        note: '' 
+    });
+    
+    const [paymentPlan, setPaymentPlan] = useState(null);
+    const [installments, setInstallments] = useState([]);
+
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
@@ -119,6 +131,27 @@ const ClaimDetail = () => {
                 .order('event_date', { ascending: false });
 
             if (!eventsError) setEvents(eventsData || []);
+
+            // Fetch E) payment_plans (active only)
+            const { data: planData, error: planError } = await supabase
+                .from('payment_plans')
+                .select('*')
+                .eq('claim_id', claimId)
+                .eq('status', 'active')
+                .maybeSingle();
+
+            if (!planError && planData) {
+                setPaymentPlan(planData);
+                const { data: instData } = await supabase
+                    .from('payment_plan_installments')
+                    .select('*')
+                    .eq('payment_plan_id', planData.id)
+                    .order('due_date', { ascending: true });
+                setInstallments(instData || []);
+            } else {
+                setPaymentPlan(null);
+                setInstallments([]);
+            }
 
         } catch (err) {
             console.error('Error loading claim details:', err);
@@ -242,6 +275,30 @@ const ClaimDetail = () => {
             alert('Frist erfolgreich aktualisiert');
         } catch (err) {
             alert('Fehler beim Ändern der Frist: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleCreatePaymentPlan = async () => {
+        if (!paymentPlanForm.startDate || !paymentPlanForm.installmentCount) return;
+        setIsSubmitting(true);
+        try {
+            const { error } = await supabase.rpc('create_payment_plan', {
+                p_claim_id: claim.id,
+                p_first_due_date: paymentPlanForm.startDate,
+                p_installment_count: parseInt(paymentPlanForm.installmentCount),
+                p_adjustment_amount: parseFloat(paymentPlanForm.adjustmentAmount) || 0,
+                p_note: paymentPlanForm.note
+            });
+
+            if (error) throw error;
+
+            setIsPaymentPlanModalOpen(false);
+            loadClaimData();
+            alert('Ratenzahlungsvereinbarung wurde erstellt');
+        } catch (err) {
+            alert('Fehler beim Erstellen der Ratenzahlung: ' + err.message);
         } finally {
             setIsSubmitting(false);
         }
@@ -475,6 +532,19 @@ const ClaimDetail = () => {
             );
         }
 
+        if (event.event_type === 'payment_plan_accepted') {
+            return (
+                <div style={{ backgroundColor: '#F0F9FF', border: '1px solid #BAE6FD', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    <div style={{ color: '#0369A1', fontWeight: 'bold', marginBottom: '8px' }}>Ratenzahlungsvereinbarung aktiv</div>
+                    <div style={{ marginBottom: '4px' }}><strong>Gesamtbetrag Ratenplan:</strong> {formatCurrency(meta.plan_total)}</div>
+                    <div style={{ marginBottom: '4px' }}><strong>Anzahl Raten:</strong> {meta.installment_count} x {formatCurrency(meta.monthly_rate)}</div>
+                    <div style={{ marginBottom: '4px' }}><strong>Laufzeit:</strong> {formatDate(meta.first_due_date)} bis {formatDate(meta.last_due_date)}</div>
+                    {meta.adjustment > 0 && <div style={{ marginBottom: '4px' }}><strong>Aufschlag / Kosten:</strong> {formatCurrency(meta.adjustment)}</div>}
+                    {meta.note && <div style={{ marginTop: '4px' }}><strong>Notiz:</strong> {meta.note}</div>}
+                </div>
+            );
+        }
+
         // Fallback: Debug view
         return (
             <details style={{ fontSize: '0.8rem', marginTop: '8px' }}>
@@ -634,6 +704,67 @@ const ClaimDetail = () => {
                                         </div>
                                     ))}
                                 </div>
+                        </div>
+                    </Card>
+
+                    {/* Ratenzahlungsvereinbarung */}
+                    <Card>
+                        <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Activity size={20} color="var(--primary-color)" />
+                            <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0 }}>Ratenzahlungsvereinbarung</h2>
+                        </div>
+                        <div style={{ padding: '24px' }}>
+                            {!paymentPlan ? (
+                                <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>Keine aktive Ratenzahlungsvereinbarung</div>
+                            ) : (
+                                <div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+                                        <div>
+                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Status</div>
+                                            <div style={{ fontWeight: 600 }}>Aktiv</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Gesamtbetrag Ratenplan</div>
+                                            <div style={{ fontWeight: 600 }}>{formatCurrency(paymentPlan.total_amount)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Anzahl Raten</div>
+                                            <div style={{ fontWeight: 600 }}>{installments.length}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Nächste Fälligkeit</div>
+                                            <div style={{ fontWeight: 600 }}>{installments.find(i => i.status === 'open') ? formatDate(installments.find(i => i.status === 'open').due_date) : '-'}</div>
+                                        </div>
+                                    </div>
+                                    <div style={{ overflowX: 'auto' }}>
+                                        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '500px' }}>
+                                            <thead>
+                                                <tr style={{ backgroundColor: '#F9FAFB', borderBottom: '1px solid var(--border-color)' }}>
+                                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Fällig am</th>
+                                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Betrag</th>
+                                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Bezahlt</th>
+                                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Offen</th>
+                                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>Status</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {installments.map((inst) => (
+                                                    <tr key={inst.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                        <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>{formatDate(inst.due_date)}</td>
+                                                        <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(inst.amount)}</td>
+                                                        <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(inst.paid_amount)}</td>
+                                                        <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(inst.amount - inst.paid_amount)}</td>
+                                                        <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'center' }}>
+                                                            <span style={{ padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, backgroundColor: inst.status === 'open' ? '#FEF3C7' : '#D1FAE5', color: inst.status === 'open' ? '#92400E' : '#065F46' }}>
+                                                                {inst.status === 'open' ? 'Offen' : 'Bezahlt'}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
                             )}
                         </div>
                     </Card>
@@ -654,6 +785,21 @@ const ClaimDetail = () => {
                                 disabled={isLocked}
                             >
                                 <CheckCircle size={16} /> Zahlung erfassen
+                            </Button>
+                            <Button 
+                                variant="secondary" 
+                                style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
+                                onClick={() => {
+                                    if (paymentPlan) {
+                                        alert('Für diese Forderung besteht bereits eine aktive Ratenzahlungsvereinbarung.');
+                                        return;
+                                    }
+                                    setPaymentPlanForm(prev => ({ ...prev, startDate: new Date(new Date().setDate(1)).toISOString().split('T')[0] }));
+                                    setIsPaymentPlanModalOpen(true);
+                                }}
+                                disabled={isLocked}
+                            >
+                                <CheckCircle size={16} /> Ratenzahlung vereinbaren
                             </Button>
                             <Button 
                                 variant="secondary" 
@@ -919,6 +1065,101 @@ const ClaimDetail = () => {
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                         <Button variant="secondary" onClick={() => setIsPaymentModalOpen(false)}>Abbrechen</Button>
                         <Button onClick={handleRecordPayment} disabled={isSubmitting || !paymentForm.amount || parseFloat(paymentForm.amount) <= 0}>Zahlung buchen</Button>
+                    </div>
+                </div>
+            </Modal>
+
+            <Modal isOpen={isPaymentPlanModalOpen} onClose={() => !isSubmitting && setIsPaymentPlanModalOpen(false)} title="Ratenzahlung vereinbaren">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div style={{ padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px', fontSize: '0.9rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                            <span>Gesamtforderung aktuell:</span>
+                            <strong>{formatCurrency(totals?.total_due)}</strong>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                            <span>Vereinbarungskosten (Aufschlag):</span>
+                            <strong>{formatCurrency(paymentPlanForm.adjustmentAmount || 0)}</strong>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #D1D5DB', paddingTop: '4px', marginTop: '4px' }}>
+                            <span>Ratenplan gesamt:</span>
+                            <strong style={{ color: '#166534' }}>{formatCurrency((parseFloat(totals?.total_due) || 0) + (parseFloat(paymentPlanForm.adjustmentAmount) || 0))}</strong>
+                        </div>
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Startdatum (1. Rate)</label>
+                        <Input 
+                            type="date" 
+                            value={paymentPlanForm.startDate}
+                            onChange={(e) => setPaymentPlanForm({...paymentPlanForm, startDate: e.target.value})}
+                        />
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Anzahl Raten</label>
+                        <select 
+                            style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
+                            value={paymentPlanForm.installmentCount}
+                            onChange={(e) => setPaymentPlanForm({...paymentPlanForm, installmentCount: parseInt(e.target.value)})}
+                        >
+                            <option value="2">2 Raten</option>
+                            <option value="3">3 Raten</option>
+                            <option value="4">4 Raten</option>
+                            <option value="6">6 Raten</option>
+                            <option value="12">12 Raten</option>
+                            <option value="24">24 Raten</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zusätzliche Kosten / Aufschlag (€)</label>
+                        <Input 
+                            type="number" 
+                            step="0.01"
+                            value={paymentPlanForm.adjustmentAmount}
+                            onChange={(e) => setPaymentPlanForm({...paymentPlanForm, adjustmentAmount: e.target.value})}
+                        />
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Notiz (Optional)</label>
+                        <Input 
+                            type="text" 
+                            value={paymentPlanForm.note}
+                            onChange={(e) => setPaymentPlanForm({...paymentPlanForm, note: e.target.value})}
+                        />
+                    </div>
+                    
+                    <div style={{ marginTop: '8px' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>Vorschau:</div>
+                        <div style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: '6px', padding: '12px', fontSize: '0.85rem' }}>
+                            {(() => {
+                                const total = (parseFloat(totals?.total_due) || 0) + (parseFloat(paymentPlanForm.adjustmentAmount) || 0);
+                                const count = paymentPlanForm.installmentCount;
+                                const rate = total / count;
+                                const start = new Date(paymentPlanForm.startDate);
+                                const preview = [];
+                                for (let i = 0; i < Math.min(count, 3); i++) {
+                                    const d = new Date(start);
+                                    d.setMonth(d.getMonth() + i);
+                                    preview.push(
+                                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                            <span>Rate {i+1} am {d.toLocaleDateString('de-DE')}:</span>
+                                            <strong>{formatCurrency(rate)}</strong>
+                                        </div>
+                                    );
+                                }
+                                return (
+                                    <>
+                                        {preview}
+                                        {count > 3 && <div style={{ color: '#6B7280', marginTop: '4px' }}>... ({count - 3} weitere Raten)</div>}
+                                    </>
+                                );
+                            })()}
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
+                        <Button variant="secondary" onClick={() => setIsPaymentPlanModalOpen(false)} disabled={isSubmitting}>Abbrechen</Button>
+                        <Button onClick={handleCreatePaymentPlan} disabled={isSubmitting || !paymentPlanForm.startDate || !paymentPlanForm.installmentCount}>
+                            {isSubmitting ? 'Wird gespeichert...' : 'Vereinbarung anlegen'}
+                        </Button>
                     </div>
                 </div>
             </Modal>
