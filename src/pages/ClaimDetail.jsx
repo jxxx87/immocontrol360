@@ -637,8 +637,9 @@ const ClaimDetail = () => {
         planItems = items.filter(item => new Date(item.claim_items?.created_at) <= planDate);
         newItems = items.filter(item => new Date(item.claim_items?.created_at) > planDate);
         
+        const planPaidAmount = installments.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
         const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
-        const planPrincipalOpen = Number(paymentPlan.total_amount || 0) - Number(paymentPlan.paid_amount || 0);
+        const planPrincipalOpen = Number(paymentPlan.total_amount || 0) - planPaidAmount;
         
         displayTotals = {
             current_principal_open: planPrincipalOpen + newItemsPrincipalOpen,
@@ -721,7 +722,9 @@ const ClaimDetail = () => {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {paymentPlan && (
+                                        {paymentPlan && (() => {
+                                            const planPaidAmount = installments.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
+                                            return (
                                             <tr style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: '#F0FDF4' }}>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
                                                     <div style={{ fontWeight: 600, color: '#166534' }}>Vereinbarte Ratenzahlung</div>
@@ -730,10 +733,10 @@ const ClaimDetail = () => {
                                                     </div>
                                                 </td>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(paymentPlan.total_amount)}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(paymentPlan.paid_amount)}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(paymentPlan.total_amount - paymentPlan.paid_amount)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(planPaidAmount)}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(paymentPlan.total_amount - planPaidAmount)}</td>
                                             </tr>
-                                        )}
+                                        )})()}
                                         {newItems.map(item => (
                                             <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
