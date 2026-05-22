@@ -203,9 +203,7 @@ const InvestorPortal = () => {
 
             let loanQuery = supabase.from('loans').select('*');
             if (selectedPortfolioID) {
-                const propertyIds = propData?.map(p => p.id) || [];
-                if (propertyIds.length > 0) loanQuery = loanQuery.in('property_id', propertyIds);
-                else loanQuery = null;
+                loanQuery = loanQuery.eq('portfolio_id', selectedPortfolioID);
             }
             const { data: loanData } = loanQuery ? await loanQuery : { data: [] };
 
@@ -394,7 +392,12 @@ const InvestorPortal = () => {
                     if (parseFloat(weRow.equity_invested) > 0) g.equity_invested = parseFloat(weRow.equity_invested);
                     if (parseFloat(weRow.market_value_total) > 0) g.market_value_total = parseFloat(weRow.market_value_total);
                 }
-                
+                // Add WE-level loans to _debt
+                const weLoans = loans.filter(l => l.economic_unit_id === g.economic_unit_id && !l.property_id);
+                weLoans.forEach(l => {
+                    g._debt += calculateCurrentDebt(l);
+                });
+
                 result.push(g);
             }
         });
