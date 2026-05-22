@@ -720,9 +720,6 @@ const ClaimDetail = () => {
                         {getStatusBadge(claim.status)}
                     </div>
                 </div>
-                <div style={{ display: 'flex', gap: '12px' }}>
-                    <Button variant="secondary" onClick={() => setIsStatusModalOpen(true)}>Status ändern</Button>
-                </div>
             </div>
 
             {/* KPIs */}
@@ -1000,28 +997,6 @@ const ClaimDetail = () => {
                         </div>
                     </Card>
 
-                    <Card style={{ padding: '16px' }}>
-                        <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px', borderBottom: '1px solid #E5E7EB', paddingBottom: '8px' }}>Forderungsdaten</h3>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.9rem' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>Erstellt am</span>
-                                <span>{formatDate(claim.created_at)}</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>Zinssatz</span>
-                                <span>{Number(claim.interest_rate || 5.00).toFixed(2)}% p.a.</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>Mahnstufe</span>
-                                <span>
-                                    {claim.escalation_level === 1 ? 'Stufe 1 (Zahlungserinnerung)' : 
-                                     claim.escalation_level === 2 ? 'Stufe 2 (Abmahnung)' : 
-                                     claim.escalation_level === 3 ? 'Stufe 3 (Letzte Aufforderung)' : 
-                                     claim.escalation_level ? `Stufe ${claim.escalation_level}` : 'Keine'}
-                                </span>
-                            </div>
-                        </div>
-                    </Card>
                 </div>
             </div>
 

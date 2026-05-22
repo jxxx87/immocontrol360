@@ -308,30 +308,13 @@ const Claims = () => {
                 }
             });
 
-            let finalManualItems = [...manualItems];
-            const feeAmount = parseFloat(form.fee_amount) || 0;
-            if (feeAmount > 0) {
-                finalManualItems.push({
-                    description: 'Mahnkosten',
-                    amount: feeAmount,
-                    item_type: 'other'
-                });
-            }
-            if (calculatedInterest > 0) {
-                finalManualItems.push({
-                    description: 'Verzugszinsen (bis heute)',
-                    amount: calculatedInterest,
-                    item_type: 'other'
-                });
-            }
-
             const { error: rpcError } = await supabase.rpc('create_claim_advanced', {
                 p_lease_id: targetLeaseId,
                 p_rent_ledger_ids: selectedLedgerIds.length > 0 ? selectedLedgerIds : null,
-                p_manual_items: finalManualItems,
-                p_fee_amount: 0,
+                p_manual_items: manualItems,
+                p_fee_amount: parseFloat(form.fee_amount) || 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
-                p_accumulated_interest: 0,
+                p_accumulated_interest: calculatedInterest,
                 p_interest_start_date: todayDate.toISOString().split('T')[0],
                 p_deadline_days: parseInt(form.deadline_days, 10) || 7,
                 p_note: form.note || ''
