@@ -4,6 +4,7 @@ import Modal from '../ui/Modal';
 import Input from '../ui/Input';
 import Button from '../ui/Button';
 import Badge from '../ui/Badge';
+import { useAuth } from '../../context/AuthContext';
 import { Trash2, Shield, UserPlus, CheckCircle, Mail, Settings2 } from 'lucide-react';
 
 const CATEGORIES = [
@@ -18,6 +19,7 @@ const CATEGORIES = [
 ];
 
 export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
+    const { user } = useAuth();
     const [email, setEmail] = useState('');
     const [permissions, setPermissions] = useState({});
     const [loading, setLoading] = useState(false);
@@ -80,7 +82,8 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
                     portfolio_id: portfolioId,
                     shared_with_email: email,
                     permissions: permissions,
-                    status: 'pending' // They need to accept it
+                    status: 'pending', // They need to accept it
+                    created_by: user.id
                 }, { onConflict: 'portfolio_id, shared_with_email' });
 
             if (insertError) throw insertError;
