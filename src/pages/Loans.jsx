@@ -319,11 +319,25 @@ const Loans = () => {
 
         setIsSaving(true);
         try {
-            const selectedProp = properties.find(p => p.id === loanForm.property_id);
+            let derivedPortfolioId = selectedPortfolioID || null;
+            if (!derivedPortfolioId) {
+                if (resolvedWeId) {
+                    const weProp = properties.find(p => p.economic_unit_id === resolvedWeId);
+                    derivedPortfolioId = weProp?.portfolio_id || null;
+                } else {
+                    const selectedProp = properties.find(p => p.id === resolvedPropertyId);
+                    derivedPortfolioId = selectedProp?.portfolio_id || null;
+                }
+            }
+
+            if (!derivedPortfolioId) {
+                setIsSaving(false);
+                return alert("Portfolio-Zuweisung fehlgeschlagen. Bitte ordnen Sie der Wirtschaftseinheit zuerst eine Immobilie in einem Portfolio zu.");
+            }
 
             const payload = {
                 user_id: user.id,
-                portfolio_id: selectedProp?.portfolio_id || null, // Will be null if it's a WE without property match but WE belongs to user
+                portfolio_id: derivedPortfolioId,
                 property_id: resolvedPropertyId,
                 economic_unit_id: resolvedWeId,
                 bank_name: loanForm.bank_name,
