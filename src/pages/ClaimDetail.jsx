@@ -240,6 +240,30 @@ const ClaimDetail = () => {
         }
     };
 
+    const handleDeleteItem = async (itemId) => {
+        if (!window.confirm('Möchten Sie diese Forderungsposition wirklich löschen? Wenn sie Teil eines Ratenplans ist, wird dies nicht empfohlen.')) return;
+        try {
+            const { error } = await supabase.rpc('delete_claim_item', { p_item_id: itemId });
+            if (error) throw error;
+            loadClaimData();
+            alert('Position erfolgreich gelöscht.');
+        } catch (err) {
+            alert('Fehler beim Löschen: ' + err.message);
+        }
+    };
+
+    const handleSettleItem = async (itemId) => {
+        if (!window.confirm('Möchten Sie diese Position als erledigt markieren? (Eine Erlass-Zahlung wird gebucht)')) return;
+        try {
+            const { error } = await supabase.rpc('settle_claim_item', { p_item_id: itemId });
+            if (error) throw error;
+            loadClaimData();
+            alert('Position erfolgreich als erledigt markiert.');
+        } catch (err) {
+            alert('Fehler beim Markieren: ' + err.message);
+        }
+    };
+
     const handleRecordPayment = async () => {
         if (!paymentForm.amount || parseFloat(paymentForm.amount) <= 0) {
             alert('Bitte einen gültigen Betrag größer als 0 eingeben.');
@@ -742,6 +766,7 @@ const ClaimDetail = () => {
                                             <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Ursprung</th>
                                             <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Getilgt</th>
                                             <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'right' }}>Offen</th>
+                                            <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center', width: '80px' }}>Aktionen</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -758,6 +783,7 @@ const ClaimDetail = () => {
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(paymentPlan.total_amount)}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(planPaidAmount)}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(paymentPlan.total_amount - planPaidAmount)}</td>
+                                                <td style={{ padding: '12px 16px' }}></td>
                                             </tr>
                                         )})()}
                                         {newItems.map(item => (
@@ -769,6 +795,12 @@ const ClaimDetail = () => {
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(item.original_amount)}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(item.paid_principal)}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(item.open_amount)}</td>
+                                                <td style={{ padding: '12px 16px', textAlign: 'center' }}>
+                                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                                                        <button onClick={() => handleSettleItem(item.claim_item_id)} title="Als erledigt markieren" style={{ color: '#166534', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><CheckCircle size={16} /></button>
+                                                        <button onClick={() => handleDeleteItem(item.claim_item_id)} title="Position löschen" style={{ color: '#DC2626', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                                                    </div>
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -1120,9 +1152,8 @@ const ClaimDetail = () => {
                                     />
                                     <span style={{ fontWeight: 500 }}>
                                         {(() => {
-                                            const activePlan = claim.payment_plans?.find(p => p.status === 'active');
-                                            if (activePlan && items) {
-                                                const newItemsFiltered = items.filter(item => new Date(item.claim_items?.created_at) > new Date(activePlan.created_at));
+                                            if (paymentPlan && items) {
+                                                const newItemsFiltered = items.filter(item => new Date(item.claim_items?.created_at) > new Date(paymentPlan.created_at));
                                                 if (newItemsFiltered.length > 0) {
                                                     return newItemsFiltered.map(i => i.claim_items?.description || i.claim_items?.item_type).join(', ');
                                                 }

@@ -118,11 +118,29 @@ const Claims = () => {
                 installmentsData = instData || [];
 
                 const activeClaimIds = plansData.map(p => p.claim_id);
-                const { data: itemsData } = await supabase
+                
+                // Fetch totals
+                const { data: itemsTotalsData } = await supabase
                     .from('claim_item_totals_view')
-                    .select('claim_id, open_amount, claim_items(created_at)')
+                    .select('claim_item_id, claim_id, open_amount')
                     .in('claim_id', activeClaimIds);
-                allClaimItems = itemsData || [];
+                    
+                // Fetch original items for created_at
+                const { data: originalItemsData } = await supabase
+                    .from('claim_items')
+                    .select('id, created_at')
+                    .in('claim_id', activeClaimIds);
+
+                // Merge them locally
+                if (itemsTotalsData && originalItemsData) {
+                    allClaimItems = itemsTotalsData.map(tot => {
+                        const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
+                        return {
+                            ...tot,
+                            created_at: orig ? orig.created_at : null
+                        };
+                    });
+                }
             }
 
             // 6. Merge data
@@ -137,7 +155,7 @@ const Claims = () => {
                     const planOpen = planTotal - planPaid;
                     
                     const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
-                    const newItems = claimItems.filter(item => new Date(item.claim_items?.created_at) > new Date(plan.created_at || '2026-01-01'));
+                    const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
                     const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
                     
                     // We override the totals for the UI to prevent double counting fees included in plan
