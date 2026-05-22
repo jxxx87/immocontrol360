@@ -46,6 +46,8 @@ const ClaimDetail = () => {
         startDate: new Date(new Date().setDate(1)).toISOString().split('T')[0],
         installmentCount: 3, 
         adjustmentAmount: 0, 
+        interestRate: 5.00,
+        calculationMethod: 'interest',
         note: '' 
     });
     
@@ -53,6 +55,24 @@ const ClaimDetail = () => {
     const [installments, setInstallments] = useState([]);
 
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (paymentPlanForm.calculationMethod === 'interest' && totals?.total_due && paymentPlanForm.interestRate > 0) {
+            const principal = parseFloat(totals.total_due) || 0;
+            const annualRate = parseFloat(paymentPlanForm.interestRate) || 0;
+            const months = parseInt(paymentPlanForm.installmentCount) || 1;
+            
+            if (principal > 0 && annualRate > 0) {
+                const r = (annualRate / 100) / 12; // monthly rate
+                const pmt = (principal * r) / (1 - Math.pow(1 + r, -months));
+                const totalPaid = pmt * months;
+                const totalInterest = totalPaid - principal;
+                setPaymentPlanForm(prev => ({ ...prev, adjustmentAmount: totalInterest.toFixed(2) }));
+            } else {
+                setPaymentPlanForm(prev => ({ ...prev, adjustmentAmount: 0 }));
+            }
+        }
+    }, [paymentPlanForm.calculationMethod, paymentPlanForm.interestRate, paymentPlanForm.installmentCount, totals?.total_due]);
 
     useEffect(() => {
         if (claimId) {
@@ -1110,13 +1130,41 @@ const ClaimDetail = () => {
                         </select>
                     </div>
                     <div>
-                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zusätzliche Kosten / Aufschlag (€)</label>
-                        <Input 
-                            type="number" 
-                            step="0.01"
-                            value={paymentPlanForm.adjustmentAmount}
-                            onChange={(e) => setPaymentPlanForm({...paymentPlanForm, adjustmentAmount: e.target.value})}
-                        />
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                            <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Kosten / Aufschlag berechnen über:</label>
+                            <select 
+                                style={{ padding: '2px 8px', borderRadius: '4px', border: '1px solid #D1D5DB', fontSize: '0.8rem' }}
+                                value={paymentPlanForm.calculationMethod}
+                                onChange={(e) => setPaymentPlanForm({...paymentPlanForm, calculationMethod: e.target.value})}
+                            >
+                                <option value="interest">Zinssatz (p.a.)</option>
+                                <option value="manual">Fester Betrag</option>
+                            </select>
+                        </div>
+                        
+                        {paymentPlanForm.calculationMethod === 'interest' ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Input 
+                                    type="number" 
+                                    step="0.1"
+                                    value={paymentPlanForm.interestRate}
+                                    onChange={(e) => setPaymentPlanForm({...paymentPlanForm, interestRate: e.target.value})}
+                                    style={{ flex: 1 }}
+                                />
+                                <span style={{ color: 'var(--text-secondary)' }}>% p.a.</span>
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Input 
+                                    type="number" 
+                                    step="0.01"
+                                    value={paymentPlanForm.adjustmentAmount}
+                                    onChange={(e) => setPaymentPlanForm({...paymentPlanForm, adjustmentAmount: e.target.value})}
+                                    style={{ flex: 1 }}
+                                />
+                                <span style={{ color: 'var(--text-secondary)' }}>€</span>
+                            </div>
+                        )}
                     </div>
                     <div>
                         <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Notiz (Optional)</label>
