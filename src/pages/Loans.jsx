@@ -67,7 +67,7 @@ const Loans = () => {
             // Fetch Properties
             let propQuery = supabase
                 .from('properties')
-                .select('id, street, house_number, city, portfolio_id')
+                .select('id, street, house_number, city, portfolio_id, economic_unit_id')
                 .order('street');
 
             if (selectedPortfolioID) {
@@ -115,17 +115,45 @@ const Loans = () => {
             return true;
         });
 
-        // Group by Property
+        // Build prop groups map for economic units
+        const propGroups = {};
+        rawProps.forEach(p => {
+            const key = p.economic_unit_id || p.id;
+            if (!propGroups[key]) {
+                propGroups[key] = {
+                    id: key,
+                    isGroup: !!p.economic_unit_id,
+                    properties: [],
+                    street: p.street,
+                    house_number: p.house_number,
+                    city: p.city
+                };
+            }
+            propGroups[key].properties.push(p);
+        });
+
+        Object.values(propGroups).forEach(g => {
+            if (g.isGroup && g.properties.length > 1) {
+                const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
+                g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                g.house_number = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                const cities = Array.from(new Set(g.properties.map(pr => pr.city).filter(Boolean)));
+                g.city = cities.join(', ');
+            } else {
+                g.isGroup = false;
+            }
+        });
+
+        // Group by Property or Economic Unit
         const groups = {};
 
-        // Initialize groups for all properties (even those without loans, if we want to show them? Maybe only with loans or matching filter)
-        // Let's only show those with loans for now unless filtering by property
-
         filtered.forEach(loan => {
-            const pid = loan.property_id;
+            const prop = rawProps.find(p => p.id === loan.property_id);
+            const pid = prop ? (prop.economic_unit_id || prop.id) : loan.property_id;
+
             if (!groups[pid]) {
                 groups[pid] = {
-                    property: loan.property,
+                    property: propGroups[pid] || loan.property,
                     loans: [],
                     totals: {
                         amount: 0,

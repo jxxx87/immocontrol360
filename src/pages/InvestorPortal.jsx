@@ -37,7 +37,7 @@ import { usePdfTemplate } from '../lib/usePdfTemplate';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { useViewMode } from '../context/ViewModeContext';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 
 const InvestorPortal = () => {
     const { user } = useAuth();
@@ -61,6 +61,9 @@ const InvestorPortal = () => {
 
     // Audit Modal (Inline in cockpit table)
     const [auditPropertyId, setAuditPropertyId] = useState(null);
+
+    // Expandable Group State
+    const [expandedWEId, setExpandedWEId] = useState(null);
 
     // Action Menu
     const [openMenuId, setOpenMenuId] = useState(null);
@@ -327,6 +330,58 @@ const InvestorPortal = () => {
     const getPropertyRentSoll = (property) => {
         return (property.units || []).reduce((sum, u) => sum + (parseFloat(u.target_rent) || 0), 0);
     };
+
+    // Group Properties by Economic Unit
+    const groupedProperties = React.useMemo(() => {
+        const groups = {};
+        const result = [];
+
+        properties.forEach(p => {
+            if (p.economic_unit_id) {
+                if (!groups[p.economic_unit_id]) {
+                    groups[p.economic_unit_id] = {
+                        id: 'we_' + p.economic_unit_id,
+                        isGroup: true,
+                        economic_unit_id: p.economic_unit_id,
+                        street: 'Wirtschaftseinheit',
+                        house_number: '',
+                        properties: [],
+                        total_investment_cost: 0,
+                        equity_invested: 0,
+                        market_value_total: 0,
+                        _rentIst: 0,
+                        _rentSoll: 0,
+                        _debt: 0,
+                        _totalSqm: 0
+                    };
+                }
+                const group = groups[p.economic_unit_id];
+                group.properties.push(p);
+                group.total_investment_cost += (parseFloat(p.total_investment_cost) || 0);
+                group.equity_invested += (parseFloat(p.equity_invested) || 0);
+                group.market_value_total += (parseFloat(p.market_value_total) || 0);
+                group._rentIst += getPropertyRentIst(p);
+                group._rentSoll += getPropertyRentSoll(p);
+                group._debt += getPropertyDebt(p.id);
+                group._totalSqm += (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+            } else {
+                result.push(p);
+            }
+        });
+
+        Object.values(groups).forEach(g => {
+            if (g.properties.length === 1) {
+                result.push(g.properties[0]);
+            } else if (g.properties.length > 1) {
+                const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
+                g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                g.house_number = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                result.push(g);
+            }
+        });
+
+        return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
+    }, [properties, loans]);
 
     const handleUpdateProperty = async (id, updates) => {
         try {
@@ -688,6 +743,7 @@ const InvestorPortal = () => {
                     <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1100px' }}>
                         <thead>
                             <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+                                <th style={{ width: '40px', padding: '12px 0 12px 16px' }}></th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Immobilie</th>
                                 <th style={{ textAlign: 'right', padding: '12px 16px' }}>Gesamtinvest</th>
                                 <th style={{ textAlign: 'right', padding: '12px 16px' }}>Eigenkapital</th>
@@ -699,115 +755,142 @@ const InvestorPortal = () => {
                             </tr>
                         </thead>
                         <tbody>
-                            {properties.map(p => {
-                                const totalSqm = p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
-                                const rentIstMo = getPropertyRentIst(p);
-                                const rentSollMo = getPropertyRentSoll(p);
-                                const debt = getPropertyDebt(p.id);
-                                const marketValue = parseFloat(p.market_value_total) || 0;
-
-                                return (
-                                    <React.Fragment key={p.id}>
-                                        <tr style={{ borderBottom: '1px solid var(--border-color)', transition: 'background 0.15s' }}
-                                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(59,130,246,0.03)'}
-                                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
-                                        >
-                                            <td style={{ padding: '14px 16px' }}>
-                                                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{p.street} {p.house_number}</div>
-                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
-                                                    <button
-                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Gesamtinvestition eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
-                                                    <button
-                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Eigenkapital eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {formatCurrency(rentIstMo * 12)}
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {formatCurrency(rentSollMo * 12)}
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {marketValue > 0 ? (
-                                                    formatCurrency(marketValue)
-                                                ) : (
-                                                    <button
-                                                        onClick={() => {
-                                                            setDetailProperty(p);
-                                                            setIsDetailOpen(true);
-                                                        }}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Marktwert eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </td>
-                                            <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: 500 }}>
-                                                {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
-                                            </td>
-                                            <td style={{ textAlign: 'center', padding: '14px 16px' }}>
-                                                <div style={{ position: 'relative' }}>
-                                                    <button
-                                                        onClick={e => {
-                                                            e.stopPropagation();
-                                                            if (openMenuId === p.id) { setOpenMenuId(null); return; }
-                                                            const rect = e.currentTarget.getBoundingClientRect();
-                                                            setMenuPos({ top: rect.bottom + 4, left: rect.right });
-                                                            setOpenMenuId(p.id);
-                                                        }}
-                                                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
-                                                    >
-                                                        <MoreVertical size={18} />
-                                                    </button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        {/* Inline Audit Panel */}
-                                        {auditPropertyId === p.id && (
-                                            <tr>
-                                                <td colSpan="8" style={{ padding: '0 16px 20px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                                                    <div ref={auditRef}>
-                                                        {renderInlineAudit(p)}
+                            {groupedProperties.map(pOrGroup => {
+                                const renderRow = (p, isSubRow = false) => {
+                                    const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+                                    const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                                    const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
+                                    const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
+                                    const marketValue = parseFloat(p.market_value_total) || 0;
+                                    
+                                    return (
+                                        <React.Fragment key={p.id}>
+                                            <tr style={{ 
+                                                    borderBottom: (p.isGroup && expandedWEId === p.id) ? 'none' : '1px solid var(--border-color)', 
+                                                    transition: 'background 0.15s',
+                                                    backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')
+                                                }}
+                                                onMouseEnter={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.05)' : 'rgba(59,130,246,0.03)'}
+                                                onMouseLeave={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')}
+                                                onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
+                                            >
+                                                <td style={{ padding: '14px 0 14px 16px', cursor: p.isGroup ? 'pointer' : 'default', paddingLeft: isSubRow ? '40px' : '16px' }}>
+                                                    {p.isGroup && (
+                                                        <span style={{ color: 'var(--text-secondary)' }}>
+                                                            {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                        </span>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '14px 16px' }}>
+                                                    <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '0.9rem', color: p.isGroup ? 'var(--accent-color)' : 'inherit' }}>{p.street} {p.house_number}</div>
+                                                    {!p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                    {p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.properties.length} Gebäude verknüpft</div>}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
+                                                        !p.isGroup && (
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
+                                                            style={{
+                                                                background: 'none', border: '1px dashed var(--primary-color)',
+                                                                color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                            }}
+                                                            title="Gesamtinvestition eintragen"
+                                                        >
+                                                            +
+                                                        </button>
+                                                        )
+                                                    )}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
+                                                        !p.isGroup && (
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
+                                                            style={{
+                                                                background: 'none', border: '1px dashed var(--primary-color)',
+                                                                color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                            }}
+                                                            title="Eigenkapital eintragen"
+                                                        >
+                                                            +
+                                                        </button>
+                                                        )
+                                                    )}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {formatCurrency(rentIstMo * 12)}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {formatCurrency(rentSollMo * 12)}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {marketValue > 0 ? (
+                                                        formatCurrency(marketValue)
+                                                    ) : (
+                                                        !p.isGroup && (
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setDetailProperty(p);
+                                                                setIsDetailOpen(true);
+                                                            }}
+                                                            style={{
+                                                                background: 'none', border: '1px dashed var(--primary-color)',
+                                                                color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                            }}
+                                                            title="Marktwert eintragen"
+                                                        >
+                                                            +
+                                                        </button>
+                                                        )
+                                                    )}
+                                                </td>
+                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                                </td>
+                                                <td style={{ textAlign: 'center', padding: '14px 16px' }}>
+                                                    {!p.isGroup && (
+                                                    <div style={{ position: 'relative' }}>
+                                                        <button
+                                                            onClick={e => {
+                                                                e.stopPropagation();
+                                                                if (openMenuId === p.id) { setOpenMenuId(null); return; }
+                                                                const rect = e.currentTarget.getBoundingClientRect();
+                                                                setMenuPos({ top: rect.bottom + 4, left: rect.right });
+                                                                setOpenMenuId(p.id);
+                                                            }}
+                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
+                                                        >
+                                                            <MoreVertical size={18} />
+                                                        </button>
                                                     </div>
+                                                    )}
                                                 </td>
                                             </tr>
-                                        )}
+                                            {auditPropertyId === p.id && !p.isGroup && (
+                                                <tr>
+                                                    <td colSpan="9" style={{ padding: '0 16px 20px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                                                        <div ref={auditRef}>
+                                                            {renderInlineAudit(p)}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    );
+                                };
+
+                                return (
+                                    <React.Fragment key={pOrGroup.id}>
+                                        {renderRow(pOrGroup)}
+                                        {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderRow(subProp, true))}
                                     </React.Fragment>
                                 );
                             })}
-                            {properties.length === 0 && (
-                                <tr><td colSpan="8" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>Keine Immobilien gefunden.</td></tr>
-                            )}
                         </tbody>
                     </table>
                 </div>
