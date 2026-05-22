@@ -11,7 +11,7 @@ const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('de-DE');
 };
 
-export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId, letterFee = 5) => {
+export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId) => {
     const doc = new jsPDF('p', 'mm', 'a4');
     const margin = 20;
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -133,44 +133,39 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             activeItems = [item];
             isSingleItem = true;
             
-            // Calculate interest for this specific item
-            const endDate = new Date();
-            const interestRate = claim.interest_rate || 5.0;
-            // Use due_date from claim_items, fallback to period_month, then interest_start_date
-            let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
-            if (fM > endDate) fM = endDate;
-            const diffTime = Math.max(0, endDate - fM);
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            const itemInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
+            // Use the stored fee_amount and interest_amount from the item
+            const itemFee = Number(item.claim_items?.fee_amount || 0);
+            const itemInterest = Number(item.claim_items?.interest_amount || 0);
+            // Principal = open_amount minus the fee/interest that are part of the total
+            // But open_amount already includes fee+interest in original_amount
+            // So principal_open = open_amount - itemFee - itemInterest (if not yet paid)
+            const principalOpen = Math.max(0, Number(item.open_amount) - itemFee - itemInterest);
             
             activeTotals = {
-                current_principal_open: Number(item.open_amount),
+                current_principal_open: principalOpen,
                 total_interest_open: itemInterest,
-                total_fees_open: letterFee,
-                total_due: Number(item.open_amount) + itemInterest + letterFee
+                total_fees_open: itemFee,
+                total_due: Number(item.open_amount)
             };
         }
     } else {
-        // For the full claim, recalculate interest from all items and use the explicit letterFee
-        const endDate = new Date();
-        const interestRate = claim.interest_rate || 5.0;
+        // For the full claim: sum fee_amount and interest_amount from all items
+        let totalFees = 0;
         let totalInterest = 0;
+        let totalPrincipalOpen = 0;
         items.forEach(item => {
             const openAmt = Number(item.open_amount || 0);
-            if (openAmt > 0) {
-                let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
-                if (fM > endDate) fM = endDate;
-                const diffTime = Math.max(0, endDate - fM);
-                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                totalInterest += (openAmt * interestRate * diffDays) / (100 * 365);
-            }
+            const itemFee = Number(item.claim_items?.fee_amount || 0);
+            const itemInterest = Number(item.claim_items?.interest_amount || 0);
+            totalFees += itemFee;
+            totalInterest += itemInterest;
+            totalPrincipalOpen += Math.max(0, openAmt - itemFee - itemInterest);
         });
-        const totalPrincipalOpen = items.reduce((sum, i) => sum + Number(i.open_amount || 0), 0);
         activeTotals = {
             current_principal_open: totalPrincipalOpen,
             total_interest_open: totalInterest,
-            total_fees_open: letterFee,
-            total_due: totalPrincipalOpen + totalInterest + letterFee
+            total_fees_open: totalFees,
+            total_due: totalPrincipalOpen + totalInterest + totalFees
         };
     }
 

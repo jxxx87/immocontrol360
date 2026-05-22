@@ -35,7 +35,7 @@ const ClaimDetail = () => {
     const [statusForm, setStatusForm] = useState({ status: '', reason: '' });
 
     const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
-    const [pdfForm, setPdfForm] = useState({ type: 'Zahlungserinnerung', deadlineDays: 7, targetItemId: null, letterFee: 5 });
+    const [pdfForm, setPdfForm] = useState({ type: 'Zahlungserinnerung', deadlineDays: 7, targetItemId: null });
 
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', paymentType: 'installment', linkToInstallment: false, installmentId: '' });
@@ -427,7 +427,7 @@ const ClaimDetail = () => {
     const handleGeneratePdf = async () => {
         setIsSubmitting(true);
         try {
-            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId, parseFloat(pdfForm.letterFee) || 0);
+            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId);
             
             // Determine new escalation level based on document sent
             let newLevel = claim.escalation_level;
@@ -1114,27 +1114,13 @@ const ClaimDetail = () => {
                         <option value="Letzte Zahlungsaufforderung">Stufe 3: Letzte Zahlungsaufforderung</option>
                     </select>
                     
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                        <div>
-                            <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
-                            <Input 
-                                type="number" 
-                                min="1"
-                                value={pdfForm.deadlineDays} 
-                                onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
-                            />
-                        </div>
-                        <div>
-                            <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Mahnauslagen (€)</label>
-                            <Input 
-                                type="number" 
-                                step="0.01"
-                                min="0"
-                                value={pdfForm.letterFee} 
-                                onChange={(e) => setPdfForm({...pdfForm, letterFee: e.target.value})} 
-                            />
-                        </div>
-                    </div>
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
+                    <Input 
+                        type="number" 
+                        min="1"
+                        value={pdfForm.deadlineDays} 
+                        onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
+                    />
                     
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                         <Button variant="secondary" onClick={() => setIsPdfModalOpen(false)}>Abbrechen</Button>
