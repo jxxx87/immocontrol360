@@ -18,7 +18,25 @@ export const PermissionProvider = ({ children }) => {
             setPermissions(null);
             setIsOwner(false);
 
-            if (!selectedPortfolioID || !user) {
+            if (!user) {
+                setLoadingPermissions(false);
+                return;
+            }
+
+            // If "All Portfolios" is selected (empty string), grant full access in the UI.
+            // The backend RLS will ensure they only see data from portfolios they have access to.
+            if (!selectedPortfolioID) {
+                setIsOwner(true);
+                setPermissions({
+                    immobilien: 'write',
+                    mietverhaeltnisse: 'write',
+                    finanzen: 'write',
+                    nebenkosten: 'write',
+                    zaehler: 'write',
+                    kontakte: 'write',
+                    mieterportal: 'write',
+                    investorportal: 'write'
+                });
                 setLoadingPermissions(false);
                 return;
             }
