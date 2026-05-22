@@ -31,6 +31,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useSubscription } from '../../context/SubscriptionContext';
+import { usePermission } from '../../context/PermissionContext';
 
 const Sidebar = ({ mobileOpen, onClose }) => {
     const { userRole } = useAuth();
@@ -135,7 +136,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
     ];
 
     const { hasFeature, checkFeatureAccess, paywallReason, subscription } = useSubscription();
-    const { canRead } = require('../../context/PermissionContext').usePermission();
+    const { canRead } = usePermission();
 
     const mapNavKeyToCategory = (navKey) => {
         const mapping = {
