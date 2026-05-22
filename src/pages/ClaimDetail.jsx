@@ -485,40 +485,50 @@ const ClaimDetail = () => {
         if (!meta || Object.keys(meta).length === 0) return null;
 
         if (event.event_type === 'payment_received') {
+            const isPaymentPlan = !!meta.payment_plan_id;
+            
             return (
                 <div style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
                     <div style={{ color: '#166534', fontWeight: 'bold', marginBottom: '8px' }}>Zahlung erfasst</div>
                     <div style={{ fontSize: '1rem', color: '#166534', fontWeight: 'bold', marginBottom: '12px' }}>+ {formatCurrency(meta.amount)} {meta.payment_date ? `am ${formatDate(meta.payment_date)}` : ''}</div>
                     
-                    <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
-                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>Verrechnung:</div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Mahnkosten:</span><span>{formatCurrency(meta.allocated_to_fees)}</span></div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Verzugszinsen:</span><span>{formatCurrency(meta.allocated_to_interest)}</span></div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Hauptforderung:</span><span>{formatCurrency(meta.allocated_to_principal)}</span></div>
-                    </div>
-                    
-                    {meta.installment_id && (
+                    {isPaymentPlan ? (
                         <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
-                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Ratenzahlung:</div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Zugeordnet zu Rate fällig am:</span><span>{formatDate(meta.installment_due_date)}</span></div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Ratenbetrag:</span><span>{formatCurrency(meta.installment_amount)}</span></div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Nach Zahlung offen:</span><span>{formatCurrency(meta.installment_open_after)}</span></div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span>- Status:</span>
-                                <span style={{ fontWeight: 600, color: meta.installment_status_after === 'paid' ? '#166534' : '#92400E' }}>
-                                    {meta.installment_status_after === 'paid' ? 'Bezahlt' : 'Teilweise bezahlt'}
-                                </span>
-                            </div>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Verrechnung Ratenplan:</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Getilgt:</span><span>{formatCurrency(meta.amount)}</span></div>
+                        </div>
+                    ) : (
+                        <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Verrechnung:</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Mahnkosten:</span><span>{formatCurrency(meta.allocated_to_fees)}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Verzugszinsen:</span><span>{formatCurrency(meta.allocated_to_interest)}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Hauptforderung:</span><span>{formatCurrency(meta.allocated_to_principal)}</span></div>
                         </div>
                     )}
                     
-                    <div>
-                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>Restforderung nach Zahlung:</div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                            <span>- Gesamt offen:</span>
-                            <span style={{ fontWeight: 'bold' }}>{formatCurrency(meta.remaining_total_due)}</span>
+                    {meta.modified_installments && meta.modified_installments.length > 0 && (
+                        <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Zugeordnete Raten:</div>
+                            {meta.modified_installments.map((inst, idx) => (
+                                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', color: '#166534' }}>
+                                    <span>- Rate {inst.id.substring(0,6)}...</span>
+                                    <span style={{ fontWeight: 600, color: inst.old_status === 'paid' ? '#166534' : '#92400E' }}>
+                                        {inst.old_status === 'paid' ? 'Bezahlt' : 'Teilweise getilgt'}
+                                    </span>
+                                </div>
+                            ))}
                         </div>
-                    </div>
+                    )}
+                    
+                    {!isPaymentPlan && (
+                        <div>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Restforderung nach Zahlung:</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span>- Gesamt offen:</span>
+                                <span style={{ fontWeight: 'bold' }}>{formatCurrency(meta.remaining_total_due)}</span>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }

@@ -33,6 +33,7 @@ const Claims = () => {
     
     const [selectedLedgerIds, setSelectedLedgerIds] = useState([]);
     const [selectedLeaseId, setSelectedLeaseId] = useState('');
+    const [buildingFilter, setBuildingFilter] = useState('');
     const [manualItems, setManualItems] = useState([]);
     const [allLeases, setAllLeases] = useState([]);
     
@@ -99,9 +100,46 @@ const Claims = () => {
 
             if (totalsError) throw totalsError;
 
-            // 4. Merge data
+            // 4. Fetch active payment plans
+            const { data: plansData, error: plansError } = await supabase
+                .from('payment_plans')
+                .select('id, claim_id, total_amount')
+                .eq('status', 'active');
+                
+            // 5. Fetch installments for these plans
+            let installmentsData = [];
+            if (plansData && plansData.length > 0) {
+                const planIds = plansData.map(p => p.id);
+                const { data: instData } = await supabase
+                    .from('payment_plan_installments')
+                    .select('payment_plan_id, paid_amount')
+                    .in('payment_plan_id', planIds);
+                installmentsData = instData || [];
+            }
+
+            // 6. Merge data
             const merged = (claimsData || []).map(claim => {
-                const totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
+                let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
+                
+                const plan = (plansData || []).find(p => p.claim_id === claim.id);
+                if (plan) {
+                    const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
+                    const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
+                    const planTotal = Number(plan.total_amount || 0);
+                    const planOpen = planTotal - planPaid;
+                    
+                    // We override the totals for the UI
+                    totals = {
+                        ...totals,
+                        current_principal_original: planTotal,
+                        principal_paid: planPaid,
+                        current_principal_open: planOpen,
+                        total_fees_open: 0,
+                        total_interest_open: 0,
+                        total_due: planOpen
+                    };
+                }
+                
                 return { ...claim, ...totals };
             });
 
@@ -181,6 +219,7 @@ const Claims = () => {
         setCreateStep(1);
         setSelectedLedgerIds([]);
         setSelectedLeaseId('');
+        setBuildingFilter('');
         setManualItems([]);
         setExpandedTenant(null);
         setForm({ fee_amount: 5.00, interest_rate: 5.0000, deadline_days: 7, note: '' });
@@ -390,17 +429,12 @@ const Claims = () => {
     };
 
     const toggleLedgerSelection = (ledgerId, leaseId) => {
-        if (selectedLedgerIds.length > 0) {
-            const firstSelected = openLedgers.find(l => l.id === selectedLedgerIds[0]);
-            if (firstSelected && firstSelected.leases?.id !== leaseId) {
-                setSelectedLedgerIds([ledgerId]);
-                return;
-            }
-        }
+        setSelectedLeaseId(''); // Clear manual lease selection
         setSelectedLedgerIds(prev => prev.includes(ledgerId) ? prev.filter(id => id !== ledgerId) : [...prev, ledgerId]);
     };
 
     const toggleAllForLease = (leaseId, ledgerIds) => {
+        setSelectedLeaseId(''); // Clear manual lease selection
         const allSelected = ledgerIds.every(id => selectedLedgerIds.includes(id));
         if (allSelected) {
             setSelectedLedgerIds(prev => prev.filter(id => !ledgerIds.includes(id)));
@@ -711,31 +745,43 @@ const Claims = () => {
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                                     Erstellen Sie eine Forderungsakte ohne offene Miete, z.B. für Nachzahlungen.
                                 </p>
+                                <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                                    <select 
+                                        style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
+                                        value={buildingFilter}
+                                        onChange={(e) => {
+                                            setBuildingFilter(e.target.value);
+                                            setSelectedLeaseId('');
+                                        }}
+                                    >
+                                        <option value="">-- Alle Häuser --</option>
+                                        {Array.from(new Set(allLeases.map(l => l.units?.properties ? `${l.units.properties.street} ${l.units.properties.house_number}, ${l.units.properties.city}` : ''))).filter(Boolean).map(address => (
+                                            <option key={address} value={address}>{address}</option>
+                                        ))}
+                                    </select>
+                                </div>
                                 <div style={{ display: 'flex', gap: '8px' }}>
                                     <select 
                                         style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
                                         value={selectedLeaseId}
-                                        onChange={(e) => setSelectedLeaseId(e.target.value)}
+                                        onChange={(e) => {
+                                            setSelectedLeaseId(e.target.value);
+                                            setSelectedLedgerIds([]); // Clear ledger selections
+                                        }}
                                     >
                                         <option value="">-- Mietvertrag auswählen --</option>
-                                        {allLeases.map(lease => (
+                                        {allLeases.filter(l => !buildingFilter || (l.units?.properties && `${l.units.properties.street} ${l.units.properties.house_number}, ${l.units.properties.city}` === buildingFilter)).map(lease => (
                                             <option key={lease.id} value={lease.id}>
                                                 {getTenantName(lease.tenants)} ({getLeaseName(lease)})
                                             </option>
                                         ))}
                                     </select>
-                                    <Button 
-                                        disabled={!selectedLeaseId} 
-                                        onClick={() => { setSelectedLedgerIds([]); setCreateStep(2); }}
-                                    >
-                                        Erstellen
-                                    </Button>
                                 </div>
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-lg)' }}>
                                 <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                                <Button onClick={() => { setSelectedLeaseId(''); setCreateStep(2); }} disabled={selectedLedgerIds.length === 0} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Button onClick={() => setCreateStep(2)} disabled={selectedLedgerIds.length === 0 && !selectedLeaseId} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     Weiter <ArrowRight size={16} />
                                 </Button>
                             </div>
