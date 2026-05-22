@@ -40,11 +40,13 @@ const Properties = () => {
         zip: '',
         city: '',
         construction_year: '',
-        property_type: 'residential' // residential, commercial, mixed
+        property_type: 'residential', // residential, commercial, mixed
+        linked_property_id: '' // For Economic Unit
     });
 
-    // Units Logic
+    // Units and Group Logic
     const [expandedPropertyId, setExpandedPropertyId] = useState(null);
+    const [expandedWEId, setExpandedWEId] = useState(null); // For Economic Units
     const [units, setUnits] = useState({}); // Map: propertyId -> [units]
     const [loadingUnits, setLoadingUnits] = useState({}); // Map: propertyId -> boolean
 
@@ -203,6 +205,26 @@ const Properties = () => {
 
         try {
             setIsSaving(true);
+            
+            let finalEconomicUnitId = null;
+            if (propertyForm.linked_property_id) {
+                const targetProp = properties.find(p => p.id === propertyForm.linked_property_id);
+                if (targetProp) {
+                    if (targetProp.economic_unit_id) {
+                        finalEconomicUnitId = targetProp.economic_unit_id;
+                    } else {
+                        finalEconomicUnitId = crypto.randomUUID();
+                        // Update target property to share the new group ID
+                        await supabase.from('properties').update({ economic_unit_id: finalEconomicUnitId }).eq('id', targetProp.id);
+                    }
+                }
+            } else if (editingPropertyId) {
+                // If we edit and set linked_property_id to empty, we remove it from the unit
+                // We don't explicitly track the "old" value here, we just set it to null.
+                // It will just be removed from the unit.
+                finalEconomicUnitId = null;
+            }
+
             const propData = {
                 user_id: user.id,
                 portfolio_id: propertyForm.portfolio_id || null,
@@ -213,8 +235,17 @@ const Properties = () => {
                 construction_year: parseInt(propertyForm.construction_year) || null,
                 property_type: propertyForm.property_type,
                 total_investment_cost: parseFloat(propertyForm.total_investment_cost) || 0,
-                equity_invested: parseFloat(propertyForm.equity_invested) || 0
+                equity_invested: parseFloat(propertyForm.equity_invested) || 0,
+                economic_unit_id: finalEconomicUnitId !== undefined ? finalEconomicUnitId : null
             };
+
+            // If we are editing and didn't change linked_property_id, we need to make sure we don't accidentally overwrite economic_unit_id with null
+            // Let's retrieve the original property to check if it had an economic_unit_id
+            if (editingPropertyId && !propertyForm.linked_property_id && propertyForm._original_economic_unit_id && propertyForm._keep_economic_unit) {
+                 propData.economic_unit_id = propertyForm._original_economic_unit_id;
+            } else if (editingPropertyId && !propertyForm.linked_property_id) {
+                 propData.economic_unit_id = null;
+            }
 
             let error;
             if (editingPropertyId) {
@@ -387,8 +418,20 @@ const Properties = () => {
             construction_year: property.construction_year || '',
             property_type: property.property_type || 'residential',
             total_investment_cost: property.total_investment_cost || '',
-            equity_invested: property.equity_invested || ''
+            equity_invested: property.equity_invested || '',
+            linked_property_id: '', // Reset in UI, but we know it might have an economic unit
+            _original_economic_unit_id: property.economic_unit_id,
+            _keep_economic_unit: !!property.economic_unit_id // Helper flag
         });
+        
+        // If it already is in an economic unit, find a peer to show in the dropdown
+        if (property.economic_unit_id) {
+             const peer = properties.find(p => p.economic_unit_id === property.economic_unit_id && p.id !== property.id);
+             if (peer) {
+                 setPropertyForm(prev => ({ ...prev, linked_property_id: peer.id }));
+             }
+        }
+        
         setIsPropertyModalOpen(true);
     };
 
@@ -413,6 +456,59 @@ const Properties = () => {
         return p.id === searchTerm;
     });
 
+    // Group Properties by Economic Unit
+    const groupedProperties = React.useMemo(() => {
+        const groups = {};
+        const result = [];
+
+        filteredProperties.forEach(p => {
+            if (p.economic_unit_id) {
+                if (!groups[p.economic_unit_id]) {
+                    groups[p.economic_unit_id] = {
+                        id: 'we_' + p.economic_unit_id,
+                        isGroup: true,
+                        economic_unit_id: p.economic_unit_id,
+                        street: 'Wirtschaftseinheit',
+                        house_number: '',
+                        property_type: 'mixed',
+                        properties: [],
+                        stats: { totalUnits: 0, totalArea: 0, totalTargetRent: 0, totalActualRent: 0 },
+                        total_investment_cost: 0,
+                        equity_invested: 0,
+                        market_value: 0
+                    };
+                }
+                const group = groups[p.economic_unit_id];
+                group.properties.push(p);
+                group.stats.totalUnits += (p.stats?.totalUnits || 0);
+                group.stats.totalArea += (p.stats?.totalArea || 0);
+                group.stats.totalTargetRent += (p.stats?.totalTargetRent || 0);
+                group.stats.totalActualRent += (p.stats?.totalActualRent || 0);
+                group.total_investment_cost += (p.total_investment_cost || 0);
+                group.equity_invested += (p.equity_invested || 0);
+            } else {
+                result.push(p);
+            }
+        });
+
+        // Resolve Groups: If a group only has 1 property, flatten it. Otherwise, generate name and add to result.
+        Object.values(groups).forEach(g => {
+            if (g.properties.length === 1) {
+                result.push(g.properties[0]);
+            } else if (g.properties.length > 1) {
+                const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
+                const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
+                const numbers = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                g.street = `Wirtschaftseinheit: ${streetName}`;
+                g.house_number = numbers;
+                result.push(g);
+            }
+        });
+
+        // Sort by street name
+        return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
+    }, [filteredProperties]);
+
     const propertyColumns = [
         {
             header: '',
@@ -420,10 +516,17 @@ const Properties = () => {
             width: '40px',
             render: (row) => (
                 <button
-                    onClick={(e) => { e.stopPropagation(); toggleExpand(row.id); }}
+                    onClick={(e) => { 
+                        e.stopPropagation(); 
+                        if (row.isGroup) {
+                            setExpandedWEId(expandedWEId === row.id ? null : row.id);
+                        } else {
+                            toggleExpand(row.id); 
+                        }
+                    }}
                     style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }}
                 >
-                    {expandedPropertyId === row.id ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+                    {(row.isGroup ? expandedWEId === row.id : expandedPropertyId === row.id) ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
                 </button>
             )
         },
@@ -436,18 +539,19 @@ const Properties = () => {
                         width: '40px',
                         height: '40px',
                         borderRadius: 'var(--radius-md)',
-                        backgroundColor: 'var(--surface-color)',
+                        backgroundColor: row.isGroup ? 'rgba(139, 92, 246, 0.1)' : 'var(--surface-color)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
                         marginRight: 'var(--spacing-md)',
-                        color: 'var(--primary-color)'
+                        color: row.isGroup ? 'var(--accent-color)' : 'var(--primary-color)'
                     }}>
                         <Building2 size={20} />
                     </div>
                     <div>
-                        <div style={{ fontWeight: 600 }}>{row.street} {row.house_number}</div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{row.zip} {row.city}</div>
+                        <div style={{ fontWeight: 600, color: row.isGroup ? 'var(--accent-color)' : 'inherit' }}>{row.street} {row.house_number}</div>
+                        {!row.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{row.zip} {row.city}</div>}
+                        {row.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{row.properties.length} Gebäude verknüpft</div>}
                     </div>
                 </div>
             )
@@ -481,7 +585,7 @@ const Properties = () => {
             header: 'Aktionen',
             accessor: 'actions',
             align: 'right',
-            render: (row) => (
+            render: (row) => row.isGroup ? null : (
                 <div style={{ position: 'relative', display: 'inline-block' }}>
                     <button
                         onClick={(e) => {
@@ -646,23 +750,197 @@ const Properties = () => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {filteredProperties.map(property => (
-                                        <React.Fragment key={property.id}>
+                                    {groupedProperties.map(propertyOrGroup => (
+                                        <React.Fragment key={propertyOrGroup.id}>
                                             <tr
                                                 className="table-row"
-                                                onClick={() => toggleExpand(property.id)}
+                                                onClick={() => {
+                                                    if (propertyOrGroup.isGroup) {
+                                                        setExpandedWEId(expandedWEId === propertyOrGroup.id ? null : propertyOrGroup.id);
+                                                    } else {
+                                                        toggleExpand(propertyOrGroup.id);
+                                                    }
+                                                }}
                                                 style={{
-                                                    borderBottom: expandedPropertyId === property.id ? 'none' : '1px solid var(--border-color)',
-                                                    cursor: 'pointer'
+                                                    borderBottom: (propertyOrGroup.isGroup ? expandedWEId === propertyOrGroup.id : expandedPropertyId === propertyOrGroup.id) ? 'none' : '1px solid var(--border-color)',
+                                                    cursor: 'pointer',
+                                                    backgroundColor: propertyOrGroup.isGroup ? 'rgba(139, 92, 246, 0.02)' : 'transparent'
                                                 }}
                                             >
                                                 {propertyColumns.map((col, idx) => (
-                                                    <td key={idx} style={{ textAlign: col.align || 'left' }}>
-                                                        {col.render ? col.render(property) : property[col.accessor]}
+                                                    <td key={idx} style={{ textAlign: col.align || 'left', fontWeight: propertyOrGroup.isGroup ? 600 : 'normal' }}>
+                                                        {col.render ? col.render(propertyOrGroup) : propertyOrGroup[col.accessor]}
                                                     </td>
                                                 ))}
                                             </tr>
-                                            {expandedPropertyId === property.id && (
+                                            
+                                            {/* If it's a Group and expanded, render sub-properties */}
+                                            {propertyOrGroup.isGroup && expandedWEId === propertyOrGroup.id && (
+                                                <>
+                                                    {propertyOrGroup.properties.map(subProp => (
+                                                        <React.Fragment key={subProp.id}>
+                                                            <tr
+                                                                className="table-row"
+                                                                onClick={(e) => { e.stopPropagation(); toggleExpand(subProp.id); }}
+                                                                style={{
+                                                                    borderBottom: expandedPropertyId === subProp.id ? 'none' : '1px solid var(--border-color)',
+                                                                    cursor: 'pointer',
+                                                                    backgroundColor: 'rgba(0,0,0,0.01)'
+                                                                }}
+                                                            >
+                                                                {propertyColumns.map((col, idx) => (
+                                                                    <td key={idx} style={{ textAlign: col.align || 'left', paddingLeft: idx === 1 ? '40px' : undefined }}>
+                                                                        {col.render ? col.render(subProp) : subProp[col.accessor]}
+                                                                    </td>
+                                                                ))}
+                                                            </tr>
+                                                            {/* Render Units for Sub-Property */}
+                                                            {expandedPropertyId === subProp.id && (
+                                                                <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
+                                                                    <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl) var(--spacing-md) 60px' }}>
+                                                                        <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                            <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                                <Home size={16} /> Einheiten
+                                                                            </h4>
+                                                                            <Button size="sm" icon={Plus} onClick={() => {
+                                                                                if (!checkGlobalAccess()) return;
+                                                                                handleOpenUnitModal(subProp);
+                                                                            }}>Neue Einheit</Button>
+                                                                        </div>
+                                                                        
+                                                                        {loadingUnits[subProp.id] ? (
+                                                                            <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
+                                                                        ) : (
+                                                                            !units[subProp.id] || units[subProp.id].length === 0 ? (
+                                                                                <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
+                                                                            ) : (
+                                                                                // Table rendering code is the same, just mapped to subProp.id
+                                                                                <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
+                                                                                    {/* Same header and body logic as below */}
+                                                                                    <thead style={{ backgroundColor: 'var(--background-color)' }}>
+                                                                                        <tr>
+                                                                                            <th style={{ padding: '8px' }}>Name</th>
+                                                                                            <th style={{ padding: '8px' }}>Etage</th>
+                                                                                            <th style={{ padding: '8px' }}>Fläche</th>
+                                                                                            <th style={{ padding: '8px' }}>Zimmer</th>
+                                                                                            <th style={{ padding: '8px' }}>Status</th>
+                                                                                            <th style={{ padding: '8px' }}>Istmiete</th>
+                                                                                            <th style={{ padding: '8px' }}></th>
+                                                                                        </tr>
+                                                                                    </thead>
+                                                                                    <tbody>
+                                                                                        {units[subProp.id].map(unit => (
+                                                                                            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
+                                                                                                <td style={{ padding: '8px' }}>{unit.unit_name}</td>
+                                                                                                <td style={{ padding: '8px' }}>{unit.floor}</td>
+                                                                                                <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                                <td style={{ padding: '8px' }}>{unit.rooms}</td>
+                                                                                                <td style={{ padding: '8px' }}>
+                                                                                                    {unit.status === 'vacation_rental' ? (
+                                                                                                        <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                            <Home size={12} /> Ferienwohnung
+                                                                                                        </span>
+                                                                                                    ) : unit.status === 'rented' ? (
+                                                                                                        <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                            <Key size={12} /> Vermietet
+                                                                                                        </span>
+                                                                                                    ) : (
+                                                                                                        <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                            <AlertCircle size={12} /> Leerstand
+                                                                                                        </span>
+                                                                                                    )}
+                                                                                                </td>
+                                                                                                <td style={{ padding: '8px', fontWeight: 600 }}>
+                                                                                                    {unit.is_vacation_rental 
+                                                                                                        ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                                        : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                                    }
+                                                                                                </td>
+                                                                                                <td style={{ padding: '8px', textAlign: 'right' }}>
+                                                                                                    <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                                                        <button
+                                                                                                            onClick={(e) => {
+                                                                                                                e.stopPropagation();
+                                                                                                                if (openActionMenuId === unit.id) {
+                                                                                                                    setOpenActionMenuId(null);
+                                                                                                                } else {
+                                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right });
+                                                                                                                    setOpenActionMenuId(unit.id);
+                                                                                                                }
+                                                                                                            }}
+                                                                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
+                                                                                                        >
+                                                                                                            <MoreVertical size={16} color="var(--text-secondary)" />
+                                                                                                        </button>
+
+                                                                                                        {openActionMenuId === unit.id && createPortal(
+                                                                                                            <>
+                                                                                                                <div
+                                                                                                                    style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
+                                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
+                                                                                                                />
+                                                                                                                <div style={{
+                                                                                                                    position: 'fixed',
+                                                                                                                    top: menuPos.top + 5,
+                                                                                                                    left: menuPos.left,
+                                                                                                                    transform: 'translateX(-100%)',
+                                                                                                                    backgroundColor: 'var(--surface-color)',
+                                                                                                                    border: '1px solid var(--border-color)',
+                                                                                                                    borderRadius: 'var(--radius-md)',
+                                                                                                                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                                                    zIndex: 9999,
+                                                                                                                    minWidth: '160px',
+                                                                                                                    display: 'flex',
+                                                                                                                    flexDirection: 'column',
+                                                                                                                    padding: '4px'
+                                                                                                                }}>
+                                                                                                                    {unit.status === 'vacant' && (
+                                                                                                                        <button
+                                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${subProp.id}&unitId=${unit.id}`); }}
+                                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
+                                                                                                                            title="Einheit vermieten"
+                                                                                                                        >
+                                                                                                                            <Plus size={14} /> Vermieten
+                                                                                                                        </button>
+                                                                                                                    )}
+                                                                                                                    <button
+                                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(subProp, unit); }}
+                                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
+                                                                                                                        title="Einheit bearbeiten"
+                                                                                                                    >
+                                                                                                                        <Edit size={14} /> Bearbeiten
+                                                                                                                    </button>
+                                                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                                                    <button
+                                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(subProp.id, unit.id); }}
+                                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
+                                                                                                                        title="Einheit löschen"
+                                                                                                                    >
+                                                                                                                        <Trash2 size={14} /> Löschen
+                                                                                                                    </button>
+                                                                                                                </div>
+                                                                                                            </>,
+                                                                                                            document.body
+                                                                                                        )}
+                                                                                                    </div>
+                                                                                                </td>
+                                                                                            </tr>
+                                                                                        ))}
+                                                                                    </tbody>
+                                                                                </table>
+                                                                            )
+                                                                        )}
+                                                                    </td>
+                                                                </tr>
+                                                            )}
+                                                        </React.Fragment>
+                                                    ))}
+                                                </>
+                                            )}
+
+                                            {/* Render Units for Normal Property (Not Group) */}
+                                            {!propertyOrGroup.isGroup && expandedPropertyId === propertyOrGroup.id && (
                                                 <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
                                                     <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl)' }}>
                                                         <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -916,6 +1194,28 @@ const Properties = () => {
                             <option value="commercial">Gewerbe</option>
                             <option value="mixed">Gemischt</option>
                         </select>
+                    </div>
+                </div>
+                
+                {/* Economic Unit Selection */}
+                <div style={{ marginTop: 'var(--spacing-md)' }}>
+                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem', color: 'var(--accent-color)' }}>
+                        Wirtschaftseinheit bilden mit (Optional)
+                    </label>
+                    <select
+                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--accent-color)', backgroundColor: 'rgba(139, 92, 246, 0.05)' }}
+                        value={propertyForm.linked_property_id}
+                        onChange={(e) => setPropertyForm({ ...propertyForm, linked_property_id: e.target.value })}
+                    >
+                        <option value="">-- Keine Verknüpfung --</option>
+                        {properties
+                            .filter(p => p.id !== editingPropertyId && (!propertyForm.portfolio_id || p.portfolio_id === propertyForm.portfolio_id))
+                            .map(p => (
+                            <option key={p.id} value={p.id}>{p.street} {p.house_number} {p.city}</option>
+                        ))}
+                    </select>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        Verknüpfte Immobilien werden im Dashboard und in Abrechnungen zusammengefasst.
                     </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)', marginTop: 'var(--spacing-md)' }}>

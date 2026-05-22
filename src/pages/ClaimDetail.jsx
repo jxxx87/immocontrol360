@@ -1113,7 +1113,7 @@ const ClaimDetail = () => {
                         style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid #D1D5DB', marginBottom: '16px', fontSize: '0.95rem' }}
                     >
                         <option value="">Gesamte Akte (Alle offenen Positionen)</option>
-                        {items.filter(i => i.open_amount > 0).map(i => (
+                        {items.filter(i => Number(i.open_amount) > 0).map(i => (
                             <option key={i.claim_item_id} value={i.claim_item_id}>
                                 {i.claim_items?.description || i.claim_items?.item_type} ({formatCurrency(i.open_amount)})
                             </option>

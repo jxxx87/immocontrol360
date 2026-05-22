@@ -314,14 +314,14 @@ const Claims = () => {
                 finalManualItems.push({
                     description: 'Mahnkosten',
                     amount: feeAmount,
-                    item_type: 'fee'
+                    item_type: 'other'
                 });
             }
             if (calculatedInterest > 0) {
                 finalManualItems.push({
                     description: 'Verzugszinsen (bis heute)',
                     amount: calculatedInterest,
-                    item_type: 'interest'
+                    item_type: 'other'
                 });
             }
 
@@ -869,6 +869,18 @@ const Claims = () => {
                                         const diffTime = todayDate - dueDate;
                                         const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
                                         calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
+                                    }
+                                });
+
+                                manualItems.forEach(item => {
+                                    const openAmount = Number(item.amount || 0);
+                                    if (item.dueDate && openAmount > 0) {
+                                        const dueDate = new Date(item.dueDate);
+                                        if (todayDate > dueDate) {
+                                            const diffTime = todayDate - dueDate;
+                                            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                                            calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
+                                        }
                                     }
                                 });
 
