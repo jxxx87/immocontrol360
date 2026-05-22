@@ -214,6 +214,15 @@ const ClaimDetail = () => {
                 if (rpcError) throw rpcError;
             }
 
+            // Reverse payment plan if this is a payment plan accepted event
+            if (eventType === 'payment_plan_accepted') {
+                const { error: rpcError } = await supabase.rpc('reverse_payment_plan', { p_claim_id: claim.id });
+                // We ignore errors if the plan is already cancelled/deleted
+                if (rpcError && !rpcError.message.includes('Kein aktiver Ratenplan')) {
+                    throw rpcError;
+                }
+            }
+
             const { error } = await supabase.from('claim_events').delete().eq('id', eventId);
             if (error) throw error;
             
