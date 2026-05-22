@@ -122,21 +122,82 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.text(`Sehr geehrte/r ${tenantName},`, margin, yPos);
     yPos += 10;
     
+    const endDate = new Date();
+    const interestRate = claim.interest_rate || 5.0;
+    
     // Check if single item
-    let activeItems = items;
+    let activeItems = JSON.parse(JSON.stringify(items));
     let isSingleItem = false;
     let activeTotals = { ...totals };
     
+    // DYNAMIC INTEREST CALCULATION & BREAKDOWN
+    let totalCalculatedInterest = 0;
+    for (let i = 0; i < activeItems.length; i++) {
+        let item = activeItems[i];
+        if (Number(item.open_amount) <= 0) continue;
+        
+        let dynamicInterest = 0;
+        item.claim_items.interest_breakdown = [];
+        
+        if (item.claim_items?.rent_ledger_ids && item.claim_items.rent_ledger_ids.length > 1) {
+            const { data: ledgers } = await supabase
+                .from('rent_ledger')
+                .select('period_month, expected_rent, paid_amount')
+                .in('id', item.claim_items.rent_ledger_ids)
+                .order('period_month', { ascending: true });
+                
+            if (ledgers) {
+                let remainingOpen = Number(item.open_amount);
+                for (let ledger of ledgers) {
+                    let ledgerOpen = Math.min(remainingOpen, Number(ledger.expected_rent) - Number(ledger.paid_amount));
+                    if (ledgerOpen <= 0) continue;
+                    
+                    let fM = new Date(ledger.period_month);
+                    fM.setDate(fM.getDate() + 3);
+                    if (fM > endDate) fM = endDate;
+                    
+                    const diffTime = Math.max(0, endDate - fM);
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    const ledgerInt = (ledgerOpen * interestRate * diffDays) / (100 * 365);
+                    dynamicInterest += ledgerInt;
+                    remainingOpen -= ledgerOpen;
+                    
+                    item.claim_items.interest_breakdown.push({
+                        description: `Mietrückstand ${new Date(ledger.period_month).toLocaleDateString('de-DE', { month: '2-digit', year: 'numeric' })}`,
+                        amount: ledgerOpen,
+                        fM: fM,
+                        diffDays: diffDays,
+                        interest: ledgerInt
+                    });
+                }
+            }
+        } else {
+            let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
+            if (fM > endDate) fM = endDate;
+
+            const diffTime = Math.max(0, endDate - fM);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            dynamicInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
+            
+            item.claim_items.interest_breakdown.push({
+                description: item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
+                amount: Number(item.open_amount),
+                fM: fM,
+                diffDays: diffDays,
+                interest: dynamicInterest
+            });
+        }
+        item.claim_items.dynamic_interest = dynamicInterest;
+    }
+    
     if (targetItemId) {
-        const item = items.find(i => i.claim_item_id === targetItemId);
+        const item = activeItems.find(i => i.claim_item_id === targetItemId);
         if (item) {
             activeItems = [item];
             isSingleItem = true;
             
-            // Use the stored fee_amount and interest_amount from the item
             const itemFee = Number(item.claim_items?.fee_amount || 0);
-            const itemInterest = Number(item.claim_items?.interest_amount || 0);
-            // open_amount is purely principal now, no need to subtract fees or interest!
+            const itemInterest = Number(item.claim_items?.dynamic_interest || 0);
             const principalOpen = Number(item.open_amount);
             
             activeTotals = {
@@ -147,14 +208,13 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             };
         }
     } else {
-        // For the full claim: sum fee_amount and interest_amount from all items
         let totalFees = 0;
         let totalInterest = 0;
         let totalPrincipalOpen = 0;
-        items.forEach(item => {
+        activeItems.forEach(item => {
             const openAmt = Number(item.open_amount || 0);
             const itemFee = Number(item.claim_items?.fee_amount || 0);
-            const itemInterest = Number(item.claim_items?.interest_amount || 0);
+            const itemInterest = Number(item.claim_items?.dynamic_interest || 0);
             totalFees += itemFee;
             totalInterest += itemInterest;
             totalPrincipalOpen += openAmt;
@@ -408,27 +468,23 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.text(splitZins, margin, currentY);
     currentY += splitZins.length * 5 + 5;
 
-    const endDate = new Date();
-    const interestRate = claim.interest_rate || 5.0;
-    let totalCalculatedInterest = 0;
+    const endDateRef = new Date();
+    let totalCalculatedInterestRef = 0;
+    const interestBody = [];
 
-    const interestBody = activeItems.filter(item => Number(item.open_amount) > 0).map(item => {
-        // Use due_date from claim_items first, then period_month, then claim interest_start_date
-        let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
-        if (fM > endDate) fM = endDate;
-
-        const diffTime = Math.max(0, endDate - fM);
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        const itemInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
-        totalCalculatedInterest += itemInterest;
-
-        return [
-            item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
-            formatCurrency(item.open_amount),
-            `${fM.toLocaleDateString('de-DE')} - ${endDate.toLocaleDateString('de-DE')}`,
-            diffDays.toString(),
-            formatCurrency(itemInterest)
-        ];
+    activeItems.filter(item => Number(item.open_amount) > 0).forEach(item => {
+        if (item.claim_items?.interest_breakdown) {
+            item.claim_items.interest_breakdown.forEach(b => {
+                totalCalculatedInterestRef += b.interest;
+                interestBody.push([
+                    b.description,
+                    formatCurrency(b.amount),
+                    `${b.fM.toLocaleDateString('de-DE')} - ${endDateRef.toLocaleDateString('de-DE')}`,
+                    b.diffDays.toString(),
+                    formatCurrency(b.interest)
+                ]);
+            });
+        }
     });
 
     // If there is no item with open amount, show a fallback
@@ -441,7 +497,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         margin: { left: margin, right: margin },
         head: [['Position', 'Verzinslicher Betrag', 'Zeitraum', 'Tage', 'Zinsen']],
         body: interestBody,
-        foot: [['Summe berechneter Verzugszinsen', '', '', '', formatCurrency(totalCalculatedInterest)]],
+        foot: [['Summe berechneter Verzugszinsen', '', '', '', formatCurrency(totalCalculatedInterestRef)]],
         headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
