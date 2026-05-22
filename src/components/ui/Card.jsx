@@ -47,11 +47,9 @@ const Card = ({ children, className = '', title, action, style = {}, onClick }) 
             boxShadow: 'var(--shadow-sm)',
             padding: 'var(--spacing-lg)',
             border: '1px solid var(--glass-border)',
-            height: '100%',
             display: 'flex',
             flexDirection: 'column',
             maxWidth: '100%',
-            overflow: 'hidden',
             boxSizing: 'border-box',
             ...style
         }} className={className}>
@@ -68,7 +66,7 @@ const Card = ({ children, className = '', title, action, style = {}, onClick }) 
                     {action && <div>{action}</div>}
                 </div>
             )}
-            <div style={{ flex: '1 1 auto', minWidth: 0, overflow: 'visible' }}>
+            <div style={{ flexGrow: 1, flexShrink: 0, minWidth: 0, overflow: 'visible', height: 'auto' }}>
                 {children}
             </div>
         </div>

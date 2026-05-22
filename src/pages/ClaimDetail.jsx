@@ -245,13 +245,8 @@ const ClaimDetail = () => {
             return;
         }
 
-        if (paymentForm.linkToInstallment && paymentForm.installmentId) {
-            const inst = installments.find(i => i.id === paymentForm.installmentId);
-            if (inst && amount > (inst.amount - inst.paid_amount + 0.01)) {
-                alert(`Zahlungsbetrag ist höher als die ausgewählte offene Rate (${formatCurrency(inst.amount - inst.paid_amount)}).`);
-                return;
-            }
-        }
+        // Installment cascade logic is now handled in the backend.
+        // We no longer block payments larger than a single installment.
 
         setIsSubmitting(true);
         try {
