@@ -224,6 +224,12 @@ const ClaimDetail = () => {
                 }
             }
 
+            // Reverse appended claims
+            if (eventType === 'note_added' && eventMetadata?.source === 'append_advanced') {
+                const { error: rpcError } = await supabase.rpc('reverse_appended_claim', { p_event_id: eventId });
+                if (rpcError) throw rpcError;
+            }
+
             const { error } = await supabase.from('claim_events').delete().eq('id', eventId);
             if (error) throw error;
             
@@ -250,12 +256,15 @@ const ClaimDetail = () => {
 
         setIsSubmitting(true);
         try {
+            const targetType = paymentForm.paymentType === 'new_item' ? 'claim_items' : 'auto';
+
             const { error } = await supabase.rpc('record_claim_payment', {
                 p_claim_id: claim.id,
                 p_payment_date: paymentForm.date,
                 p_amount: amount,
                 p_note: paymentForm.note,
-                p_installment_id: paymentForm.linkToInstallment && paymentForm.installmentId ? paymentForm.installmentId : null
+                p_installment_id: paymentForm.paymentType === 'installment' && paymentForm.linkToInstallment && paymentForm.installmentId ? paymentForm.installmentId : null,
+                p_target_type: targetType
             });
 
             if (error) {
@@ -1109,7 +1118,18 @@ const ClaimDetail = () => {
                                         checked={paymentForm.paymentType === 'new_item'}
                                         onChange={() => setPaymentForm({...paymentForm, paymentType: 'new_item', linkToInstallment: false, installmentId: ''})}
                                     />
-                                    <span style={{ fontWeight: 500 }}>Neue Forderungen (außerhalb Ratenplan)</span>
+                                    <span style={{ fontWeight: 500 }}>
+                                        {(() => {
+                                            const activePlan = claim.payment_plans?.find(p => p.status === 'active');
+                                            if (activePlan && items) {
+                                                const newItemsFiltered = items.filter(item => new Date(item.claim_items?.created_at) > new Date(activePlan.created_at));
+                                                if (newItemsFiltered.length > 0) {
+                                                    return newItemsFiltered.map(i => i.claim_items?.description || i.claim_items?.item_type).join(', ');
+                                                }
+                                            }
+                                            return "Neue Forderungen (außerhalb Ratenplan)";
+                                        })()}
+                                    </span>
                                 </label>
                             </div>
                         </div>

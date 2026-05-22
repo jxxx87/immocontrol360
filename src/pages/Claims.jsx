@@ -103,11 +103,12 @@ const Claims = () => {
             // 4. Fetch active payment plans
             const { data: plansData, error: plansError } = await supabase
                 .from('payment_plans')
-                .select('id, claim_id, total_amount')
+                .select('id, claim_id, total_amount, created_at')
                 .eq('status', 'active');
                 
             // 5. Fetch installments for these plans
             let installmentsData = [];
+            let allClaimItems = [];
             if (plansData && plansData.length > 0) {
                 const planIds = plansData.map(p => p.id);
                 const { data: instData } = await supabase
@@ -115,6 +116,13 @@ const Claims = () => {
                     .select('payment_plan_id, paid_amount')
                     .in('payment_plan_id', planIds);
                 installmentsData = instData || [];
+
+                const activeClaimIds = plansData.map(p => p.claim_id);
+                const { data: itemsData } = await supabase
+                    .from('claim_item_totals_view')
+                    .select('claim_id, open_amount, claim_items(created_at)')
+                    .in('claim_id', activeClaimIds);
+                allClaimItems = itemsData || [];
             }
 
             // 6. Merge data
@@ -128,15 +136,19 @@ const Claims = () => {
                     const planTotal = Number(plan.total_amount || 0);
                     const planOpen = planTotal - planPaid;
                     
-                    // We override the totals for the UI
+                    const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
+                    const newItems = claimItems.filter(item => new Date(item.claim_items?.created_at) > new Date(plan.created_at || '2026-01-01'));
+                    const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
+                    
+                    // We override the totals for the UI to prevent double counting fees included in plan
                     totals = {
                         ...totals,
-                        current_principal_original: planTotal,
+                        current_principal_original: planTotal + newItemsPrincipalOpen,
                         principal_paid: planPaid,
-                        current_principal_open: planOpen,
+                        current_principal_open: planOpen + newItemsPrincipalOpen,
                         total_fees_open: 0,
                         total_interest_open: 0,
-                        total_due: planOpen
+                        total_due: planOpen + newItemsPrincipalOpen
                     };
                 }
                 
