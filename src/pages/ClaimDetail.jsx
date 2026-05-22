@@ -379,6 +379,113 @@ const ClaimDetail = () => {
         return mapping[type] || type;
     };
 
+    const translateStatus = (status) => {
+        const mapping = {
+            'open': 'Offen',
+            'settled': 'Erledigt / Bezahlt',
+            'cancelled': 'Storniert',
+            'archived': 'Archiviert'
+        };
+        return mapping[status] || status;
+    };
+
+    const renderEventDetails = (event) => {
+        const meta = event.event_metadata;
+        if (!meta || Object.keys(meta).length === 0) return null;
+
+        if (event.event_type === 'payment_received') {
+            return (
+                <div style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '12px', borderRadius: '6px', marginTop: '8px' }}>
+                    <div style={{ color: '#166534', fontWeight: 'bold', marginBottom: '8px', fontSize: '1rem' }}>
+                        + {formatCurrency(meta.amount)} am {formatDate(meta.payment_date)}
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: '#166534' }}>
+                        <strong>Verrechnung:</strong>
+                        <ul style={{ margin: '4px 0 8px 0', paddingLeft: '20px' }}>
+                            <li>Mahnkosten: {formatCurrency(meta.allocated_to_fees)}</li>
+                            <li>Verzugszinsen: {formatCurrency(meta.allocated_to_interest)}</li>
+                            <li>Hauptforderung: {formatCurrency(meta.allocated_to_principal)}</li>
+                        </ul>
+                        <strong>Restforderung nach Zahlung:</strong>
+                        <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px' }}>
+                            <li>Gesamt offen: {formatCurrency(meta.remaining_total_due)}</li>
+                        </ul>
+                    </div>
+                </div>
+            );
+        }
+
+        if (event.event_type === 'payment_reversed') {
+            return (
+                <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '12px', borderRadius: '6px', marginTop: '8px' }}>
+                    <div style={{ color: '#991B1B', fontWeight: 'bold', marginBottom: '8px', fontSize: '1rem' }}>
+                        - {formatCurrency(meta.amount)} am {formatDate(meta.reversal_date || event.event_date)}
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: '#991B1B' }}>
+                        <strong>Storniert wurde:</strong>
+                        <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px' }}>
+                            <li>Ursprüngliche Zahlung vom: {formatDate(meta.original_payment_date || meta.payment_date)}</li>
+                            <li>Grund: {meta.reason || 'Rücklastschrift / Manuell storniert'}</li>
+                        </ul>
+                    </div>
+                </div>
+            );
+        }
+
+        if (event.event_type === 'dunning_sent') {
+            return (
+                <div style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    {meta.document_type && <div style={{ marginBottom: '4px' }}><strong>Dokumenttyp:</strong> {meta.document_type}</div>}
+                    {meta.total_due_at_generation !== undefined && (
+                        <div style={{ marginBottom: '4px' }}><strong>Gesamtforderung Stand Dokument:</strong> {formatCurrency(meta.total_due_at_generation)}</div>
+                    )}
+                    {meta.deadline_date && (
+                        <div style={{ marginBottom: '8px' }}><strong>Frist:</strong> {formatDate(meta.deadline_date)}</div>
+                    )}
+                    {(meta.document_id || meta.document_path) && (
+                        <Button 
+                            type="button"
+                            onClick={() => window.open(meta.document_path || '#', '_blank')} 
+                            style={{ padding: '6px 12px', fontSize: '0.8rem', marginTop: '4px', backgroundColor: '#fff', color: '#374151', border: '1px solid #D1D5DB' }}
+                        >
+                            PDF öffnen
+                        </Button>
+                    )}
+                </div>
+            );
+        }
+
+        if (event.event_type === 'deadline_set') {
+            return (
+                <div style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    {meta.old_deadline && <div style={{ marginBottom: '4px' }}><strong>Alte Frist:</strong> {formatDate(meta.old_deadline)}</div>}
+                    <div style={{ marginBottom: '4px' }}><strong>Neue Frist:</strong> {formatDate(meta.new_deadline)}</div>
+                    {meta.note && <div style={{ marginTop: '4px' }}><strong>Notiz:</strong> {meta.note}</div>}
+                </div>
+            );
+        }
+
+        if (event.event_type === 'status_changed') {
+            return (
+                <div style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    {meta.old_status && <div style={{ marginBottom: '4px' }}><strong>Von:</strong> {translateStatus(meta.old_status)}</div>}
+                    <div style={{ marginBottom: '4px' }}><strong>Auf:</strong> {translateStatus(meta.new_status)}</div>
+                    {meta.reason && <div style={{ marginTop: '4px' }}><strong>Grund:</strong> {meta.reason}</div>}
+                </div>
+            );
+        }
+
+        // Fallback: Debug view
+        return (
+            <details style={{ fontSize: '0.8rem', marginTop: '8px' }}>
+                <summary style={{ cursor: 'pointer', color: '#6B7280' }}>Technische Details anzeigen</summary>
+                <pre style={{ backgroundColor: '#F3F4F6', padding: '8px', borderRadius: '4px', marginTop: '4px', overflowX: 'auto' }}>
+                    {JSON.stringify(meta, null, 2)}
+                </pre>
+            </details>
+        );
+    };
+
     if (loading) return <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center' }}>Lade Forderungsakte...</div>;
     
     if (error) return (
@@ -523,14 +630,7 @@ const ClaimDetail = () => {
                                                     {event.description}
                                                 </div>
                                             )}
-                                            {event.event_metadata && Object.keys(event.event_metadata).length > 0 && (
-                                                <details style={{ fontSize: '0.8rem' }}>
-                                                    <summary style={{ cursor: 'pointer', color: '#6B7280' }}>Details anzeigen</summary>
-                                                    <pre style={{ backgroundColor: '#F3F4F6', padding: '8px', borderRadius: '4px', marginTop: '4px', overflowX: 'auto' }}>
-                                                        {JSON.stringify(event.event_metadata, null, 2)}
-                                                    </pre>
-                                                </details>
-                                            )}
+                                            {renderEventDetails(event)}
                                         </div>
                                     ))}
                                 </div>
