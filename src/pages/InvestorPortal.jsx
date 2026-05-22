@@ -788,7 +788,7 @@ const InvestorPortal = () => {
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
-                                                        !p.isGroup && (
+                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
                                                             onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
                                                             style={{
@@ -805,7 +805,7 @@ const InvestorPortal = () => {
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
-                                                        !p.isGroup && (
+                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
                                                             onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
                                                             style={{
@@ -830,7 +830,7 @@ const InvestorPortal = () => {
                                                     {marketValue > 0 ? (
                                                         formatCurrency(marketValue)
                                                     ) : (
-                                                        !p.isGroup && (
+                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -897,144 +897,173 @@ const InvestorPortal = () => {
 
                 {/* Mobile View: Cards */}
                 <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                    {properties.map(p => {
-                        const totalSqm = p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
-                        const rentIstMo = getPropertyRentIst(p);
-                        const rentSollMo = getPropertyRentSoll(p);
-                        const debt = getPropertyDebt(p.id);
-                        const marketValue = parseFloat(p.market_value_total) || 0;
+                    {groupedProperties.map(pOrGroup => {
+                        const renderMobileCard = (p, isSubCard = false) => {
+                            const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+                            const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                            const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
+                            const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
+                            const marketValue = parseFloat(p.market_value_total) || 0;
 
-                        return (
-                            <div key={p.id} style={{
-                                border: '1px solid var(--border-color)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 'var(--spacing-md)',
-                                backgroundColor: 'var(--surface-color)',
-                                display: 'flex', flexDirection: 'column', gap: '12px'
-                            }}>
-                                {/* Header */}
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                    <div>
-                                        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
-                                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city} • {totalSqm > 0 ? `${totalSqm} m²` : ''}</div>
-                                    </div>
-
-                                    <button
-                                        onClick={() => {
-                                            setDetailProperty(p);
-                                            setIsDetailOpen(true);
-                                        }}
-                                        style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer' }}
+                            return (
+                                <div key={p.id} style={{
+                                    border: p.isGroup ? '2px solid var(--accent-color, #8B5CF6)' : '1px solid var(--border-color)',
+                                    borderRadius: 'var(--radius-md)',
+                                    padding: 'var(--spacing-md)',
+                                    backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.03)' : 'var(--surface-color)',
+                                    display: 'flex', flexDirection: 'column', gap: '12px',
+                                    marginLeft: isSubCard ? '16px' : 0
+                                }}>
+                                    {/* Header */}
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
+                                        onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
                                     >
-                                        <Eye size={20} />
-                                    </button>
-                                </div>
-
-                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
-
-                                {/* Key Stats Grid */}
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
-                                        <div style={{ fontWeight: 500 }}>
-                                            {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
-                                                <button
-                                                    onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
-                                                    style={{
-                                                        background: 'none', border: '1px dashed var(--primary-color)',
-                                                        color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                        padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                    }}
-                                                    title="Gesamtinvestition eintragen"
-                                                >
-                                                    +
-                                                </button>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            {p.isGroup && (
+                                                <span style={{ color: 'var(--text-secondary)' }}>
+                                                    {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                </span>
                                             )}
+                                            <div>
+                                                <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '1rem', color: p.isGroup ? 'var(--accent-color, #8B5CF6)' : 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
+                                                {!p.isGroup && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                {p.isGroup && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.properties.length} Gebäude verknüpft</div>}
+                                            </div>
                                         </div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
-                                        <div style={{ fontWeight: 500 }}>
-                                            {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
-                                                <button
-                                                    onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
-                                                    style={{
-                                                        background: 'none', border: '1px dashed var(--primary-color)',
-                                                        color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                        padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                    }}
-                                                    title="Eigenkapital eintragen"
-                                                >
-                                                    +
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST (p.a.)</div>
-                                        <div style={{ fontWeight: 500 }}>{formatCurrency(rentIstMo * 12)}</div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL (p.a.)</div>
-                                        <div style={{ fontWeight: 500 }}>{formatCurrency(rentSollMo * 12)}</div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
-                                        <div style={{ fontWeight: 500 }}>
-                                            {marketValue > 0 ? formatCurrency(marketValue) : (
-                                                <button
-                                                    onClick={() => {
-                                                        setDetailProperty(p);
-                                                        setIsDetailOpen(true);
-                                                    }}
-                                                    style={{
-                                                        background: 'none', border: '1px dashed var(--primary-color)',
-                                                        color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                        padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                    }}
-                                                    title="Marktwert eintragen"
-                                                >
-                                                    +
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Restschuld</div>
-                                        <div style={{ fontWeight: 500 }}>
-                                            {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
-                                        </div>
-                                    </div>
-                                </div>
 
-                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+                                        {!p.isGroup && (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setDetailProperty(p);
+                                                    setIsDetailOpen(true);
+                                                }}
+                                                style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer' }}
+                                            >
+                                                <Eye size={20} />
+                                            </button>
+                                        )}
+                                    </div>
 
-                                {/* Action Buttons */}
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                    <Button size="sm" variant="secondary" onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)} style={{ flex: 1 }}>
-                                        <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
-                                    </Button>
-                                    {/* Zustand toggle only in browser, not in native app */}
-                                    {!window.Capacitor?.isNativePlatform?.() && (
-                                        <Button size="sm" variant="secondary" onClick={() => {
-                                            if (auditPropertyId === p.id) setAuditPropertyId(null);
-                                            else setAuditPropertyId(p.id);
-                                        }} style={{ flex: 1, borderColor: auditPropertyId === p.id ? 'var(--primary-color)' : 'var(--border-color)' }}>
-                                            <ShieldCheck size={14} style={{ marginRight: '6px' }} /> Zustand
-                                        </Button>
+                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+
+                                    {/* Key Stats Grid */}
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
+                                                {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
+                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
+                                                    <button
+                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
+                                                        style={{
+                                                            background: 'none', border: '1px dashed var(--primary-color)',
+                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                        }}
+                                                        title="Gesamtinvestition eintragen"
+                                                    >
+                                                        +
+                                                    </button>
+                                                    )
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
+                                                {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
+                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
+                                                    <button
+                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
+                                                        style={{
+                                                            background: 'none', border: '1px dashed var(--primary-color)',
+                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                        }}
+                                                        title="Eigenkapital eintragen"
+                                                    >
+                                                        +
+                                                    </button>
+                                                    )
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST (p.a.)</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentIstMo * 12)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL (p.a.)</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentSollMo * 12)}</div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
+                                                {marketValue > 0 ? formatCurrency(marketValue) : (
+                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
+                                                    <button
+                                                        onClick={() => {
+                                                            setDetailProperty(p);
+                                                            setIsDetailOpen(true);
+                                                        }}
+                                                        style={{
+                                                            background: 'none', border: '1px dashed var(--primary-color)',
+                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                        }}
+                                                        title="Marktwert eintragen"
+                                                    >
+                                                        +
+                                                    </button>
+                                                    )
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Restschuld</div>
+                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
+                                                {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {!p.isGroup && (
+                                        <>
+                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+                                            {/* Action Buttons */}
+                                            <div style={{ display: 'flex', gap: '8px' }}>
+                                                <Button size="sm" variant="secondary" onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)} style={{ flex: 1 }}>
+                                                    <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                                </Button>
+                                                {!window.Capacitor?.isNativePlatform?.() && (
+                                                    <Button size="sm" variant="secondary" onClick={() => {
+                                                        if (auditPropertyId === p.id) setAuditPropertyId(null);
+                                                        else setAuditPropertyId(p.id);
+                                                    }} style={{ flex: 1, borderColor: auditPropertyId === p.id ? 'var(--primary-color)' : 'var(--border-color)' }}>
+                                                        <ShieldCheck size={14} style={{ marginRight: '6px' }} /> Zustand
+                                                    </Button>
+                                                )}
+                                            </div>
+                                            {!window.Capacitor?.isNativePlatform?.() && auditPropertyId === p.id && (
+                                                <div ref={auditRef} style={{ marginTop: '8px' }}>
+                                                    {renderInlineAudit(p)}
+                                                </div>
+                                            )}
+                                        </>
                                     )}
                                 </div>
+                            );
+                        };
 
-                                {/* Inline Audit (browser only) */}
-                                {!window.Capacitor?.isNativePlatform?.() && auditPropertyId === p.id && (
-                                    <div ref={auditRef} style={{ marginTop: '8px' }}>
-                                        {renderInlineAudit(p)}
-                                    </div>
-                                )}
-                            </div>
+                        return (
+                            <React.Fragment key={pOrGroup.id}>
+                                {renderMobileCard(pOrGroup)}
+                                {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderMobileCard(subProp, true))}
+                            </React.Fragment>
                         );
                     })}
-                    {properties.length === 0 && (
+                    {groupedProperties.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)' }}>Keine Immobilien gefunden.</div>
                     )}
                 </div>

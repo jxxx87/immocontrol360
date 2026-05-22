@@ -100,10 +100,10 @@ const Claims = () => {
 
             if (totalsError) throw totalsError;
 
-            // 4. Fetch active payment plans
+            // 4. Fetch active payment plans (including fees_at_creation, interest_at_creation)
             const { data: plansData, error: plansError } = await supabase
                 .from('payment_plans')
-                .select('id, claim_id, total_amount, created_at')
+                .select('id, claim_id, total_amount, created_at, fees_at_creation, interest_at_creation')
                 .eq('status', 'active');
                 
             // 5. Fetch installments for these plans
@@ -159,22 +159,26 @@ const Claims = () => {
                     const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
                     const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
                     
-                    // We override the totals for the UI to prevent double counting fees included in plan
-                    // But for new items added AFTER the plan, show the claim-level fees/interest separately
-                    const claimFeesOpen = Number(totals.total_fees_open || claim.accumulated_unpaid_fees || 0);
-                    const claimInterestOpen = Number(totals.total_interest_open || claim.accumulated_unpaid_interest || 0);
+                    // Fees/Interest that were part of the plan (absorbed into plan total)
+                    const planFees = Number(plan.fees_at_creation || 0);
+                    const planInterest = Number(plan.interest_at_creation || 0);
                     
-                    // If there are new items, the fees/interest on the claim are for those new items
-                    const newItemsFeesInterest = newItems.length > 0 ? (claimFeesOpen + claimInterestOpen) : 0;
+                    // Total fees/interest on the claim
+                    const totalClaimFees = Number(claim.accumulated_unpaid_fees || 0);
+                    const totalClaimInterest = Number(claim.accumulated_unpaid_interest || 0);
+                    
+                    // Only fees/interest AFTER the plan belong to new items
+                    const newItemsFees = Math.max(0, totalClaimFees - planFees);
+                    const newItemsInterest = Math.max(0, totalClaimInterest - planInterest);
                     
                     totals = {
                         ...totals,
                         current_principal_original: planTotal + newItemsPrincipalOpen,
                         principal_paid: planPaid,
                         current_principal_open: planOpen + newItemsPrincipalOpen,
-                        total_fees_open: newItems.length > 0 ? claimFeesOpen : 0,
-                        total_interest_open: newItems.length > 0 ? claimInterestOpen : 0,
-                        total_due: planOpen + newItemsPrincipalOpen + newItemsFeesInterest
+                        total_fees_open: newItemsFees,
+                        total_interest_open: newItemsInterest,
+                        total_due: planOpen + newItemsPrincipalOpen + newItemsFees + newItemsInterest
                     };
                 }
                 

@@ -275,18 +275,27 @@ const Loans = () => {
     // --- Actions ---
     const handleSave = async () => {
         // Validate
-        if (!loanForm.property_id) return alert("Bitte Immobilie wählen");
+        let resolvedPropertyId = loanForm.property_id;
+        if (!resolvedPropertyId) return alert("Bitte Immobilie wählen");
+
+        // If a WE was selected, resolve to the first property in that unit
+        if (resolvedPropertyId.startsWith('we_')) {
+            const weId = resolvedPropertyId.replace('we_', '');
+            const weProps = properties.filter(p => p.economic_unit_id === weId);
+            if (weProps.length === 0) return alert("Keine Immobilie in dieser Wirtschaftseinheit gefunden");
+            resolvedPropertyId = weProps[0].id;
+        }
 
         if (!loanForm.start_date) return alert("Bitte Startdatum eingeben");
 
         setIsSaving(true);
         try {
-            const selectedProp = properties.find(p => p.id === loanForm.property_id);
+            const selectedProp = properties.find(p => p.id === resolvedPropertyId);
 
             const payload = {
                 user_id: user.id,
-                portfolio_id: selectedProp.portfolio_id,
-                property_id: loanForm.property_id,
+                portfolio_id: selectedProp?.portfolio_id,
+                property_id: resolvedPropertyId,
                 bank_name: loanForm.bank_name,
                 account_number: loanForm.account_number,
                 loan_amount: loanForm.loan_amount ? parseFloat(loanForm.loan_amount) : null,
@@ -653,7 +662,44 @@ const Loans = () => {
                             disabled={!!editingLoan} // Prevent changing property on edit? Or allow? Usually locks simplify things.
                         >
                             <option value="">Bitte wählen...</option>
-                            {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.city}</option>)}
+                            {(() => {
+                                // Build grouped options: WE groups first, then standalone properties
+                                const weGroups = {};
+                                const standalone = [];
+                                properties.forEach(p => {
+                                    if (p.economic_unit_id) {
+                                        if (!weGroups[p.economic_unit_id]) {
+                                            weGroups[p.economic_unit_id] = [];
+                                        }
+                                        weGroups[p.economic_unit_id].push(p);
+                                    } else {
+                                        standalone.push(p);
+                                    }
+                                });
+
+                                const options = [];
+
+                                // Add WE group options
+                                Object.entries(weGroups).forEach(([weId, weProps]) => {
+                                    if (weProps.length > 1) {
+                                        const streets = Array.from(new Set(weProps.map(p => p.street).filter(Boolean)));
+                                        const houseNumbers = weProps.map(p => p.house_number).filter(Boolean).join(' & ');
+                                        const label = `🏢 WE: ${streets.join(', ')} ${houseNumbers}`;
+                                        options.push(<option key={`we_${weId}`} value={`we_${weId}`} style={{ fontWeight: 600 }}>{label}</option>);
+                                    }
+                                    // Also add individual properties within the WE
+                                    weProps.forEach(p => {
+                                        options.push(<option key={p.id} value={p.id}>{weProps.length > 1 ? `  └ ` : ''}{p.street} {p.house_number}, {p.city}</option>);
+                                    });
+                                });
+
+                                // Add standalone properties
+                                standalone.forEach(p => {
+                                    options.push(<option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.city}</option>);
+                                });
+
+                                return options;
+                            })()}
                         </select>
                     </div>
 
