@@ -442,10 +442,10 @@ const ClaimDetail = () => {
                     {meta.deadline_date && (
                         <div style={{ marginBottom: '8px' }}><strong>Frist:</strong> {formatDate(meta.deadline_date)}</div>
                     )}
-                    {(meta.document_id || meta.document_path) && (
+                    {(meta.document_url || (meta.document_path && meta.document_path.startsWith('http'))) && (
                         <Button 
                             type="button"
-                            onClick={() => window.open(meta.document_path || '#', '_blank')} 
+                            onClick={(e) => { e.stopPropagation(); window.open(meta.document_url || meta.document_path, '_blank'); }} 
                             style={{ padding: '6px 12px', fontSize: '0.8rem', marginTop: '4px', backgroundColor: '#fff', color: '#374151', border: '1px solid #D1D5DB' }}
                         >
                             PDF öffnen
