@@ -799,23 +799,55 @@ const ClaimDetail = () => {
                                                 <td style={{ padding: '12px 16px' }}></td>
                                             </tr>
                                         )})()}
-                                        {newItems.map(item => (
-                                            <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
-                                                    <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.claim_items?.period_month ? formatDate(item.claim_items.period_month) : ''}</div>
-                                                </td>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(item.original_amount)}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(item.paid_principal)}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(item.open_amount)}</td>
-                                                <td style={{ padding: '12px 16px', textAlign: 'center' }}>
-                                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
-                                                        <button onClick={() => handleSettleItem(item.claim_item_id)} title="Als erledigt markieren" style={{ color: '#166534', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><CheckCircle size={16} /></button>
-                                                        <button onClick={() => handleDeleteItem(item.claim_item_id)} title="Position löschen" style={{ color: '#DC2626', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><Trash2 size={16} /></button>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        ))}
+                                        {newItems.map(item => {
+                                                    const baseAmt = Number(item.original_amount || 0);
+                                                    const feeAmt = Number(item.claim_items?.fee_amount || 0);
+                                                    const intAmt = Number(item.claim_items?.interest_amount || 0);
+                                                    const itemTotal = baseAmt + feeAmt + intAmt;
+                                                    
+                                                    // This is an approximation since fees/interest payments aren't tracked per item.
+                                                    // If the item has principal paid, we assume its fees/interest were paid first.
+                                                    const paidPrincipal = Number(item.paid_principal || 0);
+                                                    let paidTotal = 0;
+                                                    if (paidPrincipal > 0 || item.open_amount === 0) {
+                                                        // If any principal is paid, it means fees/interest were already paid fully!
+                                                        paidTotal = feeAmt + intAmt + paidPrincipal;
+                                                    } else {
+                                                        // What if fees were paid but NO principal yet?
+                                                        // We can't know for sure, so we use claim totals as a fallback, but let's keep it simple:
+                                                        paidTotal = 0; // It will update when principal is hit
+                                                    }
+                                                    
+                                                    // If settled
+                                                    if (item.open_amount === 0) {
+                                                        paidTotal = itemTotal;
+                                                    }
+                                                    const openTotal = Math.max(0, itemTotal - paidTotal);
+
+                                                    return (
+                                                        <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
+                                                                <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
+                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.claim_items?.period_month ? formatDate(item.claim_items.period_month) : ''}</div>
+                                                                {(feeAmt > 0 || intAmt > 0) && (
+                                                                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '2px' }}>
+                                                                        (Forderung: {formatCurrency(baseAmt)}{feeAmt > 0 ? `, Mahnkosten: ${formatCurrency(feeAmt)}` : ''}{intAmt > 0 ? `, Zinsen: ${formatCurrency(intAmt)}` : ''})
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(itemTotal)}</td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(paidTotal)}</td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(openTotal)}</td>
+                                                            <td style={{ padding: '12px 16px', textAlign: 'center' }}>
+                                                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                                                                    <button onClick={() => handleSettleItem(item.claim_item_id)} title="Als erledigt markieren" style={{ color: '#166534', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><CheckCircle size={16} /></button>
+                                                                    <button onClick={() => handleDeleteItem(item.claim_item_id)} title="Position löschen" style={{ color: '#DC2626', backgroundColor: 'transparent', border: 'none', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                }
+                                        )}
                                     </tbody>
                                 </table>
                             </div>
@@ -1245,10 +1277,27 @@ const ClaimDetail = () => {
                                 let allocFees = 0;
                                 let allocInterest = 0;
                                 
-                                if (paymentForm.paymentType === 'installment' || !paymentPlan) {
-                                    allocFees = Math.min(rem, totals?.total_fees_open || 0);
+                                if (paymentForm.paymentType === 'specific_item') {
+                                    const tItem = items.find(i => i.claim_item_id === paymentForm.targetItemId);
+                                    if (tItem) {
+                                        let itemFeeOpen = Number(tItem.claim_items?.fee_amount || 0);
+                                        let itemIntOpen = Number(tItem.claim_items?.interest_amount || 0);
+                                        if (Number(tItem.paid_principal) > 0 || tItem.open_amount === 0) {
+                                            itemFeeOpen = 0;
+                                            itemIntOpen = 0;
+                                        }
+                                        allocFees = Math.min(rem, itemFeeOpen);
+                                        rem -= allocFees;
+                                        allocInterest = Math.min(rem, itemIntOpen);
+                                        rem -= allocInterest;
+                                    }
+                                } else {
+                                    const feesOpen = paymentForm.paymentType === 'installment' ? (totals?.total_fees_open || 0) : (displayTotals.total_fees_open || 0);
+                                    const intOpen = paymentForm.paymentType === 'installment' ? (totals?.total_interest_open || 0) : (displayTotals.total_interest_open || 0);
+                                    
+                                    allocFees = Math.min(rem, feesOpen);
                                     rem -= allocFees;
-                                    allocInterest = Math.min(rem, totals?.total_interest_open || 0);
+                                    allocInterest = Math.min(rem, intOpen);
                                     rem -= allocInterest;
                                 }
                                 

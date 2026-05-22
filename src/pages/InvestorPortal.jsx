@@ -813,7 +813,15 @@ const InvestorPortal = () => {
                                                     {p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.properties.length} Gebäude verknüpft</div>}
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
-                                                    {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
+                                                    {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
+                                                        p.isGroup ? (
+                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
+                                                                {formatCurrency(p.total_investment_cost)}
+                                                            </span>
+                                                        ) : (
+                                                            formatCurrency(p.total_investment_cost)
+                                                        )
+                                                    ) : (
                                                         <button
                                                             onClick={(e) => { 
                                                                 e.stopPropagation(); 
@@ -832,7 +840,15 @@ const InvestorPortal = () => {
                                                     )}
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
-                                                    {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
+                                                    {(parseFloat(p.equity_invested) || 0) > 0 ? (
+                                                        p.isGroup ? (
+                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
+                                                                {formatCurrency(p.equity_invested)}
+                                                            </span>
+                                                        ) : (
+                                                            formatCurrency(p.equity_invested)
+                                                        )
+                                                    ) : (
                                                         <button
                                                             onClick={(e) => { 
                                                                 e.stopPropagation(); 
@@ -858,7 +874,13 @@ const InvestorPortal = () => {
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {marketValue > 0 ? (
-                                                        formatCurrency(marketValue)
+                                                        p.isGroup ? (
+                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
+                                                                {formatCurrency(marketValue)}
+                                                            </span>
+                                                        ) : (
+                                                            formatCurrency(marketValue)
+                                                        )
                                                     ) : (
                                                         <button
                                                             onClick={(e) => {
@@ -984,9 +1006,18 @@ const InvestorPortal = () => {
                                         <div>
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
+                                                {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
+                                                    p.isGroup ? (
+                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
+                                                            {formatCurrency(p.total_investment_cost)}
+                                                        </span>
+                                                    ) : (
+                                                        formatCurrency(p.total_investment_cost)
+                                                    )
+                                                ) : (
                                                     <button
-                                                        onClick={() => {
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
                                                             if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
                                                             else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                         }}
@@ -1005,9 +1036,18 @@ const InvestorPortal = () => {
                                         <div>
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
+                                                {(parseFloat(p.equity_invested) || 0) > 0 ? (
+                                                    p.isGroup ? (
+                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
+                                                            {formatCurrency(p.equity_invested)}
+                                                        </span>
+                                                    ) : (
+                                                        formatCurrency(p.equity_invested)
+                                                    )
+                                                ) : (
                                                     <button
-                                                        onClick={() => {
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
                                                             if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
                                                             else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                         }}
@@ -1034,9 +1074,18 @@ const InvestorPortal = () => {
                                         <div>
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {marketValue > 0 ? formatCurrency(marketValue) : (
+                                                {marketValue > 0 ? (
+                                                    p.isGroup ? (
+                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
+                                                            {formatCurrency(marketValue)}
+                                                        </span>
+                                                    ) : (
+                                                        formatCurrency(marketValue)
+                                                    )
+                                                ) : (
                                                     <button
-                                                        onClick={() => {
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
                                                             if (p.isGroup) {
                                                                 setWeEditModal({ ...p, field: 'market_value_total' });
                                                             } else {

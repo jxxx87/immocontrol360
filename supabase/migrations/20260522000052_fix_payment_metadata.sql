@@ -1,4 +1,4 @@
--- Fix record_claim_payment: use item-level fee_amount/interest_amount for specific_item
+-- Update record_claim_payment to correctly track timeline open amounts for specific items
 CREATE OR REPLACE FUNCTION public.record_claim_payment(
   p_claim_id uuid, p_payment_date date, p_amount numeric, p_note text,
   p_installment_id uuid DEFAULT NULL, p_target_type text DEFAULT 'auto',
@@ -73,11 +73,8 @@ BEGIN
 
   -- FEE/INTEREST ALLOCATION
   IF p_installment_id IS NOT NULL THEN
-    -- Installment: fees/interest are in the plan total
     v_alloc_fees := 0; v_alloc_interest := 0;
   ELSIF p_target_type = 'specific_item' AND p_target_claim_item_id IS NOT NULL THEN
-    -- Specific item: use THAT ITEM's fee_amount and interest_amount
-    -- Check how much fee/interest was already paid for this claim
     SELECT COALESCE(SUM(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'fees'), 0),
            COALESCE(SUM(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'interest'), 0)
     INTO v_item_fee_already_paid, v_item_interest_already_paid
@@ -92,7 +89,6 @@ BEGIN
     v_alloc_interest := LEAST(v_remaining_amount, v_item_interest_open);
     v_remaining_amount := v_remaining_amount - v_alloc_interest;
   ELSE
-    -- Normal: pay all fees first, then interest
     v_alloc_fees := LEAST(v_remaining_amount, v_total_fees_open);
     v_remaining_amount := v_remaining_amount - v_alloc_fees;
     v_alloc_interest := LEAST(v_remaining_amount, v_total_interest_open);
@@ -139,7 +135,6 @@ BEGIN
     END LOOP;
   END IF;
 
-  -- Catch unallocated
   SELECT COALESCE(SUM(amount),0) INTO v_inserted_sum FROM claim_payment_allocations WHERE claim_payment_id = v_payment_id;
   IF v_inserted_sum < p_amount THEN
     INSERT INTO claim_payment_allocations (claim_payment_id, user_id, claim_id, allocation_bucket, amount)
@@ -147,7 +142,6 @@ BEGIN
     v_alloc_fees := v_alloc_fees + (p_amount - v_inserted_sum);
   END IF;
 
-  -- Installment tracking
   IF p_installment_id IS NOT NULL THEN
     v_remaining_installment_amount := p_amount;
     FOR v_open_inst IN SELECT id, due_date, amount, paid_amount, status
@@ -170,9 +164,7 @@ BEGIN
     status = CASE WHEN p_amount >= (v_total_due - 0.01) THEN 'settled' ELSE status END, updated_at = now()
   WHERE id = p_claim_id;
 
-  -- Remaining for specific item total (principal + fees + interest)
   IF p_target_type = 'specific_item' AND p_target_claim_item_id IS NOT NULL THEN
-    -- Redefine before/after to include fees and interest
     v_target_item_open_before := v_target_item_open_before + v_item_fee_open + v_item_interest_open;
     v_target_item_open_after := GREATEST(0, v_target_item_open_before - p_amount);
   END IF;

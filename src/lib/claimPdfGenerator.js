@@ -235,7 +235,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         tableWidth: usableWidth * 0.8,
         theme: 'plain',
         body: [
-            ['Miet-/Betriebskosten-/Heizkostenrückstand', formatCurrency(activeTotals.current_principal_open)],
+            [isSingleItem ? (activeItems[0].claim_items?.description || 'Hauptforderung') : 'Offene Hauptforderungen (Miete/Nebenkosten etc.)', formatCurrency(activeTotals.current_principal_open)],
             [`Verzugszinsen bis einschließlich ${dateStr}`, formatCurrency(activeTotals.total_interest_open)],
             ['Mahnauslagen für dieses Schreiben', formatCurrency(activeTotals.total_fees_open)]
         ],
@@ -371,14 +371,14 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     autoTable(doc, {
         startY: currentY,
         margin: { left: margin, right: margin },
-        head: [['Position', 'Sollmiete', 'Zahlung / Anrechnung', 'Offener Betrag']],
+        head: [['Position', 'Forderungsbetrag', 'Zahlung / Anrechnung', 'Offener Betrag']],
         body: activeItems.map(item => [
             item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
             formatCurrency(item.original_amount),
             item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '0,00 €',
             formatCurrency(item.open_amount)
         ]),
-        foot: [['Summe offener Miet-/Betriebskosten-/Heizkostenbetrag', '', '', formatCurrency(activeTotals.current_principal_open)]],
+        foot: [['Summe offener Hauptforderungen', '', '', formatCurrency(activeTotals.current_principal_open)]],
         headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
