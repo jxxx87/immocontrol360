@@ -280,28 +280,36 @@ const ClaimDetail = () => {
 
         setIsSubmitting(true);
         try {
-            const targetType = paymentForm.paymentType === 'new_item' ? 'claim_items' : 'auto';
+            const targetType = paymentForm.paymentType === 'specific_item' ? 'specific_item' : 
+                               (paymentForm.paymentType === 'new_item' ? 'claim_items' : 'auto');
+                               
+            let installmentId = null;
+            if (paymentForm.paymentType === 'installment') {
+                installmentId = installments.find(i => i.status !== 'paid')?.id || null;
+            }
 
-            const { error } = await supabase.rpc('record_claim_payment', {
-                p_claim_id: claim.id,
+            const { error: rpcError } = await supabase.rpc('record_claim_payment', {
+                p_claim_id: claimId,
                 p_payment_date: paymentForm.date,
-                p_amount: amount,
-                p_note: paymentForm.note,
-                p_installment_id: paymentForm.paymentType === 'installment' && paymentForm.linkToInstallment && paymentForm.installmentId ? paymentForm.installmentId : null,
-                p_target_type: targetType
+                p_amount: parseFloat(paymentForm.amount),
+                p_note: paymentForm.note || '',
+                p_installment_id: installmentId,
+                p_target_type: targetType,
+                p_target_claim_item_id: paymentForm.targetItemId || null
             });
-
-            if (error) {
-                console.warn("SQL Error:", error);
-                throw error; 
+            
+            if (rpcError) {
+                console.warn("SQL Error:", rpcError);
+                throw rpcError; 
             }
 
             setIsPaymentModalOpen(false);
             setPaymentForm({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
             loadClaimData();
-            alert('Zahlung wurde erfasst');
+            alert('Zahlung wurde erfolgreich verbucht.');
         } catch (err) {
-            alert('Fehler beim Erfassen der Zahlung: ' + err.message);
+            console.error('Error recording payment:', err);
+            alert('Fehler beim Buchen der Zahlung: ' + (err.message || err.details || 'Unbekannter Fehler'));
         } finally {
             setIsSubmitting(false);
         }
@@ -1128,40 +1136,60 @@ const ClaimDetail = () => {
 
             <Modal isOpen={isPaymentModalOpen} onClose={() => !isSubmitting && setIsPaymentModalOpen(false)} title="Zahlung erfassen">
                 <div style={{ padding: '16px 0' }}>
-                    {paymentPlan && newItems.length > 0 && (
+                    {items.filter(item => item.open_amount > 0).length > 0 && (
                         <div style={{ marginBottom: '24px', padding: '16px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE' }}>
                             <h4 style={{ fontSize: '0.95rem', fontWeight: 600, color: '#1E3A8A', marginBottom: '12px' }}>Was wird bezahlt?</h4>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input 
-                                        type="radio" 
-                                        name="paymentType"
-                                        value="installment"
-                                        checked={paymentForm.paymentType === 'installment'}
-                                        onChange={() => setPaymentForm({...paymentForm, paymentType: 'installment', linkToInstallment: true, installmentId: installments.find(i => i.status !== 'paid')?.id || ''})}
-                                    />
-                                    <span style={{ fontWeight: 500 }}>Ratenplan (Rate)</span>
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input 
-                                        type="radio" 
-                                        name="paymentType"
-                                        value="new_item"
-                                        checked={paymentForm.paymentType === 'new_item'}
-                                        onChange={() => setPaymentForm({...paymentForm, paymentType: 'new_item', linkToInstallment: false, installmentId: ''})}
-                                    />
-                                    <span style={{ fontWeight: 500 }}>
-                                        {(() => {
-                                            if (paymentPlan && items) {
-                                                const newItemsFiltered = items.filter(item => new Date(item.claim_items?.created_at) > new Date(paymentPlan.created_at));
-                                                if (newItemsFiltered.length > 0) {
-                                                    return newItemsFiltered.map(i => i.claim_items?.description || i.claim_items?.item_type).join(', ');
-                                                }
-                                            }
-                                            return "Neue Forderungen (außerhalb Ratenplan)";
-                                        })()}
-                                    </span>
-                                </label>
+                                
+                                {paymentPlan && (
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                        <input 
+                                            type="radio" 
+                                            name="paymentType"
+                                            value="installment"
+                                            checked={paymentForm.paymentType === 'installment'}
+                                            onChange={() => setPaymentForm({...paymentForm, paymentType: 'installment', linkToInstallment: true, targetItemId: null})}
+                                        />
+                                        <span style={{ fontWeight: 500 }}>Ratenplan (Rate)</span>
+                                    </label>
+                                )}
+
+                                {(() => {
+                                    let selectableItems = [];
+                                    if (paymentPlan) {
+                                        selectableItems = items.filter(item => item.open_amount > 0 && new Date(item.claim_items?.created_at) > new Date(paymentPlan.created_at));
+                                    } else {
+                                        selectableItems = items.filter(item => item.open_amount > 0);
+                                    }
+
+                                    return selectableItems.map(item => (
+                                        <label key={item.claim_item_id} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                            <input 
+                                                type="radio" 
+                                                name="paymentType"
+                                                value={`item_${item.claim_item_id}`}
+                                                checked={paymentForm.targetItemId === item.claim_item_id}
+                                                onChange={() => setPaymentForm({...paymentForm, paymentType: 'specific_item', linkToInstallment: false, targetItemId: item.claim_item_id})}
+                                            />
+                                            <span style={{ fontWeight: 500 }}>
+                                                {item.claim_items?.description || item.claim_items?.item_type} ({formatCurrency(item.open_amount)} offen)
+                                            </span>
+                                        </label>
+                                    ));
+                                })()}
+                                
+                                {!paymentPlan && items.filter(item => item.open_amount > 0).length > 1 && (
+                                     <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                         <input 
+                                             type="radio" 
+                                             name="paymentType"
+                                             value="auto"
+                                             checked={paymentForm.paymentType === 'auto' && !paymentForm.targetItemId}
+                                             onChange={() => setPaymentForm({...paymentForm, paymentType: 'auto', linkToInstallment: false, targetItemId: null})}
+                                         />
+                                         <span style={{ fontWeight: 500 }}>Automatische Verteilung (Älteste zuerst)</span>
+                                     </label>
+                                )}
                             </div>
                         </div>
                     )}
