@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
-import { Modal } from '../ui/Modal';
-import { Input } from '../ui/Input';
+import Modal from '../ui/Modal';
+import Input from '../ui/Input';
 
 const CATEGORIES = [
     { id: 'immobilien', label: 'Immobilien' },

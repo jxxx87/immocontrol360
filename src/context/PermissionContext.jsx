@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { supabase } from '../supabaseClient';
+import { supabase } from '../lib/supabase';
 import { usePortfolio } from './PortfolioContext';
 import { useAuth } from './AuthContext'; // Assuming AuthContext exists
 
