@@ -32,6 +32,10 @@ const Claims = () => {
     const [loadingLedgers, setLoadingLedgers] = useState(false);
     
     const [selectedLedgerIds, setSelectedLedgerIds] = useState([]);
+    const [selectedLeaseId, setSelectedLeaseId] = useState('');
+    const [manualItems, setManualItems] = useState([]);
+    const [allLeases, setAllLeases] = useState([]);
+    
     const [expandedTenant, setExpandedTenant] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -151,6 +155,20 @@ const Claims = () => {
             const available = (ledgerData || []).filter(l => !excludedIds.includes(l.id));
 
             setOpenLedgers(available);
+            
+            // Fetch all active leases for manual claims
+            const { data: leasesData, error: leasesError } = await supabase
+                .from('leases')
+                .select(`
+                    id, 
+                    tenants (first_name, last_name),
+                    units (unit_name, properties(street, house_number))
+                `)
+                .eq('status', 'active');
+                
+            if (!leasesError && leasesData) {
+                setAllLeases(leasesData);
+            }
         } catch (err) {
             console.error('Error loading ledgers:', err);
             alert('Fehler beim Laden offener Mieten.');
@@ -162,6 +180,8 @@ const Claims = () => {
     const openCreateModal = () => {
         setCreateStep(1);
         setSelectedLedgerIds([]);
+        setSelectedLeaseId('');
+        setManualItems([]);
         setExpandedTenant(null);
         setForm({ fee_amount: 5.00, interest_rate: 5.0000, deadline_days: 7, note: '' });
         setIsCreateModalOpen(true);
@@ -169,7 +189,22 @@ const Claims = () => {
     };
 
     const handleCreateClaim = async () => {
-        if (selectedLedgerIds.length === 0) return;
+        if (selectedLedgerIds.length === 0 && manualItems.length === 0) {
+            alert('Bitte wählen Sie mindestens eine Miete aus oder fügen Sie eine manuelle Position hinzu.');
+            return;
+        }
+        
+        let targetLeaseId = selectedLeaseId;
+        if (!targetLeaseId && selectedLedgerIds.length > 0) {
+            const firstLedger = openLedgers.find(l => l.id === selectedLedgerIds[0]);
+            if (firstLedger) targetLeaseId = firstLedger.leases?.id;
+        }
+        
+        if (!targetLeaseId) {
+            alert('Kein Mietvertrag zugeordnet.');
+            return;
+        }
+
         setIsSubmitting(true);
         try {
             const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
@@ -191,8 +226,12 @@ const Claims = () => {
                 }
             });
 
-            const { error: rpcError } = await supabase.rpc('create_claim_from_rent_ledgers', {
-                p_rent_ledger_ids: selectedLedgerIds,
+            // We do not calculate delay interest on manual items automatically here, unless they have a due date (for now, 0).
+
+            const { error: rpcError } = await supabase.rpc('create_claim_advanced', {
+                p_lease_id: targetLeaseId,
+                p_rent_ledger_ids: selectedLedgerIds.length > 0 ? selectedLedgerIds : null,
+                p_manual_items: manualItems,
                 p_fee_amount: parseFloat(form.fee_amount) || 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
                 p_accumulated_interest: calculatedInterest,
@@ -667,9 +706,36 @@ const Claims = () => {
                                 </div>
                             )}
 
+                            <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
+                                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '12px' }}>Freie Forderung (z.B. Betriebskosten)</h4>
+                                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                                    Erstellen Sie eine Forderungsakte ohne offene Miete, z.B. für Nachzahlungen.
+                                </p>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <select 
+                                        style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
+                                        value={selectedLeaseId}
+                                        onChange={(e) => setSelectedLeaseId(e.target.value)}
+                                    >
+                                        <option value="">-- Mietvertrag auswählen --</option>
+                                        {allLeases.map(lease => (
+                                            <option key={lease.id} value={lease.id}>
+                                                {getTenantName(lease.tenants)} ({getLeaseName(lease)})
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <Button 
+                                        disabled={!selectedLeaseId} 
+                                        onClick={() => { setSelectedLedgerIds([]); setCreateStep(2); }}
+                                    >
+                                        Erstellen
+                                    </Button>
+                                </div>
+                            </div>
+
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-lg)' }}>
                                 <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                                <Button onClick={() => setCreateStep(2)} disabled={selectedLedgerIds.length === 0} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Button onClick={() => { setSelectedLeaseId(''); setCreateStep(2); }} disabled={selectedLedgerIds.length === 0} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     Weiter <ArrowRight size={16} />
                                 </Button>
                             </div>
@@ -679,6 +745,9 @@ const Claims = () => {
                     {createStep === 2 && (
                         <div>
                             {(() => {
+                                const targetLease = selectedLeaseId 
+                                    ? allLeases.find(l => l.id === selectedLeaseId)
+                                    : openLedgers.find(l => l.id === selectedLedgerIds[0])?.leases;
                                 const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
                                 let calculatedInterest = 0;
                                 const todayDate = new Date();
@@ -697,19 +766,33 @@ const Claims = () => {
                                     }
                                 });
 
-                                const total = totalPrincipalSelected + Number(form.fee_amount || 0) + calculatedInterest;
+                                const totalManual = manualItems.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
+                                const total = totalPrincipalSelected + totalManual + Number(form.fee_amount || 0) + calculatedInterest;
                                 const deadlineDate = new Date();
                                 deadlineDate.setDate(deadlineDate.getDate() + Number(form.deadline_days || 0));
 
                                 return (
                                     <>
                                         <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
-                                            <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Zusammenfassung ({selectedLedgerIds.length} {selectedLedgerIds.length === 1 ? 'Monat' : 'Monate'})</h3>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <span>Hauptforderung:</span>
-                                                <span style={{ fontWeight: 600 }}>{formatCurrency(totalPrincipalSelected)}</span>
-                                            </div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
+                                                Zusammenfassung ({targetLease ? getTenantName(targetLease.tenants) : ''})
+                                            </h3>
+                                            
+                                            {selectedLedgerIds.length > 0 && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                    <span>Offene Mieten ({selectedLedgerIds.length} {selectedLedgerIds.length === 1 ? 'Monat' : 'Monate'}):</span>
+                                                    <span style={{ fontWeight: 600 }}>{formatCurrency(totalPrincipalSelected)}</span>
+                                                </div>
+                                            )}
+                                            
+                                            {manualItems.map((item, idx) => (
+                                                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', paddingLeft: '8px', borderLeft: '2px solid #D1D5DB' }}>
+                                                    <span>{item.description || 'Manuelle Position'}:</span>
+                                                    <span style={{ fontWeight: 600 }}>{formatCurrency(item.amount)}</span>
+                                                </div>
+                                            ))}
+                                            
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', marginTop: '12px' }}>
                                                 <span>Mahnkosten:</span>
                                                 <span style={{ fontWeight: 600 }}>{formatCurrency(form.fee_amount)}</span>
                                             </div>
@@ -722,6 +805,52 @@ const Claims = () => {
                                                 <span style={{ fontWeight: 600 }}>Gesamtforderung (heute):</span>
                                                 <span style={{ fontWeight: 700 }}>{formatCurrency(total)}</span>
                                             </div>
+                                        </div>
+                                        
+                                        <div style={{ marginBottom: '24px' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>Manuelle Positionen (Optional)</label>
+                                                <Button 
+                                                    variant="secondary" 
+                                                    size="sm"
+                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: 0, item_type: 'other' }])}
+                                                    style={{ padding: '4px 8px', fontSize: '0.8rem' }}
+                                                >
+                                                    <Plus size={14} /> Position hinzufügen
+                                                </Button>
+                                            </div>
+                                            
+                                            {manualItems.map((item, idx) => (
+                                                <div key={idx} style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
+                                                    <Input 
+                                                        placeholder="Bezeichnung (z.B. Betriebskosten 2024)" 
+                                                        value={item.description}
+                                                        onChange={e => {
+                                                            const newItems = [...manualItems];
+                                                            newItems[idx].description = e.target.value;
+                                                            setManualItems(newItems);
+                                                        }}
+                                                        style={{ flex: 2 }}
+                                                    />
+                                                    <Input 
+                                                        type="number" step="0.01" 
+                                                        placeholder="Betrag" 
+                                                        value={item.amount}
+                                                        onChange={e => {
+                                                            const newItems = [...manualItems];
+                                                            newItems[idx].amount = parseFloat(e.target.value) || 0;
+                                                            setManualItems(newItems);
+                                                        }}
+                                                        style={{ flex: 1 }}
+                                                    />
+                                                    <button 
+                                                        onClick={() => setManualItems(manualItems.filter((_, i) => i !== idx))}
+                                                        style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', padding: '4px' }}
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </div>
+                                            ))}
                                         </div>
 
                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
