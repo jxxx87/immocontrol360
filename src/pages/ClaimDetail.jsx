@@ -509,14 +509,18 @@ const ClaimDetail = () => {
                     {meta.modified_installments && meta.modified_installments.length > 0 && (
                         <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
                             <div style={{ fontWeight: 600, marginBottom: '4px' }}>Zugeordnete Raten:</div>
-                            {meta.modified_installments.map((inst, idx) => (
-                                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', color: '#166534' }}>
-                                    <span>- Rate {inst.id.substring(0,6)}...</span>
-                                    <span style={{ fontWeight: 600, color: inst.old_status === 'paid' ? '#166534' : '#92400E' }}>
-                                        {inst.old_status === 'paid' ? 'Bezahlt' : 'Teilweise getilgt'}
-                                    </span>
-                                </div>
-                            ))}
+                            {meta.modified_installments.map((inst, idx) => {
+                                const isPaid = (inst.new_status || inst.old_status) === 'paid';
+                                const label = inst.due_date ? formatDate(inst.due_date) : inst.id.substring(0,6) + '...';
+                                return (
+                                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', color: '#166534' }}>
+                                        <span>- Rate {label}</span>
+                                        <span style={{ fontWeight: 600, color: isPaid ? '#166534' : '#92400E' }}>
+                                            {isPaid ? 'Bezahlt' : 'Teilweise getilgt'}
+                                        </span>
+                                    </div>
+                                );
+                            })}
                         </div>
                     )}
                     
