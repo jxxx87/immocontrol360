@@ -828,7 +828,6 @@ const ClaimDetail = () => {
                                                         <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                                                             <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
                                                                 <div>{item.claim_items?.description || item.claim_items?.item_type}</div>
-                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.claim_items?.period_month ? formatDate(item.claim_items.period_month) : ''}</div>
                                                                 {(feeAmt > 0 || intAmt > 0) && (
                                                                     <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '2px' }}>
                                                                         (Forderung: {formatCurrency(baseAmt)}{feeAmt > 0 ? `, Mahnkosten: ${formatCurrency(feeAmt)}` : ''}{intAmt > 0 ? `, Zinsen: ${formatCurrency(intAmt)}` : ''})
