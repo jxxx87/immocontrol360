@@ -200,7 +200,7 @@ const Claims = () => {
                 .select(`
                     id, 
                     tenants (first_name, last_name),
-                    units (unit_name, properties(street, house_number))
+                    units (unit_name, properties(street, house_number, city))
                 `)
                 .eq('status', 'active');
                 
