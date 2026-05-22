@@ -18,13 +18,12 @@ const CATEGORIES = [
     { id: 'investorportal', label: 'Investorportal' }
 ];
 
-export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
+export const PortfolioShareModal = ({ isOpen, onClose, portfolioId, onShareSuccess }) => {
     const { user } = useAuth();
     const [email, setEmail] = useState('');
     const [permissions, setPermissions] = useState({});
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState({ text: '', type: '' });
-    const [existingShares, setExistingShares] = useState([]);
 
     useEffect(() => {
         // Initialize default permissions
@@ -33,22 +32,10 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
         setPermissions(initialPerms);
         
         if (isOpen && portfolioId) {
-            fetchExistingShares();
             setMessage({ text: '', type: '' });
             setEmail('');
         }
     }, [isOpen, portfolioId]);
-
-    const fetchExistingShares = async () => {
-        const { data, error } = await supabase
-            .from('portfolio_shares')
-            .select('*')
-            .eq('portfolio_id', portfolioId);
-        
-        if (!error && data) {
-            setExistingShares(data);
-        }
-    };
 
     const handlePermissionChange = (categoryId, value) => {
         setPermissions(prev => ({ ...prev, [categoryId]: value }));
@@ -88,9 +75,13 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
 
             if (insertError) throw insertError;
 
-            setMessage({ text: 'Erfolgreich geteilt! Eine Einladung wurde verschickt.', type: 'success' });
-            fetchExistingShares();
+            setMessage({ text: '', type: '' });
             setEmail('');
+            
+            // Show alert and close modal
+            alert('Erfolgreich geteilt! Eine Einladung wurde verschickt.');
+            if (onShareSuccess) onShareSuccess();
+            onClose();
             
         } catch (error) {
             console.error('Error sharing portfolio:', error);
@@ -104,7 +95,6 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
         if (!window.confirm("Zugang wirklich widerrufen?")) return;
         try {
             await supabase.from('portfolio_shares').delete().eq('id', shareId);
-            fetchExistingShares();
         } catch (error) {
             console.error("Error removing share:", error);
         }
@@ -210,49 +200,6 @@ export const PortfolioShareModal = ({ isOpen, onClose, portfolioId }) => {
                         </div>
                     )}
                 </div>
-
-                {/* Existing Shares Section */}
-                {existingShares.length > 0 && (
-                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '24px' }}>
-                        <h3 style={{ fontSize: '1.05rem', fontWeight: 600, margin: '0 0 16px 0', color: 'var(--text-color)' }}>Aktuelle Freigaben</h3>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {existingShares.map(share => (
-                                <div key={share.id} style={{ 
-                                    display: 'flex', 
-                                    alignItems: 'center', 
-                                    justifyContent: 'space-between',
-                                    padding: '16px',
-                                    backgroundColor: 'white',
-                                    border: '1px solid var(--border-color)',
-                                    borderRadius: 'var(--radius-md)'
-                                }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                        <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#F3F4F6', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6B7280' }}>
-                                            <Mail size={18} />
-                                        </div>
-                                        <div>
-                                            <p style={{ margin: 0, fontWeight: 500, fontSize: '0.95rem', color: 'var(--text-color)' }}>{share.shared_with_email}</p>
-                                            <div style={{ margin: '4px 0 0 0' }}>
-                                                {share.status === 'accepted' 
-                                                    ? <Badge variant="success">Akzeptiert</Badge> 
-                                                    : <Badge variant="warning">Ausstehend</Badge>
-                                                }
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <Button 
-                                        variant="ghost" 
-                                        icon={Trash2} 
-                                        style={{ color: 'var(--danger-color)' }}
-                                        onClick={() => handleRemoveShare(share.id)}
-                                    >
-                                        Entfernen
-                                    </Button>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                )}
             </div>
             
             <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>

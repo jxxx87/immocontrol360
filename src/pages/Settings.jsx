@@ -17,6 +17,7 @@ import ImportPage from './Import'; // Import the Import page component
 import Billing from './Billing'; // Billing & Abo page component
 import { PortfolioShareModal } from '../components/portfolio/PortfolioShareModal';
 import { PendingInvitations } from '../components/portfolio/PendingInvitations';
+import { ActiveShares } from '../components/portfolio/ActiveShares';
 
 const Settings = () => {
     const { user } = useAuth();
@@ -30,6 +31,7 @@ const Settings = () => {
     // Sharing modal state
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [sharePortfolioId, setSharePortfolioId] = useState(null);
+    const [activeShareRefresh, setActiveShareRefresh] = useState(0);
 
     // Navigation visibility state
     const [navVisibility, setNavVisibility] = useState(() => {
@@ -954,6 +956,7 @@ const Settings = () => {
                                                 isOpen={isShareModalOpen} 
                                                 onClose={() => { setIsShareModalOpen(false); setSharePortfolioId(null); }} 
                                                 portfolioId={sharePortfolioId} 
+                                                onShareSuccess={() => setActiveShareRefresh(prev => prev + 1)}
                                             />
                                             <div className="hidden-mobile">
                                                 <Table columns={portfolioColumns} data={portfolios} />
@@ -1001,6 +1004,9 @@ const Settings = () => {
                                     )
                                 )}
                             </Card>
+                            
+                            {/* Active Shares Section */}
+                            <ActiveShares refreshTrigger={activeShareRefresh} />
                         </div>
                     )}
 
