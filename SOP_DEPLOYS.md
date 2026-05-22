@@ -41,3 +41,17 @@ Das Deployment auf Hostinger erfolgt automatisch über den GitHub-`master`-Branc
    git config windows.appendAtomically false ; git commit -m "feat: beschreibung" ; git push
    ```
 4. Sobald der Push auf GitHub erfolgreich ist, holt Hostinger die Änderungen automatisch ab und geht live. Es ist kein manueller Hostinger-Login nötig.
+
+## 3. RLS Policies Pitfall: `auth.users`
+**WICHTIG:** In Supabase haben Nutzer (Rolle `authenticated`) **keinen Zugriff** auf die Tabelle `auth.users`!
+Ein `SELECT email FROM auth.users WHERE id = auth.uid()` innerhalb einer RLS-Policy führt zu einem `Permission Denied` Fehler. Dieser Fehler blockiert die gesamte Query (z.B. werden Portfolios nicht mehr geladen und der Nutzer landet beim Onboarding).
+
+**Lösung:** Um die E-Mail des aktuellen Nutzers in einer RLS-Policy zu erhalten, nutze IMMER die JWT-Claims:
+```sql
+-- FALSCH:
+shared_with_email = (SELECT email FROM auth.users WHERE id = auth.uid())
+
+-- RICHTIG:
+shared_with_email = (auth.jwt() ->> 'email')
+```
+*(Hinweis: In `SECURITY DEFINER` RPC-Funktionen darf `auth.users` abgefragt werden, da diese mit höheren Rechten laufen.)*
