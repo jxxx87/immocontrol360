@@ -35,7 +35,7 @@ const ClaimDetail = () => {
     const [statusForm, setStatusForm] = useState({ status: '', reason: '' });
 
     const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
-    const [pdfForm, setPdfForm] = useState({ type: 'Zahlungserinnerung', deadlineDays: 7, targetItemId: null });
+    const [pdfForm, setPdfForm] = useState({ type: 'Zahlungserinnerung', deadlineDays: 7, targetItemId: null, letterFee: 5 });
 
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', paymentType: 'installment', linkToInstallment: false, installmentId: '' });
@@ -427,7 +427,7 @@ const ClaimDetail = () => {
     const handleGeneratePdf = async () => {
         setIsSubmitting(true);
         try {
-            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId);
+            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId, parseFloat(pdfForm.letterFee) || 0);
             
             // Determine new escalation level based on document sent
             let newLevel = claim.escalation_level;
@@ -540,7 +540,9 @@ const ClaimDetail = () => {
                         </div>
                     ) : (
                         <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
-                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Verrechnung:</div>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                                Verrechnung{meta.target_item_description ? ` (${meta.target_item_description})` : ''}:
+                            </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Mahnkosten:</span><span>{formatCurrency(meta.allocated_to_fees)}</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Verzugszinsen:</span><span>{formatCurrency(meta.allocated_to_interest)}</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Hauptforderung:</span><span>{formatCurrency(meta.allocated_to_principal)}</span></div>
@@ -567,10 +569,16 @@ const ClaimDetail = () => {
                     
                     {!isPaymentPlan && (
                         <div>
-                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Restforderung nach Zahlung:</div>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                                {meta.target_item_description 
+                                    ? `Rest "${meta.target_item_description}" nach Zahlung:` 
+                                    : 'Restforderung nach Zahlung:'}
+                            </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span>- Gesamt offen:</span>
-                                <span style={{ fontWeight: 'bold' }}>{formatCurrency(meta.remaining_total_due)}</span>
+                                <span>- {meta.target_item_description ? 'Position offen' : 'Gesamt offen'}:</span>
+                                <span style={{ fontWeight: 'bold' }}>
+                                    {formatCurrency(meta.target_item_open_after !== undefined ? meta.target_item_open_after : meta.remaining_total_due)}
+                                </span>
                             </div>
                         </div>
                     )}
@@ -1106,13 +1114,27 @@ const ClaimDetail = () => {
                         <option value="Letzte Zahlungsaufforderung">Stufe 3: Letzte Zahlungsaufforderung</option>
                     </select>
                     
-                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
-                    <Input 
-                        type="number" 
-                        min="1"
-                        value={pdfForm.deadlineDays} 
-                        onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
-                    />
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <div>
+                            <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Zahlungsfrist (Tage)</label>
+                            <Input 
+                                type="number" 
+                                min="1"
+                                value={pdfForm.deadlineDays} 
+                                onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
+                            />
+                        </div>
+                        <div>
+                            <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Mahnauslagen (€)</label>
+                            <Input 
+                                type="number" 
+                                step="0.01"
+                                min="0"
+                                value={pdfForm.letterFee} 
+                                onChange={(e) => setPdfForm({...pdfForm, letterFee: e.target.value})} 
+                            />
+                        </div>
+                    </div>
                     
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                         <Button variant="secondary" onClick={() => setIsPdfModalOpen(false)}>Abbrechen</Button>

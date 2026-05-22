@@ -11,7 +11,7 @@ const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('de-DE');
 };
 
-export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId) => {
+export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId, letterFee = 5) => {
     const doc = new jsPDF('p', 'mm', 'a4');
     const margin = 20;
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -143,16 +143,35 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
             const itemInterest = (Number(item.open_amount) * interestRate * diffDays) / (100 * 365);
             
-            // Use the claim's actual accumulated fees
-            const claimFees = Number(claim.accumulated_unpaid_fees || 0);
-            
             activeTotals = {
                 current_principal_open: Number(item.open_amount),
                 total_interest_open: itemInterest,
-                total_fees_open: claimFees,
-                total_due: Number(item.open_amount) + itemInterest + claimFees
+                total_fees_open: letterFee,
+                total_due: Number(item.open_amount) + itemInterest + letterFee
             };
         }
+    } else {
+        // For the full claim, recalculate interest from all items and use the explicit letterFee
+        const endDate = new Date();
+        const interestRate = claim.interest_rate || 5.0;
+        let totalInterest = 0;
+        items.forEach(item => {
+            const openAmt = Number(item.open_amount || 0);
+            if (openAmt > 0) {
+                let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
+                if (fM > endDate) fM = endDate;
+                const diffTime = Math.max(0, endDate - fM);
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                totalInterest += (openAmt * interestRate * diffDays) / (100 * 365);
+            }
+        });
+        const totalPrincipalOpen = items.reduce((sum, i) => sum + Number(i.open_amount || 0), 0);
+        activeTotals = {
+            current_principal_open: totalPrincipalOpen,
+            total_interest_open: totalInterest,
+            total_fees_open: letterFee,
+            total_due: totalPrincipalOpen + totalInterest + letterFee
+        };
     }
 
     // Create text lines for formatting

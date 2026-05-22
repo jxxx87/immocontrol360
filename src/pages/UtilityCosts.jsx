@@ -140,7 +140,9 @@ const UtilityCosts = () => {
                 allUnits = allUnits.filter(u => propIds.includes(u.property_id));
                 allLeases = allLeases.filter(l => l.unit?.property?.portfolio_id === selectedPortfolioID);
                 allExpenses = allExpenses.filter(e => !e.property_id || propIds.includes(e.property_id));
-                allSettlements = allSettlements.filter(s => propIds.includes(s.property_id));
+                // We'll filter settlements based on properties OR economic unit
+                const economicUnitIds = Array.from(new Set(props.map(p => p.economic_unit_id).filter(Boolean)));
+                allSettlements = allSettlements.filter(s => propIds.includes(s.property_id) || (s.economic_unit_id && economicUnitIds.includes(s.economic_unit_id)));
             }
 
             setProperties(props);
@@ -159,10 +161,54 @@ const UtilityCosts = () => {
     };
 
     // ===== WIZARD HELPERS =====
-    const propertyUnits = useMemo(() =>
-        units.filter(u => u.property_id === wizardPropertyId),
-        [units, wizardPropertyId]
-    );
+    const propertyUnits = useMemo(() => {
+        if (wizardPropertyId?.startsWith('we_')) {
+            const weId = wizardPropertyId.replace('we_', '');
+            return units.filter(u => u.property?.economic_unit_id === weId);
+        }
+        return units.filter(u => u.property_id === wizardPropertyId);
+    }, [units, wizardPropertyId]);
+
+    // Group properties into groupedProperties (including standalone properties)
+    const groupedProperties = React.useMemo(() => {
+        const groups = {};
+        const result = [];
+
+        properties.forEach(p => {
+            if (p.economic_unit_id) {
+                if (!groups[p.economic_unit_id]) {
+                    groups[p.economic_unit_id] = {
+                        id: 'we_' + p.economic_unit_id,
+                        isGroup: true,
+                        economic_unit_id: p.economic_unit_id,
+                        properties: []
+                    };
+                }
+                groups[p.economic_unit_id].properties.push(p);
+            } else {
+                result.push({ ...p, isGroup: false });
+            }
+        });
+
+        Object.values(groups).forEach(g => {
+            if (g.properties.length > 0) {
+                const uniqueProps = g.properties;
+                if (uniqueProps.length === 1) {
+                    result.push({ ...uniqueProps[0], isGroup: false });
+                } else {
+                    const streets = Array.from(new Set(uniqueProps.map(u => u.street).filter(Boolean)));
+                    g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                    g.house_number = Array.from(new Set(uniqueProps.map(u => u.house_number).filter(Boolean))).join(' & ');
+                    const cities = Array.from(new Set(uniqueProps.map(u => u.city).filter(Boolean)));
+                    g.city = cities.join(', ');
+                    g.zip = uniqueProps[0].zip || '';
+                    result.push(g);
+                }
+            }
+        });
+
+        return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
+    }, [properties]);
 
     const toggleUnit = (unitId) => {
         setSelectedUnitIds(prev =>
@@ -184,7 +230,13 @@ const UtilityCosts = () => {
         const year = now.getFullYear() - 1;
         setPeriodStart(`${year}-01-01`);
         setPeriodEnd(`${year}-12-31`);
-        const propUnits = units.filter(u => u.property_id === propertyId);
+        let propUnits = [];
+        if (propertyId.startsWith('we_')) {
+            const weId = propertyId.replace('we_', '');
+            propUnits = units.filter(u => u.property?.economic_unit_id === weId);
+        } else {
+            propUnits = units.filter(u => u.property_id === propertyId);
+        }
         setSelectedUnitIds(propUnits.map(u => u.id));
         setCostItems([]);
         setUnitCosts({});
@@ -197,7 +249,7 @@ const UtilityCosts = () => {
 
     const editSettlement = (settlement) => {
         setEditingSettlement(settlement);
-        setWizardPropertyId(settlement.property_id);
+        setWizardPropertyId(settlement.economic_unit_id ? `we_${settlement.economic_unit_id}` : settlement.property_id);
         setPeriodStart(settlement.period_start);
         setPeriodEnd(settlement.period_end);
 
@@ -213,13 +265,25 @@ const UtilityCosts = () => {
 
     // Load expense-based costs when entering step 2
     const loadCostsForStep2 = () => {
+        let weId = null;
+        let pId = wizardPropertyId;
+        if (wizardPropertyId?.startsWith('we_')) {
+            weId = wizardPropertyId.replace('we_', '');
+            pId = null;
+        }
+
         // Filter expenses by property and period, only recoverable
-        const periodExpenses = expenses.filter(e =>
-            e.property_id === wizardPropertyId &&
-            e.booking_date >= periodStart &&
-            e.booking_date <= periodEnd &&
-            e.expense_categories?.is_recoverable === true
-        );
+        const periodExpenses = expenses.filter(e => {
+            // If we have an economic unit, we'd theoretically want expenses across the unit,
+            // but expenses only have property_id. We'd map weId to all property_ids.
+            const pIdsInWe = pId ? [pId] : properties.filter(p => p.economic_unit_id === weId).map(p => p.id);
+            const matchesProp = e.property_id ? pIdsInWe.includes(e.property_id) : false;
+
+            return matchesProp &&
+                e.booking_date >= periodStart &&
+                e.booking_date <= periodEnd &&
+                e.expense_categories?.is_recoverable === true;
+        });
 
         // Group by category
         const byCategory = {};
@@ -387,9 +451,18 @@ const UtilityCosts = () => {
                 unitCosts
             };
 
+            let actualPropertyId = wizardPropertyId;
+            let actualEconomicUnitId = null;
+            if (wizardPropertyId?.startsWith('we_')) {
+                actualEconomicUnitId = wizardPropertyId.replace('we_', '');
+                const relatedProps = properties.filter(p => p.economic_unit_id === actualEconomicUnitId);
+                actualPropertyId = relatedProps.length > 0 ? relatedProps[0].id : null;
+            }
+
             const record = {
                 user_id: user.id,
-                property_id: wizardPropertyId,
+                property_id: actualPropertyId,
+                economic_unit_id: actualEconomicUnitId,
                 period_start: periodStart,
                 period_end: periodEnd,
                 status: status,
@@ -506,7 +579,14 @@ const UtilityCosts = () => {
     // ===== HELPER: Get property name =====
     const getPropertyName = (propId) => {
         const p = properties.find(p => p.id === propId);
-        return p ? `${p.street} ${p.house_number}` : 'Unbekannt';
+        if (!p) return 'Unbekannt';
+        if (p.economic_unit_id) {
+            const weProps = properties.filter(x => x.economic_unit_id === p.economic_unit_id);
+            const streets = Array.from(new Set(weProps.map(u => u.street).filter(Boolean)));
+            const houseNumbers = Array.from(new Set(weProps.map(u => u.house_number).filter(Boolean))).join(' & ');
+            return `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'} ${houseNumbers}`;
+        }
+        return `${p.street} ${p.house_number}`;
     };
 
     const getPropertyFull = (propId) => {
@@ -528,7 +608,9 @@ const UtilityCosts = () => {
         const propCity = prop ? `${prop.zip} ${prop.city}` : '';
 
         const unitsToProcess = singleUnitId ? sUnits.filter(id => id === singleUnitId) : sUnits;
-        const allPropertyUnits = units.filter(u => u.property_id === settlement.property_id);
+        const allPropertyUnits = settlement.economic_unit_id 
+            ? units.filter(u => u.property?.economic_unit_id === settlement.economic_unit_id)
+            : units.filter(u => u.property_id === settlement.property_id);
 
         // Totals for distribution keys (calculated from current property state)
         const totalArea = allPropertyUnits.reduce((s, u) => s + (u.sqm || 1), 0);
@@ -1487,7 +1569,9 @@ const UtilityCosts = () => {
                                 {/* Unit Detail Modal */}
                                 {reviewUnit && (() => {
                                     const unit = units.find(u => u.id === reviewUnit);
-                                    const allPropertyUnits = units.filter(u => u.property_id === wizardPropertyId);
+                                    const allPropertyUnits = wizardPropertyId?.startsWith('we_')
+                                        ? units.filter(u => u.property?.economic_unit_id === wizardPropertyId.replace('we_', ''))
+                                        : units.filter(u => u.property_id === wizardPropertyId);
 
                                     // Totals for distribution keys
                                     const totalArea = allPropertyUnits.reduce((s, u) => s + (u.sqm || 1), 0);
@@ -1778,22 +1862,25 @@ const UtilityCosts = () => {
     }
 
     // ===== LIST VIEW =====
-    // Group settlements by property
-    const settlementsByProperty = {};
-    properties.forEach(p => {
-        settlementsByProperty[p.id] = settlements.filter(s => s.property_id === p.id);
+    const settlementsByGroup = {};
+    groupedProperties.forEach(group => {
+        if (group.isGroup) {
+            settlementsByGroup[group.id] = settlements.filter(s => s.economic_unit_id === group.economic_unit_id);
+        } else {
+            settlementsByGroup[group.id] = settlements.filter(s => s.property_id === group.id && !s.economic_unit_id);
+        }
     });
 
     return (
         <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)', flexWrap: 'wrap', gap: '10px' }}>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Nebenkostenabrechnung</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Erstellen und verwalten Sie Ihre Betriebskostenabrechnungen</p>
                 </div>
             </div>
 
-            {properties.length === 0 ? (
+            {groupedProperties.length === 0 ? (
                 <Card>
                     <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
                         Keine Immobilien gefunden. Erstellen Sie zunächst eine Immobilie.
@@ -1801,9 +1888,9 @@ const UtilityCosts = () => {
                 </Card>
             ) : (
                 <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
-                    {properties.map(prop => {
-                        const propSettlements = settlementsByProperty[prop.id] || [];
-                        const propUnits = units.filter(u => u.property_id === prop.id);
+                    {groupedProperties.map(prop => {
+                        const propSettlements = settlementsByGroup[prop.id] || [];
+                        const propUnits = prop.isGroup ? units.filter(u => u.property?.economic_unit_id === prop.economic_unit_id) : units.filter(u => u.property_id === prop.id);
                         const isExpanded = expandedProperty === prop.id;
 
                         return (
@@ -1817,8 +1904,10 @@ const UtilityCosts = () => {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                         {isExpanded ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
                                         <div>
-                                            <div style={{ fontWeight: 600, fontSize: '1.05rem' }}>{prop.street} {prop.house_number}</div>
-                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{prop.zip} {prop.city} · {propUnits.length} Einheiten</div>
+                                            <div style={{ fontWeight: 600, fontSize: '1.05rem', color: prop.isGroup ? 'var(--accent-color)' : 'var(--text-primary)' }}>{prop.street} {prop.house_number}</div>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                {prop.zip} {prop.city} · {propUnits.length} Einheiten
+                                            </div>
                                         </div>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
