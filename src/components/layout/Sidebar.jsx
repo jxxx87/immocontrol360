@@ -134,10 +134,36 @@ const Sidebar = ({ mobileOpen, onClose }) => {
         { path: '/settings', label: 'Einstellungen', icon: Settings }
     ];
 
+    const { hasFeature, checkFeatureAccess, paywallReason, subscription } = useSubscription();
+    const { canRead } = require('../../context/PermissionContext').usePermission();
+
+    const mapNavKeyToCategory = (navKey) => {
+        const mapping = {
+            'properties': 'immobilien',
+            'tenants': 'mietverhaeltnisse',
+            'forderungen': 'finanzen', 
+            'finance': 'finanzen',
+            'utility-costs': 'nebenkosten',
+            'meters': 'zaehler',
+            'contacts': 'kontakte',
+            'mieterportal': 'mieterportal',
+            'investorportal': 'investorportal'
+        };
+        return mapping[navKey] || navKey;
+    };
+
     const investorNavItems = allInvestorNavItems.filter(item => {
         if (item.type === 'divider') return true;
         if (!item.navKey) return true; // always show items without navKey (e.g. Einstellungen)
-        return isVisible(item.navKey);
+        if (!isVisible(item.navKey)) return false;
+        
+        // Check portfolio share permissions
+        const category = mapNavKeyToCategory(item.navKey);
+        if (category !== 'dashboard' && !canRead(category)) {
+            return false;
+        }
+        
+        return true;
     });
 
     // ── TENANT NAV ITEMS ────────────────────────────────────────────
@@ -169,8 +195,6 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             'Investorportal': investorPortalActive
         }));
     }, [location.pathname]);
-
-    const { hasFeature, checkFeatureAccess, paywallReason, subscription } = useSubscription();
 
     const getPlanBadge = () => {
         if (!subscription || !subscription.plan) return null;

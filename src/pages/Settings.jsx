@@ -7,7 +7,7 @@ import Modal from '../components/ui/Modal';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import RateInput from '../components/ui/RateInput';
-import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText } from 'lucide-react';
+import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText, Share2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
@@ -15,6 +15,8 @@ import { translateError } from '../lib/errorTranslator';
 import { useViewMode } from '../context/ViewModeContext';
 import ImportPage from './Import'; // Import the Import page component
 import Billing from './Billing'; // Billing & Abo page component
+import { PortfolioShareModal } from '../components/portfolio/PortfolioShareModal';
+import { PendingInvitations } from '../components/portfolio/PendingInvitations';
 
 const Settings = () => {
     const { user } = useAuth();
@@ -24,6 +26,10 @@ const Settings = () => {
     const { onboardingLocked, unlockOnboarding } = useOutletContext() || {};
     const location = useLocation();
     const [activeTab, setActiveTab] = useState('profile');
+    
+    // Sharing modal state
+    const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+    const [sharePortfolioId, setSharePortfolioId] = useState(null);
 
     // Navigation visibility state
     const [navVisibility, setNavVisibility] = useState(() => {
@@ -578,6 +584,7 @@ const Settings = () => {
             align: 'right',
             render: (row) => (
                 <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
+                    <Button variant="ghost" size="sm" icon={Share2} onClick={() => { setSharePortfolioId(row.id); setIsShareModalOpen(true); }}>Teilen</Button>
                     <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
                     {!row.is_primary && (
                         <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>
@@ -924,6 +931,7 @@ const Settings = () => {
 
                     {activeTab === 'portfolios' && (
                         <div>
+                            <PendingInvitations />
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
                                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600 }}>Portfolios verwalten</h2>
                                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -941,6 +949,12 @@ const Settings = () => {
                                         </div>
                                     ) : (
                                         <>
+                                            {/* Share Portfolio Modal */}
+                                            <PortfolioShareModal 
+                                                isOpen={isShareModalOpen} 
+                                                onClose={() => { setIsShareModalOpen(false); setSharePortfolioId(null); }} 
+                                                portfolioId={sharePortfolioId} 
+                                            />
                                             <div className="hidden-mobile">
                                                 <Table columns={portfolioColumns} data={portfolios} />
                                             </div>
@@ -974,6 +988,7 @@ const Settings = () => {
                                                             {row.is_primary && (
                                                                 <Badge variant="info" style={{ marginRight: 'auto' }}>Hauptportfolio</Badge>
                                                             )}
+                                                            <Button variant="ghost" size="sm" icon={Share2} onClick={() => { setSharePortfolioId(row.id); setIsShareModalOpen(true); }}>Teilen</Button>
                                                             <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
                                                             {!row.is_primary && (
                                                                 <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>

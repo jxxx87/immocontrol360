@@ -34,6 +34,7 @@ import Register from './pages/auth/Register';
 import ResetPassword from './pages/auth/ResetPassword';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PortfolioProvider } from './context/PortfolioContext';
+import { PermissionProvider } from './context/PermissionContext';
 import { ProtectedRoute } from './ProtectedRoute';
 import { ViewModeProvider } from './context/ViewModeContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -75,75 +76,77 @@ function App() {
     <Router>
       <AuthProvider>
         <PortfolioProvider>
-          <SubscriptionProvider>
-            <ViewModeProvider>
-              <NotificationProvider>
-                <Routes>
-                  {/* Public Auth Routes */}
-                  <Route path="/login" element={<AuthRoute><Login /></AuthRoute>} />
-                  <Route path="/register" element={<AuthRoute><Register /></AuthRoute>} />
-                  <Route path="/reset-password" element={<AuthRoute><ResetPassword /></AuthRoute>} />
-                  <Route path="/billing/success" element={<BillingSuccess />} />
+          <PermissionProvider>
+            <SubscriptionProvider>
+              <ViewModeProvider>
+                <NotificationProvider>
+                  <Routes>
+                    {/* Public Auth Routes */}
+                    <Route path="/login" element={<AuthRoute><Login /></AuthRoute>} />
+                    <Route path="/register" element={<AuthRoute><Register /></AuthRoute>} />
+                    <Route path="/reset-password" element={<AuthRoute><ResetPassword /></AuthRoute>} />
+                    <Route path="/billing/success" element={<BillingSuccess />} />
 
-                  {/* Protected App Routes */}
-                  <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                    <Route index element={<RoleBasedIndex />} />
-                    <Route path="properties" element={<Properties />} />
+                    {/* Protected App Routes */}
+                    <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+                      <Route index element={<RoleBasedIndex />} />
+                      <Route path="properties" element={<Properties />} />
 
-                    <Route path="tenants" element={<Tenants />} />
-                    <Route path="forderungen" element={<Claims />} />
-                    <Route path="forderungen/:claimId" element={<ClaimDetail />} />
-                    <Route path="finance" element={<Finance />} />
-                    <Route path="loans" element={<Loans />} />
-                    <Route path="utility-costs" element={<UtilityCosts />} />
-                    <Route path="invoices" element={<Invoices />} />
-                    <Route path="invoices/new" element={<InvoiceForm />} />
-                    <Route path="invoices/edit/:id" element={<InvoiceForm />} />
-                    <Route path="meters" element={<Meters />} />
-                    <Route path="contacts" element={<Contacts />} />
-                    <Route path="documents" element={<Documents />} />
-                    <Route path="settings" element={<Settings />} />
-                    <Route path="security" element={<PlaceholderPage title="Sicherheit" />} />
-                    <Route path="import" element={<Import />} />
-                    <Route path="help" element={<PlaceholderPage title="Hilfe" />} />
+                      <Route path="tenants" element={<Tenants />} />
+                      <Route path="forderungen" element={<Claims />} />
+                      <Route path="forderungen/:claimId" element={<ClaimDetail />} />
+                      <Route path="finance" element={<Finance />} />
+                      <Route path="loans" element={<Loans />} />
+                      <Route path="utility-costs" element={<UtilityCosts />} />
+                      <Route path="invoices" element={<Invoices />} />
+                      <Route path="invoices/new" element={<InvoiceForm />} />
+                      <Route path="invoices/edit/:id" element={<InvoiceForm />} />
+                      <Route path="meters" element={<Meters />} />
+                      <Route path="contacts" element={<Contacts />} />
+                      <Route path="documents" element={<Documents />} />
+                      <Route path="settings" element={<Settings />} />
+                      <Route path="security" element={<PlaceholderPage title="Sicherheit" />} />
+                      <Route path="import" element={<Import />} />
+                      <Route path="help" element={<PlaceholderPage title="Hilfe" />} />
 
-                    {/* ── Investor Portal Routes ── */}
-                    <Route path="tenant-management" element={<TenantManagement />} />
-                    <Route path="ticket-board" element={<TicketKanban />} />
-                    <Route path="announcements" element={<Announcements />} />
-                    <Route path="investor-messages" element={<InvestorMessages />} />
-                    <Route path="object-calendar" element={<ObjectCalendar />} />
+                      {/* ── Investor Portal Routes ── */}
+                      <Route path="tenant-management" element={<TenantManagement />} />
+                      <Route path="ticket-board" element={<TicketKanban />} />
+                      <Route path="announcements" element={<Announcements />} />
+                      <Route path="investor-messages" element={<InvestorMessages />} />
+                      <Route path="object-calendar" element={<ObjectCalendar />} />
 
-                    {/* ── Investorportal Routes ── */}
-                    <Route path="buy-and-hold" element={<BuyAndHold />} />
-                    <Route path="fix-and-flip" element={<FixAndFlip />} />
-                    <Route path="tax-and-exit" element={<TaxAndExit />} />
-                    <Route path="asset-management" element={<AssetManagement />} />
-                    <Route path="investor-portal" element={<InvestorPortal />} />
+                      {/* ── Investorportal Routes ── */}
+                      <Route path="buy-and-hold" element={<BuyAndHold />} />
+                      <Route path="fix-and-flip" element={<FixAndFlip />} />
+                      <Route path="tax-and-exit" element={<TaxAndExit />} />
+                      <Route path="asset-management" element={<AssetManagement />} />
+                      <Route path="investor-portal" element={<InvestorPortal />} />
 
-                    {/* ── Sanierungsmanager Routes ── */}
-                    <Route path="renovation" element={<RenovationManager />} />
-                    <Route path="renovation/new" element={<RenovationWizard />} />
-                    <Route path="renovation/:id" element={<RenovationProjectDetail />} />
-                    <Route path="renovation/calculator/:id" element={<RenovationCalculatorDetail />} />
-                    <Route path="renovation/floorplan/:id" element={<FloorPlanEditor />} />
+                      {/* ── Sanierungsmanager Routes ── */}
+                      <Route path="renovation" element={<RenovationManager />} />
+                      <Route path="renovation/new" element={<RenovationWizard />} />
+                      <Route path="renovation/:id" element={<RenovationProjectDetail />} />
+                      <Route path="renovation/calculator/:id" element={<RenovationCalculatorDetail />} />
+                      <Route path="renovation/floorplan/:id" element={<FloorPlanEditor />} />
 
-                    {/* ── PDF Template Route ── */}
-                    <Route path="portfolio/settings/pdf-template" element={<PdfTemplateEditor />} />
+                      {/* ── PDF Template Route ── */}
+                      <Route path="portfolio/settings/pdf-template" element={<PdfTemplateEditor />} />
 
-                    {/* ── Tenant Portal Routes ── */}
-                    <Route path="tenant" element={<TenantDashboard />} />
-                    <Route path="tenant/tickets" element={<TenantTickets />} />
-                    <Route path="tenant/messages" element={<TenantMessages />} />
-                    <Route path="tenant/announcements" element={<TenantAnnouncements />} />
-                    <Route path="tenant/documents" element={<TenantDocuments />} />
-                  </Route>
-                </Routes>
-                <ToastContainer />
-              </NotificationProvider>
-            </ViewModeProvider>
-            <PaywallModal />
-          </SubscriptionProvider>
+                      {/* ── Tenant Portal Routes ── */}
+                      <Route path="tenant" element={<TenantDashboard />} />
+                      <Route path="tenant/tickets" element={<TenantTickets />} />
+                      <Route path="tenant/messages" element={<TenantMessages />} />
+                      <Route path="tenant/announcements" element={<TenantAnnouncements />} />
+                      <Route path="tenant/documents" element={<TenantDocuments />} />
+                    </Route>
+                  </Routes>
+                  <ToastContainer />
+                </NotificationProvider>
+              </ViewModeProvider>
+              <PaywallModal />
+            </SubscriptionProvider>
+          </PermissionProvider>
         </PortfolioProvider>
       </AuthProvider>
     </Router>
