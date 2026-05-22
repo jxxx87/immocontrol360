@@ -4,9 +4,12 @@ import Sidebar from './Sidebar';
 import Topbar from './Topbar';
 import BottomNav from './BottomNav';
 import PushPermissionPrompt from '../ui/PushPermissionPrompt';
+import Modal from '../ui/Modal';
+import Button from '../ui/Button';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../lib/supabase';
+import { Mail } from 'lucide-react';
 
 const Layout = () => {
     const { isMobile } = useViewMode();
@@ -16,6 +19,10 @@ const Layout = () => {
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
     const [onboardingLocked, setOnboardingLocked] = useState(false);
     const [onboardingChecked, setOnboardingChecked] = useState(false);
+    
+    // Invite popup state
+    const [showInvitePopup, setShowInvitePopup] = useState(false);
+    const [inviteCount, setInviteCount] = useState(0);
 
     useEffect(() => {
         const checkOnboarding = async () => {
@@ -40,7 +47,31 @@ const Layout = () => {
                 setOnboardingChecked(true);
             }
         };
+        
+        const checkInvitations = async () => {
+            if (!user) return;
+            const alreadyShown = sessionStorage.getItem('invitePopupShown');
+            if (alreadyShown) return;
+
+            try {
+                const { count } = await supabase
+                    .from('portfolio_shares')
+                    .select('*', { count: 'exact', head: true })
+                    .eq('shared_with_email', user.email)
+                    .eq('status', 'pending');
+                    
+                if (count > 0) {
+                    setInviteCount(count);
+                    setShowInvitePopup(true);
+                    sessionStorage.setItem('invitePopupShown', 'true');
+                }
+            } catch (e) {
+                console.error('Error checking invitations:', e);
+            }
+        };
+
         checkOnboarding();
+        checkInvitations();
     }, [user, userRole]);
 
     // If locked and user tries to navigate away from settings, push them back
@@ -91,6 +122,24 @@ const Layout = () => {
 
             {/* Push Notification Permission Dialog (shows once on first launch) */}
             {!onboardingLocked && <PushPermissionPrompt />}
+
+            {/* Invite Notification Modal */}
+            <Modal
+                isOpen={showInvitePopup}
+                onClose={() => setShowInvitePopup(false)}
+                title="Neue Portfolio-Einladung"
+                footer={<Button onClick={() => { setShowInvitePopup(false); navigate('/settings', { state: { activeTab: 'portfolios' } }); }}>Zu den Portfolios</Button>}
+            >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '16px' }}>
+                    <div style={{ backgroundColor: '#DBEAFE', color: 'var(--primary-color)', padding: '12px', borderRadius: '50%' }}>
+                        <Mail size={32} />
+                    </div>
+                    <div>
+                        <p style={{ margin: 0, fontSize: '1rem' }}>Sie haben <strong>{inviteCount} neue Einladung(en)</strong> erhalten, einem Portfolio beizutreten.</p>
+                        <p style={{ margin: '4px 0 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Wechseln Sie in die Einstellungen unter "Portfolios", um die Einladung(en) anzunehmen oder abzulehnen.</p>
+                    </div>
+                </div>
+            </Modal>
         </div>
     );
 };

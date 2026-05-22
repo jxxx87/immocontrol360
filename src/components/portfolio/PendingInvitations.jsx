@@ -2,6 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
+import Card from '../ui/Card';
+import Button from '../ui/Button';
+import Badge from '../ui/Badge';
+import { Mail, Check, X, BellDot } from 'lucide-react';
 
 export const PendingInvitations = () => {
     const { user } = useAuth();
@@ -18,7 +22,6 @@ export const PendingInvitations = () => {
     const fetchInvitations = async () => {
         setLoading(true);
         try {
-            // We need to fetch portfolio_shares where email matches and status is pending
             const { data, error } = await supabase
                 .from('portfolio_shares')
                 .select(`
@@ -48,7 +51,7 @@ export const PendingInvitations = () => {
             if (error) throw error;
             
             if (data) {
-                // Success! Refresh the list and portfolios
+                alert('Einladung erfolgreich angenommen!');
                 fetchInvitations();
                 refreshPortfolios();
             }
@@ -59,6 +62,7 @@ export const PendingInvitations = () => {
     };
 
     const handleDecline = async (shareId) => {
+        if (!window.confirm('Einladung wirklich ablehnen?')) return;
         try {
             const { error } = await supabase
                 .from('portfolio_shares')
@@ -76,45 +80,67 @@ export const PendingInvitations = () => {
     if (loading || invitations.length === 0) return null;
 
     return (
-        <div className="mb-6 bg-white rounded-lg shadow border border-blue-100 overflow-hidden">
-            <div className="px-4 py-5 sm:px-6 bg-blue-50 border-b border-blue-100">
-                <h3 className="text-lg leading-6 font-medium text-blue-900">
-                    Ausstehende Portfolio-Einladungen ({invitations.length})
-                </h3>
-                <p className="mt-1 max-w-2xl text-sm text-blue-700">
-                    Andere Nutzer haben Portfolios mit dir geteilt.
-                </p>
-            </div>
-            <div className="px-4 py-5 sm:p-0">
-                <ul className="divide-y divide-gray-200">
+        <div style={{ marginBottom: 'var(--spacing-xl)' }}>
+            <Card style={{ backgroundColor: '#F0F9FF', border: '1px solid #BAE6FD' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+                    <div style={{ backgroundColor: '#DBEAFE', color: 'var(--primary-color)', padding: '8px', borderRadius: '8px' }}>
+                        <BellDot size={22} />
+                    </div>
+                    <div>
+                        <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#1E3A8A', margin: 0 }}>
+                            Ausstehende Einladungen ({invitations.length})
+                        </h3>
+                        <p style={{ fontSize: '0.85rem', color: '#1E40AF', margin: '4px 0 0 0' }}>
+                            Andere Nutzer haben Portfolios mit Ihnen geteilt.
+                        </p>
+                    </div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     {invitations.map((invitation) => (
-                        <li key={invitation.id} className="p-4 sm:px-6 flex items-center justify-between">
-                            <div>
-                                <p className="text-sm font-medium text-gray-900 truncate">
-                                    Portfolio: {invitation.portfolios?.name || 'Unbekannt'}
-                                </p>
-                                <p className="text-sm text-gray-500">
-                                    Eingeladen am {new Date(invitation.created_at).toLocaleDateString('de-DE')}
-                                </p>
+                        <div key={invitation.id} style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '16px',
+                            backgroundColor: 'white',
+                            borderRadius: 'var(--radius-md)',
+                            border: '1px solid #E0F2FE'
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: '#F3F4F6', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6B7280', flexShrink: 0 }}>
+                                    <Mail size={20} />
+                                </div>
+                                <div>
+                                    <p style={{ margin: 0, fontWeight: 500, fontSize: '0.95rem', color: 'var(--text-color)' }}>
+                                        Portfolio: <strong>{invitation.portfolios?.name || 'Unbekannt'}</strong>
+                                    </p>
+                                    <p style={{ margin: '2px 0 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                        Eingeladen am {new Date(invitation.created_at).toLocaleDateString('de-DE')}
+                                    </p>
+                                </div>
                             </div>
-                            <div className="flex gap-2">
-                                <button
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Button 
+                                    variant="primary" 
+                                    icon={Check} 
                                     onClick={() => handleAccept(invitation.id)}
-                                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none"
                                 >
                                     Annehmen
-                                </button>
-                                <button
+                                </Button>
+                                <Button 
+                                    variant="ghost" 
+                                    icon={X} 
+                                    style={{ color: 'var(--danger-color)' }}
                                     onClick={() => handleDecline(invitation.id)}
-                                    className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-xs font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none"
                                 >
                                     Ablehnen
-                                </button>
+                                </Button>
                             </div>
-                        </li>
+                        </div>
                     ))}
-                </ul>
-            </div>
+                </div>
+            </Card>
         </div>
     );
 };
