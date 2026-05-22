@@ -38,7 +38,7 @@ const ClaimDetail = () => {
     const [pdfForm, setPdfForm] = useState({ type: 'Abmahnung', deadlineDays: 14 });
 
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
-    const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '' });
+    const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', linkToInstallment: false, installmentId: '' });
 
     // Ratenzahlung Modal State
     const [isPaymentPlanModalOpen, setIsPaymentPlanModalOpen] = useState(false);
@@ -244,13 +244,22 @@ const ClaimDetail = () => {
             return;
         }
 
+        if (paymentForm.linkToInstallment && paymentForm.installmentId) {
+            const inst = installments.find(i => i.id === paymentForm.installmentId);
+            if (inst && amount > (inst.amount - inst.paid_amount + 0.01)) {
+                alert(`Zahlungsbetrag ist höher als die ausgewählte offene Rate (${formatCurrency(inst.amount - inst.paid_amount)}).`);
+                return;
+            }
+        }
+
         setIsSubmitting(true);
         try {
             const { error } = await supabase.rpc('record_claim_payment', {
                 p_claim_id: claim.id,
                 p_payment_date: paymentForm.date,
                 p_amount: amount,
-                p_note: paymentForm.note
+                p_note: paymentForm.note,
+                p_installment_id: paymentForm.linkToInstallment && paymentForm.installmentId ? paymentForm.installmentId : null
             });
 
             if (error) {
@@ -481,21 +490,38 @@ const ClaimDetail = () => {
 
         if (event.event_type === 'payment_received') {
             return (
-                <div style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '12px', borderRadius: '6px', marginTop: '8px' }}>
-                    <div style={{ color: '#166534', fontWeight: 'bold', marginBottom: '8px', fontSize: '1rem' }}>
-                        + {formatCurrency(meta.amount)} am {formatDate(meta.payment_date)}
+                <div style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    <div style={{ color: '#166534', fontWeight: 'bold', marginBottom: '8px' }}>Zahlung erfasst</div>
+                    <div style={{ fontSize: '1rem', color: '#166534', fontWeight: 'bold', marginBottom: '12px' }}>+ {formatCurrency(meta.amount)} {meta.payment_date ? `am ${formatDate(meta.payment_date)}` : ''}</div>
+                    
+                    <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
+                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>Verrechnung:</div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Mahnkosten:</span><span>{formatCurrency(meta.allocated_to_fees)}</span></div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Verzugszinsen:</span><span>{formatCurrency(meta.allocated_to_interest)}</span></div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Hauptforderung:</span><span>{formatCurrency(meta.allocated_to_principal)}</span></div>
                     </div>
-                    <div style={{ fontSize: '0.85rem', color: '#166534' }}>
-                        <strong>Verrechnung:</strong>
-                        <ul style={{ margin: '4px 0 8px 0', paddingLeft: '20px' }}>
-                            <li>Mahnkosten: {formatCurrency(meta.allocated_to_fees)}</li>
-                            <li>Verzugszinsen: {formatCurrency(meta.allocated_to_interest)}</li>
-                            <li>Hauptforderung: {formatCurrency(meta.allocated_to_principal)}</li>
-                        </ul>
-                        <strong>Restforderung nach Zahlung:</strong>
-                        <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px' }}>
-                            <li>Gesamt offen: {formatCurrency(meta.remaining_total_due)}</li>
-                        </ul>
+                    
+                    {meta.installment_id && (
+                        <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>Ratenzahlung:</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Zugeordnet zu Rate fällig am:</span><span>{formatDate(meta.installment_due_date)}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Ratenbetrag:</span><span>{formatCurrency(meta.installment_amount)}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>- Nach Zahlung offen:</span><span>{formatCurrency(meta.installment_open_after)}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span>- Status:</span>
+                                <span style={{ fontWeight: 600, color: meta.installment_status_after === 'paid' ? '#166534' : '#92400E' }}>
+                                    {meta.installment_status_after === 'paid' ? 'Bezahlt' : 'Teilweise bezahlt'}
+                                </span>
+                            </div>
+                        </div>
+                    )}
+                    
+                    <div>
+                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>Restforderung nach Zahlung:</div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span>- Gesamt offen:</span>
+                            <span style={{ fontWeight: 'bold' }}>{formatCurrency(meta.remaining_total_due)}</span>
+                        </div>
                     </div>
                 </div>
             );
@@ -785,8 +811,8 @@ const ClaimDetail = () => {
                                                         <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(inst.paid_amount)}</td>
                                                         <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(inst.amount - inst.paid_amount)}</td>
                                                         <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'center' }}>
-                                                            <span style={{ padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, backgroundColor: inst.status === 'open' ? '#FEF3C7' : '#D1FAE5', color: inst.status === 'open' ? '#92400E' : '#065F46' }}>
-                                                                {inst.status === 'open' ? 'Offen' : 'Bezahlt'}
+                                                            <span style={{ padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, backgroundColor: inst.status === 'open' ? '#FEF3C7' : inst.status === 'partial' ? '#DBEAFE' : '#D1FAE5', color: inst.status === 'open' ? '#92400E' : inst.status === 'partial' ? '#1E40AF' : '#065F46' }}>
+                                                                {inst.status === 'open' ? 'Offen' : inst.status === 'partial' ? 'Teilweise bezahlt' : 'Bezahlt'}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -1089,6 +1115,39 @@ const ClaimDetail = () => {
                                     </div>
                                 );
                             })()}
+                        </div>
+                    )}
+                    
+                    {paymentPlan && installments.filter(i => i.status !== 'paid').length > 0 && (
+                        <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px' }}>
+                            <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: '#0F172A', marginBottom: '12px' }}>Ratenzahlung</h4>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', marginBottom: paymentForm.linkToInstallment ? '12px' : '0' }}>
+                                <input 
+                                    type="checkbox" 
+                                    checked={paymentForm.linkToInstallment}
+                                    onChange={(e) => {
+                                        const isChecked = e.target.checked;
+                                        const openInst = installments.find(i => i.status !== 'paid');
+                                        setPaymentForm({...paymentForm, linkToInstallment: isChecked, installmentId: isChecked && openInst ? openInst.id : ''});
+                                    }}
+                                />
+                                Zahlung einer Rate zuordnen
+                            </label>
+                            
+                            {paymentForm.linkToInstallment && (
+                                <select 
+                                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
+                                    value={paymentForm.installmentId}
+                                    onChange={(e) => setPaymentForm({...paymentForm, installmentId: e.target.value})}
+                                >
+                                    <option value="">-- Bitte Rate auswählen --</option>
+                                    {installments.filter(i => i.status !== 'paid').map((inst, idx) => (
+                                        <option key={inst.id} value={inst.id}>
+                                            Rate {installments.findIndex(x => x.id === inst.id) + 1} - fällig am {formatDate(inst.due_date)} - offen {formatCurrency(inst.amount - inst.paid_amount)}
+                                        </option>
+                                    ))}
+                                </select>
+                            )}
                         </div>
                     )}
 
