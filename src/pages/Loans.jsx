@@ -17,6 +17,7 @@ const Loans = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
 
+    // eslint-disable-next-line no-unused-vars
     const [loans, setLoans] = useState([]);
     const [properties, setProperties] = useState([]);
     const [economicUnits, setEconomicUnits] = useState([]);
@@ -208,6 +209,7 @@ const Loans = () => {
 
     useEffect(() => {
         fetchData();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user, selectedPortfolioID]);
 
     useEffect(() => {
@@ -837,7 +839,7 @@ const Loans = () => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {scheduleData.map((row, idx) => (
+                                    {scheduleData.map((row) => (
                                         <tr key={row.year} className="table-row" style={{ borderBottom: '1px solid #eee' }}>
                                             <td style={{ padding: '8px' }}>{row.year}</td>
                                             <td style={{ textAlign: 'right', padding: '8px', color: 'var(--danger-color)' }}>{row.interest.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</td>

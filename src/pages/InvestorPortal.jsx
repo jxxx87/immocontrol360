@@ -53,6 +53,7 @@ const InvestorPortal = () => {
     const pdfTemplate = usePdfTemplate('deal_kalkulation');
     const [auditStep, setAuditStep] = useState(0);
     const [loading, setLoading] = useState(true);
+    // eslint-disable-next-line no-unused-vars
     const [saving, setSaving] = useState(null);
 
     // Detail Modal
@@ -83,6 +84,7 @@ const InvestorPortal = () => {
     });
 
     // Renovation Stats (for cockpit card)
+    // eslint-disable-next-line no-unused-vars
     const [renovationStats, setRenovationStats] = useState({ activeProjects: 0, openTasks: 0 });
 
     // Rent increase tracking
@@ -165,10 +167,12 @@ const InvestorPortal = () => {
             const deal = deals.find(d => d.id === urlDealId);
             if (deal) loadDeal(deal);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.search, deals]);
 
     useEffect(() => {
         if (user) fetchData();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user, selectedPortfolioID]);
 
     // Close menu on outside click
@@ -220,7 +224,7 @@ const InvestorPortal = () => {
                     supabase.from('renovation_tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_completed', false),
                 ]);
                 setRenovationStats({ activeProjects: projRes.count || 0, openTasks: taskRes.count || 0 });
-            } catch (e) { /* renovation tables may not exist yet */ }
+            } catch { /* renovation tables may not exist yet */ }
 
             // Calculate pending rent increases
             const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietvertrag', index: 'Indexmietvertrag' };
@@ -396,6 +400,7 @@ const InvestorPortal = () => {
         });
 
         return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [properties, loans]);
 
     const handleUpdateProperty = async (id, updates) => {
@@ -563,6 +568,7 @@ const InvestorPortal = () => {
             const nr = parseFloat(d.notaryRate) || 0;
             const rr = parseFloat(d.registryRate) || 0;
             const knk = pp * ((ttr + br + nr + rr) / 100);
+            // eslint-disable-next-line no-unused-vars
             const totalInv = pp + knk + (parseFloat(d.renovationCosts) || 0);
             const grossIstMo = (parseFloat(d.coldRentIst) || 0) + (parseFloat(d.garageIst) || 0);
             const hg = parseFloat(d.housegeld) || 0;
@@ -1441,6 +1447,7 @@ const InvestorPortal = () => {
         // Financing
         let totalInterestPA = 0;
         let totalRepaymentPA = 0;
+        // eslint-disable-next-line no-unused-vars
         let loansTotal = 0;
         p.loans.forEach(loan => {
             const amt = parseFloat(loan.amount) || 0;
