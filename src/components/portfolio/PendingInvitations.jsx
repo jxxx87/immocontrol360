@@ -22,18 +22,7 @@ export const PendingInvitations = () => {
     const fetchInvitations = async () => {
         setLoading(true);
         try {
-            const { data, error } = await supabase
-                .from('portfolio_shares')
-                .select(`
-                    id,
-                    portfolio_id,
-                    created_at,
-                    portfolios (
-                        name
-                    )
-                `)
-                .eq('shared_with_email', user.email)
-                .eq('status', 'pending');
+            const { data, error } = await supabase.rpc('get_pending_invitations');
 
             if (error) throw error;
             setInvitations(data || []);
@@ -64,10 +53,7 @@ export const PendingInvitations = () => {
     const handleDecline = async (shareId) => {
         if (!window.confirm('Einladung wirklich ablehnen?')) return;
         try {
-            const { error } = await supabase
-                .from('portfolio_shares')
-                .delete()
-                .eq('id', shareId);
+            const { error } = await supabase.rpc('decline_portfolio_share', { share_id: shareId });
             
             if (error) throw error;
             
@@ -113,7 +99,10 @@ export const PendingInvitations = () => {
                                 </div>
                                 <div>
                                     <p style={{ margin: 0, fontWeight: 500, fontSize: '0.95rem', color: 'var(--text-color)' }}>
-                                        Portfolio: <strong>{invitation.portfolios?.name || 'Unbekannt'}</strong>
+                                        Portfolio: <strong>{invitation.portfolio_name || 'Unbekannt'}</strong>
+                                    </p>
+                                    <p style={{ margin: '2px 0 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                        Eingeladen von: <strong>{invitation.sender_name || 'Unbekannt'}</strong>
                                     </p>
                                     <p style={{ margin: '2px 0 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                         Eingeladen am {new Date(invitation.created_at).toLocaleDateString('de-DE')}

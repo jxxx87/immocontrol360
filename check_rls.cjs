@@ -11,10 +11,10 @@ async function run() {
     try {
         await client.connect();
         const res = await client.query(`
-            SELECT pol.polname, pol.polcmd, pol.polqual, pol.polwithcheck
+            SELECT tbl.relname, pol.polname, pol.polcmd, pol.polqual, pol.polwithcheck
             FROM pg_policy pol
             JOIN pg_class tbl ON pol.polrelid = tbl.oid
-            WHERE tbl.relname = 'portfolio_shares';
+            WHERE tbl.relname IN ('profiles', 'portfolios');
         `);
         console.log(res.rows);
     } catch (e) {
