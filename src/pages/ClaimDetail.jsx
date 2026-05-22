@@ -78,6 +78,7 @@ const ClaimDetail = () => {
         if (claimId) {
             loadClaimData();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [claimId]);
 
     const loadClaimData = async () => {
@@ -390,7 +391,7 @@ const ClaimDetail = () => {
     const handleGeneratePdf = async () => {
         setIsSubmitting(true);
         try {
-            const result = await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays);
+            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays);
             
             // Determine new escalation level based on document sent
             let newLevel = claim.escalation_level;
@@ -1141,7 +1142,7 @@ const ClaimDetail = () => {
                                     onChange={(e) => setPaymentForm({...paymentForm, installmentId: e.target.value})}
                                 >
                                     <option value="">-- Bitte Rate auswählen --</option>
-                                    {installments.filter(i => i.status !== 'paid').map((inst, idx) => (
+                                    {installments.filter(i => i.status !== 'paid').map((inst) => (
                                         <option key={inst.id} value={inst.id}>
                                             Rate {installments.findIndex(x => x.id === inst.id) + 1} - fällig am {formatDate(inst.due_date)} - offen {formatCurrency(inst.amount - inst.paid_amount)}
                                         </option>
