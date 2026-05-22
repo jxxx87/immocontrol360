@@ -35,7 +35,7 @@ const ClaimDetail = () => {
     const [statusForm, setStatusForm] = useState({ status: '', reason: '' });
 
     const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
-    const [pdfForm, setPdfForm] = useState({ type: 'Abmahnung', deadlineDays: 14 });
+    const [pdfForm, setPdfForm] = useState({ type: 'Zahlungserinnerung', deadlineDays: 7, targetItemId: null });
 
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '', note: '', paymentType: 'installment', linkToInstallment: false, installmentId: '' });
@@ -427,7 +427,7 @@ const ClaimDetail = () => {
     const handleGeneratePdf = async () => {
         setIsSubmitting(true);
         try {
-            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays);
+            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId);
             
             // Determine new escalation level based on document sent
             let newLevel = claim.escalation_level;
@@ -1105,6 +1105,20 @@ const ClaimDetail = () => {
                     <div style={{ backgroundColor: '#F3F4F6', padding: '12px', borderRadius: '8px', marginBottom: '20px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
                         Erzeugt ein rechtssicheres PDF inklusive Forderungsaufstellung und Zinsberechnung auf Basis der Vorlage. Es wird automatisch ein Historien-Eintrag erstellt.
                     </div>
+
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Was soll gemahnt werden?</label>
+                    <select 
+                        value={pdfForm.targetItemId || ''} 
+                        onChange={(e) => setPdfForm({...pdfForm, targetItemId: e.target.value || null})}
+                        style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid #D1D5DB', marginBottom: '16px', fontSize: '0.95rem' }}
+                    >
+                        <option value="">Gesamte Akte (Alle offenen Positionen)</option>
+                        {items.filter(i => i.open_amount > 0).map(i => (
+                            <option key={i.claim_item_id} value={i.claim_item_id}>
+                                {i.claim_items?.description || i.claim_items?.item_type} ({formatCurrency(i.open_amount)})
+                            </option>
+                        ))}
+                    </select>
 
                     <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Dokumenttyp</label>
                     <select 

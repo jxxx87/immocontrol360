@@ -11,7 +11,7 @@ const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('de-DE');
 };
 
-export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote) => {
+export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId) => {
     const doc = new jsPDF('p', 'mm', 'a4');
     const margin = 20;
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -122,11 +122,50 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     doc.text(`Sehr geehrte/r ${tenantName},`, margin, yPos);
     yPos += 10;
     
+    // Check if single item
+    let activeItems = items;
+    let isSingleItem = false;
+    let activeTotals = { ...totals };
+    
+    if (targetItemId) {
+        const item = items.find(i => i.claim_item_id === targetItemId);
+        if (item) {
+            activeItems = [item];
+            isSingleItem = true;
+            
+            // Calculate interest for this specific item
+            const endDate = new Date();
+            const interestRate = claim.interest_rate || 8.62;
+            let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
+            fM.setDate(fM.getDate() + 3);
+            if (fM > endDate) fM = endDate;
+            const diffTime = Math.max(0, endDate - fM);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const itemInterest = (item.open_amount * interestRate * diffDays) / (100 * 365);
+            
+            activeTotals = {
+                current_principal_open: item.open_amount,
+                total_interest_open: itemInterest,
+                total_fees_open: totals.total_fees_open, // We carry over the full claim fees to this dunning? Yes, usually they are for this letter.
+                total_due: item.open_amount + itemInterest + totals.total_fees_open
+            };
+        }
+    }
+
     // Create text lines for formatting
     const leaseStart = claim.leases?.start_date ? formatDate(claim.leases.start_date) : 'Mietbeginn';
-    const intro1 = `zwischen uns besteht seit dem ${leaseStart} ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.\n\nDie Miete ist nach § 556b Abs. 1 BGB zu Beginn, `;
-    const introBold = `spätestens bis zum dritten Werktag`;
-    const intro2 = ` des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.`;
+    let intro1, introBold, intro2;
+
+    if (isSingleItem) {
+        const desc = activeItems[0].claim_items?.description || activeItems[0].claim_items?.item_type;
+        intro1 = `zwischen uns besteht seit dem ${leaseStart} ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der Position "${desc}" besteht aktuell ein Zahlungsrückstand.\n\nTrotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen.`;
+        introBold = ``;
+        intro2 = ``;
+    } else {
+        intro1 = `zwischen uns besteht seit dem ${leaseStart} ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.\n\nDie Miete ist nach § 556b Abs. 1 BGB zu Beginn, `;
+        introBold = `spätestens bis zum dritten Werktag`;
+        intro2 = ` des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.`;
+    }
     
     // First part
     const splitIntro1 = doc.splitTextToSize(intro1, usableWidth);
@@ -137,29 +176,33 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const lastLineText1 = splitIntro1[splitIntro1.length - 1];
     let currentX = margin + doc.getTextWidth(lastLineText1);
     
-    // Bold part
-    doc.setFont('helvetica', 'bold');
-    doc.text(introBold, currentX, yPos);
-    currentX += doc.getTextWidth(introBold);
-    
-    // Remaining part
-    doc.setFont('helvetica', 'normal');
-    const intro2Words = intro2.split(' ');
-    let currentLine = '';
-    for (let word of intro2Words) {
-        if (word === '') continue;
-        const wordWithSpace = currentLine.length === 0 && word.startsWith(',') ? word : ' ' + word;
-        if (currentX + doc.getTextWidth(currentLine + wordWithSpace) > margin + usableWidth) {
-            doc.text(currentLine, currentX, yPos);
-            yPos += 5;
-            currentX = margin;
-            currentLine = word; // Start new line
-        } else {
-            currentLine += wordWithSpace;
+    if (introBold) {
+        // Bold part
+        doc.setFont('helvetica', 'bold');
+        doc.text(introBold, currentX, yPos);
+        currentX += doc.getTextWidth(introBold);
+        
+        // Remaining part
+        doc.setFont('helvetica', 'normal');
+        const intro2Words = intro2.split(' ');
+        let currentLine = '';
+        for (let word of intro2Words) {
+            if (word === '') continue;
+            const wordWithSpace = currentLine.length === 0 && word.startsWith(',') ? word : ' ' + word;
+            if (currentX + doc.getTextWidth(currentLine + wordWithSpace) > margin + usableWidth) {
+                doc.text(currentLine, currentX, yPos);
+                yPos += 5;
+                currentX = margin;
+                currentLine = word; // Start new line
+            } else {
+                currentLine += wordWithSpace;
+            }
         }
-    }
-    if (currentLine) {
-        doc.text(currentLine, currentX, yPos);
+        if (currentLine) {
+            doc.text(currentLine, currentX, yPos);
+            yPos += 10;
+        }
+    } else {
         yPos += 10;
     }
     
@@ -175,9 +218,9 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         tableWidth: usableWidth * 0.8,
         theme: 'plain',
         body: [
-            ['Miet-/Betriebskosten-/Heizkostenrückstand', formatCurrency(totals.current_principal_open)],
-            [`Verzugszinsen bis einschließlich ${dateStr}`, formatCurrency(totals.total_interest_open)],
-            ['Mahnauslagen für dieses Schreiben', formatCurrency(totals.total_fees_open)]
+            ['Miet-/Betriebskosten-/Heizkostenrückstand', formatCurrency(activeTotals.current_principal_open)],
+            [`Verzugszinsen bis einschließlich ${dateStr}`, formatCurrency(activeTotals.total_interest_open)],
+            ['Mahnauslagen für dieses Schreiben', formatCurrency(activeTotals.total_fees_open)]
         ],
         columnStyles: {
             0: { fontStyle: 'normal', textColor: [0, 0, 0] },
@@ -194,7 +237,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         tableWidth: usableWidth * 0.8,
         theme: 'plain',
         body: [
-            [`Gesamtforderung zum ${dateStr}`, formatCurrency(totals.total_due)]
+            [`Gesamtforderung zum ${dateStr}`, formatCurrency(activeTotals.total_due)]
         ],
         columnStyles: {
             0: { fontStyle: 'bold', textColor: [0, 0, 0] },
@@ -217,7 +260,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const nextDay = new Date(deadlineDate);
     nextDay.setDate(nextDay.getDate() + 1);
 
-    const introBank = `Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von ${formatCurrency(totals.total_due)} spätestens bis zum ${deadlineDate.toLocaleDateString('de-DE')} auf folgendes Konto:`;
+    const introBank = `Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von ${formatCurrency(activeTotals.total_due)} spätestens bis zum ${deadlineDate.toLocaleDateString('de-DE')} auf folgendes Konto:`;
     const splitIntroBank = doc.splitTextToSize(introBank, usableWidth);
     doc.text(splitIntroBank, margin, yPos);
     yPos += splitIntroBank.length * 5 + 5;
@@ -312,13 +355,13 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         startY: currentY,
         margin: { left: margin, right: margin },
         head: [['Position', 'Sollmiete', 'Zahlung / Anrechnung', 'Offener Betrag']],
-        body: items.map(item => [
+        body: activeItems.map(item => [
             item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
             formatCurrency(item.original_amount),
             item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '0,00 €',
             formatCurrency(item.open_amount)
         ]),
-        foot: [['Summe offener Miet-/Betriebskosten-/Heizkostenbetrag', '', '', formatCurrency(totals.current_principal_open)]],
+        foot: [['Summe offener Miet-/Betriebskosten-/Heizkostenbetrag', '', '', formatCurrency(activeTotals.current_principal_open)]],
         headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
         styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
@@ -354,7 +397,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const interestRate = claim.interest_rate || 8.62;
     let totalCalculatedInterest = 0;
 
-    const interestBody = items.filter(item => item.open_amount > 0).map(item => {
+    const interestBody = activeItems.filter(item => item.open_amount > 0).map(item => {
         let fM = new Date(item.claim_items?.due_date || item.claim_items?.period_month || claim.interest_start_date || new Date());
         // Fälligkeitstoleranz (3 Werktage) hier vereinfacht als +3 Tage
         fM.setDate(fM.getDate() + 3);
@@ -462,14 +505,15 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const eventMetadata = {
         document_type: documentType,
         snapshot_date: docDate.toISOString(),
-        principal_snapshot: totals.current_principal_open,
-        fees_snapshot: totals.total_fees_open,
-        interest_snapshot: totals.total_interest_open,
-        total_snapshot: totals.total_due,
+        principal_snapshot: activeTotals.current_principal_open,
+        fees_snapshot: activeTotals.total_fees_open,
+        interest_snapshot: activeTotals.total_interest_open,
+        total_snapshot: activeTotals.total_due,
         deadline: deadlineDate.toISOString(),
         document_path: fileName,
         document_sha256: document_sha256,
-        template_reference: "Abmahnung_Zahlungsverzug_Marco_Weber_2026-05-19(1).docx"
+        template_reference: "Abmahnung_Zahlungsverzug_Marco_Weber_2026-05-19(1).docx",
+        target_item_id: targetItemId || null
     };
 
     // Save to claim_events (Deduplicate by documentType)

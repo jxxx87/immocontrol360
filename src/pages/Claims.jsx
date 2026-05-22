@@ -296,15 +296,42 @@ const Claims = () => {
                 }
             });
 
-            // We do not calculate delay interest on manual items automatically here, unless they have a due date (for now, 0).
+            manualItems.forEach(item => {
+                const openAmount = Number(item.amount || 0);
+                if (item.dueDate && openAmount > 0) {
+                    const dueDate = new Date(item.dueDate);
+                    if (todayDate > dueDate) {
+                        const diffTime = todayDate - dueDate;
+                        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                        calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
+                    }
+                }
+            });
+
+            let finalManualItems = [...manualItems];
+            const feeAmount = parseFloat(form.fee_amount) || 0;
+            if (feeAmount > 0) {
+                finalManualItems.push({
+                    description: 'Mahnkosten',
+                    amount: feeAmount,
+                    item_type: 'fee'
+                });
+            }
+            if (calculatedInterest > 0) {
+                finalManualItems.push({
+                    description: 'Verzugszinsen (bis heute)',
+                    amount: calculatedInterest,
+                    item_type: 'interest'
+                });
+            }
 
             const { error: rpcError } = await supabase.rpc('create_claim_advanced', {
                 p_lease_id: targetLeaseId,
                 p_rent_ledger_ids: selectedLedgerIds.length > 0 ? selectedLedgerIds : null,
-                p_manual_items: manualItems,
-                p_fee_amount: parseFloat(form.fee_amount) || 0,
+                p_manual_items: finalManualItems,
+                p_fee_amount: 0,
                 p_interest_rate: parseFloat(form.interest_rate) || 0,
-                p_accumulated_interest: calculatedInterest,
+                p_accumulated_interest: 0,
                 p_interest_start_date: todayDate.toISOString().split('T')[0],
                 p_deadline_days: parseInt(form.deadline_days, 10) || 7,
                 p_note: form.note || ''
@@ -892,7 +919,7 @@ const Claims = () => {
                                                 <Button 
                                                     variant="secondary" 
                                                     size="sm"
-                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: 0, item_type: 'other' }])}
+                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: 0, item_type: 'other', dueDate: new Date().toISOString().split('T')[0] }])}
                                                     style={{ padding: '4px 8px', fontSize: '0.8rem' }}
                                                 >
                                                     <Plus size={14} /> Position hinzufügen
@@ -910,6 +937,17 @@ const Claims = () => {
                                                             setManualItems(newItems);
                                                         }}
                                                         style={{ flex: 2 }}
+                                                    />
+                                                    <Input 
+                                                        type="date"
+                                                        value={item.dueDate || ''}
+                                                        onChange={e => {
+                                                            const newItems = [...manualItems];
+                                                            newItems[idx].dueDate = e.target.value;
+                                                            setManualItems(newItems);
+                                                        }}
+                                                        style={{ flex: 1 }}
+                                                        title="Fällig seit"
                                                     />
                                                     <Input 
                                                         type="number" step="0.01" 
