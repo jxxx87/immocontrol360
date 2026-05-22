@@ -72,6 +72,8 @@ const InvestorPortal = () => {
     // Data State
     const [properties, setProperties] = useState([]);
     const [loans, setLoans] = useState([]);
+    const [economicUnits, setEconomicUnits] = useState([]);
+    const [weEditModal, setWeEditModal] = useState(null);
     const [stats, setStats] = useState({
         netCashflow: 0,
         ltv: 0,
@@ -203,8 +205,12 @@ const InvestorPortal = () => {
             }
             const { data: loanData } = loanQuery ? await loanQuery : { data: [] };
 
+            let weQuery = supabase.from('economic_units').select('*');
+            const { data: weData } = await weQuery;
+
             setProperties(propData || []);
             setLoans(loanData || []);
+            setEconomicUnits(weData || []);
             calculateCockpitStats(propData || [], loanData || []);
 
             // Fetch renovation stats for cockpit card
@@ -370,12 +376,21 @@ const InvestorPortal = () => {
         });
 
         Object.values(groups).forEach(g => {
-            if (g.properties.length === 1) {
+            const weRow = economicUnits.find(eu => eu.id === g.economic_unit_id);
+            if (g.properties.length === 1 && !weRow) {
                 result.push(g.properties[0]);
-            } else if (g.properties.length > 1) {
+            } else if (g.properties.length > 0) {
                 const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
-                g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                g.street = weRow?.name || `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
                 g.house_number = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                
+                // Override calculated sums with explicit WE values if they are > 0
+                if (weRow) {
+                    if (parseFloat(weRow.total_investment_cost) > 0) g.total_investment_cost = parseFloat(weRow.total_investment_cost);
+                    if (parseFloat(weRow.equity_invested) > 0) g.equity_invested = parseFloat(weRow.equity_invested);
+                    if (parseFloat(weRow.market_value_total) > 0) g.market_value_total = parseFloat(weRow.market_value_total);
+                }
+                
                 result.push(g);
             }
         });
@@ -398,6 +413,17 @@ const InvestorPortal = () => {
             alert('Fehler beim Speichern: ' + err.message);
         } finally {
             setSaving(null);
+        }
+    };
+
+    const handleUpdateWE = async (id, updates) => {
+        try {
+            const { error } = await supabase.from('economic_units').update(updates).eq('id', id);
+            if (error) throw error;
+            const updatedWEs = economicUnits.map(eu => eu.id === id ? { ...eu, ...updates } : eu);
+            setEconomicUnits(updatedWEs);
+        } catch (err) {
+            alert('Fehler beim Speichern der Wirtschaftseinheit: ' + err.message);
         }
     };
 
@@ -788,9 +814,12 @@ const InvestorPortal = () => {
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
-                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
-                                                            onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
+                                                            onClick={(e) => { 
+                                                                e.stopPropagation(); 
+                                                                if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
+                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                            }}
                                                             style={{
                                                                 background: 'none', border: '1px dashed var(--primary-color)',
                                                                 color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
@@ -800,14 +829,16 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
-                                                        )
                                                     )}
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
-                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
-                                                            onClick={(e) => { e.stopPropagation(); navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); }}
+                                                            onClick={(e) => { 
+                                                                e.stopPropagation(); 
+                                                                if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
+                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                            }}
                                                             style={{
                                                                 background: 'none', border: '1px dashed var(--primary-color)',
                                                                 color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
@@ -817,7 +848,6 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
-                                                        )
                                                     )}
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
@@ -830,12 +860,15 @@ const InvestorPortal = () => {
                                                     {marketValue > 0 ? (
                                                         formatCurrency(marketValue)
                                                     ) : (
-                                                        p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                setDetailProperty(p);
-                                                                setIsDetailOpen(true);
+                                                                if (p.isGroup) {
+                                                                    setWeEditModal({ ...p, field: 'market_value_total' });
+                                                                } else {
+                                                                    setDetailProperty(p);
+                                                                    setIsDetailOpen(true);
+                                                                }
                                                             }}
                                                             style={{
                                                                 background: 'none', border: '1px dashed var(--primary-color)',
@@ -846,7 +879,6 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
-                                                        )
                                                     )}
                                                 </td>
                                                 <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
@@ -953,9 +985,11 @@ const InvestorPortal = () => {
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                 {(parseFloat(p.total_investment_cost) || 0) > 0 ? formatCurrency(p.total_investment_cost) : (
-                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                     <button
-                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
+                                                        onClick={() => {
+                                                            if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
+                                                            else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
+                                                        }}
                                                         style={{
                                                             background: 'none', border: '1px dashed var(--primary-color)',
                                                             color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
@@ -965,7 +999,6 @@ const InvestorPortal = () => {
                                                     >
                                                         +
                                                     </button>
-                                                    )
                                                 )}
                                             </div>
                                         </div>
@@ -973,9 +1006,11 @@ const InvestorPortal = () => {
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                 {(parseFloat(p.equity_invested) || 0) > 0 ? formatCurrency(p.equity_invested) : (
-                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                     <button
-                                                        onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)}
+                                                        onClick={() => {
+                                                            if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
+                                                            else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
+                                                        }}
                                                         style={{
                                                             background: 'none', border: '1px dashed var(--primary-color)',
                                                             color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
@@ -985,7 +1020,6 @@ const InvestorPortal = () => {
                                                     >
                                                         +
                                                     </button>
-                                                    )
                                                 )}
                                             </div>
                                         </div>
@@ -1001,11 +1035,14 @@ const InvestorPortal = () => {
                                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
                                             <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                 {marketValue > 0 ? formatCurrency(marketValue) : (
-                                                    p.isGroup ? <span style={{ color: 'var(--text-secondary)' }}>—</span> : (
                                                     <button
                                                         onClick={() => {
-                                                            setDetailProperty(p);
-                                                            setIsDetailOpen(true);
+                                                            if (p.isGroup) {
+                                                                setWeEditModal({ ...p, field: 'market_value_total' });
+                                                            } else {
+                                                                setDetailProperty(p);
+                                                                setIsDetailOpen(true);
+                                                            }
                                                         }}
                                                         style={{
                                                             background: 'none', border: '1px dashed var(--primary-color)',
@@ -1016,7 +1053,6 @@ const InvestorPortal = () => {
                                                     >
                                                         +
                                                     </button>
-                                                    )
                                                 )}
                                             </div>
                                         </div>
@@ -1091,6 +1127,46 @@ const InvestorPortal = () => {
 
             {/* Detail Modal */}
             {renderDetailModal()}
+
+            {/* WE Edit Modal */}
+            {weEditModal && (
+                <Modal
+                    isOpen={!!weEditModal}
+                    onClose={() => setWeEditModal(null)}
+                    title="Wirtschaftseinheit Finanzen"
+                    footer={<Button onClick={() => setWeEditModal(null)}>Schließen</Button>}
+                >
+                    <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
+                        <CurrencyInput
+                            label="Gesamtinvestition (€)"
+                            value={weEditModal.total_investment_cost}
+                            onChange={e => {
+                                const val = e.target.value;
+                                setWeEditModal(prev => ({ ...prev, total_investment_cost: val }));
+                                handleUpdateWE(weEditModal.economic_unit_id, { total_investment_cost: val });
+                            }}
+                        />
+                        <CurrencyInput
+                            label="Eigenkapital (€)"
+                            value={weEditModal.equity_invested}
+                            onChange={e => {
+                                const val = e.target.value;
+                                setWeEditModal(prev => ({ ...prev, equity_invested: val }));
+                                handleUpdateWE(weEditModal.economic_unit_id, { equity_invested: val });
+                            }}
+                        />
+                        <CurrencyInput
+                            label="Marktwert gesamt (€)"
+                            value={weEditModal.market_value_total}
+                            onChange={e => {
+                                const val = e.target.value;
+                                setWeEditModal(prev => ({ ...prev, market_value_total: val }));
+                                handleUpdateWE(weEditModal.economic_unit_id, { market_value_total: val });
+                            }}
+                        />
+                    </div>
+                </Modal>
+            )}
         </div>
     );
 

@@ -19,6 +19,7 @@ const Loans = () => {
 
     const [loans, setLoans] = useState([]);
     const [properties, setProperties] = useState([]);
+    const [economicUnits, setEconomicUnits] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -88,9 +89,13 @@ const Loans = () => {
             }
             const { data: loanData, error: loanError } = await loanQuery;
             if (loanError) throw loanError;
+            // Fetch Economic Units
+            const { data: weData, error: weError } = await supabase.from('economic_units').select('*');
+            if (weError) throw weError;
+            setEconomicUnits(weData || []);
 
             // Process Loans (Group & Filter)
-            processLoans(loanData || [], propData || []);
+            processLoans(loanData || [], propData || [], weData || []);
 
         } catch (error) {
             console.error(error);
@@ -100,10 +105,11 @@ const Loans = () => {
         }
     };
 
-    const processLoans = (rawLoans, rawProps) => {
+    const processLoans = (rawLoans, rawProps, rawWEs) => {
         // Filter first
         const filtered = rawLoans.filter(l => {
-            if (filters.propertyId && l.property_id !== filters.propertyId) return false;
+            const lPid = l.economic_unit_id ? `we_${l.economic_unit_id}` : l.property_id;
+            if (filters.propertyId && lPid !== filters.propertyId) return false;
             if (filters.search) {
                 const term = filters.search.toLowerCase();
                 return (
@@ -133,9 +139,10 @@ const Loans = () => {
         });
 
         Object.values(propGroups).forEach(g => {
-            if (g.isGroup && g.properties.length > 1) {
+            const weRow = rawWEs.find(we => we.id === g.id);
+            if (g.isGroup && g.properties.length > 0) {
                 const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
-                g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
+                g.street = weRow?.name || `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
                 g.house_number = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
                 const cities = Array.from(new Set(g.properties.map(pr => pr.city).filter(Boolean)));
                 g.city = cities.join(', ');
@@ -144,12 +151,32 @@ const Loans = () => {
             }
         });
 
+        // Ensure empty WE groups exist if they have loans attached directly to them
+        rawWEs.forEach(we => {
+            if (!propGroups[we.id]) {
+                propGroups[we.id] = {
+                    id: we.id,
+                    isGroup: true,
+                    properties: [],
+                    street: we.name || 'Wirtschaftseinheit',
+                    house_number: '',
+                    city: ''
+                };
+            }
+        });
+
         // Group by Property or Economic Unit
         const groups = {};
 
         filtered.forEach(loan => {
-            const prop = rawProps.find(p => p.id === loan.property_id);
-            const pid = prop ? (prop.economic_unit_id || prop.id) : loan.property_id;
+            let pid = loan.property_id;
+            
+            if (loan.economic_unit_id) {
+                pid = loan.economic_unit_id;
+            } else {
+                const prop = rawProps.find(p => p.id === loan.property_id);
+                pid = prop ? (prop.economic_unit_id || prop.id) : loan.property_id;
+            }
 
             if (!groups[pid]) {
                 groups[pid] = {
@@ -276,26 +303,27 @@ const Loans = () => {
     const handleSave = async () => {
         // Validate
         let resolvedPropertyId = loanForm.property_id;
+        let resolvedWeId = null;
+
         if (!resolvedPropertyId) return alert("Bitte Immobilie wählen");
 
-        // If a WE was selected, resolve to the first property in that unit
+        // If a WE was selected, resolve to the economic unit id directly
         if (resolvedPropertyId.startsWith('we_')) {
-            const weId = resolvedPropertyId.replace('we_', '');
-            const weProps = properties.filter(p => p.economic_unit_id === weId);
-            if (weProps.length === 0) return alert("Keine Immobilie in dieser Wirtschaftseinheit gefunden");
-            resolvedPropertyId = weProps[0].id;
+            resolvedWeId = resolvedPropertyId.replace('we_', '');
+            resolvedPropertyId = null; // property_id can be null if it's attached to WE
         }
 
         if (!loanForm.start_date) return alert("Bitte Startdatum eingeben");
 
         setIsSaving(true);
         try {
-            const selectedProp = properties.find(p => p.id === resolvedPropertyId);
+            const selectedProp = properties.find(p => p.id === loanForm.property_id);
 
             const payload = {
                 user_id: user.id,
-                portfolio_id: selectedProp?.portfolio_id,
+                portfolio_id: selectedProp?.portfolio_id || null, // Will be null if it's a WE without property match but WE belongs to user
                 property_id: resolvedPropertyId,
+                economic_unit_id: resolvedWeId,
                 bank_name: loanForm.bank_name,
                 account_number: loanForm.account_number,
                 loan_amount: loanForm.loan_amount ? parseFloat(loanForm.loan_amount) : null,
@@ -340,7 +368,7 @@ const Loans = () => {
     const openEdit = (loan) => {
         setEditingLoan(loan);
         setLoanForm({
-            property_id: loan.property_id,
+            property_id: loan.economic_unit_id ? `we_${loan.economic_unit_id}` : loan.property_id,
             bank_name: loan.bank_name,
             account_number: loan.account_number || '',
             loan_amount: loan.loan_amount,
@@ -445,7 +473,26 @@ const Loans = () => {
                             }}
                         >
                             <option value="">Alle Immobilien</option>
-                            {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.city}</option>)}
+                            {(() => {
+                                const weGroups = {};
+                                const standalone = [];
+                                properties.forEach(p => {
+                                    if (p.economic_unit_id) {
+                                        if (!weGroups[p.economic_unit_id]) weGroups[p.economic_unit_id] = [];
+                                        weGroups[p.economic_unit_id].push(p);
+                                    } else standalone.push(p);
+                                });
+
+                                const options = [];
+                                Object.entries(weGroups).forEach(([weId, weProps]) => {
+                                    const weRow = economicUnits.find(eu => eu.id === weId);
+                                    const label = weRow?.name || `🏢 WE: ${Array.from(new Set(weProps.map(p => p.street))).join(', ')}`;
+                                    options.push(<option key={`we_${weId}`} value={`we_${weId}`} style={{ fontWeight: 600 }}>{label}</option>);
+                                    weProps.forEach(p => options.push(<option key={p.id} value={p.id}>  └ {p.street} {p.house_number}</option>));
+                                });
+                                standalone.forEach(p => options.push(<option key={p.id} value={p.id}>{p.street} {p.house_number}</option>));
+                                return options;
+                            })()}
                         </select>
                     </div>
                     <div style={{ flex: 1, minWidth: '200px' }}>
@@ -681,15 +728,16 @@ const Loans = () => {
 
                                 // Add WE group options
                                 Object.entries(weGroups).forEach(([weId, weProps]) => {
-                                    if (weProps.length > 1) {
+                                    const weRow = economicUnits.find(eu => eu.id === weId);
+                                    if (weProps.length > 0 || weRow) {
                                         const streets = Array.from(new Set(weProps.map(p => p.street).filter(Boolean)));
                                         const houseNumbers = weProps.map(p => p.house_number).filter(Boolean).join(' & ');
-                                        const label = `🏢 WE: ${streets.join(', ')} ${houseNumbers}`;
+                                        const label = weRow?.name || `🏢 WE: ${streets.join(', ')} ${houseNumbers}`;
                                         options.push(<option key={`we_${weId}`} value={`we_${weId}`} style={{ fontWeight: 600 }}>{label}</option>);
                                     }
                                     // Also add individual properties within the WE
                                     weProps.forEach(p => {
-                                        options.push(<option key={p.id} value={p.id}>{weProps.length > 1 ? `  └ ` : ''}{p.street} {p.house_number}, {p.city}</option>);
+                                        options.push(<option key={p.id} value={p.id}>{weProps.length > 0 ? `  └ ` : ''}{p.street} {p.house_number}, {p.city}</option>);
                                     });
                                 });
 
