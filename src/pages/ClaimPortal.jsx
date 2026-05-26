@@ -23,20 +23,17 @@ export default function ClaimPortal() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [requestSuccess, setRequestSuccess] = useState(false);
 
-    useEffect(() => {
-        if (!token) {
-            setError('Kein gültiger Token gefunden.');
-        }
-    }, [token]);
+    // Online Payment State
+    const [paymentLoading, setPaymentLoading] = useState(false);
+    const [paymentStatus, setPaymentStatus] = useState(null); // 'success' | 'cancel'
 
-    const handleLogin = async (e) => {
-        e.preventDefault();
+    const loadClaimData = async (enteredPin) => {
         setLoading(true);
         setError(null);
         try {
             const { data, error: rpcError } = await supabase.rpc('get_public_claim_by_token', {
                 p_token: token,
-                p_pin: pin
+                p_pin: enteredPin
             });
 
             if (rpcError) throw rpcError;
@@ -44,11 +41,71 @@ export default function ClaimPortal() {
 
             setClaimData(data);
             setIsAuthenticated(true);
+            setPin(enteredPin);
+            sessionStorage.setItem(`claim_pin_${token}`, enteredPin);
         } catch (err) {
             console.error(err);
             setError(err.message || 'Zugriff verweigert. Bitte überprüfen Sie die PIN.');
+            sessionStorage.removeItem(`claim_pin_${token}`);
+            setIsAuthenticated(false);
         } finally {
             setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!token) {
+            setError('Kein gültiger Token gefunden.');
+            return;
+        }
+
+        const savedPin = sessionStorage.getItem(`claim_pin_${token}`);
+        if (savedPin) {
+            loadClaimData(savedPin);
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        const paymentParam = params.get('payment');
+        if (paymentParam) {
+            setPaymentStatus(paymentParam);
+            // URL aufräumen ohne Neuladen der Seite
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+    }, [token]);
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        await loadClaimData(pin);
+    };
+
+    const handleOnlinePayment = async () => {
+        setPaymentLoading(true);
+        setError(null);
+        try {
+            const activePin = pin || sessionStorage.getItem(`claim_pin_${token}`);
+            if (!activePin) {
+                throw new Error('Sicherheits-PIN fehlt. Bitte melden Sie sich erneut an.');
+            }
+
+            const { data, error: functionError } = await supabase.functions.invoke('create-portal-checkout-session', {
+                body: { 
+                    token, 
+                    pin: activePin, 
+                    origin: window.location.origin 
+                }
+            });
+
+            if (functionError) throw functionError;
+            if (data?.url) {
+                window.location.href = data.url;
+            } else {
+                throw new Error('Keine Checkout-URL erhalten.');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Starten der Online-Zahlung: ' + (err.message || 'Bitte versuchen Sie es später noch einmal.'));
+        } finally {
+            setPaymentLoading(false);
         }
     };
 
@@ -151,6 +208,44 @@ export default function ClaimPortal() {
                             Bitte geben Sie den Zugangscode aus Ihrem Anschreiben ein, um Ihre aktuelle Forderung einzusehen.
                         </p>
                     </div>
+                    
+                    {paymentStatus === 'success' && (
+                        <div style={{ 
+                            marginBottom: '20px', 
+                            padding: '12px 16px', 
+                            backgroundColor: '#ECFDF5', 
+                            border: '1px solid #10B981', 
+                            borderRadius: '8px', 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: '8px',
+                            textAlign: 'left'
+                        }}>
+                            <CheckCircle2 size={20} color="#059669" style={{ flexShrink: 0 }} />
+                            <div style={{ fontSize: '0.85rem', color: '#047857' }}>
+                                <strong>Zahlung erfolgreich!</strong> Ihre Zahlung wurde gestartet. Bitte loggen Sie sich ein, um den aktuellen Status zu sehen.
+                            </div>
+                        </div>
+                    )}
+                    
+                    {paymentStatus === 'cancel' && (
+                        <div style={{ 
+                            marginBottom: '20px', 
+                            padding: '12px 16px', 
+                            backgroundColor: '#FEF2F2', 
+                            border: '1px solid #EF4444', 
+                            borderRadius: '8px', 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: '8px',
+                            textAlign: 'left'
+                        }}>
+                            <Clock size={20} color="#DC2626" style={{ flexShrink: 0 }} />
+                            <div style={{ fontSize: '0.85rem', color: '#B91C1C' }}>
+                                <strong>Abgebrochen.</strong> Der Bezahlvorgang wurde abgebrochen.
+                            </div>
+                        </div>
+                    )}
 
                     <form onSubmit={handleLogin}>
                         <div style={{ marginBottom: '24px' }}>
@@ -174,11 +269,56 @@ export default function ClaimPortal() {
     }
 
     const planPreview = calculatePaymentPlan(requestOption);
+    const showStripePayment = claimData.settings?.stripe_connect_enabled && claimData.settings?.allow_stripe;
 
     return (
         <div style={{ minHeight: '100vh', backgroundColor: '#F3F4F6', padding: 'var(--spacing-xl) 16px' }}>
             <div style={{ maxWidth: '800px', margin: '0 auto' }}>
                 
+                {paymentStatus === 'success' && (
+                    <div style={{ 
+                        marginBottom: '24px', 
+                        padding: '16px 20px', 
+                        backgroundColor: '#ECFDF5', 
+                        border: '1px solid #10B981', 
+                        borderRadius: '12px', 
+                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px'
+                    }}>
+                        <CheckCircle2 size={24} color="#059669" style={{ flexShrink: 0 }} />
+                        <div>
+                            <h4 style={{ fontWeight: 600, color: '#065F46', margin: 0 }}>Zahlung erfolgreich!</h4>
+                            <p style={{ color: '#047857', fontSize: '0.9rem', margin: '4px 0 0 0', lineHeight: 1.4 }}>
+                                Ihre Zahlung wurde erfolgreich über Stripe initiiert. Der Zahlungseingang wird in Kürze verbucht.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {paymentStatus === 'cancel' && (
+                    <div style={{ 
+                        marginBottom: '24px', 
+                        padding: '16px 20px', 
+                        backgroundColor: '#FEF2F2', 
+                        border: '1px solid #EF4444', 
+                        borderRadius: '12px', 
+                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px'
+                    }}>
+                        <Clock size={24} color="#DC2626" style={{ flexShrink: 0 }} />
+                        <div>
+                            <h4 style={{ fontWeight: 600, color: '#991B1B', margin: 0 }}>Zahlung abgebrochen</h4>
+                            <p style={{ color: '#B91C1C', fontSize: '0.9rem', margin: '4px 0 0 0', lineHeight: 1.4 }}>
+                                Der Bezahlvorgang wurde abgebrochen und es wurde keine Zahlung durchgeführt.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
                 {/* Header */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '32px' }}>
                     <div style={{ width: '56px', height: '56px', backgroundColor: 'white', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
@@ -241,35 +381,127 @@ export default function ClaimPortal() {
                         </div>
                     </Card>
 
-                    {/* Action Area */}
-                    {!requestSuccess && claimData.status !== 'payment_plan_requested' && (
-                        <Card style={{ padding: '24px', backgroundColor: 'white' }}>
-                            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '8px' }}>Zahlungserleichterung</h3>
-                            <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem', lineHeight: '1.5' }}>
-                                Falls Sie den Gesamtbetrag nicht fristgerecht begleichen können, bieten wir Ihnen die Möglichkeit einer Ratenzahlung an. 
-                                Bitte beachten Sie, dass bei einer Ratenzahlung zusätzliche Bearbeitungskosten anfallen.
-                            </p>
-                            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                                <Button 
-                                    onClick={() => alert('Stripe Checkout Integration folgt hier')} 
-                                    style={{ flex: 1, minWidth: '200px', padding: '12px', fontSize: '1rem', backgroundColor: '#3B82F6', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                                >
-                                    Jetzt bezahlen (Kreditkarte / Apple Pay)
-                                </Button>
-                                {claimData.settings?.allow_installments !== false && (
-                                    <Button 
-                                        onClick={() => setShowRequestModal(true)} 
-                                        style={{ flex: 1, minWidth: '200px', padding: '12px', fontSize: '1rem', backgroundColor: '#10B981', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                                    >
-                                        <Calendar size={20} />
-                                        Ratenzahlung anfragen
-                                    </Button>
-                                )}
+                    {/* Paid State */}
+                    {claimData.totals?.total_due <= 0 && (
+                        <Card style={{ padding: '24px', backgroundColor: '#ECFDF5', border: '1px solid #10B981' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                                <CheckCircle2 size={32} color="#059669" style={{ flexShrink: 0 }} />
+                                <div>
+                                    <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#065F46', margin: 0 }}>Vollständig beglichen</h3>
+                                    <p style={{ color: '#047857', fontSize: '0.95rem', margin: '4px 0 0 0' }}>
+                                        Es stehen keine offenen Posten für diese Forderung aus. Vielen Dank für Ihre Zahlung.
+                                    </p>
+                                </div>
                             </div>
                         </Card>
                     )}
 
-                    {(requestSuccess || claimData.status === 'payment_plan_requested') && (
+                    {/* Action Area */}
+                    {!requestSuccess && claimData.status !== 'payment_plan_requested' && claimData.totals?.total_due > 0 && (
+                        (showStripePayment || claimData.settings?.allow_installments !== false) && (
+                            <Card style={{ padding: '24px', backgroundColor: 'white' }}>
+                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '8px' }}>Optionen zur Zahlungsabwicklung</h3>
+                                <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem', lineHeight: '1.5' }}>
+                                    {showStripePayment 
+                                        ? 'Sie können die ausstehende Forderung direkt sicher online bezahlen. Alternativ können Sie eine Ratenzahlung beantragen.' 
+                                        : 'Falls Sie den Gesamtbetrag nicht fristgerecht begleichen können, bieten wir Ihnen die Möglichkeit einer Ratenzahlung an. Bitte beachten Sie, dass bei einer Ratenzahlung zusätzliche Bearbeitungskosten anfallen.'}
+                                </p>
+                                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                                    {showStripePayment && (
+                                        <Button 
+                                            onClick={handleOnlinePayment} 
+                                            disabled={paymentLoading}
+                                            style={{ 
+                                                flex: 1, 
+                                                minWidth: '200px', 
+                                                padding: '14px 20px', 
+                                                fontSize: '1rem', 
+                                                fontWeight: '600',
+                                                backgroundColor: '#0F172A',
+                                                backgroundImage: 'linear-gradient(to bottom right, #1E293B, #0F172A)',
+                                                color: '#F8FAFC', 
+                                                border: '1px solid #334155',
+                                                borderRadius: '8px',
+                                                display: 'flex', 
+                                                alignItems: 'center', 
+                                                justifyContent: 'center', 
+                                                gap: '10px',
+                                                boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)',
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                                transform: paymentLoading ? 'none' : 'translateY(0)',
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                if (!paymentLoading) {
+                                                    e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #334155, #1E293B)';
+                                                    e.currentTarget.style.transform = 'translateY(-1px)';
+                                                    e.currentTarget.style.boxShadow = '0 6px 12px -2px rgba(0,0,0,0.15), 0 3px 6px -2px rgba(0,0,0,0.1)';
+                                                }
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                if (!paymentLoading) {
+                                                    e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #1E293B, #0F172A)';
+                                                    e.currentTarget.style.transform = 'translateY(0)';
+                                                    e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)';
+                                                }
+                                            }}
+                                        >
+                                            {paymentLoading ? (
+                                                <>
+                                                    <Loader2 className="animate-spin" size={18} />
+                                                    <span>Verbindung zu Stripe...</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Lock size={18} />
+                                                    <span>Jetzt online bezahlen</span>
+                                                </>
+                                            )}
+                                        </Button>
+                                    )}
+                                    {claimData.settings?.allow_installments !== false && (
+                                        <Button 
+                                            onClick={() => setShowRequestModal(true)} 
+                                            style={{ 
+                                                flex: 1, 
+                                                minWidth: '200px', 
+                                                padding: '14px 20px', 
+                                                fontSize: '1rem', 
+                                                fontWeight: '600',
+                                                backgroundColor: '#10B981', 
+                                                backgroundImage: 'linear-gradient(to bottom right, #10B981, #059669)',
+                                                color: 'white', 
+                                                border: 'none',
+                                                borderRadius: '8px',
+                                                display: 'flex', 
+                                                alignItems: 'center', 
+                                                justifyContent: 'center', 
+                                                gap: '10px',
+                                                boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)',
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #34D399, #10B981)';
+                                                e.currentTarget.style.transform = 'translateY(-1px)';
+                                                e.currentTarget.style.boxShadow = '0 6px 12px -2px rgba(0,0,0,0.15), 0 3px 6px -2px rgba(0,0,0,0.1)';
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #10B981, #059669)';
+                                                e.currentTarget.style.transform = 'translateY(0)';
+                                                e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)';
+                                            }}
+                                        >
+                                            <Calendar size={18} />
+                                            <span>Ratenzahlung anfragen</span>
+                                        </Button>
+                                    )}
+                                </div>
+                            </Card>
+                        )
+                    )}
+
+                    {(requestSuccess || claimData.status === 'payment_plan_requested') && claimData.totals?.total_due > 0 && (
                         <Card style={{ padding: '24px', backgroundColor: '#ECFDF5', border: '1px solid #10B981' }}>
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
                                 <CheckCircle2 size={24} color="#059669" style={{ marginTop: '2px' }} />

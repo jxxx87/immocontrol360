@@ -213,6 +213,42 @@ serve(async (req: Request) => {
                 const session = event.data.object;
                 console.log("mode:", session.mode, "sub:", session.subscription, "cust:", session.customer);
 
+                if (session.metadata?.payment_type === "claim_checkout") {
+                    const claimId = session.metadata.claim_id;
+                    const amount = session.metadata.claim_amount 
+                        ? parseFloat(session.metadata.claim_amount) 
+                        : (session.amount_total / 100.0);
+                    
+                    console.log(`Processing claim checkout payment: claimId=${claimId}, amount=${amount} (excluding transaction fees)`);
+
+                    // Call database RPC record_claim_payment
+                    const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/record_claim_payment`, {
+                        method: "POST",
+                        headers: {
+                            apikey: SUPABASE_KEY,
+                            Authorization: `Bearer ${SUPABASE_KEY}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            p_claim_id: claimId,
+                            p_payment_date: new Date().toISOString().split('T')[0],
+                            p_amount: amount,
+                            p_note: "Online-Zahlung via Stripe Checkout",
+                            p_installment_id: null,
+                            p_target_type: "auto",
+                            p_target_claim_item_id: null
+                        })
+                    });
+
+                    if (!rpcRes.ok) {
+                        const txt = await rpcRes.text();
+                        console.error("RPC record_claim_payment failed:", txt);
+                        throw new Error(`RPC failed: ${txt}`);
+                    }
+                    console.log(`✅ Successfully recorded payment of ${amount} EUR for claim ${claimId}`);
+                    break;
+                }
+
                 if (session.mode !== "subscription" || !session.subscription) {
                     console.warn("Not a subscription checkout, skipping.");
                     break;
@@ -319,6 +355,34 @@ serve(async (req: Request) => {
                     console.error("UPDATE ERROR:", updateError);
                 } else {
                     console.log(`✅ Updated: user ${userId}`, JSON.stringify(updateResult));
+                }
+                break;
+            }
+
+            // ═══════════════════════════════════════
+            // CONNECT ACCOUNT UPDATED
+            // ═══════════════════════════════════════
+            case "account.updated": {
+                const account = event.data.object;
+                const connectId = account.id;
+                const chargesEnabled = account.charges_enabled;
+                const detailsSubmitted = account.details_submitted;
+                
+                console.log(`account.updated: id=${connectId}, charges_enabled=${chargesEnabled}, details_submitted=${detailsSubmitted}`);
+                
+                const enabled = chargesEnabled && detailsSubmitted;
+                
+                // Update profiles where stripe_connect_id matches
+                const { data: updateRes, error: updateError } = await supabaseUpdate(
+                    "profiles",
+                    `stripe_connect_id=eq.${connectId}`,
+                    { stripe_connect_enabled: enabled, updated_at: new Date().toISOString() }
+                );
+                
+                if (updateError) {
+                    console.error(`Failed to update profile for connect account ${connectId}:`, updateError);
+                } else {
+                    console.log(`✅ Updated profile stripe_connect_enabled to ${enabled} for account ${connectId}`);
                 }
                 break;
             }

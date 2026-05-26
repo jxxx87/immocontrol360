@@ -65,27 +65,38 @@ const Claims = () => {
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
     const [portalSettings, setPortalSettings] = useState({
         claim_portal_allow_installments: true,
+        claim_portal_allow_stripe: true,
         claim_portal_installment_options: [
             { months: 3, surcharge_percent: 7.00 },
             { months: 6, surcharge_percent: 9.00 },
             { months: 12, surcharge_percent: 12.00 }
-        ]
+        ],
+        stripe_connect_id: null,
+        stripe_connect_enabled: false
     });
     const [loadingSettings, setLoadingSettings] = useState(false);
+    const [isStripeConnecting, setIsStripeConnecting] = useState(false);
 
     const loadPortalSettings = async () => {
         setLoadingSettings(true);
         try {
-            const { data, error } = await supabase.from('profiles').select('claim_portal_allow_installments, claim_portal_installment_options').eq('id', user.id).single();
+            const { data, error } = await supabase
+                .from('profiles')
+                .select('claim_portal_allow_installments, claim_portal_allow_stripe, claim_portal_installment_options, stripe_connect_id, stripe_connect_enabled')
+                .eq('id', user.id)
+                .single();
             if (error) throw error;
             if (data) {
                 setPortalSettings({
                     claim_portal_allow_installments: data.claim_portal_allow_installments ?? true,
+                    claim_portal_allow_stripe: data.claim_portal_allow_stripe ?? true,
                     claim_portal_installment_options: data.claim_portal_installment_options || [
                         { months: 3, surcharge_percent: 7.00 },
                         { months: 6, surcharge_percent: 9.00 },
                         { months: 12, surcharge_percent: 12.00 }
-                    ]
+                    ],
+                    stripe_connect_id: data.stripe_connect_id || null,
+                    stripe_connect_enabled: data.stripe_connect_enabled ?? false
                 });
             }
         } catch (err) {
@@ -95,10 +106,56 @@ const Claims = () => {
         }
     };
 
+    const handleStripeConnect = async () => {
+        setIsStripeConnecting(true);
+        try {
+            const { data, error } = await supabase.functions.invoke('stripe-connect-onboard', {
+                body: { origin: window.location.origin }
+            });
+            if (error) throw error;
+            if (data?.url) {
+                window.location.href = data.url;
+            } else {
+                throw new Error('Keine Onboarding-URL von Stripe Connect empfangen.');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Fehler bei der Verbindung mit Stripe: ' + err.message);
+        } finally {
+            setIsStripeConnecting(false);
+        }
+    };
+
+    const handleStripeDisconnect = async () => {
+        if (!window.confirm('Möchten Sie die Stripe-Verbindung wirklich trennen? Mieter können dann nicht mehr online bezahlen.')) return;
+        setIsStripeConnecting(true);
+        try {
+            const { error } = await supabase.from('profiles').update({
+                stripe_connect_id: null,
+                stripe_connect_enabled: false
+            }).eq('id', user.id);
+            
+            if (error) throw error;
+            
+            setPortalSettings(prev => ({
+                ...prev,
+                stripe_connect_id: null,
+                stripe_connect_enabled: false
+            }));
+            alert('Verbindung mit Stripe wurde getrennt.');
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Trennen der Verbindung: ' + err.message);
+        } finally {
+            setIsStripeConnecting(false);
+        }
+    };
+
     const handleSavePortalSettings = async () => {
         try {
             const { error } = await supabase.from('profiles').update({
                 claim_portal_allow_installments: portalSettings.claim_portal_allow_installments,
+                claim_portal_allow_stripe: portalSettings.claim_portal_allow_stripe,
                 claim_portal_installment_options: portalSettings.claim_portal_installment_options
             }).eq('id', user.id);
             if (error) throw error;
@@ -137,6 +194,29 @@ const Claims = () => {
         const handleClickOutside = () => setActiveDropdown(null);
         window.addEventListener('click', handleClickOutside);
         return () => window.removeEventListener('click', handleClickOutside);
+    }, []);
+
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const stripeStatus = params.get('stripe_status');
+        if (stripeStatus) {
+            // Clean URL from search params
+            const cleanUrl = window.location.pathname + (window.location.hash || '');
+            window.history.replaceState({}, document.title, cleanUrl);
+
+            if (stripeStatus === 'success') {
+                alert('Stripe-Konto erfolgreich verbunden/aktualisiert!');
+                // Auto-open settings modal to show connected state
+                loadPortalSettings().then(() => {
+                    setIsSettingsModalOpen(true);
+                });
+            } else if (stripeStatus === 'refresh') {
+                alert('Das Stripe-Onboarding wurde abgebrochen oder muss fortgesetzt werden.');
+                loadPortalSettings().then(() => {
+                    setIsSettingsModalOpen(true);
+                });
+            }
+        }
     }, []);
 
     const fetchAndMergeClaims = async () => {
@@ -1286,14 +1366,73 @@ const Claims = () => {
                                     <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#1E40AF', margin: 0 }}>Online-Bezahlung (Stripe)</h3>
                                 </div>
                                 <p style={{ fontSize: '0.85rem', color: '#1E3A8A', marginBottom: '16px' }}>
-                                    Ermöglichen Sie Mietern die sofortige Bezahlung per Kreditkarte oder Apple Pay.
+                                    Ermöglichen Sie Mietern die sofortige Bezahlung per Kreditkarte, SEPA-Lastschrift oder Apple Pay.
                                 </p>
-                                <Button 
-                                    onClick={() => alert('Die Stripe Connect Einrichtung öffnet sich hier.')} 
-                                    style={{ backgroundColor: '#635BFF', color: 'white', display: 'flex', alignItems: 'center', gap: '8px' }}
-                                >
-                                    Mit Stripe verbinden
-                                </Button>
+                                
+                                {portalSettings.stripe_connect_enabled ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#059669', fontWeight: 500, fontSize: '0.9rem' }}>
+                                            <CheckCircle2 size={18} />
+                                            <span>Erfolgreich mit Stripe verbunden</span>
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                            Stripe Konto-ID: <code style={{ backgroundColor: 'white', padding: '2px 4px', borderRadius: '4px', border: '1px solid var(--border-color)' }}>{portalSettings.stripe_connect_id}</code>
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', backgroundColor: 'white', borderRadius: '6px', border: '1px solid #BFDBFE', marginTop: '4px', marginBottom: '4px' }}>
+                                            <input 
+                                                type="checkbox" 
+                                                id="allow_stripe" 
+                                                checked={portalSettings.claim_portal_allow_stripe}
+                                                onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_allow_stripe: e.target.checked })}
+                                                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                                            />
+                                            <div>
+                                                <label htmlFor="allow_stripe" style={{ fontWeight: 600, display: 'block', cursor: 'pointer', color: '#1E3A8A' }}>Stripe Direktzahlung anbieten</label>
+                                                <span style={{ fontSize: '0.8rem', color: '#1D4ED8' }}>Mieter können offene Beträge direkt über den Portal-Link begleichen.</span>
+                                            </div>
+                                        </div>
+                                        <Button 
+                                            variant="secondary" 
+                                            onClick={handleStripeDisconnect}
+                                            disabled={isStripeConnecting}
+                                            style={{ color: '#DC2626', borderColor: '#FCA5A5', backgroundColor: '#FEF2F2', width: 'fit-content' }}
+                                        >
+                                            Verbindung trennen
+                                        </Button>
+                                    </div>
+                                ) : portalSettings.stripe_connect_id ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#D97706', fontWeight: 500, fontSize: '0.9rem' }}>
+                                            <Clock size={18} />
+                                            <span>Verbindung ausstehend (Onboarding unvollständig)</span>
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                            <Button 
+                                                onClick={handleStripeConnect}
+                                                disabled={isStripeConnecting}
+                                                style={{ backgroundColor: '#D97706', color: 'white' }}
+                                            >
+                                                {isStripeConnecting ? 'Lade...' : 'Onboarding fortsetzen'}
+                                            </Button>
+                                            <Button 
+                                                variant="secondary" 
+                                                onClick={handleStripeDisconnect}
+                                                disabled={isStripeConnecting}
+                                                style={{ color: '#DC2626', borderColor: '#FCA5A5', backgroundColor: '#FEF2F2' }}
+                                            >
+                                                Abbrechen
+                                            </Button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <Button 
+                                        onClick={handleStripeConnect} 
+                                        disabled={isStripeConnecting}
+                                        style={{ backgroundColor: '#635BFF', color: 'white', display: 'flex', alignItems: 'center', gap: '8px' }}
+                                    >
+                                        {isStripeConnecting ? 'Verbinde...' : 'Mit Stripe verbinden'}
+                                    </Button>
+                                )}
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--spacing-md)', marginTop: '24px' }}>
