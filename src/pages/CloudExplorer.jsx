@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud, UploadCloud, FolderPlus } from 'lucide-react';
+import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud, UploadCloud, FolderPlus, Trash2 } from 'lucide-react';
 import Card from '../components/ui/Card';
 
 const CloudExplorer = () => {
@@ -252,6 +252,28 @@ const CloudExplorer = () => {
         }
     };
 
+    const handleDelete = async (e, item) => {
+        e.stopPropagation();
+        const confirmDelete = window.confirm(`Möchten Sie '${item.name}' wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.`);
+        if (!confirmDelete) return;
+
+        setIsLoadingFiles(true);
+        try {
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: { action: 'delete', provider: 'onedrive', itemId: item.id }
+            });
+            
+            if (error) throw error;
+            if (data && data.error) throw new Error(data.error);
+            
+            fetchFiles(selectedProperty, currentPath);
+        } catch (err) {
+            console.error("Delete error:", err);
+            alert("Fehler beim Löschen.");
+            setIsLoadingFiles(false);
+        }
+    };
+
     if (status === 'no_connection') {
         return (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: '20px' }}>
@@ -484,7 +506,25 @@ const CloudExplorer = () => {
                                             onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
                                             title={file.name}
                                         >
-                                            <Icon size={48} color={file.isFolder ? '#FBBF24' : (isPdf ? '#EF4444' : '#3B82F6')} strokeWidth={1.5} />
+                                            <div style={{ position: 'relative' }}>
+                                                <Icon size={48} color={file.isFolder ? '#FBBF24' : (isPdf ? '#EF4444' : '#3B82F6')} strokeWidth={1.5} />
+                                                <button 
+                                                    onClick={(e) => handleDelete(e, file)}
+                                                    style={{ 
+                                                        position: 'absolute', top: '-6px', right: '-6px', 
+                                                        background: '#EF4444', color: 'white', border: 'none', 
+                                                        borderRadius: '50%', width: '22px', height: '22px', 
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                        cursor: 'pointer', opacity: 0.8, padding: 0,
+                                                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                                                    }}
+                                                    onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                                                    onMouseLeave={(e) => e.currentTarget.style.opacity = 0.8}
+                                                    title="Löschen"
+                                                >
+                                                    <Trash2 size={12} />
+                                                </button>
+                                            </div>
                                             <span style={{ fontSize: '0.85rem', fontWeight: 500, textAlign: 'center', wordBreak: 'break-word', color: 'var(--text-primary)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                                                 {file.name}
                                             </span>
