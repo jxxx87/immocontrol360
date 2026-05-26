@@ -1,6 +1,7 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { supabase } from './supabase';
+import QRCode from 'qrcode';
 
 const formatCurrency = (amount) => {
     return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount || 0);
@@ -11,7 +12,7 @@ const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('de-DE');
 };
 
-export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId) => {
+export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId, portalLinkData) => {
     const doc = new jsPDF('p', 'mm', 'a4');
     const margin = 20;
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -395,6 +396,35 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     }
     doc.setFont('helvetica', 'normal');
     yPos += 5;
+
+    // QR Code / Forderungsportal
+    if (portalLinkData && portalLinkData.token && portalLinkData.pin) {
+        if (yPos + 40 > pageHeight - margin) {
+            doc.addPage();
+            yPos = margin;
+        }
+
+        const portalUrl = portalLinkData.link || `${window.location.origin}/forderung/portal/${portalLinkData.token}`;
+        
+        try {
+            const qrDataUrl = await QRCode.toDataURL(portalUrl, { margin: 1, width: 100 });
+            doc.addImage(qrDataUrl, 'PNG', margin, yPos, 30, 30);
+            
+            doc.setFontSize(10);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Online Forderungsportal', margin + 35, yPos + 6);
+            
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'normal');
+            const portalText = `Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.\n\nZugangscode (PIN): ${portalLinkData.pin}`;
+            const splitPortalText = doc.splitTextToSize(portalText, usableWidth - 35);
+            doc.text(splitPortalText, margin + 35, yPos + 12);
+            
+            yPos += 35;
+        } catch (qrErr) {
+            console.error('Failed to generate QR code', qrErr);
+        }
+    }
 
     // Schluss
     if (yPos + 40 > pageHeight - margin) {

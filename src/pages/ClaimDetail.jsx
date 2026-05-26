@@ -8,7 +8,7 @@ import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import { 
     ArrowLeft, Calendar, FileText, Activity, AlertCircle, 
-    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2, Printer, Trash2
+    CheckCircle, MessageSquare, Clock, Edit, CheckCircle2, Printer, Trash2, Link, Globe
 } from 'lucide-react';
 import { generateClaimPdf } from '../lib/claimPdfGenerator';
 
@@ -53,6 +53,12 @@ const ClaimDetail = () => {
     
     const [paymentPlan, setPaymentPlan] = useState(null);
     const [installments, setInstallments] = useState([]);
+
+    // Portal State
+    const [claimAccessLink, setClaimAccessLink] = useState(null);
+    const [paymentPlanRequests, setPaymentPlanRequests] = useState([]);
+    const [isPortalModalOpen, setIsPortalModalOpen] = useState(false);
+    const [newPortalLink, setNewPortalLink] = useState(null);
 
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -174,6 +180,32 @@ const ClaimDetail = () => {
                 setInstallments([]);
             }
 
+            // Fetch F) claim_access_links
+            const { data: linkData, error: linkError } = await supabase
+                .from('claim_access_links')
+                .select('*')
+                .eq('claim_id', claimId)
+                .is('revoked_at', null)
+                .gt('expires_at', new Date().toISOString())
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (!linkError) {
+                setClaimAccessLink(linkData);
+            }
+
+            // Fetch G) payment_plan_requests
+            const { data: requestsData, error: requestsError } = await supabase
+                .from('payment_plan_requests')
+                .select('*')
+                .eq('claim_id', claimId)
+                .order('created_at', { ascending: false });
+
+            if (!requestsError) {
+                setPaymentPlanRequests(requestsData || []);
+            }
+
         } catch (err) {
             console.error('Error loading claim details:', err);
             setError('Forderungsakte konnte nicht geladen werden. Möglicherweise haben Sie keine Berechtigung.');
@@ -203,6 +235,88 @@ const ClaimDetail = () => {
             alert('Fehler beim Speichern der Notiz: ' + err.message);
         } finally {
             setIsSubmitting(false);
+        }
+    };
+
+    const handleCreatePortalLink = async () => {
+        setIsSubmitting(true);
+        try {
+            // Generate a random token (32 chars) and a 5-digit PIN
+            const token = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+                .map(b => b.toString(16).padStart(2, '0')).join('');
+            const pin = Math.floor(10000 + Math.random() * 90000).toString(); // 5 digits
+
+            const { data, error } = await supabase.rpc('generate_claim_access_link', {
+                p_claim_id: claim.id,
+                p_token: token,
+                p_pin: pin,
+                p_expires_days: 14 // valid for 14 days
+            });
+
+            if (error) throw error;
+            
+            // Show new token and pin to the user ONCE
+            setNewPortalLink({ token, pin, link: `${window.location.origin}/forderung/portal/${token}` });
+            
+            loadClaimData();
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Erstellen des Links: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleRevokePortalLink = async () => {
+        if (!claimAccessLink || !window.confirm('Möchten Sie diesen Link wirklich widerrufen?')) return;
+        setIsSubmitting(true);
+        try {
+            const { error } = await supabase
+                .from('claim_access_links')
+                .update({ revoked_at: new Date().toISOString() })
+                .eq('id', claimAccessLink.id);
+                
+            if (error) throw error;
+            setClaimAccessLink(null);
+            alert('Link wurde widerrufen.');
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Widerrufen: ' + err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleUpdatePaymentPlanRequest = async (requestId, newStatus) => {
+        try {
+            const { error } = await supabase
+                .from('payment_plan_requests')
+                .update({ status: newStatus, decided_at: new Date().toISOString(), decided_by: claim.user_id })
+                .eq('id', requestId);
+            
+            if (error) throw error;
+
+            if (newStatus === 'accepted') {
+                // If accepted, we might want to automatically pre-fill the manual payment plan modal
+                const request = paymentPlanRequests.find(r => r.id === requestId);
+                if (request) {
+                    setPaymentPlanForm(prev => ({
+                        ...prev,
+                        startDate: new Date(new Date().setDate(1)).toISOString().split('T')[0],
+                        installmentCount: request.requested_months,
+                        adjustmentAmount: request.adjustment_amount,
+                        calculationMethod: 'manual',
+                        note: 'Ratenzahlungsanfrage angenommen'
+                    }));
+                    setIsPaymentPlanModalOpen(true);
+                }
+            } else if (newStatus === 'rejected') {
+                alert('Anfrage wurde abgelehnt.');
+            }
+            loadClaimData();
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Aktualisieren der Anfrage.');
         }
     };
 
@@ -427,7 +541,7 @@ const ClaimDetail = () => {
     const handleGeneratePdf = async () => {
         setIsSubmitting(true);
         try {
-            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId);
+            await generateClaimPdf(claim, totals, items, pdfForm.type, pdfForm.deadlineDays, '', pdfForm.targetItemId, claimAccessLink);
             
             // Determine new escalation level based on document sent
             let newLevel = claim.escalation_level;
@@ -994,6 +1108,68 @@ const ClaimDetail = () => {
                             )}
                         </div>
                     </Card>
+
+                    {/* Ratenzahlungsanfragen */}
+                    {paymentPlanRequests.length > 0 && (
+                        <Card>
+                            <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#F0FDF4' }}>
+                                <Globe size={20} color="#059669" />
+                                <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0, color: '#065F46' }}>Ratenzahlungsanfragen (Portal)</h2>
+                            </div>
+                            <div style={{ padding: '24px' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                    {paymentPlanRequests.map(request => (
+                                        <div key={request.id} style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '16px', backgroundColor: request.status === 'requested' ? '#FFFBEB' : '#F9FAFB' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '1.05rem', color: 'var(--text-primary)' }}>{request.requested_months} Monate Laufzeit</div>
+                                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Angefragt am: {formatDate(request.created_at)}</div>
+                                                </div>
+                                                <Badge variant={request.status === 'requested' ? 'warning' : request.status === 'accepted' ? 'success' : 'neutral'}>
+                                                    {request.status === 'requested' ? 'Neu / Offen' : request.status === 'accepted' ? 'Angenommen' : request.status === 'rejected' ? 'Abgelehnt' : 'Storniert'}
+                                                </Badge>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px', backgroundColor: 'white', padding: '12px', borderRadius: '6px', border: '1px solid #E5E7EB' }}>
+                                                <div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Vorgeschlagene Rate</div>
+                                                    <div style={{ fontWeight: 600 }}>{formatCurrency(request.requested_rate)} / Monat</div>
+                                                </div>
+                                                <div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Aufschlag</div>
+                                                    <div style={{ fontWeight: 500 }}>{formatCurrency(request.adjustment_amount)}</div>
+                                                </div>
+                                                <div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Gesamtbetrag</div>
+                                                    <div style={{ fontWeight: 600, color: '#166534' }}>{formatCurrency(request.requested_total)}</div>
+                                                </div>
+                                            </div>
+                                            {request.tenant_message && (
+                                                <div style={{ padding: '12px', backgroundColor: 'white', borderLeft: '3px solid #D1D5DB', marginBottom: '16px', fontSize: '0.9rem', fontStyle: 'italic' }}>
+                                                    "{request.tenant_message}"
+                                                </div>
+                                            )}
+                                            {request.status === 'requested' && (
+                                                <div style={{ display: 'flex', gap: '12px' }}>
+                                                    <Button 
+                                                        onClick={() => handleUpdatePaymentPlanRequest(request.id, 'accepted')}
+                                                        style={{ backgroundColor: '#10B981', color: 'white' }}
+                                                    >
+                                                        Annehmen
+                                                    </Button>
+                                                    <Button 
+                                                        variant="secondary"
+                                                        onClick={() => handleUpdatePaymentPlanRequest(request.id, 'rejected')}
+                                                    >
+                                                        Ablehnen
+                                                    </Button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </Card>
+                    )}
                 </div>
 
                 {/* RIGHT PANEL */}
@@ -1034,6 +1210,24 @@ const ClaimDetail = () => {
                             >
                                 <MessageSquare size={16} /> Notiz hinzufügen
                             </Button>
+                            {!claimAccessLink ? (
+                                <Button 
+                                    variant="secondary" 
+                                    style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
+                                    onClick={handleCreatePortalLink}
+                                    disabled={isSubmitting || isLocked}
+                                >
+                                    <Globe size={16} /> Portal-Link erstellen
+                                </Button>
+                            ) : (
+                                <Button 
+                                    variant="secondary" 
+                                    style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', color: '#1D4ED8', backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' }}
+                                    onClick={() => setIsPortalModalOpen(true)}
+                                >
+                                    <Globe size={16} /> Portal-Link anzeigen
+                                </Button>
+                            )}
                             <Button 
                                 variant="secondary" 
                                 style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px' }}
@@ -1191,6 +1385,24 @@ const ClaimDetail = () => {
                         value={pdfForm.deadlineDays} 
                         onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
                     />
+
+                    {!newPortalLink && claimAccessLink && (
+                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#FEF2F2', borderRadius: '8px', border: '1px solid #FCA5A5', fontSize: '0.85rem', color: '#991B1B' }}>
+                            <strong>Hinweis zum Forderungsportal:</strong> Es existiert zwar ein aktiver Portal-Link, aber die PIN liegt nicht mehr vor. Um einen neuen QR-Code im PDF zu drucken, widerrufen Sie den Link und erstellen Sie vor der PDF-Generierung einen neuen.
+                        </div>
+                    )}
+                    
+                    {!newPortalLink && !claimAccessLink && (
+                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px', fontSize: '0.85rem', color: '#4B5563' }}>
+                            <strong>Hinweis:</strong> Erstellen Sie vorab einen "Portal-Link", um automatisch einen QR-Code für den Mieter in das PDF einzubauen.
+                        </div>
+                    )}
+
+                    {newPortalLink && (
+                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F0FDF4', borderRadius: '8px', border: '1px solid #BBF7D0', fontSize: '0.85rem', color: '#166534' }}>
+                            <strong>Portal-Link aktiv:</strong> QR-Code und Zugangscode (PIN: {newPortalLink.pin}) werden automatisch auf der ersten Seite des PDFs abgedruckt.
+                        </div>
+                    )}
                     
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                         <Button variant="secondary" onClick={() => setIsPdfModalOpen(false)}>Abbrechen</Button>
@@ -1519,6 +1731,73 @@ const ClaimDetail = () => {
                         <Button variant="secondary" onClick={() => setIsPaymentPlanModalOpen(false)} disabled={isSubmitting}>Abbrechen</Button>
                         <Button onClick={handleCreatePaymentPlan} disabled={isSubmitting || !paymentPlanForm.startDate || !paymentPlanForm.installmentCount}>
                             {isSubmitting ? 'Wird gespeichert...' : 'Vereinbarung anlegen'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* Portal Link Modal */}
+            <Modal isOpen={isPortalModalOpen || !!newPortalLink} onClose={() => { setIsPortalModalOpen(false); setNewPortalLink(null); }} title="Forderungsportal">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                    <div style={{ padding: '16px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE' }}>
+                        <h3 style={{ fontSize: '1.05rem', fontWeight: 600, color: '#1E40AF', marginBottom: '8px' }}>Zugang zum Forderungsportal</h3>
+                        <p style={{ fontSize: '0.9rem', color: '#1E3A8A', marginBottom: '16px' }}>
+                            Der Mieter kann über diesen Link und die PIN seine aktuelle Forderung einsehen und eine Ratenzahlung anfragen.
+                        </p>
+                        
+                        {(newPortalLink || claimAccessLink) && (
+                            <>
+                                <div style={{ marginBottom: '16px' }}>
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#1E40AF', marginBottom: '4px' }}>Link (URL)</label>
+                                    <div style={{ padding: '8px 12px', backgroundColor: 'white', border: '1px solid #BFDBFE', borderRadius: '4px', wordBreak: 'break-all', fontSize: '0.9rem' }}>
+                                        {newPortalLink?.link || `${window.location.origin}/forderung/portal/--- (Token nur bei Erstellung sichtbar)`}
+                                    </div>
+                                </div>
+                                
+                                {newPortalLink && (
+                                    <div style={{ marginBottom: '16px' }}>
+                                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#1E40AF', marginBottom: '4px' }}>PIN / Zugangscode</label>
+                                        <div style={{ padding: '12px', backgroundColor: '#FEF3C7', border: '2px dashed #F59E0B', borderRadius: '4px', fontSize: '1.25rem', fontWeight: 700, textAlign: 'center', letterSpacing: '4px' }}>
+                                            {newPortalLink.pin}
+                                        </div>
+                                        <p style={{ fontSize: '0.75rem', color: '#B45309', marginTop: '4px', textAlign: 'center' }}>
+                                            Notieren Sie sich diese PIN. Sie wird aus Sicherheitsgründen nicht mehr im System angezeigt!
+                                        </p>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                    
+                    {claimAccessLink && !newPortalLink && (
+                        <div style={{ padding: '16px', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ color: 'var(--text-secondary)' }}>Status:</span>
+                                <Badge variant="success">Aktiv</Badge>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                <span style={{ color: 'var(--text-secondary)' }}>Gültig bis:</span>
+                                <span style={{ fontWeight: 500 }}>{formatDate(claimAccessLink.expires_at)}</span>
+                            </div>
+                            {claimAccessLink.last_used_at && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Zuletzt aufgerufen:</span>
+                                    <span style={{ fontWeight: 500 }}>{new Date(claimAccessLink.last_used_at).toLocaleString('de-DE')}</span>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px' }}>
+                        {claimAccessLink ? (
+                            <Button variant="secondary" onClick={handleRevokePortalLink} style={{ color: '#DC2626', borderColor: '#FCA5A5' }} disabled={isSubmitting}>
+                                Link widerrufen
+                            </Button>
+                        ) : (
+                            <div></div>
+                        )}
+                        <Button onClick={() => { setIsPortalModalOpen(false); setNewPortalLink(null); }}>
+                            Schließen
                         </Button>
                     </div>
                 </div>
