@@ -399,28 +399,75 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
     // QR Code / Forderungsportal
     if (portalLinkData && portalLinkData.token && portalLinkData.pin) {
-        if (yPos + 40 > pageHeight - margin) {
-            doc.addPage();
-            yPos = margin;
-        }
-
         const portalUrl = portalLinkData.link || `${window.location.origin}/forderung/portal/${portalLinkData.token}`;
         
         try {
-            const qrDataUrl = await QRCode.toDataURL(portalUrl, { margin: 1, width: 100 });
-            doc.addImage(qrDataUrl, 'PNG', margin, yPos, 30, 30);
+            const qrDataUrl = await QRCode.toDataURL(portalUrl, { margin: 1, width: 120 });
+            const qrSize = 35;
             
-            doc.setFontSize(10);
+            const boxWidth = usableWidth;
+            const boxPadding = 12;
+            const textWidth = boxWidth - (boxPadding * 2);
+            
+            const titleText = 'Online Forderungsportal';
+            const infoText = 'Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.';
+            const pinText = `Zugangscode (PIN): ${portalLinkData.pin}`;
+            
+            doc.setFontSize(9.5);
+            const splitPortalText = doc.splitTextToSize(infoText, textWidth);
+            const infoLinesCount = splitPortalText.length;
+            
+            // Calculate total height of the box:
+            // Padding Top (8) + QR Code (35) + Gap (6) + Title (5) + Gap (4) + Text Lines (count * 4.5) + Gap (5) + PIN (6) + Padding Bottom (8)
+            const boxHeight = 8 + qrSize + 6 + 5 + 4 + (infoLinesCount * 4.5) + 5 + 6 + 8;
+            
+            if (yPos + boxHeight > pageHeight - margin) {
+                doc.addPage();
+                yPos = margin;
+            }
+            
+            // Draw background gray box
+            doc.setFillColor(245, 247, 250);
+            doc.rect(margin, yPos, boxWidth, boxHeight, 'F');
+            
+            // Draw dashed border
+            doc.setDrawColor(180, 187, 200);
+            doc.setLineWidth(0.4);
+            doc.setLineDashPattern([2, 2], 0);
+            doc.rect(margin, yPos, boxWidth, boxHeight, 'D');
+            doc.setLineDashPattern([], 0); // reset to solid lines
+            
+            // Add QR Code centered
+            const qrX = margin + (boxWidth - qrSize) / 2;
+            const qrY = yPos + 8;
+            doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
+            
+            // Add Title centered
+            doc.setFontSize(11);
             doc.setFont('helvetica', 'bold');
-            doc.text('Online Forderungsportal', margin + 35, yPos + 6);
+            doc.setTextColor(30, 41, 59);
+            doc.text(titleText, margin + (boxWidth / 2), qrY + qrSize + 7, { align: 'center' });
             
-            doc.setFontSize(9);
+            // Add Info Text centered
+            doc.setFontSize(9.5);
             doc.setFont('helvetica', 'normal');
-            const portalText = `Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.\n\nZugangscode (PIN): ${portalLinkData.pin}`;
-            const splitPortalText = doc.splitTextToSize(portalText, usableWidth - 35);
-            doc.text(splitPortalText, margin + 35, yPos + 12);
+            doc.setTextColor(71, 85, 105);
+            const textYStart = qrY + qrSize + 7 + 6;
+            for (let i = 0; i < splitPortalText.length; i++) {
+                doc.text(splitPortalText[i], margin + (boxWidth / 2), textYStart + (i * 4.5), { align: 'center' });
+            }
             
-            yPos += 35;
+            // Add PIN centered
+            doc.setFontSize(12);
+            doc.setFont('helvetica', 'bold');
+            doc.setTextColor(30, 41, 59);
+            const pinY = textYStart + (infoLinesCount * 4.5) + 4;
+            doc.text(pinText, margin + (boxWidth / 2), pinY, { align: 'center' });
+            
+            // Reset text color to black for following text
+            doc.setTextColor(0, 0, 0);
+            
+            yPos += boxHeight;
         } catch (qrErr) {
             console.error('Failed to generate QR code', qrErr);
         }
