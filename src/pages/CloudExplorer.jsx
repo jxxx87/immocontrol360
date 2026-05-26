@@ -142,27 +142,31 @@ const CloudExplorer = () => {
         init();
     }, []);
 
-    const mockRootFolders = [
-        { id: '1', name: 'Rechnungen', type: 'folder', icon: Folder, isFolder: true },
-        { id: '2', name: 'Mietverträge', type: 'folder', icon: Folder, isFolder: true },
-        { id: '3', name: 'Bilder', type: 'folder', icon: Folder, isFolder: true },
-        { id: '4', name: 'Schriftverkehr', type: 'folder', icon: Folder, isFolder: true },
-        { id: '5', name: 'Nebenkosten', type: 'folder', icon: Folder, isFolder: true },
-        { id: '6', name: 'Versicherungen', type: 'folder', icon: Folder, isFolder: true },
-        { id: '7', name: 'Energieausweise', type: 'folder', icon: Folder, isFolder: true }
-    ];
+    const fetchFiles = async (property, pathArray) => {
+        setIsLoadingFiles(true);
+        try {
+            const subPath = pathArray.map(p => p.name).join('/');
+            const fullPath = property.displayFolderName + (subPath ? '/' + subPath : '');
+            
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: { action: 'list', provider: 'onedrive', path: fullPath }
+            });
+            
+            if (error) throw error;
+            if (data && data.error) throw new Error(data.error);
+            
+            setFiles(data.files || []);
+        } catch (err) {
+            console.error("Error fetching files:", err);
+            setFiles([]);
+        } finally {
+            setIsLoadingFiles(false);
+        }
+    };
 
     useEffect(() => {
-        if (status === 'ready' && selectedProperty) {
-            if (currentPath.length === 0) {
-                setFiles(mockRootFolders);
-            } else {
-                // Mock inner folders/files
-                setFiles([
-                    { id: 'f1', name: 'Beispieldokument.pdf', type: 'file', icon: FileText },
-                    { id: 'f2', name: 'Foto.jpg', type: 'file', icon: ImageIcon }
-                ]);
-            }
+        if (selectedProperty && status === 'ready') {
+            fetchFiles(selectedProperty, currentPath);
         }
     }, [selectedProperty, currentPath, status]);
 
@@ -171,9 +175,11 @@ const CloudExplorer = () => {
         setCurrentPath([]);
     };
 
-    const handleItemClick = (file) => {
-        if (file.type === 'folder') {
-            setCurrentPath([...currentPath, file]);
+    const handleItemClick = (item) => {
+        if (item.isFolder) {
+            setCurrentPath([...currentPath, { id: item.id, name: item.name }]);
+        } else if (item.url) {
+            window.open(item.url, '_blank');
         }
     };
 
@@ -183,6 +189,43 @@ const CloudExplorer = () => {
 
     const handleNavigateRoot = () => {
         setCurrentPath([]);
+    };
+
+    const handleUploadClick = () => {
+        if (fileInputRef.current) fileInputRef.current.click();
+    };
+
+    const handleFileChange = async (e) => {
+        const file = e.target.files[0];
+        if (!file || !selectedProperty) return;
+        
+        setIsUploading(true);
+        try {
+            const subPath = currentPath.map(p => p.name).join('/');
+            const fullPath = selectedProperty.displayFolderName + (subPath ? '/' + subPath : '');
+            
+            const formData = new FormData();
+            formData.append('action', 'upload');
+            formData.append('provider', 'onedrive');
+            formData.append('path', fullPath);
+            formData.append('file', file);
+            
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: formData
+            });
+            
+            if (error) throw error;
+            if (data && data.error) throw new Error(data.error);
+            
+            // Refresh
+            fetchFiles(selectedProperty, currentPath);
+        } catch (err) {
+            console.error("Upload error:", err);
+            alert("Fehler beim Hochladen der Datei.");
+        } finally {
+            setIsUploading(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
     };
 
     if (status === 'no_connection') {
