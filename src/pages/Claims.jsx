@@ -7,9 +7,11 @@ import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import { createPortal } from 'react-dom';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical } from 'lucide-react';
+import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical, Settings as SettingsIcon, CreditCard } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const Claims = () => {
+    const { user } = useAuth();
     const navigate = useNavigate();
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -56,6 +58,49 @@ const Claims = () => {
         accumulated_unpaid_interest: 0,
         accumulated_unpaid_fees: 0
     });
+
+    // Portal Settings States
+    const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+    const [portalSettings, setPortalSettings] = useState({
+        claim_portal_allow_installments: true,
+        claim_portal_installment_max_months: 12,
+        claim_portal_installment_surcharge_percent: 7.00
+    });
+    const [loadingSettings, setLoadingSettings] = useState(false);
+
+    const loadPortalSettings = async () => {
+        setLoadingSettings(true);
+        try {
+            const { data, error } = await supabase.from('profiles').select('claim_portal_allow_installments, claim_portal_installment_max_months, claim_portal_installment_surcharge_percent').eq('id', user.id).single();
+            if (error) throw error;
+            if (data) {
+                setPortalSettings({
+                    claim_portal_allow_installments: data.claim_portal_allow_installments ?? true,
+                    claim_portal_installment_max_months: data.claim_portal_installment_max_months ?? 12,
+                    claim_portal_installment_surcharge_percent: data.claim_portal_installment_surcharge_percent ?? 7.00
+                });
+            }
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoadingSettings(false);
+        }
+    };
+
+    const handleSavePortalSettings = async () => {
+        try {
+            const { error } = await supabase.from('profiles').update({
+                claim_portal_allow_installments: portalSettings.claim_portal_allow_installments,
+                claim_portal_installment_max_months: parseInt(portalSettings.claim_portal_installment_max_months, 10),
+                claim_portal_installment_surcharge_percent: parseFloat(portalSettings.claim_portal_installment_surcharge_percent)
+            }).eq('id', user.id);
+            if (error) throw error;
+            setIsSettingsModalOpen(false);
+            alert('Einstellungen gespeichert.');
+        } catch (err) {
+            alert('Fehler: ' + err.message);
+        }
+    };
 
     useEffect(() => {
         loadData();
@@ -530,10 +575,21 @@ const Claims = () => {
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwalten Sie Mietrückstände, Mahnungen und Ratenzahlungen.</p>
                 </div>
-                <Button onClick={openCreateModal} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Plus size={18} />
-                    Forderung erstellen
-                </Button>
+                </div>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                    <Button 
+                        variant="secondary" 
+                        onClick={() => { loadPortalSettings(); setIsSettingsModalOpen(true); }} 
+                        style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                    >
+                        <SettingsIcon size={18} />
+                        Portal-Einstellungen
+                    </Button>
+                    <Button onClick={openCreateModal} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Plus size={18} />
+                        Forderung erstellen
+                    </Button>
+                </div>
             </div>
 
             {/* KPIs */}
@@ -1089,6 +1145,75 @@ const Claims = () => {
                 </>,
                 document.body
             )}
+
+            {/* Portal Settings Modal */}
+            <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="Forderungsportal Einstellungen">
+                <div style={{ padding: 'var(--spacing-lg)' }}>
+                    {loadingSettings ? (
+                        <div style={{ textAlign: 'center', padding: '20px' }}>Lade Einstellungen...</div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-lg)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '16px', backgroundColor: '#F9FAFB', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                <input 
+                                    type="checkbox" 
+                                    id="allow_installments" 
+                                    checked={portalSettings.claim_portal_allow_installments}
+                                    onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_allow_installments: e.target.checked })}
+                                    style={{ width: '18px', height: '18px' }}
+                                />
+                                <div>
+                                    <label htmlFor="allow_installments" style={{ fontWeight: 600, display: 'block', cursor: 'pointer' }}>Ratenzahlung im Portal anbieten</label>
+                                    <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Mieter können Ratenzahlungen selbstständig anfragen.</span>
+                                </div>
+                            </div>
+
+                            {portalSettings.claim_portal_allow_installments && (
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                                    <div>
+                                        <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Maximale Ratenanzahl</label>
+                                        <Input 
+                                            type="number" 
+                                            min="2" max="48"
+                                            value={portalSettings.claim_portal_installment_max_months}
+                                            onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_installment_max_months: e.target.value })}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Aufschlag pro Rate (%)</label>
+                                        <Input 
+                                            type="number" 
+                                            step="0.01"
+                                            value={portalSettings.claim_portal_installment_surcharge_percent}
+                                            onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_installment_surcharge_percent: e.target.value })}
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            <div style={{ padding: '16px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE', marginTop: '16px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                                    <CreditCard size={20} color="#1D4ED8" />
+                                    <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#1E40AF', margin: 0 }}>Online-Bezahlung (Stripe)</h3>
+                                </div>
+                                <p style={{ fontSize: '0.85rem', color: '#1E3A8A', marginBottom: '16px' }}>
+                                    Ermöglichen Sie Mietern die sofortige Bezahlung per Kreditkarte oder Apple Pay.
+                                </p>
+                                <Button 
+                                    onClick={() => alert('Die Stripe Connect Einrichtung öffnet sich hier.')} 
+                                    style={{ backgroundColor: '#635BFF', color: 'white', display: 'flex', alignItems: 'center', gap: '8px' }}
+                                >
+                                    Mit Stripe verbinden
+                                </Button>
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--spacing-md)', marginTop: '24px' }}>
+                                <Button variant="secondary" onClick={() => setIsSettingsModalOpen(false)}>Abbrechen</Button>
+                                <Button onClick={handleSavePortalSettings}>Speichern</Button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </Modal>
         </div>
     );
 };
