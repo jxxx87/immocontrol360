@@ -27,11 +27,13 @@ export const CloudCallback = () => {
                 const redirectUri = `${window.location.origin}/settings/cloud/callback`;
 
                 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+                const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
                 const res = await fetch(`${supabaseUrl}/functions/v1/cloud-auth`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${session.access_token}`
+                        'Authorization': `Bearer ${session.access_token}`,
+                        'apikey': supabaseKey
                     },
                     body: JSON.stringify({
                         provider: state,

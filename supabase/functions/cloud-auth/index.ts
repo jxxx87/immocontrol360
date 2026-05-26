@@ -21,10 +21,14 @@ serve(async (req) => {
       { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
     )
 
-    // Get the user from the authorization header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader) {
+      throw new Error('Missing Authorization header')
+    }
+
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
     if (userError || !user) {
-      throw new Error('Unauthorized')
+      throw new Error(`Auth Error: ${userError?.message || 'User not found'}`)
     }
 
     let tokenResponse;

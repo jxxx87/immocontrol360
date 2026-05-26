@@ -181,6 +181,7 @@ const Claims = () => {
                 let claimTotalGetilgt = 0;
                 let claimTotalOffen = 0;
 
+                const plan = (plansData || []).find(p => p.claim_id === claim.id);
                 if (plan) {
                     const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
                     const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
