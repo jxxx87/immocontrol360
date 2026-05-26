@@ -316,6 +316,8 @@ const ClaimDetail = () => {
             console.error(err);
             alert('Fehler beim Aktualisieren der Anfrage.');
         }
+    };
+
     const handleDeletePaymentPlanRequest = async (requestId) => {
         if (!window.confirm('Möchten Sie diese Ratenzahlungsanfrage wirklich löschen?')) return;
         try {
