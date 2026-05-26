@@ -142,6 +142,17 @@ const CloudExplorer = () => {
         init();
     }, []);
 
+    const mockRootFolders = [
+        { id: '1', name: 'Rechnungen', type: 'folder', icon: Folder, isFolder: true },
+        { id: '2', name: 'Mietverträge', type: 'folder', icon: Folder, isFolder: true },
+        { id: '3', name: 'Bilder', type: 'folder', icon: Folder, isFolder: true },
+        { id: '4', name: 'Schriftverkehr', type: 'folder', icon: Folder, isFolder: true },
+        { id: '5', name: 'Nebenkosten', type: 'folder', icon: Folder, isFolder: true },
+        { id: '6', name: 'Versicherungen', type: 'folder', icon: Folder, isFolder: true },
+        { id: '7', name: 'Energieausweise', type: 'folder', icon: Folder, isFolder: true }
+    ];
+
+    useEffect(() => {
         if (status === 'ready' && selectedProperty) {
             if (currentPath.length === 0) {
                 setFiles(mockRootFolders);
