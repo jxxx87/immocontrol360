@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { usePortfolio } from '../context/PortfolioContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
@@ -13,6 +14,7 @@ import { useAuth } from '../context/AuthContext';
 const Claims = () => {
     const { user } = useAuth();
     const navigate = useNavigate();
+    const { selectedPortfolioID } = usePortfolio();
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -129,164 +131,198 @@ const Claims = () => {
 
     useEffect(() => {
         loadData();
+    }, [selectedPortfolioID]);
+
+    useEffect(() => {
         const handleClickOutside = () => setActiveDropdown(null);
         window.addEventListener('click', handleClickOutside);
         return () => window.removeEventListener('click', handleClickOutside);
     }, []);
 
+    const fetchAndMergeClaims = async () => {
+        // Fetch claims with tenant and lease data
+        let claimsQuery = supabase
+            .from('claims')
+            .select(`
+                id, status, escalation_level, deadline, next_action_at,
+                interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
+                tenants ( first_name, last_name ),
+                leases!inner ( 
+                    id, 
+                    units!inner ( 
+                        unit_name,
+                        properties!inner ( id, portfolio_id, street, house_number, zip, city )
+                    ) 
+                )
+            `)
+            .order('created_at', { ascending: false });
+
+        if (selectedPortfolioID) {
+            claimsQuery = claimsQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
+        }
+
+        const { data: claimsData, error: claimsError } = await claimsQuery;
+
+        if (claimsError) throw claimsError;
+
+        const allActiveClaimIds = claimsData ? claimsData.map(c => c.id) : [];
+
+        // Fetch totals from view (filtered by active claim IDs)
+        let totalsData = [];
+        if (allActiveClaimIds.length > 0) {
+            const { data: tData, error: totalsError } = await supabase
+                .from('claim_totals_view')
+                .select('*')
+                .in('claim_id', allActiveClaimIds);
+            if (totalsError) throw totalsError;
+            totalsData = tData || [];
+        }
+
+        // Fetch active payment plans (including fees_at_creation, interest_at_creation) for active claims
+        let plansData = [];
+        if (allActiveClaimIds.length > 0) {
+            const { data: pData, error: plansError } = await supabase
+                .from('payment_plans')
+                .select('id, claim_id, total_amount, created_at, fees_at_creation, interest_at_creation')
+                .eq('status', 'active')
+                .in('claim_id', allActiveClaimIds);
+            if (plansError) throw plansError;
+            plansData = pData || [];
+        }
+            
+        // Fetch installments for these plans
+        let installmentsData = [];
+        let allClaimItems = [];
+        if (plansData && plansData.length > 0) {
+            const planIds = plansData.map(p => p.id);
+            const { data: instData } = await supabase
+                .from('payment_plan_installments')
+                .select('payment_plan_id, paid_amount')
+                .in('payment_plan_id', planIds);
+            installmentsData = instData || [];
+        }
+
+        // Fetch totals for ALL active claims
+        let itemsTotalsData = [];
+        let originalItemsData = [];
+        if (allActiveClaimIds.length > 0) {
+            const { data: iTotals } = await supabase
+                .from('claim_item_totals_view')
+                .select('claim_item_id, claim_id, open_amount, original_amount, paid_principal')
+                .in('claim_id', allActiveClaimIds);
+            itemsTotalsData = iTotals || [];
+                
+            // Fetch original items for created_at
+            const { data: oItems } = await supabase
+                .from('claim_items')
+                .select('id, created_at, fee_amount, interest_amount')
+                .in('claim_id', allActiveClaimIds);
+            originalItemsData = oItems || [];
+        }
+
+        // Merge them locally
+        if (itemsTotalsData && originalItemsData) {
+            allClaimItems = itemsTotalsData.map(tot => {
+                const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
+                return {
+                    ...tot,
+                    created_at: orig ? orig.created_at : null,
+                    claim_items: orig ? { fee_amount: orig.fee_amount, interest_amount: orig.interest_amount } : {}
+                };
+            });
+        }
+
+        const calcItemTotal = (itemList) => {
+            let ursprung = 0;
+            let getilgt = 0;
+            let offen = 0;
+            itemList.forEach(item => {
+                const baseAmt = Number(item.original_amount || 0);
+                const feeAmt = Number(item.claim_items?.fee_amount || 0);
+                const intAmt = Number(item.claim_items?.interest_amount || 0);
+                const itemTotal = baseAmt + feeAmt + intAmt;
+                
+                const paidPrincipal = Number(item.paid_principal || 0);
+                let paidTotal = 0;
+                if (paidPrincipal > 0 || item.open_amount === 0) {
+                    paidTotal = feeAmt + intAmt + paidPrincipal;
+                }
+                if (item.open_amount === 0) {
+                    paidTotal = itemTotal;
+                }
+                const openTotal = Math.max(0, itemTotal - paidTotal);
+
+                ursprung += itemTotal;
+                getilgt += paidTotal;
+                offen += openTotal;
+            });
+            return { ursprung, getilgt, offen };
+        };
+
+        // Merge data
+        const merged = (claimsData || []).map(claim => {
+            let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
+            
+            const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
+            const itemCount = claimItems.length;
+
+            let claimTotalUrsprung = 0;
+            let claimTotalGetilgt = 0;
+            let claimTotalOffen = 0;
+
+            const plan = (plansData || []).find(p => p.claim_id === claim.id);
+            if (plan) {
+                const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
+                const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
+                const planTotal = Number(plan.total_amount || 0);
+                const planOpen = Math.max(0, planTotal - planPaid);
+                
+                const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
+                const newItemsCalc = calcItemTotal(newItems);
+                
+                claimTotalUrsprung = planTotal + newItemsCalc.ursprung;
+                claimTotalGetilgt = planPaid + newItemsCalc.getilgt;
+                claimTotalOffen = planOpen + newItemsCalc.offen;
+            } else {
+                const allItemsCalc = calcItemTotal(claimItems);
+                claimTotalUrsprung = allItemsCalc.ursprung;
+                claimTotalGetilgt = allItemsCalc.getilgt;
+                claimTotalOffen = allItemsCalc.offen;
+            }
+            
+            return { 
+                ...claim, 
+                ...totals, 
+                itemCount, 
+                totalUrsprung: claimTotalUrsprung, 
+                totalGetilgt: claimTotalGetilgt, 
+                totalOffen: claimTotalOffen 
+            };
+        });
+
+        // Filter out cancelled and archived claims from the main view (optional, but good for UI)
+        const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
+
+        setClaims(activeClaims);
+        calculateKpis(activeClaims);
+    };
+
     const loadData = async () => {
         setLoading(true);
         setError(null);
         try {
-            // 1. Call RPC to update overdue claims
-            const { error: rpcError } = await supabase.rpc('update_overdue_claims_status');
-            if (rpcError) {
-                console.warn('Could not update overdue claims status:', rpcError);
-            }
-
-            // 2. Fetch claims with tenant and lease data
-            const { data: claimsData, error: claimsError } = await supabase
-                .from('claims')
-                .select(`
-                    id, status, escalation_level, deadline, next_action_at,
-                    interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
-                    tenants ( first_name, last_name ),
-                    leases ( 
-                        id, 
-                        units ( 
-                            unit_name,
-                            properties ( street, house_number, zip, city )
-                        ) 
-                    )
-                `)
-                .order('created_at', { ascending: false });
-
-            if (claimsError) throw claimsError;
-
-            // 3. Fetch totals from view
-            const { data: totalsData, error: totalsError } = await supabase
-                .from('claim_totals_view')
-                .select('*');
-
-            if (totalsError) throw totalsError;
-
-            // 4. Fetch active payment plans (including fees_at_creation, interest_at_creation)
-            const { data: plansData, error: plansError } = await supabase
-                .from('payment_plans')
-                .select('id, claim_id, total_amount, created_at, fees_at_creation, interest_at_creation')
-                .eq('status', 'active');
-                
-            // 5. Fetch installments for these plans
-            let installmentsData = [];
-            let allClaimItems = [];
-            if (plansData && plansData.length > 0) {
-                const planIds = plansData.map(p => p.id);
-                const { data: instData } = await supabase
-                    .from('payment_plan_installments')
-                    .select('payment_plan_id, paid_amount')
-                    .in('payment_plan_id', planIds);
-                installmentsData = instData || [];
-            }
-
-            // Fetch totals for ALL active claims
-            const allActiveClaimIds = claimsData ? claimsData.map(c => c.id) : [];
-            const { data: itemsTotalsData } = await supabase
-                .from('claim_item_totals_view')
-                .select('claim_item_id, claim_id, open_amount, original_amount, paid_principal')
-                .in('claim_id', allActiveClaimIds);
-                
-            // Fetch original items for created_at
-            const { data: originalItemsData } = await supabase
-                .from('claim_items')
-                .select('id, created_at, fee_amount, interest_amount')
-                .in('claim_id', allActiveClaimIds);
-
-            // Merge them locally
-            if (itemsTotalsData && originalItemsData) {
-                allClaimItems = itemsTotalsData.map(tot => {
-                    const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
-                    return {
-                        ...tot,
-                        created_at: orig ? orig.created_at : null,
-                        claim_items: orig ? { fee_amount: orig.fee_amount, interest_amount: orig.interest_amount } : {}
-                    };
-                });
-            }
-
-            const calcItemTotal = (itemList) => {
-                let ursprung = 0;
-                let getilgt = 0;
-                let offen = 0;
-                itemList.forEach(item => {
-                    const baseAmt = Number(item.original_amount || 0);
-                    const feeAmt = Number(item.claim_items?.fee_amount || 0);
-                    const intAmt = Number(item.claim_items?.interest_amount || 0);
-                    const itemTotal = baseAmt + feeAmt + intAmt;
-                    
-                    const paidPrincipal = Number(item.paid_principal || 0);
-                    let paidTotal = 0;
-                    if (paidPrincipal > 0 || item.open_amount === 0) {
-                        paidTotal = feeAmt + intAmt + paidPrincipal;
-                    }
-                    if (item.open_amount === 0) {
-                        paidTotal = itemTotal;
-                    }
-                    const openTotal = Math.max(0, itemTotal - paidTotal);
-
-                    ursprung += itemTotal;
-                    getilgt += paidTotal;
-                    offen += openTotal;
-                });
-                return { ursprung, getilgt, offen };
-            };
-
-            // 6. Merge data
-            const merged = (claimsData || []).map(claim => {
-                let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
-                
-                const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
-                const itemCount = claimItems.length;
-
-                let claimTotalUrsprung = 0;
-                let claimTotalGetilgt = 0;
-                let claimTotalOffen = 0;
-
-                const plan = (plansData || []).find(p => p.claim_id === claim.id);
-                if (plan) {
-                    const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
-                    const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
-                    const planTotal = Number(plan.total_amount || 0);
-                    const planOpen = Math.max(0, planTotal - planPaid);
-                    
-                    const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
-                    const newItemsCalc = calcItemTotal(newItems);
-                    
-                    claimTotalUrsprung = planTotal + newItemsCalc.ursprung;
-                    claimTotalGetilgt = planPaid + newItemsCalc.getilgt;
-                    claimTotalOffen = planOpen + newItemsCalc.offen;
-                } else {
-                    const allItemsCalc = calcItemTotal(claimItems);
-                    claimTotalUrsprung = allItemsCalc.ursprung;
-                    claimTotalGetilgt = allItemsCalc.getilgt;
-                    claimTotalOffen = allItemsCalc.offen;
+            // 1. Overdue-Status im Hintergrund aktualisieren (non-blocking)
+            supabase.rpc('update_overdue_claims_status').then(({ data, error }) => {
+                if (error) {
+                    console.warn('Could not update overdue claims status:', error);
+                } else if (data && data > 0) {
+                    console.log(`Updated ${data} overdue claims in background. Reloading silently...`);
+                    fetchAndMergeClaims().catch(err => console.error('Silent reload failed:', err));
                 }
-                
-                return { 
-                    ...claim, 
-                    ...totals, 
-                    itemCount, 
-                    totalUrsprung: claimTotalUrsprung, 
-                    totalGetilgt: claimTotalGetilgt, 
-                    totalOffen: claimTotalOffen 
-                };
             });
 
-            // Filter out cancelled and archived claims from the main view (optional, but good for UI)
-            const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
-
-            setClaims(activeClaims);
-            calculateKpis(activeClaims);
-
+            // 2. Daten sofort laden
+            await fetchAndMergeClaims();
         } catch (err) {
             console.error('Error loading claims:', err);
             setError(err.message || 'Fehler beim Laden der Forderungen');
@@ -301,21 +337,27 @@ const Claims = () => {
             const { error: syncError } = await supabase.rpc('sync_all_rent_ledgers');
             if (syncError) console.warn('Sync ledger warning:', syncError);
 
-            const { data: ledgerData, error: ledgerError } = await supabase
+            let ledgerQuery = supabase
                 .from('rent_ledger')
                 .select(`
                     id, period_month, expected_rent, paid_amount, due_date,
-                    leases (
+                    leases!inner (
                         id,
-                        units (
+                        units!inner (
                             unit_name,
-                            properties ( street, house_number, zip, city )
+                            properties!inner ( id, portfolio_id, street, house_number, zip, city )
                         ),
                         tenants ( first_name, last_name )
                     )
                 `)
                 .eq('status', 'open')
                 .order('period_month', { ascending: false });
+
+            if (selectedPortfolioID) {
+                ledgerQuery = ledgerQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
+            }
+
+            const { data: ledgerData, error: ledgerError } = await ledgerQuery;
 
             if (ledgerError) throw ledgerError;
 
@@ -333,14 +375,20 @@ const Claims = () => {
             setOpenLedgers(available);
             
             // Fetch all active leases for manual claims
-            const { data: leasesData, error: leasesError } = await supabase
+            let leasesQuery = supabase
                 .from('leases')
                 .select(`
                     id, 
                     tenants (first_name, last_name),
-                    units (unit_name, properties(street, house_number, city))
+                    units!inner (unit_name, properties!inner (id, portfolio_id, street, house_number, city))
                 `)
                 .eq('status', 'active');
+
+            if (selectedPortfolioID) {
+                leasesQuery = leasesQuery.eq('units.properties.portfolio_id', selectedPortfolioID);
+            }
+
+            const { data: leasesData, error: leasesError } = await leasesQuery;
                 
             if (!leasesError && leasesData) {
                 setAllLeases(leasesData);
