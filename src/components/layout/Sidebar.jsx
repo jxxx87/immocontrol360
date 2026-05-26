@@ -26,7 +26,8 @@ import {
     Smartphone,
     Monitor,
     Lock,
-    CalendarDays
+    CalendarDays,
+    Folder
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useViewMode } from '../../context/ViewModeContext';
@@ -132,7 +133,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                 { path: '/renovation', label: 'Sanierungsmanager' }
             ]
         },
-        { path: '/settings', label: 'Einstellungen', icon: Settings }
+        { path: '/settings', label: 'Einstellungen', icon: Settings },
+        { path: '/cloud-documents', label: 'Dokumente', icon: Folder, navKey: 'cloud-documents' }
     ];
 
     const { hasFeature, checkFeatureAccess, paywallReason, subscription } = useSubscription();
@@ -148,7 +150,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             'meters': 'zaehler',
             'contacts': 'kontakte',
             'mieterportal': 'mieterportal',
-            'investorportal': 'investorportal'
+            'investorportal': 'investorportal',
+            'cloud-documents': 'immobilien'
         };
         return mapping[navKey] || navKey;
     };
