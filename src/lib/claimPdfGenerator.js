@@ -467,7 +467,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             // Reset text color to black for following text
             doc.setTextColor(0, 0, 0);
             
-            yPos += boxHeight;
+            yPos += boxHeight + 12; // Add 12mm of space below the box
         } catch (qrErr) {
             console.error('Failed to generate QR code', qrErr);
         }
