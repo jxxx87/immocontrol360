@@ -18,6 +18,8 @@ import Documents from './pages/Documents';
 import Settings from './pages/Settings';
 import { CloudCallback } from './pages/settings/CloudCallback';
 import Import from './pages/Import';
+import Privacy from './pages/Privacy';
+import Terms from './pages/Terms';
 import PlaceholderPage from './pages/PlaceholderPage';
 import BuyAndHold from './pages/investor/BuyAndHold';
 import FixAndFlip from './pages/investor/FixAndFlip';
@@ -87,6 +89,8 @@ function App() {
                     <Route path="/register" element={<AuthRoute><Register /></AuthRoute>} />
                     <Route path="/reset-password" element={<AuthRoute><ResetPassword /></AuthRoute>} />
                     <Route path="/billing/success" element={<BillingSuccess />} />
+                    <Route path="/privacy" element={<Privacy />} />
+                    <Route path="/terms" element={<Terms />} />
 
                     {/* Protected App Routes */}
                     <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
