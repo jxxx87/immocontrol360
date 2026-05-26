@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud } from 'lucide-react';
+import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud, UploadCloud } from 'lucide-react';
 import Card from '../components/ui/Card';
 
 const CloudExplorer = () => {
@@ -16,7 +16,10 @@ const CloudExplorer = () => {
 
     const [selectedProperty, setSelectedProperty] = useState(null);
     const [currentPath, setCurrentPath] = useState([]);
-    const [files, setFiles] = useState([]); // mock files
+    const [files, setFiles] = useState([]);
+    const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
+    const fileInputRef = useRef(null);
 
     useEffect(() => {
         const init = async () => {
@@ -136,23 +139,9 @@ const CloudExplorer = () => {
             setStatusMessage('');
         };
 
-
         init();
     }, []);
 
-    const getPropertyLabel = (p) => `${p.street} ${p.house_number || ''}, ${p.city}`;
-
-    const mockRootFolders = [
-        { id: '1', name: 'Rechnungen', type: 'folder', icon: Folder },
-        { id: '2', name: 'Mietverträge', type: 'folder', icon: Folder },
-        { id: '3', name: 'Bilder', type: 'folder', icon: Folder },
-        { id: '4', name: 'Schriftverkehr', type: 'folder', icon: Folder },
-        { id: '5', name: 'Nebenkosten', type: 'folder', icon: Folder },
-        { id: '6', name: 'Versicherungen', type: 'folder', icon: Folder },
-        { id: '7', name: 'Energieausweise', type: 'folder', icon: Folder }
-    ];
-
-    useEffect(() => {
         if (status === 'ready' && selectedProperty) {
             if (currentPath.length === 0) {
                 setFiles(mockRootFolders);
@@ -331,33 +320,68 @@ const CloudExplorer = () => {
                         </div>
                     ) : (
                         <>
-                            {/* Breadcrumbs */}
-                            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', backgroundColor: 'var(--bg-secondary)' }}>
-                                <span 
-                                    onClick={handleNavigateRoot}
-                                    style={{ cursor: 'pointer', fontWeight: 600, color: currentPath.length === 0 ? 'var(--text-primary)' : 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '6px' }}
-                                >
-                                    <Building2 size={16} />
-                                    {selectedProperty.displayFolderName}
-                                </span>
+                            {/* Breadcrumbs & Actions */}
+                            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', backgroundColor: 'var(--bg-secondary)' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span 
+                                        onClick={handleNavigateRoot}
+                                        style={{ cursor: 'pointer', fontWeight: 600, color: currentPath.length === 0 ? 'var(--text-primary)' : 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '6px' }}
+                                    >
+                                        <Building2 size={16} />
+                                        {selectedProperty.displayFolderName}
+                                    </span>
+                                    
+                                    {currentPath.map((path, idx) => (
+                                        <React.Fragment key={path.id}>
+                                            <ChevronRight size={16} color="var(--text-secondary)" />
+                                            <span 
+                                                onClick={() => handleNavigateUp(idx)}
+                                                style={{ cursor: 'pointer', fontWeight: idx === currentPath.length - 1 ? 600 : 400, color: idx === currentPath.length - 1 ? 'var(--text-primary)' : 'var(--primary-color)' }}
+                                            >
+                                                {path.name}
+                                            </span>
+                                        </React.Fragment>
+                                    ))}
+                                </div>
                                 
-                                {currentPath.map((path, idx) => (
-                                    <React.Fragment key={path.id}>
-                                        <ChevronRight size={16} color="var(--text-secondary)" />
-                                        <span 
-                                            onClick={() => handleNavigateUp(idx)}
-                                            style={{ cursor: 'pointer', fontWeight: idx === currentPath.length - 1 ? 600 : 400, color: idx === currentPath.length - 1 ? 'var(--text-primary)' : 'var(--primary-color)' }}
-                                        >
-                                            {path.name}
-                                        </span>
-                                    </React.Fragment>
-                                ))}
+                                <div>
+                                    <input 
+                                        type="file" 
+                                        ref={fileInputRef} 
+                                        style={{ display: 'none' }} 
+                                        onChange={handleFileChange} 
+                                    />
+                                    <button 
+                                        className="btn btn-primary" 
+                                        onClick={handleUploadClick}
+                                        disabled={isUploading || isLoadingFiles}
+                                        style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', fontSize: '0.85rem' }}
+                                    >
+                                        {isUploading ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+                                        {isUploading ? 'Wird hochgeladen...' : 'Datei hochladen'}
+                                    </button>
+                                </div>
                             </div>
 
                             {/* File Grid */}
-                            <div style={{ padding: '24px', flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '20px', alignContent: 'start' }}>
+                            <div style={{ padding: '24px', flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '20px', alignContent: 'start', position: 'relative' }}>
+                                {isLoadingFiles && (
+                                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.7)', zIndex: 10 }}>
+                                        <Loader2 size={32} color="var(--primary-color)" className="animate-spin" />
+                                    </div>
+                                )}
+                                
+                                {!isLoadingFiles && files.length === 0 && (
+                                    <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
+                                        Dieser Ordner ist leer.
+                                    </div>
+                                )}
+
                                 {files.map(file => {
-                                    const Icon = file.icon;
+                                    const isPdf = file.name.toLowerCase().endsWith('.pdf');
+                                    const isImage = file.name.toLowerCase().match(/\.(jpg|jpeg|png|gif)$/);
+                                    const Icon = file.isFolder ? Folder : (isImage ? ImageIcon : FileText);
+                                    
                                     return (
                                         <div 
                                             key={file.id} 
@@ -365,14 +389,15 @@ const CloudExplorer = () => {
                                             style={{ 
                                                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', 
                                                 padding: '16px', borderRadius: 'var(--radius-md)',
-                                                cursor: file.type === 'folder' ? 'pointer' : 'default',
+                                                cursor: 'pointer',
                                                 transition: 'background 0.2s'
                                             }}
                                             onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'}
                                             onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                            title={file.name}
                                         >
-                                            <Icon size={48} color={file.type === 'folder' ? '#FBBF24' : '#3B82F6'} strokeWidth={1.5} />
-                                            <span style={{ fontSize: '0.85rem', fontWeight: 500, textAlign: 'center', wordBreak: 'break-word', color: 'var(--text-primary)' }}>
+                                            <Icon size={48} color={file.isFolder ? '#FBBF24' : (isPdf ? '#EF4444' : '#3B82F6')} strokeWidth={1.5} />
+                                            <span style={{ fontSize: '0.85rem', fontWeight: 500, textAlign: 'center', wordBreak: 'break-word', color: 'var(--text-primary)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                                                 {file.name}
                                             </span>
                                         </div>
