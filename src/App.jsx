@@ -16,6 +16,7 @@ import ClaimDetail from './pages/ClaimDetail';
 import Loans from './pages/Loans';
 import Documents from './pages/Documents';
 import Settings from './pages/Settings';
+import { CloudCallback } from './pages/settings/CloudCallback';
 import Import from './pages/Import';
 import PlaceholderPage from './pages/PlaceholderPage';
 import BuyAndHold from './pages/investor/BuyAndHold';
@@ -105,6 +106,7 @@ function App() {
                       <Route path="contacts" element={<Contacts />} />
                       <Route path="documents" element={<Documents />} />
                       <Route path="settings" element={<Settings />} />
+                      <Route path="settings/cloud/callback" element={<CloudCallback />} />
                       <Route path="security" element={<PlaceholderPage title="Sicherheit" />} />
                       <Route path="import" element={<Import />} />
                       <Route path="help" element={<PlaceholderPage title="Hilfe" />} />

@@ -13,11 +13,6 @@ export const CloudSettings = ({ portfolios }) => {
     const [connections, setConnections] = useState([]);
     const [links, setLinks] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [saving, setSaving] = useState(false);
-
-    // Form state for creating a new connection
-    const [newProvider, setNewProvider] = useState('onedrive');
-    const [newEmail, setNewEmail] = useState('');
 
     useEffect(() => {
         if (user) {
@@ -45,31 +40,26 @@ export const CloudSettings = ({ portfolios }) => {
         }
     };
 
-    const handleAddConnection = async () => {
-        if (!newEmail.trim()) {
-            return alert("Bitte geben Sie einen Account-Namen/Email ein.");
-        }
+    const handleConnectOneDrive = () => {
+        const clientId = import.meta.env.VITE_ONEDRIVE_CLIENT_ID;
+        if (!clientId) return alert("Fehler: VITE_ONEDRIVE_CLIENT_ID ist in der .env Datei nicht konfiguriert.");
         
-        try {
-            setSaving(true);
-            // This is a placeholder for actual OAuth connection
-            // We just create a database record for now
-            const payload = {
-                user_id: user.id,
-                provider: newProvider,
-                account_email: newEmail.trim()
-            };
-            
-            const { error } = await supabase.from('cloud_connections').insert(payload);
-            if (error) throw error;
-            
-            setNewEmail('');
-            await fetchCloudData();
-        } catch (error) {
-            alert(translateError(error));
-        } finally {
-            setSaving(false);
-        }
+        const redirectUri = encodeURIComponent(`${window.location.origin}/settings/cloud/callback`);
+        const scope = encodeURIComponent('offline_access Files.ReadWrite.All User.Read');
+        const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scope}&state=onedrive`;
+        
+        window.location.href = url;
+    };
+
+    const handleConnectGoogleDrive = () => {
+        const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+        if (!clientId) return alert("Fehler: VITE_GOOGLE_CLIENT_ID ist in der .env Datei nicht konfiguriert.");
+        
+        const redirectUri = encodeURIComponent(`${window.location.origin}/settings/cloud/callback`);
+        const scope = encodeURIComponent('https://www.googleapis.com/auth/drive.file email');
+        const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=googledrive`;
+        
+        window.location.href = url;
     };
 
     const handleDeleteConnection = async (id) => {
@@ -156,34 +146,13 @@ export const CloudSettings = ({ portfolios }) => {
                         {/* Add new connection */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '16px', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-md)' }}>
                             <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Neue Verbindung hinzufügen</h3>
-                            <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                                <div style={{ flex: '1', minWidth: '150px' }}>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: '4px', color: 'var(--text-secondary)' }}>Anbieter</label>
-                                    <select 
-                                        style={{ width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
-                                        value={newProvider}
-                                        onChange={(e) => setNewProvider(e.target.value)}
-                                    >
-                                        <option value="onedrive">Microsoft OneDrive</option>
-                                        <option value="googledrive">Google Drive</option>
-                                    </select>
-                                </div>
-                                <div style={{ flex: '2', minWidth: '200px' }}>
-                                    <Input 
-                                        label="Account / Email (Zur Übersicht)"
-                                        value={newEmail}
-                                        onChange={(e) => setNewEmail(e.target.value)}
-                                        placeholder="z.B. user@outlook.de"
-                                    />
-                                </div>
-                                <div>
-                                    <Button icon={saving ? Loader2 : Cloud} onClick={handleAddConnection} disabled={saving}>
-                                        {saving ? 'Verbinde...' : 'Verbinden'}
-                                    </Button>
-                                </div>
-                            </div>
-                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '5px' }}>
-                                Hinweis: Im ersten Schritt wird hier nur die Struktur vorbereitet. Die echte Login-Weiterleitung (OAuth) folgt im nächsten Ausbauschritt.
+                            <div style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' }}>
+                                <Button onClick={handleConnectOneDrive} style={{ backgroundColor: '#0078D4', color: 'white', border: 'none' }}>
+                                    Mit Microsoft OneDrive verbinden
+                                </Button>
+                                <Button onClick={handleConnectGoogleDrive} style={{ backgroundColor: '#DB4437', color: 'white', border: 'none' }}>
+                                    Mit Google Drive verbinden
+                                </Button>
                             </div>
                         </div>
                     </div>

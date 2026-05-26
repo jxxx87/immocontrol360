@@ -78,6 +78,8 @@ const Finance = () => {
     const [rentLedger, setRentLedger] = useState([]);
     const [isSyncing, setIsSyncing] = useState(false);
     const [deletingBookingId, setDeletingBookingId] = useState(null);
+    const [mahnverfahrenMonths, setMahnverfahrenMonths] = useState(new Set());
+    const [mahnverfahrenClaims, setMahnverfahrenClaims] = useState(new Map());
 
     // Helper Data
     const [categories, setCategories] = useState([]);
@@ -132,7 +134,7 @@ const Finance = () => {
     };
 
     // Calculate Expected Rent Logic
-    const calculateFinanceKPIs = (currentExpenses, currentPayments, currentLeases) => {
+    const calculateFinanceKPIs = (currentExpenses, currentPayments, currentLeases, currentMahnverfahren = mahnverfahrenMonths) => {
         // Filter Expenses
         let filteredExpenses = currentExpenses.filter(e => {
             if (e.booking_date < filterStartDate || e.booking_date > filterEndDate) return false;
@@ -276,7 +278,9 @@ const Finance = () => {
                     .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
 
                 if (paidSum < monthlyRent - 1) {
-                    totalOverdueAll += (monthlyRent - paidSum);
+                    if (!currentMahnverfahren.has(`${lease.id}_${monthStr}`)) {
+                        totalOverdueAll += (monthlyRent - paidSum);
+                    }
                 }
                 iter.setMonth(iter.getMonth() + 1);
             }
@@ -368,7 +372,7 @@ const Finance = () => {
             setTenants(tens || []);
 
             // Initial Calc
-            calculateFinanceKPIs(allExpenses, allPayments, allLeases);
+            // Note: KPI calc is deferred until mahnverfahren data is fetched to avoid double overdue rent
 
             // NEW: Fetch Ledger for Overdue Details
             const { data: ledgerData, error: ledgerError } = await supabase
@@ -386,6 +390,47 @@ const Finance = () => {
                 }
                 setRentLedger(currentLedger);
             }
+
+            // 6. Fetch Active Claim Items (for "Im Mahnverfahren" status)
+            let activeMahn = new Set();
+            let activeMahnClaims = new Map();
+            try {
+                const { data: claimItemsRes } = await supabase
+                    .from('claim_items')
+                    .select('rent_ledger_ids, rent_ledger_id, claims!inner(id, status, lease_id)')
+                    .not('claims.status', 'in', '("settled","cancelled","archived")');
+                
+                if (claimItemsRes) {
+                    let ledgerIdsToFetch = [];
+                    claimItemsRes.forEach(ci => {
+                        if (ci.rent_ledger_ids) ledgerIdsToFetch.push(...ci.rent_ledger_ids);
+                        if (ci.rent_ledger_id) ledgerIdsToFetch.push(ci.rent_ledger_id);
+                    });
+                    
+                    if (ledgerIdsToFetch.length > 0) {
+                        const { data: rlData } = await supabase.from('rent_ledger').select('id, lease_id, period_month').in('id', ledgerIdsToFetch);
+                        if (rlData) {
+                            rlData.forEach(rl => {
+                                const monthStr = rl.period_month.slice(0, 7); // YYYY-MM
+                                const key = `${rl.lease_id}_${monthStr}`;
+                                activeMahn.add(key);
+                                
+                                const ci = claimItemsRes.find(c => (c.rent_ledger_ids && c.rent_ledger_ids.includes(rl.id)) || c.rent_ledger_id === rl.id);
+                                if (ci && ci.claims) {
+                                    activeMahnClaims.set(key, ci.claims.id);
+                                }
+                            });
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching Mahnverfahren data:", err);
+            }
+            
+            setMahnverfahrenMonths(activeMahn);
+            setMahnverfahrenClaims(activeMahnClaims);
+
+            calculateFinanceKPIs(allExpenses, allPayments, allLeases, activeMahn);
 
         } catch (error) {
             console.error('Error fetching finance data:', error);
@@ -949,6 +994,9 @@ const Finance = () => {
                             processingPaymentId={processingPaymentId}
                             filterPropertyId={filterPropertyId}
                             filterUnitId={filterUnitId}
+                            mahnverfahrenMonths={mahnverfahrenMonths}
+                            mahnverfahrenClaims={mahnverfahrenClaims}
+                            navigate={navigate}
                         />
                     ) : (
                         <Card title="Buchungen im Zeitraum">
@@ -1413,7 +1461,7 @@ const Finance = () => {
 };
 
 // --- SUB-COMPONENTS FOR OVERDUE VIEW ---
-const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAllPaid, processingPaymentId, filterPropertyId, filterUnitId }) => {
+const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAllPaid, processingPaymentId, filterPropertyId, filterUnitId, mahnverfahrenMonths, mahnverfahrenClaims, navigate }) => {
     const [expandedIds, setExpandedIds] = useState(new Set());
     const [confirmingAllId, setConfirmingAllId] = useState(null);
     const [markingAllId, setMarkingAllId] = useState(null);
@@ -1484,6 +1532,8 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                 if (paidSum < monthlyRent - 1) { // tolerance 1€
                     const leaseKey = lease.id;
                     const due = monthlyRent - paidSum;
+                    const isMahn = mahnverfahrenMonths.has(`${lease.id}_${monthStr}`);
+                    const claimId = mahnverfahrenClaims.get(`${lease.id}_${monthStr}`);
 
                     if (!groupMap.has(leaseKey)) {
                         groupMap.set(leaseKey, {
@@ -1499,7 +1549,9 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                         });
                     }
                     const group = groupMap.get(leaseKey);
-                    group.totalOverdue += due;
+                    if (!isMahn) {
+                        group.totalOverdue += due;
+                    }
                     group.entries.push({
                         id: `${lease.id}_${periodMonth}`,
                         leaseId: lease.id,
@@ -1508,7 +1560,9 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                         periodMonth,
                         monthlyRent,
                         paidSum,
-                        dueAmount: due
+                        dueAmount: due,
+                        isMahn,
+                        claimId
                     });
                 }
 
@@ -1516,8 +1570,10 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
             }
         });
 
+        // Filter out groups that have 0 totalOverdue AND all their entries are in Mahnverfahren?
+        // No, keep them so the user sees they are in Mahnverfahren.
         return Array.from(groupMap.values()).sort((a, b) => b.totalOverdue - a.totalOverdue);
-    }, [leases, rentPayments, tenants, filterPropertyId, filterUnitId]);
+    }, [leases, rentPayments, tenants, filterPropertyId, filterUnitId, mahnverfahrenMonths, mahnverfahrenClaims]);
 
     if (overdueGroups.length === 0) {
         return (
@@ -1644,11 +1700,33 @@ const OverdueRentsView = ({ leases, rentPayments, tenants, onMarkPaid, onMarkAll
                                             <span style={{ textAlign: 'right', color: entry.paidSum > 0 ? 'var(--success-color)' : '#6B7280' }}>{entry.paidSum.toFixed(2)} €</span>
                                             <span style={{ textAlign: 'right', color: '#EF4444', fontWeight: 700 }}>{entry.dueAmount.toFixed(2)} €</span>
                                             <div style={{ textAlign: 'right' }}>
-                                                <OverdueActionMenu
-                                                    onMarkPaid={(customAmount) => onMarkPaid(entry.lease, entry.monthStr, customAmount !== undefined ? customAmount : entry.dueAmount)}
-                                                    isProcessing={processingPaymentId === `${entry.leaseId}-${entry.monthStr}`}
-                                                    dueAmount={entry.dueAmount}
-                                                />
+                                                {entry.isMahn ? (
+                                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                                                        <span style={{ 
+                                                            display: 'inline-block', 
+                                                            padding: '2px 8px', 
+                                                            borderRadius: '12px', 
+                                                            fontSize: '0.7rem', 
+                                                            fontWeight: 600, 
+                                                            backgroundColor: '#FEF2F2', 
+                                                            color: '#DC2626',
+                                                            border: '1px solid #FCA5A5' 
+                                                        }}>
+                                                            {entry.paidSum > 0 ? 'Im Mahnverfahren (Teilzahlung)' : 'Im Mahnverfahren'}
+                                                        </span>
+                                                        {entry.claimId && (
+                                                            <Button size="sm" onClick={(e) => { e.stopPropagation(); navigate('/forderungen/' + entry.claimId); }} style={{ fontSize: '0.7rem', padding: '2px 8px', height: 'auto', minHeight: '22px' }}>
+                                                                Forderungsakte
+                                                            </Button>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <OverdueActionMenu
+                                                        onMarkPaid={(customAmount) => onMarkPaid(entry.lease, entry.monthStr, customAmount !== undefined ? customAmount : entry.dueAmount)}
+                                                        isProcessing={processingPaymentId === `${entry.leaseId}-${entry.monthStr}`}
+                                                        dueAmount={entry.dueAmount}
+                                                    />
+                                                )}
                                             </div>
                                         </div>
                                     ))}
