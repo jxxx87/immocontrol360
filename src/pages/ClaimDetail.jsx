@@ -316,6 +316,16 @@ const ClaimDetail = () => {
             console.error(err);
             alert('Fehler beim Aktualisieren der Anfrage.');
         }
+    const handleDeletePaymentPlanRequest = async (requestId) => {
+        if (!window.confirm('Möchten Sie diese Ratenzahlungsanfrage wirklich löschen?')) return;
+        try {
+            const { error } = await supabase.from('payment_plan_requests').delete().eq('id', requestId);
+            if (error) throw error;
+            loadClaimData();
+        } catch (err) {
+            console.error(err);
+            alert('Fehler beim Löschen der Anfrage.');
+        }
     };
 
     const handleDeleteEvent = async (eventId, eventType, eventMetadata) => {
@@ -1147,18 +1157,38 @@ const ClaimDetail = () => {
                                                 </div>
                                             )}
                                             {request.status === 'requested' && (
-                                                <div style={{ display: 'flex', gap: '12px' }}>
+                                                <div style={{ display: 'flex', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                    <div style={{ display: 'flex', gap: '12px' }}>
+                                                        <Button 
+                                                            onClick={() => handleUpdatePaymentPlanRequest(request.id, 'accepted')}
+                                                            style={{ backgroundColor: '#10B981', color: 'white' }}
+                                                        >
+                                                            Annehmen
+                                                        </Button>
+                                                        <Button 
+                                                            variant="secondary"
+                                                            onClick={() => handleUpdatePaymentPlanRequest(request.id, 'rejected')}
+                                                        >
+                                                            Ablehnen
+                                                        </Button>
+                                                    </div>
                                                     <Button 
-                                                        onClick={() => handleUpdatePaymentPlanRequest(request.id, 'accepted')}
-                                                        style={{ backgroundColor: '#10B981', color: 'white' }}
+                                                        variant="secondary" 
+                                                        style={{ color: '#EF4444', borderColor: '#FCA5A5' }}
+                                                        onClick={() => handleDeletePaymentPlanRequest(request.id)}
                                                     >
-                                                        Annehmen
+                                                        <Trash2 size={16} /> Löschen
                                                     </Button>
+                                                </div>
+                                            )}
+                                            {request.status !== 'requested' && (
+                                                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
                                                     <Button 
-                                                        variant="secondary"
-                                                        onClick={() => handleUpdatePaymentPlanRequest(request.id, 'rejected')}
+                                                        variant="secondary" 
+                                                        style={{ color: '#EF4444', borderColor: '#FCA5A5', padding: '6px 12px', fontSize: '0.85rem' }}
+                                                        onClick={() => handleDeletePaymentPlanRequest(request.id)}
                                                     >
-                                                        Ablehnen
+                                                        <Trash2 size={14} style={{ marginRight: '6px' }} /> Löschen / Rückgängig
                                                     </Button>
                                                 </div>
                                             )}
