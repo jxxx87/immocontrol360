@@ -30,6 +30,7 @@ serve(async (req) => {
     let action = '';
     let path = '';
     let itemId = '';
+    let folderName = '';
     
     // Parse request
     const contentType = req.headers.get('content-type') || '';
@@ -40,12 +41,14 @@ serve(async (req) => {
       action = formData.get('action') as string;
       path = formData.get('path') as string;
       provider = (formData.get('provider') as string) || 'onedrive';
+      folderName = formData.get('folderName') as string;
       fileToUpload = formData.get('file') as File;
     } else {
       const body = await req.json();
       action = body.action;
       path = body.path;
       itemId = body.itemId;
+      folderName = body.folderName;
       provider = body.provider || 'onedrive';
     }
 
@@ -169,10 +172,6 @@ serve(async (req) => {
       }
 
       if (action === 'create_folder') {
-          // Frontend should pass `path` as the parent path, and we need the new folder name from `body.folderName`
-          const body = await req.json().catch(() => ({})); // fallback if it's form-data it was already parsed
-          const folderName = body.folderName || (req.headers.get('content-type')?.includes('multipart/form-data') ? (await req.formData().catch(() => new FormData())).get('folderName') : '');
-          
           if (!folderName) throw new Error('Missing folderName');
           
           const safeFolderName = folderName.replace(/["*:<>?\/\\|]/g, '');
