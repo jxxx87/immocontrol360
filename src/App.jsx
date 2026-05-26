@@ -13,6 +13,7 @@ import Meters from './pages/Meters';
 import Contacts from './pages/Contacts';
 import Claims from './pages/Claims';
 import ClaimDetail from './pages/ClaimDetail';
+import ClaimPortal from './pages/ClaimPortal';
 import Loans from './pages/Loans';
 import Documents from './pages/Documents';
 import CloudExplorer from './pages/CloudExplorer';
@@ -92,6 +93,7 @@ function App() {
                     <Route path="/billing/success" element={<BillingSuccess />} />
                     <Route path="/privacy" element={<Privacy />} />
                     <Route path="/terms" element={<Terms />} />
+                    <Route path="/forderung/portal/:token" element={<ClaimPortal />} />
 
                     {/* Protected App Routes */}
                     <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
