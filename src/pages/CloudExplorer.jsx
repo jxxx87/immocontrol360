@@ -68,25 +68,69 @@ const CloudExplorer = () => {
             });
             
             const finalGrouped = [...Object.values(groups), ...ungrouped];
+            // Calculate display folder names
+            finalGrouped.forEach(item => {
+                if (item.isGroup) {
+                    const groupedByStreet = {};
+                    item.members.forEach(m => {
+                        if (!m.street) return;
+                        if (!groupedByStreet[m.street]) groupedByStreet[m.street] = [];
+                        if (m.house_number) {
+                            groupedByStreet[m.street].push(m.house_number);
+                        }
+                    });
+                    const parts = Object.keys(groupedByStreet).map(street => {
+                        const nums = groupedByStreet[street];
+                        if (nums.length > 0) {
+                            return `${street} ${nums.join(' & ')}`;
+                        }
+                        return street;
+                    });
+                    const displayNames = parts.slice(0, 2).join(' | ');
+                    const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
+                    item.displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`;
+                } else {
+                    item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim();
+                }
+            });
+
             setGroupedProperties(finalGrouped);
 
-            if (safeProps.length > 0) {
+            if (finalGrouped.length > 0) {
                 setStatus('checking');
                 setStatusMessage('Überprüfe Cloud-Ordnerstruktur...');
                 
-                await new Promise(r => setTimeout(r, 800));
+                // Identify missing items (groups or single properties)
+                const missingItems = finalGrouped.filter(item => {
+                    const trackingId = item.isGroup ? `wg_${item.id}` : item.id;
+                    return !localStorage.getItem(`cloud_synced_${trackingId}`);
+                });
                 
-                // 3. Check missing folders (using localStorage as mock tracker)
-                const missingProps = safeProps.filter(p => !localStorage.getItem(`cloud_synced_${p.id}`));
-                setMissingCount(missingProps.length);
-                
-                if (missingProps.length > 0) {
+                if (missingItems.length > 0) {
+                    setMissingCount(missingItems.length);
                     setStatus('creating');
-                    setStatusMessage(`${missingProps.length} neue Immobilie(n) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
-                    await new Promise(r => setTimeout(r, 2000 + (missingProps.length * 500))); // Simulate processing
+                    setStatusMessage(`${missingItems.length} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
                     
-                    // Mark as synced
-                    missingProps.forEach(p => localStorage.setItem(`cloud_synced_${p.id}`, 'true'));
+                    try {
+                        const foldersToCreate = missingItems.map(item => item.displayFolderName);
+                        
+                        const { data, error } = await supabase.functions.invoke('cloud-sync', {
+                            body: { provider: 'onedrive', foldersToCreate }
+                        });
+                        
+                        if (error) throw error;
+                        if (data && data.error) throw new Error(data.error);
+
+                        // Mark as synced
+                        missingItems.forEach(item => {
+                            const trackingId = item.isGroup ? `wg_${item.id}` : item.id;
+                            localStorage.setItem(`cloud_synced_${trackingId}`, 'true');
+                        });
+                    } catch (err) {
+                        console.error("Cloud Sync Error:", err);
+                        // Fallback: wait a bit so user sees it tried, even if failed, we will just proceed
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
                 }
             }
 
@@ -229,24 +273,6 @@ const CloudExplorer = () => {
                     <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
                         {groupedProperties.map((item, idx) => {
                             if (item.isGroup) {
-                                const groupedByStreet = {};
-                                item.members.forEach(m => {
-                                    if (!m.street) return;
-                                    if (!groupedByStreet[m.street]) groupedByStreet[m.street] = [];
-                                    if (m.house_number) {
-                                        groupedByStreet[m.street].push(m.house_number);
-                                    }
-                                });
-                                const parts = Object.keys(groupedByStreet).map(street => {
-                                    const nums = groupedByStreet[street];
-                                    if (nums.length > 0) {
-                                        return `${street} ${nums.join(' & ')}`;
-                                    }
-                                    return street;
-                                });
-                                const displayNames = parts.slice(0, 2).join(' | ');
-                                const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
-
                                 return (
                                     <div 
                                         key={`group-${item.id}`}
@@ -264,7 +290,7 @@ const CloudExplorer = () => {
                                         <Folder size={16} color={selectedProperty?.id === item.id ? 'var(--primary-color)' : '#64748b'} />
                                         <div style={{ display: 'flex', flexDirection: 'column' }}>
                                             <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === item.id ? 600 : 400, color: selectedProperty?.id === item.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
-                                                WG: {groupName || 'Wirtschaftsgemeinschaft'}
+                                                {item.displayFolderName}
                                             </span>
                                             <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
                                                 {item.members.length} Objekte
@@ -314,15 +340,7 @@ const CloudExplorer = () => {
                                     style={{ cursor: 'pointer', fontWeight: 600, color: currentPath.length === 0 ? 'var(--text-primary)' : 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '6px' }}
                                 >
                                     <Building2 size={16} />
-                                    {selectedProperty.isGroup ? `WG: ${
-                                        Object.entries(selectedProperty.members.reduce((acc, m) => {
-                                            if (m.street) {
-                                                if (!acc[m.street]) acc[m.street] = [];
-                                                if (m.house_number) acc[m.street].push(m.house_number);
-                                            }
-                                            return acc;
-                                        }, {})).map(([street, nums]) => nums.length ? `${street} ${nums.join(' & ')}` : street).join(' | ') || 'Wirtschaftsgemeinschaft'
-                                    }` : getPropertyLabel(selectedProperty)}
+                                    {selectedProperty.displayFolderName}
                                 </span>
                                 
                                 {currentPath.map((path, idx) => (
