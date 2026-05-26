@@ -103,7 +103,25 @@ export default function ClaimPortal() {
             }
         } catch (err) {
             console.error(err);
-            alert('Fehler beim Starten der Online-Zahlung: ' + (err.message || 'Bitte versuchen Sie es später noch einmal.'));
+            let detailedMsg = err.message;
+            if (err.context && typeof err.context.text === 'function') {
+                try {
+                    const responseText = await err.context.text();
+                    try {
+                        const parsed = JSON.parse(responseText);
+                        if (parsed && parsed.error) {
+                            detailedMsg = parsed.error;
+                        } else if (parsed && parsed.message) {
+                            detailedMsg = parsed.message;
+                        } else {
+                            detailedMsg = responseText;
+                        }
+                    } catch (_) {
+                        detailedMsg = responseText;
+                    }
+                } catch (_) {}
+            }
+            alert('Fehler beim Starten der Online-Zahlung: ' + detailedMsg);
         } finally {
             setPaymentLoading(false);
         }
