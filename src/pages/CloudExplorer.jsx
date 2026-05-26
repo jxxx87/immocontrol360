@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive } from 'lucide-react';
+import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings } from 'lucide-react';
 import Card from '../components/ui/Card';
 
 const CloudExplorer = () => {
     const { user } = useAuth();
+    const navigate = useNavigate();
     const [properties, setProperties] = useState([]);
-    const [status, setStatus] = useState('loading'); // loading, checking, creating, ready
-    const [statusMessage, setStatusMessage] = useState('Lade Immobilien...');
+    const [groupedProperties, setGroupedProperties] = useState([]);
+    const [status, setStatus] = useState('loading'); // loading, checking, creating, ready, no_connection
+    const [statusMessage, setStatusMessage] = useState('Überprüfe Cloud-Verbindung...');
     const [missingCount, setMissingCount] = useState(0);
 
     const [selectedProperty, setSelectedProperty] = useState(null);
@@ -17,37 +20,80 @@ const CloudExplorer = () => {
 
     useEffect(() => {
         const init = async () => {
+            if (!user) return;
+            
             setStatus('loading');
+            setStatusMessage('Überprüfe Cloud-Verbindung...');
+            
+            // 1. Check for active cloud connection
+            const { data: connections, error: connError } = await supabase
+                .from('cloud_connections')
+                .select('id')
+                .eq('user_id', user.id);
+                
+            if (connError || !connections || connections.length === 0) {
+                setStatus('no_connection');
+                return;
+            }
+
             setStatusMessage('Lade Immobilien...');
             
+            // 2. Fetch properties
             const { data: props } = await supabase
                 .from('properties')
-                .select('id, street, house_number, city, portfolio_id')
+                .select('id, street, house_number, city, portfolio_id, economic_unit_id')
                 .order('street');
                 
-            setProperties(props || []);
+            const safeProps = props || [];
+            setProperties(safeProps);
+            
+            // Group properties by economic_unit_id
+            const groups = {};
+            const ungrouped = [];
+            
+            safeProps.forEach(p => {
+                if (p.economic_unit_id) {
+                    if (!groups[p.economic_unit_id]) {
+                        groups[p.economic_unit_id] = {
+                            id: p.economic_unit_id,
+                            isGroup: true,
+                            name: 'Wirtschaftsgemeinschaft',
+                            members: []
+                        };
+                    }
+                    groups[p.economic_unit_id].members.push(p);
+                } else {
+                    ungrouped.push({ ...p, isGroup: false });
+                }
+            });
+            
+            const finalGrouped = [...Object.values(groups), ...ungrouped];
+            setGroupedProperties(finalGrouped);
 
-            if (props && props.length > 0) {
-                // Simulate checking cloud structure
+            if (safeProps.length > 0) {
                 setStatus('checking');
                 setStatusMessage('Überprüfe Cloud-Ordnerstruktur...');
                 
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 800));
                 
-                // Simulate that 1 property is missing folders
-                const missing = Math.min(props.length, 1); // Mock: pretend at least 1 is missing if we have properties
-                setMissingCount(missing);
+                // 3. Check missing folders (using localStorage as mock tracker)
+                const missingProps = safeProps.filter(p => !localStorage.getItem(`cloud_synced_${p.id}`));
+                setMissingCount(missingProps.length);
                 
-                if (missing > 0) {
+                if (missingProps.length > 0) {
                     setStatus('creating');
-                    setStatusMessage(`${missing} neue Immobilie(n) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
-                    await new Promise(r => setTimeout(r, 2500)); // Simulate folder creation
+                    setStatusMessage(`${missingProps.length} neue Immobilie(n) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
+                    await new Promise(r => setTimeout(r, 2000 + (missingProps.length * 500))); // Simulate processing
+                    
+                    // Mark as synced
+                    missingProps.forEach(p => localStorage.setItem(`cloud_synced_${p.id}`, 'true'));
                 }
             }
 
             setStatus('ready');
             setStatusMessage('');
         };
+
 
         init();
     }, []);
@@ -97,6 +143,28 @@ const CloudExplorer = () => {
         setCurrentPath([]);
     };
 
+    if (status === 'no_connection') {
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: '20px' }}>
+                <HardDrive size={64} color="var(--text-secondary)" />
+                <h2 style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--text-primary)', textAlign: 'center' }}>
+                    Keine Cloud-Verbindung gefunden
+                </h2>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', maxWidth: '450px', textAlign: 'center', marginBottom: '10px' }}>
+                    Um den Dokumenten-Explorer zu nutzen, verknüpfen Sie bitte zuerst ein Microsoft OneDrive oder Google Drive Konto mit Ihrem Profil.
+                </p>
+                <button 
+                    onClick={() => navigate('/settings', { state: { activeTab: 'cloud' } })}
+                    className="btn btn-primary"
+                    style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                >
+                    <Settings size={18} />
+                    Zu den Cloud-Einstellungen
+                </button>
+            </div>
+        );
+    }
+
     if (status !== 'ready') {
         return (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: '20px' }}>
@@ -143,26 +211,59 @@ const CloudExplorer = () => {
                         Immobilien
                     </div>
                     <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
-                        {properties.map(p => (
-                            <div 
-                                key={p.id}
-                                onClick={() => handleSelectProperty(p)}
-                                style={{
-                                    padding: '12px 16px',
-                                    cursor: 'pointer',
-                                    borderBottom: '1px solid var(--border-color)',
-                                    backgroundColor: selectedProperty?.id === p.id ? 'var(--primary-light)' : 'var(--surface-color)',
-                                    borderLeft: selectedProperty?.id === p.id ? '3px solid var(--primary-color)' : '3px solid transparent',
-                                    display: 'flex', alignItems: 'center', gap: '10px',
-                                    transition: 'all 0.2s'
-                                }}
-                            >
-                                <Folder size={16} color={selectedProperty?.id === p.id ? 'var(--primary-color)' : '#64748b'} />
-                                <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === p.id ? 600 : 400, color: selectedProperty?.id === p.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
-                                    {p.street} {p.house_number}
-                                </span>
-                            </div>
-                        ))}
+                        {groupedProperties.map((item, idx) => {
+                            if (item.isGroup) {
+                                return (
+                                    <div key={`group-${item.id}`} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                        <div style={{ padding: '8px 16px', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', backgroundColor: 'var(--bg-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <Building2 size={12} />
+                                            {item.name}
+                                        </div>
+                                        {item.members.map(p => (
+                                            <div 
+                                                key={p.id}
+                                                onClick={() => handleSelectProperty(p)}
+                                                style={{
+                                                    padding: '12px 16px',
+                                                    paddingLeft: '24px',
+                                                    cursor: 'pointer',
+                                                    backgroundColor: selectedProperty?.id === p.id ? 'var(--primary-light)' : 'var(--surface-color)',
+                                                    borderLeft: selectedProperty?.id === p.id ? '3px solid var(--primary-color)' : '3px solid transparent',
+                                                    display: 'flex', alignItems: 'center', gap: '10px',
+                                                    transition: 'all 0.2s'
+                                                }}
+                                            >
+                                                <Folder size={16} color={selectedProperty?.id === p.id ? 'var(--primary-color)' : '#64748b'} />
+                                                <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === p.id ? 600 : 400, color: selectedProperty?.id === p.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
+                                                    {p.street} {p.house_number}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                );
+                            } else {
+                                return (
+                                    <div 
+                                        key={item.id}
+                                        onClick={() => handleSelectProperty(item)}
+                                        style={{
+                                            padding: '12px 16px',
+                                            cursor: 'pointer',
+                                            borderBottom: '1px solid var(--border-color)',
+                                            backgroundColor: selectedProperty?.id === item.id ? 'var(--primary-light)' : 'var(--surface-color)',
+                                            borderLeft: selectedProperty?.id === item.id ? '3px solid var(--primary-color)' : '3px solid transparent',
+                                            display: 'flex', alignItems: 'center', gap: '10px',
+                                            transition: 'all 0.2s'
+                                        }}
+                                    >
+                                        <Folder size={16} color={selectedProperty?.id === item.id ? 'var(--primary-color)' : '#64748b'} />
+                                        <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === item.id ? 600 : 400, color: selectedProperty?.id === item.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
+                                            {item.street} {item.house_number}
+                                        </span>
+                                    </div>
+                                );
+                            }
+                        })}
                     </div>
                 </Card>
 
