@@ -122,13 +122,13 @@ const Claims = () => {
             const allActiveClaimIds = claimsData ? claimsData.map(c => c.id) : [];
             const { data: itemsTotalsData } = await supabase
                 .from('claim_item_totals_view')
-                .select('claim_item_id, claim_id, open_amount')
+                .select('claim_item_id, claim_id, open_amount, original_amount, paid_principal')
                 .in('claim_id', allActiveClaimIds);
                 
             // Fetch original items for created_at
             const { data: originalItemsData } = await supabase
                 .from('claim_items')
-                .select('id, created_at')
+                .select('id, created_at, fee_amount, interest_amount')
                 .in('claim_id', allActiveClaimIds);
 
             // Merge them locally
@@ -137,7 +137,8 @@ const Claims = () => {
                     const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
                     return {
                         ...tot,
-                        created_at: orig ? orig.created_at : null
+                        created_at: orig ? orig.created_at : null,
+                        claim_items: orig ? { fee_amount: orig.fee_amount, interest_amount: orig.interest_amount } : {}
                     };
                 });
             }
@@ -189,7 +190,7 @@ const Claims = () => {
             const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
 
             setClaims(activeClaims);
-            calculateKpis(activeClaims);
+            calculateKpis(activeClaims, allClaimItems, plansData, installmentsData);
 
         } catch (err) {
             console.error('Error loading claims:', err);
@@ -409,22 +410,64 @@ const Claims = () => {
         }
     };
 
-    const calculateKpis = (data) => {
-        let openCount = 0;
-        let totalDue = 0;
-        let actionRequiredCount = 0;
-        let paymentPlanCount = 0;
+    const calculateKpis = (activeClaims, allItems, plansData, installmentsData) => {
+        let totalUrsprung = 0;
+        let totalGetilgt = 0;
+        let totalOffen = 0;
 
-        data.forEach(claim => {
-            if (!['settled', 'cancelled', 'archived'].includes(claim.status)) {
-                openCount++;
-                totalDue += Number(claim.total_due || 0);
+        const calcItemTotal = (itemList) => {
+            let ursprung = 0;
+            let getilgt = 0;
+            let offen = 0;
+            itemList.forEach(item => {
+                const baseAmt = Number(item.original_amount || 0);
+                const feeAmt = Number(item.claim_items?.fee_amount || 0);
+                const intAmt = Number(item.claim_items?.interest_amount || 0);
+                const itemTotal = baseAmt + feeAmt + intAmt;
+                
+                const paidPrincipal = Number(item.paid_principal || 0);
+                let paidTotal = 0;
+                if (paidPrincipal > 0 || item.open_amount === 0) {
+                    paidTotal = feeAmt + intAmt + paidPrincipal;
+                }
+                if (item.open_amount === 0) {
+                    paidTotal = itemTotal;
+                }
+                const openTotal = Math.max(0, itemTotal - paidTotal);
+
+                ursprung += itemTotal;
+                getilgt += paidTotal;
+                offen += openTotal;
+            });
+            return { ursprung, getilgt, offen };
+        };
+
+        activeClaims.forEach(claim => {
+            const claimItems = allItems.filter(i => i.claim_id === claim.id);
+            const plan = (plansData || []).find(p => p.claim_id === claim.id);
+            
+            if (plan) {
+                const planInst = (installmentsData || []).filter(i => i.payment_plan_id === plan.id);
+                const planPaidAmount = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
+                const planTotal = Number(plan.total_amount || 0);
+                totalUrsprung += planTotal;
+                totalGetilgt += planPaidAmount;
+                totalOffen += Math.max(0, planTotal - planPaidAmount);
+
+                const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
+                const newItemsCalc = calcItemTotal(newItems);
+                totalUrsprung += newItemsCalc.ursprung;
+                totalGetilgt += newItemsCalc.getilgt;
+                totalOffen += newItemsCalc.offen;
+            } else {
+                const allItemsCalc = calcItemTotal(claimItems);
+                totalUrsprung += allItemsCalc.ursprung;
+                totalGetilgt += allItemsCalc.getilgt;
+                totalOffen += allItemsCalc.offen;
             }
-            if (claim.status === 'action_required') actionRequiredCount++;
-            if (claim.status === 'payment_plan_active') paymentPlanCount++;
         });
 
-        setKpis({ openCount, totalDue, actionRequiredCount, paymentPlanCount });
+        setKpis({ totalUrsprung, totalGetilgt, totalOffen });
     };
 
     const getStatusBadge = (status) => {
@@ -516,36 +559,19 @@ const Claims = () => {
 
             {/* KPIs */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
-                <Card style={{ padding: 'var(--spacing-lg)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <div style={{ padding: '10px', backgroundColor: '#DBEAFE', borderRadius: '12px' }}><Clock size={24} color="#1E40AF" /></div>
-                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>Offene Fälle</span>
-                    </div>
-                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)' }}>{kpis.openCount}</div>
+                <Card style={{ padding: 'var(--spacing-lg)', borderLeft: '4px solid #3B82F6' }}>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Ursprung</div>
+                    <div style={{ fontSize: '1.75rem', fontWeight: 700 }}>{formatCurrency(kpis.totalUrsprung || 0)}</div>
                 </Card>
                 
-                <Card style={{ padding: 'var(--spacing-lg)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <div style={{ padding: '10px', backgroundColor: '#FEE2E2', borderRadius: '12px' }}><AlertCircle size={24} color="#991B1B" /></div>
-                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>Aktion erforderlich</span>
-                    </div>
-                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#991B1B' }}>{kpis.actionRequiredCount}</div>
+                <Card style={{ padding: 'var(--spacing-lg)', borderLeft: '4px solid #10B981' }}>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Getilgt</div>
+                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#059669' }}>{formatCurrency(kpis.totalGetilgt || 0)}</div>
                 </Card>
 
-                <Card style={{ padding: 'var(--spacing-lg)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <div style={{ padding: '10px', backgroundColor: '#FEF3C7', borderRadius: '12px' }}><Scale size={24} color="#92400E" /></div>
-                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>Gesamt Offen</span>
-                    </div>
-                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)' }}>{formatCurrency(kpis.totalDue)}</div>
-                </Card>
-
-                <Card style={{ padding: 'var(--spacing-lg)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <div style={{ padding: '10px', backgroundColor: '#D1FAE5', borderRadius: '12px' }}><CheckCircle2 size={24} color="#065F46" /></div>
-                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>Aktive Ratenpläne</span>
-                    </div>
-                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)' }}>{kpis.paymentPlanCount}</div>
+                <Card style={{ padding: 'var(--spacing-lg)', borderLeft: '4px solid #EF4444', backgroundColor: '#FEF2F2' }}>
+                    <div style={{ fontSize: '0.85rem', color: '#991B1B', marginBottom: '4px', fontWeight: 600 }}>Gesamt offen</div>
+                    <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#991B1B' }}>{formatCurrency(kpis.totalOffen || 0)}</div>
                 </Card>
             </div>
 

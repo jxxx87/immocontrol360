@@ -712,6 +712,55 @@ const ClaimDetail = () => {
         };
     }
 
+    let totalUrsprung = 0;
+    let totalGetilgt = 0;
+    let totalOffen = 0;
+
+    const calcItemTotal = (itemList) => {
+        let ursprung = 0;
+        let getilgt = 0;
+        let offen = 0;
+        itemList.forEach(item => {
+            const baseAmt = Number(item.original_amount || 0);
+            const feeAmt = Number(item.claim_items?.fee_amount || 0);
+            const intAmt = Number(item.claim_items?.interest_amount || 0);
+            const itemTotal = baseAmt + feeAmt + intAmt;
+            
+            const paidPrincipal = Number(item.paid_principal || 0);
+            let paidTotal = 0;
+            if (paidPrincipal > 0 || item.open_amount === 0) {
+                paidTotal = feeAmt + intAmt + paidPrincipal;
+            }
+            if (item.open_amount === 0) {
+                paidTotal = itemTotal;
+            }
+            const openTotal = Math.max(0, itemTotal - paidTotal);
+
+            ursprung += itemTotal;
+            getilgt += paidTotal;
+            offen += openTotal;
+        });
+        return { ursprung, getilgt, offen };
+    };
+
+    if (paymentPlan) {
+        const planPaidAmount = installments.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
+        const planTotal = Number(paymentPlan.total_amount || 0);
+        totalUrsprung += planTotal;
+        totalGetilgt += planPaidAmount;
+        totalOffen += Math.max(0, planTotal - planPaidAmount);
+
+        const newItemsCalc = calcItemTotal(newItems);
+        totalUrsprung += newItemsCalc.ursprung;
+        totalGetilgt += newItemsCalc.getilgt;
+        totalOffen += newItemsCalc.offen;
+    } else {
+        const allItemsCalc = calcItemTotal(items);
+        totalUrsprung = allItemsCalc.ursprung;
+        totalGetilgt = allItemsCalc.getilgt;
+        totalOffen = allItemsCalc.offen;
+    }
+
     return (
         <div style={{ padding: 'var(--spacing-lg)' }}>
             {/* Header */}
@@ -731,28 +780,18 @@ const ClaimDetail = () => {
             </div>
 
             {/* KPIs */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-xl)' }}>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #3B82F6' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Hauptforderung offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.current_principal_open)}</div>
-                </Card>
-                <Card style={{ padding: '16px', borderLeft: '4px solid #F59E0B' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Gebühren offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.total_fees_open)}</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Ursprung</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(totalUrsprung)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #10B981' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinsen offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(displayTotals.total_interest_open)}</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Getilgt</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#059669' }}>{formatCurrency(totalGetilgt)}</div>
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #EF4444', backgroundColor: '#FEF2F2' }}>
                     <div style={{ fontSize: '0.85rem', color: '#991B1B', marginBottom: '4px', fontWeight: 600 }}>Gesamt offen</div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#991B1B' }}>{formatCurrency(displayTotals.total_due)}</div>
-                </Card>
-                <Card style={{ padding: '16px', borderLeft: '4px solid var(--text-secondary)' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Aktuelle Frist</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Clock size={18} /> {formatDate(claim.deadline)}
-                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#991B1B' }}>{formatCurrency(totalOffen)}</div>
                 </Card>
             </div>
 
