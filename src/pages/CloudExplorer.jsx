@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings } from 'lucide-react';
+import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud } from 'lucide-react';
 import Card from '../components/ui/Card';
 
 const CloudExplorer = () => {
@@ -155,10 +155,26 @@ const CloudExplorer = () => {
                 </p>
                 <button 
                     onClick={() => navigate('/settings', { state: { activeTab: 'cloud' } })}
-                    className="btn btn-primary"
-                    style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                    style={{
+                        width: '100%',
+                        maxWidth: '350px',
+                        padding: '12px 16px',
+                        backgroundColor: '#0078D4',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 'var(--radius-md)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '10px',
+                        fontSize: '1rem',
+                        fontWeight: 600,
+                        transition: 'background-color 0.2s',
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                    }}
                 >
-                    <Settings size={18} />
+                    <Cloud size={20} />
                     Zu den Cloud-Einstellungen
                 </button>
             </div>
@@ -213,32 +229,34 @@ const CloudExplorer = () => {
                     <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
                         {groupedProperties.map((item, idx) => {
                             if (item.isGroup) {
+                                const streets = item.members.map(m => m.street).filter(Boolean);
+                                const uniqueStreets = [...new Set(streets)];
+                                const displayNames = uniqueStreets.slice(0, 2).join(' & ');
+                                const groupName = uniqueStreets.length > 2 ? `${displayNames} u.a.` : displayNames;
+
                                 return (
-                                    <div key={`group-${item.id}`} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                        <div style={{ padding: '8px 16px', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', backgroundColor: 'var(--bg-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <Building2 size={12} />
-                                            {item.name}
+                                    <div 
+                                        key={`group-${item.id}`}
+                                        onClick={() => handleSelectProperty(item)}
+                                        style={{
+                                            padding: '12px 16px',
+                                            cursor: 'pointer',
+                                            borderBottom: '1px solid var(--border-color)',
+                                            backgroundColor: selectedProperty?.id === item.id ? 'var(--primary-light)' : 'var(--surface-color)',
+                                            borderLeft: selectedProperty?.id === item.id ? '3px solid var(--primary-color)' : '3px solid transparent',
+                                            display: 'flex', alignItems: 'center', gap: '10px',
+                                            transition: 'all 0.2s'
+                                        }}
+                                    >
+                                        <Folder size={16} color={selectedProperty?.id === item.id ? 'var(--primary-color)' : '#64748b'} />
+                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                            <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === item.id ? 600 : 400, color: selectedProperty?.id === item.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
+                                                WG: {groupName || 'Wirtschaftsgemeinschaft'}
+                                            </span>
+                                            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                                {item.members.length} Objekte
+                                            </span>
                                         </div>
-                                        {item.members.map(p => (
-                                            <div 
-                                                key={p.id}
-                                                onClick={() => handleSelectProperty(p)}
-                                                style={{
-                                                    padding: '12px 16px',
-                                                    paddingLeft: '24px',
-                                                    cursor: 'pointer',
-                                                    backgroundColor: selectedProperty?.id === p.id ? 'var(--primary-light)' : 'var(--surface-color)',
-                                                    borderLeft: selectedProperty?.id === p.id ? '3px solid var(--primary-color)' : '3px solid transparent',
-                                                    display: 'flex', alignItems: 'center', gap: '10px',
-                                                    transition: 'all 0.2s'
-                                                }}
-                                            >
-                                                <Folder size={16} color={selectedProperty?.id === p.id ? 'var(--primary-color)' : '#64748b'} />
-                                                <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === p.id ? 600 : 400, color: selectedProperty?.id === p.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
-                                                    {p.street} {p.house_number}
-                                                </span>
-                                            </div>
-                                        ))}
                                     </div>
                                 );
                             } else {
@@ -283,7 +301,7 @@ const CloudExplorer = () => {
                                     style={{ cursor: 'pointer', fontWeight: 600, color: currentPath.length === 0 ? 'var(--text-primary)' : 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '6px' }}
                                 >
                                     <Building2 size={16} />
-                                    {getPropertyLabel(selectedProperty)}
+                                    {selectedProperty.isGroup ? `WG: ${selectedProperty.members.map(m => m.street).filter(Boolean)[0] || 'Wirtschaftsgemeinschaft'}` : getPropertyLabel(selectedProperty)}
                                 </span>
                                 
                                 {currentPath.map((path, idx) => (
