@@ -229,10 +229,23 @@ const CloudExplorer = () => {
                     <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
                         {groupedProperties.map((item, idx) => {
                             if (item.isGroup) {
-                                const streets = item.members.map(m => m.street).filter(Boolean);
-                                const uniqueStreets = [...new Set(streets)];
-                                const displayNames = uniqueStreets.slice(0, 2).join(' & ');
-                                const groupName = uniqueStreets.length > 2 ? `${displayNames} u.a.` : displayNames;
+                                const groupedByStreet = {};
+                                item.members.forEach(m => {
+                                    if (!m.street) return;
+                                    if (!groupedByStreet[m.street]) groupedByStreet[m.street] = [];
+                                    if (m.house_number) {
+                                        groupedByStreet[m.street].push(m.house_number);
+                                    }
+                                });
+                                const parts = Object.keys(groupedByStreet).map(street => {
+                                    const nums = groupedByStreet[street];
+                                    if (nums.length > 0) {
+                                        return `${street} ${nums.join(' & ')}`;
+                                    }
+                                    return street;
+                                });
+                                const displayNames = parts.slice(0, 2).join(' | ');
+                                const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
 
                                 return (
                                     <div 
@@ -301,7 +314,15 @@ const CloudExplorer = () => {
                                     style={{ cursor: 'pointer', fontWeight: 600, color: currentPath.length === 0 ? 'var(--text-primary)' : 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '6px' }}
                                 >
                                     <Building2 size={16} />
-                                    {selectedProperty.isGroup ? `WG: ${selectedProperty.members.map(m => m.street).filter(Boolean)[0] || 'Wirtschaftsgemeinschaft'}` : getPropertyLabel(selectedProperty)}
+                                    {selectedProperty.isGroup ? `WG: ${
+                                        Object.entries(selectedProperty.members.reduce((acc, m) => {
+                                            if (m.street) {
+                                                if (!acc[m.street]) acc[m.street] = [];
+                                                if (m.house_number) acc[m.street].push(m.house_number);
+                                            }
+                                            return acc;
+                                        }, {})).map(([street, nums]) => nums.length ? `${street} ${nums.join(' & ')}` : street).join(' | ') || 'Wirtschaftsgemeinschaft'
+                                    }` : getPropertyLabel(selectedProperty)}
                                 </span>
                                 
                                 {currentPath.map((path, idx) => (
