@@ -113,7 +113,10 @@ const Claims = () => {
                 body: { origin: window.location.origin }
             });
             if (error) throw error;
-            if (data?.url) {
+            if (data?.already_connected) {
+                alert('Erfolgreich mit Stripe verbunden!');
+                await loadPortalSettings();
+            } else if (data?.url) {
                 window.location.href = data.url;
             } else {
                 throw new Error('Keine Onboarding-URL von Stripe Connect empfangen.');
@@ -224,10 +227,29 @@ const Claims = () => {
             window.history.replaceState({}, document.title, cleanUrl);
 
             if (stripeStatus === 'success') {
-                alert('Stripe-Konto erfolgreich verbunden/aktualisiert!');
-                // Auto-open settings modal to show connected state
-                loadPortalSettings().then(() => {
-                    setIsSettingsModalOpen(true);
+                setIsStripeConnecting(true);
+                // Synchronize onboarding state directly via Edge Function
+                supabase.functions.invoke('stripe-connect-onboard', {
+                    body: { origin: window.location.origin }
+                }).then(({ data, error }) => {
+                    loadPortalSettings().then(() => {
+                        setIsSettingsModalOpen(true);
+                        setIsStripeConnecting(false);
+                        if (error) {
+                            console.error('Failed to sync Stripe status:', error);
+                            alert('Fehler beim Synchronisieren des Stripe-Status.');
+                        } else if (data?.already_connected) {
+                            alert('Stripe-Konto erfolgreich verbunden und aktiviert!');
+                        } else {
+                            alert('Stripe-Verbindung ausstehend. Das Onboarding scheint unvollständig zu sein.');
+                        }
+                    });
+                }).catch(err => {
+                    console.error('Error during Stripe status sync:', err);
+                    loadPortalSettings().then(() => {
+                        setIsSettingsModalOpen(true);
+                        setIsStripeConnecting(false);
+                    });
                 });
             } else if (stripeStatus === 'refresh') {
                 alert('Das Stripe-Onboarding wurde abgebrochen oder muss fortgesetzt werden.');

@@ -31,6 +31,19 @@ async function stripePost(path: string, params: Record<string, string>): Promise
     return data;
 }
 
+async function stripeGet(path: string): Promise<any> {
+    const res = await fetch(`https://api.stripe.com/v1${path}`, {
+        method: "GET",
+        headers: {
+            Authorization: `Bearer ${STRIPE_SECRET}`,
+            "Stripe-Version": "2022-11-15",
+        },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || `Stripe error: ${res.status}`);
+    return data;
+}
+
 serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
@@ -71,6 +84,46 @@ serve(async (req: Request) => {
         }
         
         let stripeConnectId = profileData[0]?.stripe_connect_id;
+        let isAlreadyEnabled = false;
+
+        if (stripeConnectId) {
+            console.log(`Checking status for existing Stripe Connect Account: ${stripeConnectId}...`);
+            try {
+                const account = await stripeGet(`/accounts/${stripeConnectId}`);
+                const chargesEnabled = account.charges_enabled;
+                const detailsSubmitted = account.details_submitted;
+                isAlreadyEnabled = chargesEnabled && detailsSubmitted;
+                
+                console.log(`Stripe Connect status for ${stripeConnectId}: charges_enabled=${chargesEnabled}, details_submitted=${detailsSubmitted}`);
+                
+                // Update database status
+                const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${userId}`, {
+                    method: "PATCH",
+                    headers: {
+                        apikey: SUPABASE_KEY,
+                        Authorization: `Bearer ${SUPABASE_KEY}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ 
+                        stripe_connect_enabled: isAlreadyEnabled,
+                        updated_at: new Date().toISOString()
+                    }),
+                });
+                
+                if (!updateRes.ok) {
+                    console.error("Failed to update profile connection status in DB");
+                }
+            } catch (err: any) {
+                console.error("Failed to retrieve account status from Stripe:", err.message);
+            }
+        }
+
+        // If already connected, return early
+        if (isAlreadyEnabled) {
+            return new Response(JSON.stringify({ url: null, already_connected: true }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
 
         // 3. Create Stripe Connect Express Account if not exists
         if (!stripeConnectId) {
