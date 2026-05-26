@@ -7,7 +7,7 @@ import Modal from '../components/ui/Modal';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import RateInput from '../components/ui/RateInput';
-import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText, Share2 } from 'lucide-react';
+import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText, Share2, Cloud } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
@@ -18,6 +18,7 @@ import Billing from './Billing'; // Billing & Abo page component
 import { PortfolioShareModal } from '../components/portfolio/PortfolioShareModal';
 import { PendingInvitations } from '../components/portfolio/PendingInvitations';
 import { ActiveShares } from '../components/portfolio/ActiveShares';
+import { CloudSettings } from './settings/CloudSettings';
 
 const Settings = () => {
     const { user } = useAuth();
@@ -680,6 +681,7 @@ const Settings = () => {
         { id: 'navigation', label: 'Navigationsleiste', icon: PanelLeft },
         { id: 'security', label: 'Sicherheit', icon: Lock },
         { id: 'import', label: 'Import', icon: Upload },
+        { id: 'cloud', label: 'Cloud-Verbindungen', icon: Cloud },
         { id: 'billing', label: 'Abrechnung & Abo', icon: CreditCard },
         { id: 'help', label: 'Hilfe', icon: HelpCircle }
     ];
@@ -1102,6 +1104,12 @@ const Settings = () => {
                     {activeTab === 'import' && (
                         <div>
                             <ImportPage />
+                        </div>
+                    )}
+
+                    {activeTab === 'cloud' && (
+                        <div>
+                            <CloudSettings portfolios={portfolios} />
                         </div>
                     )}
 
