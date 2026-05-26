@@ -143,6 +143,33 @@ const Claims = () => {
                 });
             }
 
+            const calcItemTotal = (itemList) => {
+                let ursprung = 0;
+                let getilgt = 0;
+                let offen = 0;
+                itemList.forEach(item => {
+                    const baseAmt = Number(item.original_amount || 0);
+                    const feeAmt = Number(item.claim_items?.fee_amount || 0);
+                    const intAmt = Number(item.claim_items?.interest_amount || 0);
+                    const itemTotal = baseAmt + feeAmt + intAmt;
+                    
+                    const paidPrincipal = Number(item.paid_principal || 0);
+                    let paidTotal = 0;
+                    if (paidPrincipal > 0 || item.open_amount === 0) {
+                        paidTotal = feeAmt + intAmt + paidPrincipal;
+                    }
+                    if (item.open_amount === 0) {
+                        paidTotal = itemTotal;
+                    }
+                    const openTotal = Math.max(0, itemTotal - paidTotal);
+
+                    ursprung += itemTotal;
+                    getilgt += paidTotal;
+                    offen += openTotal;
+                });
+                return { ursprung, getilgt, offen };
+            };
+
             // 6. Merge data
             const merged = (claimsData || []).map(claim => {
                 let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
@@ -150,47 +177,44 @@ const Claims = () => {
                 const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
                 const itemCount = claimItems.length;
 
-                const plan = (plansData || []).find(p => p.claim_id === claim.id);
+                let claimTotalUrsprung = 0;
+                let claimTotalGetilgt = 0;
+                let claimTotalOffen = 0;
+
                 if (plan) {
                     const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
                     const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
                     const planTotal = Number(plan.total_amount || 0);
-                    const planOpen = planTotal - planPaid;
+                    const planOpen = Math.max(0, planTotal - planPaid);
                     
                     const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
-                    const newItemsPrincipalOpen = newItems.reduce((sum, item) => sum + Number(item.open_amount || 0), 0);
+                    const newItemsCalc = calcItemTotal(newItems);
                     
-                    // Fees/Interest that were part of the plan (absorbed into plan total)
-                    const planFees = Number(plan.fees_at_creation || 0);
-                    const planInterest = Number(plan.interest_at_creation || 0);
-                    
-                    // Total fees/interest on the claim
-                    const totalClaimFees = Number(claim.accumulated_unpaid_fees || 0);
-                    const totalClaimInterest = Number(claim.accumulated_unpaid_interest || 0);
-                    
-                    // Only fees/interest AFTER the plan belong to new items
-                    const newItemsFees = Math.max(0, totalClaimFees - planFees);
-                    const newItemsInterest = Math.max(0, totalClaimInterest - planInterest);
-                    
-                    totals = {
-                        ...totals,
-                        current_principal_original: planTotal + newItemsPrincipalOpen,
-                        principal_paid: planPaid,
-                        current_principal_open: planOpen + newItemsPrincipalOpen,
-                        total_fees_open: newItemsFees,
-                        total_interest_open: newItemsInterest,
-                        total_due: planOpen + newItemsPrincipalOpen + newItemsFees + newItemsInterest
-                    };
+                    claimTotalUrsprung = planTotal + newItemsCalc.ursprung;
+                    claimTotalGetilgt = planPaid + newItemsCalc.getilgt;
+                    claimTotalOffen = planOpen + newItemsCalc.offen;
+                } else {
+                    const allItemsCalc = calcItemTotal(claimItems);
+                    claimTotalUrsprung = allItemsCalc.ursprung;
+                    claimTotalGetilgt = allItemsCalc.getilgt;
+                    claimTotalOffen = allItemsCalc.offen;
                 }
                 
-                return { ...claim, ...totals, itemCount };
+                return { 
+                    ...claim, 
+                    ...totals, 
+                    itemCount, 
+                    totalUrsprung: claimTotalUrsprung, 
+                    totalGetilgt: claimTotalGetilgt, 
+                    totalOffen: claimTotalOffen 
+                };
             });
 
             // Filter out cancelled and archived claims from the main view (optional, but good for UI)
             const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
 
             setClaims(activeClaims);
-            calculateKpis(activeClaims, allClaimItems, plansData, installmentsData);
+            calculateKpis(activeClaims);
 
         } catch (err) {
             console.error('Error loading claims:', err);
@@ -410,61 +434,15 @@ const Claims = () => {
         }
     };
 
-    const calculateKpis = (activeClaims, allItems, plansData, installmentsData) => {
+    const calculateKpis = (activeClaims) => {
         let totalUrsprung = 0;
         let totalGetilgt = 0;
         let totalOffen = 0;
 
-        const calcItemTotal = (itemList) => {
-            let ursprung = 0;
-            let getilgt = 0;
-            let offen = 0;
-            itemList.forEach(item => {
-                const baseAmt = Number(item.original_amount || 0);
-                const feeAmt = Number(item.claim_items?.fee_amount || 0);
-                const intAmt = Number(item.claim_items?.interest_amount || 0);
-                const itemTotal = baseAmt + feeAmt + intAmt;
-                
-                const paidPrincipal = Number(item.paid_principal || 0);
-                let paidTotal = 0;
-                if (paidPrincipal > 0 || item.open_amount === 0) {
-                    paidTotal = feeAmt + intAmt + paidPrincipal;
-                }
-                if (item.open_amount === 0) {
-                    paidTotal = itemTotal;
-                }
-                const openTotal = Math.max(0, itemTotal - paidTotal);
-
-                ursprung += itemTotal;
-                getilgt += paidTotal;
-                offen += openTotal;
-            });
-            return { ursprung, getilgt, offen };
-        };
-
         activeClaims.forEach(claim => {
-            const claimItems = allItems.filter(i => i.claim_id === claim.id);
-            const plan = (plansData || []).find(p => p.claim_id === claim.id);
-            
-            if (plan) {
-                const planInst = (installmentsData || []).filter(i => i.payment_plan_id === plan.id);
-                const planPaidAmount = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
-                const planTotal = Number(plan.total_amount || 0);
-                totalUrsprung += planTotal;
-                totalGetilgt += planPaidAmount;
-                totalOffen += Math.max(0, planTotal - planPaidAmount);
-
-                const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
-                const newItemsCalc = calcItemTotal(newItems);
-                totalUrsprung += newItemsCalc.ursprung;
-                totalGetilgt += newItemsCalc.getilgt;
-                totalOffen += newItemsCalc.offen;
-            } else {
-                const allItemsCalc = calcItemTotal(claimItems);
-                totalUrsprung += allItemsCalc.ursprung;
-                totalGetilgt += allItemsCalc.getilgt;
-                totalOffen += allItemsCalc.offen;
-            }
+            totalUrsprung += (claim.totalUrsprung || 0);
+            totalGetilgt += (claim.totalGetilgt || 0);
+            totalOffen += (claim.totalOffen || 0);
         });
 
         setKpis({ totalUrsprung, totalGetilgt, totalOffen });
@@ -605,8 +583,6 @@ const Claims = () => {
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Frist</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Ursprung</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Getilgt</th>
-                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Rest Miete</th>
-                                    <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Kosten/Zins</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 700, textAlign: 'right' }}>Gesamt Offen</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right' }}>Aktionen</th>
                                 </tr>
@@ -631,14 +607,10 @@ const Claims = () => {
                                                 </div>
                                             )}
                                         </td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(claim.current_principal_original)}</td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(claim.principal_paid)}</td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(claim.current_principal_open)}</td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#B45309' }}>
-                                            {formatCurrency(Number(claim.total_fees_open || 0) + Number(claim.total_interest_open || 0))}
-                                        </td>
+                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(claim.totalUrsprung)}</td>
+                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(claim.totalGetilgt)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.95rem', textAlign: 'right', fontWeight: 600, color: 'var(--text-primary)' }}>
-                                            {formatCurrency(claim.total_due)}
+                                            {formatCurrency(claim.totalOffen)}
                                         </td>
                                         <td style={{ padding: '16px', textAlign: 'right' }}>
                                             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
