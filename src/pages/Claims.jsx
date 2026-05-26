@@ -120,7 +120,26 @@ const Claims = () => {
             }
         } catch (err) {
             console.error(err);
-            alert('Fehler bei der Verbindung mit Stripe: ' + err.message);
+            let detailedMsg = err.message;
+            // Attempt to extract error message from response context
+            if (err.context && typeof err.context.text === 'function') {
+                try {
+                    const responseText = await err.context.text();
+                    try {
+                        const parsed = JSON.parse(responseText);
+                        if (parsed && parsed.error) {
+                            detailedMsg = parsed.error;
+                        } else if (parsed && parsed.message) {
+                            detailedMsg = parsed.message;
+                        } else {
+                            detailedMsg = responseText;
+                        }
+                    } catch (_) {
+                        detailedMsg = responseText;
+                    }
+                } catch (_) {}
+            }
+            alert('Fehler bei der Verbindung mit Stripe: ' + detailedMsg);
         } finally {
             setIsStripeConnecting(false);
         }
