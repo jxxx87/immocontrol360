@@ -58,7 +58,6 @@ const ClaimDetail = () => {
     const [claimAccessLink, setClaimAccessLink] = useState(null);
     const [paymentPlanRequests, setPaymentPlanRequests] = useState([]);
     const [isPortalModalOpen, setIsPortalModalOpen] = useState(false);
-    const [newPortalLink, setNewPortalLink] = useState(null);
 
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -255,10 +254,9 @@ const ClaimDetail = () => {
 
             if (error) throw error;
             
-            // Show new token and pin to the user ONCE
-            setNewPortalLink({ token, pin, link: `${window.location.origin}/forderung/portal/${token}` });
-            
+            // Link is created, just reload data to get the new claimAccessLink
             loadClaimData();
+            alert('Neuer Portal-Link wurde erfolgreich erstellt!');
         } catch (err) {
             console.error(err);
             alert('Fehler beim Erstellen des Links: ' + err.message);
@@ -1386,21 +1384,15 @@ const ClaimDetail = () => {
                         onChange={(e) => setPdfForm({...pdfForm, deadlineDays: e.target.value})} 
                     />
 
-                    {!newPortalLink && claimAccessLink && (
-                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#FEF2F2', borderRadius: '8px', border: '1px solid #FCA5A5', fontSize: '0.85rem', color: '#991B1B' }}>
-                            <strong>Hinweis zum Forderungsportal:</strong> Es existiert zwar ein aktiver Portal-Link, aber die PIN liegt nicht mehr vor. Um einen neuen QR-Code im PDF zu drucken, widerrufen Sie den Link und erstellen Sie vor der PDF-Generierung einen neuen.
+                    {claimAccessLink && (
+                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F0FDF4', borderRadius: '8px', border: '1px solid #BBF7D0', fontSize: '0.85rem', color: '#166534' }}>
+                            <strong>Portal-Link aktiv:</strong> QR-Code und Zugangscode (PIN: {claimAccessLink.pin}) werden automatisch auf der ersten Seite des PDFs abgedruckt.
                         </div>
                     )}
                     
-                    {!newPortalLink && !claimAccessLink && (
+                    {!claimAccessLink && (
                         <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px', fontSize: '0.85rem', color: '#4B5563' }}>
                             <strong>Hinweis:</strong> Erstellen Sie vorab einen "Portal-Link", um automatisch einen QR-Code für den Mieter in das PDF einzubauen.
-                        </div>
-                    )}
-
-                    {newPortalLink && (
-                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F0FDF4', borderRadius: '8px', border: '1px solid #BBF7D0', fontSize: '0.85rem', color: '#166534' }}>
-                            <strong>Portal-Link aktiv:</strong> QR-Code und Zugangscode (PIN: {newPortalLink.pin}) werden automatisch auf der ersten Seite des PDFs abgedruckt.
                         </div>
                     )}
                     
@@ -1736,69 +1728,83 @@ const ClaimDetail = () => {
                 </div>
             </Modal>
 
-            {/* Portal Link Modal */}
-            <Modal isOpen={isPortalModalOpen || !!newPortalLink} onClose={() => { setIsPortalModalOpen(false); setNewPortalLink(null); }} title="Forderungsportal">
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                    <div style={{ padding: '16px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE' }}>
-                        <h3 style={{ fontSize: '1.05rem', fontWeight: 600, color: '#1E40AF', marginBottom: '8px' }}>Zugang zum Forderungsportal</h3>
-                        <p style={{ fontSize: '0.9rem', color: '#1E3A8A', marginBottom: '16px' }}>
-                            Der Mieter kann über diesen Link und die PIN seine aktuelle Forderung einsehen und eine Ratenzahlung anfragen.
-                        </p>
-                        
-                        {(newPortalLink || claimAccessLink) && (
-                            <>
-                                <div style={{ marginBottom: '16px' }}>
-                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#1E40AF', marginBottom: '4px' }}>Link (URL)</label>
-                                    <div style={{ padding: '8px 12px', backgroundColor: 'white', border: '1px solid #BFDBFE', borderRadius: '4px', wordBreak: 'break-all', fontSize: '0.9rem' }}>
-                                        {newPortalLink?.link || `${window.location.origin}/forderung/portal/--- (Token nur bei Erstellung sichtbar)`}
-                                    </div>
+            {/* Portal Modal */}
+            <Modal isOpen={isPortalModalOpen} onClose={() => setIsPortalModalOpen(false)} title="Forderungsportal">
+                <div style={{ padding: 'var(--spacing-lg)' }}>
+                    <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
+                        Sie können dem Mieter einen gesicherten Link zur Verfügung stellen. Darüber kann der Mieter die aktuelle Forderung einsehen und z.B. eine Ratenzahlung anfragen.
+                    </p>
+
+                    <div style={{ padding: '16px', backgroundColor: '#F9FAFB', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: 'var(--spacing-lg)' }}>
+                        {claimAccessLink && (
+                            <div style={{ marginBottom: '16px' }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Portal Link</label>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <Input 
+                                        readOnly 
+                                        value={`${window.location.origin}/forderung/portal/${claimAccessLink.token}`}
+                                        style={{ flex: 1, backgroundColor: 'white' }}
+                                    />
+                                    <Button variant="secondary" onClick={() => {
+                                        navigator.clipboard.writeText(`${window.location.origin}/forderung/portal/${claimAccessLink.token}`);
+                                        alert('Link kopiert!');
+                                    }}>
+                                        Kopieren
+                                    </Button>
                                 </div>
-                                
-                                {newPortalLink && (
-                                    <div style={{ marginBottom: '16px' }}>
-                                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#1E40AF', marginBottom: '4px' }}>PIN / Zugangscode</label>
-                                        <div style={{ padding: '12px', backgroundColor: '#FEF3C7', border: '2px dashed #F59E0B', borderRadius: '4px', fontSize: '1.25rem', fontWeight: 700, textAlign: 'center', letterSpacing: '4px' }}>
-                                            {newPortalLink.pin}
-                                        </div>
-                                        <p style={{ fontSize: '0.75rem', color: '#B45309', marginTop: '4px', textAlign: 'center' }}>
-                                            Notieren Sie sich diese PIN. Sie wird aus Sicherheitsgründen nicht mehr im System angezeigt!
-                                        </p>
-                                    </div>
-                                )}
-                            </>
+                            </div>
                         )}
-                    </div>
-                    
-                    {claimAccessLink && !newPortalLink && (
-                        <div style={{ padding: '16px', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>Status:</span>
-                                <Badge variant="success">Aktiv</Badge>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>Gültig bis:</span>
-                                <span style={{ fontWeight: 500 }}>{formatDate(claimAccessLink.expires_at)}</span>
-                            </div>
-                            {claimAccessLink.last_used_at && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span style={{ color: 'var(--text-secondary)' }}>Zuletzt aufgerufen:</span>
-                                    <span style={{ fontWeight: 500 }}>{new Date(claimAccessLink.last_used_at).toLocaleString('de-DE')}</span>
+
+                        <div style={{ display: 'flex', gap: '16px' }}>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Zugangscode (PIN)</label>
+                                <div style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '4px', color: 'var(--primary-color)' }}>
+                                    {claimAccessLink ? claimAccessLink.pin : '-----'}
                                 </div>
-                            )}
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                    Wird zur Authentifizierung benötigt.
+                                </div>
+                            </div>
+                            
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Status</label>
+                                {claimAccessLink ? (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#059669', fontSize: '0.9rem', fontWeight: 500 }}>
+                                        <CheckCircle2 size={16} />
+                                        Aktiv
+                                    </span>
+                                ) : (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#9CA3AF', fontSize: '0.9rem', fontWeight: 500 }}>
+                                        Inaktiv
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {!claimAccessLink && (
+                        <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE', marginBottom: 'var(--spacing-lg)' }}>
+                            <AlertCircle size={18} color="#1D4ED8" style={{ marginTop: '2px' }} />
+                            <div style={{ fontSize: '0.85rem', color: '#1E3A8A' }}>
+                                Klicken Sie auf "Link generieren", um einen neuen Zugangscode zu erstellen. Dies widerruft automatisch alte Links dieser Forderung.
+                            </div>
                         </div>
                     )}
-                    
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px' }}>
-                        {claimAccessLink ? (
-                            <Button variant="secondary" onClick={handleRevokePortalLink} style={{ color: '#DC2626', borderColor: '#FCA5A5' }} disabled={isSubmitting}>
-                                Link widerrufen
-                            </Button>
-                        ) : (
-                            <div></div>
-                        )}
-                        <Button onClick={() => { setIsPortalModalOpen(false); setNewPortalLink(null); }}>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 'var(--spacing-lg)' }}>
+                        <Button variant="secondary" onClick={() => setIsPortalModalOpen(false)}>
                             Schließen
                         </Button>
+                        <div style={{ display: 'flex', gap: '12px' }}>
+                            {claimAccessLink && (
+                                <Button onClick={handleRevokePortalLink} style={{ backgroundColor: '#EF4444', color: 'white' }}>
+                                    Link widerrufen
+                                </Button>
+                            )}
+                            <Button onClick={handleCreatePortalLink} disabled={isSubmitting}>
+                                {isSubmitting ? 'Generiere...' : claimAccessLink ? 'Neu generieren' : 'Link generieren'}
+                            </Button>
+                        </div>
                     </div>
                 </div>
             </Modal>
