@@ -46,7 +46,7 @@ export const CloudSettings = ({ portfolios }) => {
         
         const redirectUri = encodeURIComponent(`${window.location.origin}/settings/cloud/callback`);
         const scope = encodeURIComponent('offline_access Files.ReadWrite.All User.Read');
-        const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scope}&state=onedrive`;
+        const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scope}&prompt=select_account&state=onedrive`;
         
         window.location.href = url;
     };
