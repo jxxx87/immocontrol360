@@ -575,7 +575,6 @@ const Claims = () => {
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwalten Sie Mietrückstände, Mahnungen und Ratenzahlungen.</p>
                 </div>
-                </div>
                 <div style={{ display: 'flex', gap: '12px' }}>
                     <Button 
                         variant="secondary" 
