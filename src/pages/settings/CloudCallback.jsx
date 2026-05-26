@@ -26,7 +26,8 @@ export const CloudCallback = () => {
 
                 const redirectUri = `${window.location.origin}/settings/cloud/callback`;
 
-                const res = await fetch('https://[YOUR_SUPABASE_ID].supabase.co/functions/v1/cloud-auth', {
+                const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+                const res = await fetch(`${supabaseUrl}/functions/v1/cloud-auth`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
