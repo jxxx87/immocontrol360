@@ -100,37 +100,35 @@ const CloudExplorer = () => {
                 setStatus('checking');
                 setStatusMessage('Überprüfe Cloud-Ordnerstruktur...');
                 
-                // Identify missing items (groups or single properties)
-                const missingItems = finalGrouped.filter(item => {
-                    const trackingId = item.isGroup ? `wg_${item.id}` : item.id;
-                    return !localStorage.getItem(`cloud_synced_${trackingId}`);
-                });
-                
-                if (missingItems.length > 0) {
-                    setMissingCount(missingItems.length);
-                    setStatus('creating');
-                    setStatusMessage(`${missingItems.length} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
+                try {
+                    const allExpectedFolders = finalGrouped.map(item => item.displayFolderName);
                     
-                    try {
-                        const foldersToCreate = missingItems.map(item => item.displayFolderName);
+                    // 3. Ask Edge Function which ones are actually missing in OneDrive
+                    const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: 'onedrive', action: 'check', foldersToCreate: allExpectedFolders }
+                    });
+                    
+                    if (checkError) throw checkError;
+                    if (checkData && checkData.error) throw new Error(checkData.error);
+                    
+                    const missingFolders = checkData.missingFolders || [];
+                    
+                    if (missingFolders.length > 0) {
+                        setMissingCount(missingFolders.length);
+                        setStatus('creating');
+                        setStatusMessage(`${missingFolders.length} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
                         
-                        const { data, error } = await supabase.functions.invoke('cloud-sync', {
-                            body: { provider: 'onedrive', foldersToCreate }
+                        const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
+                            body: { provider: 'onedrive', action: 'create', foldersToCreate: missingFolders }
                         });
                         
-                        if (error) throw error;
-                        if (data && data.error) throw new Error(data.error);
-
-                        // Mark as synced
-                        missingItems.forEach(item => {
-                            const trackingId = item.isGroup ? `wg_${item.id}` : item.id;
-                            localStorage.setItem(`cloud_synced_${trackingId}`, 'true');
-                        });
-                    } catch (err) {
-                        console.error("Cloud Sync Error:", err);
-                        // Fallback: wait a bit so user sees it tried, even if failed, we will just proceed
-                        await new Promise(r => setTimeout(r, 2000));
+                        if (createError) throw createError;
+                        if (createData && createData.error) throw new Error(createData.error);
                     }
+                } catch (err) {
+                    console.error("Cloud Sync Error:", err);
+                    // Fallback: wait a bit so user sees it tried, even if failed, we will just proceed
+                    await new Promise(r => setTimeout(r, 2000));
                 }
             }
 
