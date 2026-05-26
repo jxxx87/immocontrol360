@@ -492,6 +492,17 @@ const CloudExplorer = () => {
                                     const isImage = file.name.toLowerCase().match(/\.(jpg|jpeg|png|gif)$/);
                                     const Icon = file.isFolder ? Folder : (isImage ? ImageIcon : FileText);
                                     
+                                    const PROTECTED_FOLDERS = [
+                                        "Rechnungen",
+                                        "Mietverträge",
+                                        "Bilder",
+                                        "Schriftverkehr",
+                                        "Nebenkosten",
+                                        "Versicherungen",
+                                        "Energieausweise"
+                                    ];
+                                    const isProtected = file.isFolder && currentPath.length === 0 && PROTECTED_FOLDERS.includes(file.name);
+                                    
                                     return (
                                         <div 
                                             key={file.id} 
@@ -508,22 +519,24 @@ const CloudExplorer = () => {
                                         >
                                             <div style={{ position: 'relative' }}>
                                                 <Icon size={48} color={file.isFolder ? '#FBBF24' : (isPdf ? '#EF4444' : '#3B82F6')} strokeWidth={1.5} />
-                                                <button 
-                                                    onClick={(e) => handleDelete(e, file)}
-                                                    style={{ 
-                                                        position: 'absolute', top: '-6px', right: '-6px', 
-                                                        background: '#EF4444', color: 'white', border: 'none', 
-                                                        borderRadius: '50%', width: '22px', height: '22px', 
-                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                        cursor: 'pointer', opacity: 0.8, padding: 0,
-                                                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-                                                    }}
-                                                    onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
-                                                    onMouseLeave={(e) => e.currentTarget.style.opacity = 0.8}
-                                                    title="Löschen"
-                                                >
-                                                    <Trash2 size={12} />
-                                                </button>
+                                                {!isProtected && (
+                                                    <button 
+                                                        onClick={(e) => handleDelete(e, file)}
+                                                        style={{ 
+                                                            position: 'absolute', top: '-6px', right: '-6px', 
+                                                            background: '#EF4444', color: 'white', border: 'none', 
+                                                            borderRadius: '50%', width: '22px', height: '22px', 
+                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                            cursor: 'pointer', opacity: 0.8, padding: 0,
+                                                            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                                                        }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                                                        onMouseLeave={(e) => e.currentTarget.style.opacity = 0.8}
+                                                        title="Löschen"
+                                                    >
+                                                        <Trash2 size={12} />
+                                                    </button>
+                                                )}
                                             </div>
                                             <span style={{ fontSize: '0.85rem', fontWeight: 500, textAlign: 'center', wordBreak: 'break-word', color: 'var(--text-primary)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                                                 {file.name}
