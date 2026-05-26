@@ -63,21 +63,27 @@ const Claims = () => {
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
     const [portalSettings, setPortalSettings] = useState({
         claim_portal_allow_installments: true,
-        claim_portal_installment_max_months: 12,
-        claim_portal_installment_surcharge_percent: 7.00
+        claim_portal_installment_options: [
+            { months: 3, surcharge_percent: 7.00 },
+            { months: 6, surcharge_percent: 9.00 },
+            { months: 12, surcharge_percent: 12.00 }
+        ]
     });
     const [loadingSettings, setLoadingSettings] = useState(false);
 
     const loadPortalSettings = async () => {
         setLoadingSettings(true);
         try {
-            const { data, error } = await supabase.from('profiles').select('claim_portal_allow_installments, claim_portal_installment_max_months, claim_portal_installment_surcharge_percent').eq('id', user.id).single();
+            const { data, error } = await supabase.from('profiles').select('claim_portal_allow_installments, claim_portal_installment_options').eq('id', user.id).single();
             if (error) throw error;
             if (data) {
                 setPortalSettings({
                     claim_portal_allow_installments: data.claim_portal_allow_installments ?? true,
-                    claim_portal_installment_max_months: data.claim_portal_installment_max_months ?? 12,
-                    claim_portal_installment_surcharge_percent: data.claim_portal_installment_surcharge_percent ?? 7.00
+                    claim_portal_installment_options: data.claim_portal_installment_options || [
+                        { months: 3, surcharge_percent: 7.00 },
+                        { months: 6, surcharge_percent: 9.00 },
+                        { months: 12, surcharge_percent: 12.00 }
+                    ]
                 });
             }
         } catch (err) {
@@ -91,8 +97,7 @@ const Claims = () => {
         try {
             const { error } = await supabase.from('profiles').update({
                 claim_portal_allow_installments: portalSettings.claim_portal_allow_installments,
-                claim_portal_installment_max_months: parseInt(portalSettings.claim_portal_installment_max_months, 10),
-                claim_portal_installment_surcharge_percent: parseFloat(portalSettings.claim_portal_installment_surcharge_percent)
+                claim_portal_installment_options: portalSettings.claim_portal_installment_options
             }).eq('id', user.id);
             if (error) throw error;
             setIsSettingsModalOpen(false);
@@ -100,6 +105,26 @@ const Claims = () => {
         } catch (err) {
             alert('Fehler: ' + err.message);
         }
+    };
+
+    const addInstallmentOption = () => {
+        setPortalSettings(prev => ({
+            ...prev,
+            claim_portal_installment_options: [...prev.claim_portal_installment_options, { months: 12, surcharge_percent: 10.00 }]
+        }));
+    };
+
+    const removeInstallmentOption = (index) => {
+        setPortalSettings(prev => ({
+            ...prev,
+            claim_portal_installment_options: prev.claim_portal_installment_options.filter((_, i) => i !== index)
+        }));
+    };
+
+    const updateInstallmentOption = (index, field, value) => {
+        const newOptions = [...portalSettings.claim_portal_installment_options];
+        newOptions[index][field] = parseFloat(value) || 0;
+        setPortalSettings(prev => ({ ...prev, claim_portal_installment_options: newOptions }));
     };
 
     useEffect(() => {
@@ -1167,24 +1192,42 @@ const Claims = () => {
                             </div>
 
                             {portalSettings.claim_portal_allow_installments && (
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                                    <div>
-                                        <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Maximale Ratenanzahl</label>
-                                        <Input 
-                                            type="number" 
-                                            min="2" max="48"
-                                            value={portalSettings.claim_portal_installment_max_months}
-                                            onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_installment_max_months: e.target.value })}
-                                        />
+                                <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '16px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                        <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>Raten-Vorschläge (Standard)</h3>
+                                        <Button variant="secondary" onClick={addInstallmentOption} style={{ padding: '4px 8px', fontSize: '0.8rem', display: 'flex', gap: '4px' }}>
+                                            <Plus size={14} /> Hinzufügen
+                                        </Button>
                                     </div>
-                                    <div>
-                                        <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', fontWeight: 500 }}>Aufschlag pro Rate (%)</label>
-                                        <Input 
-                                            type="number" 
-                                            step="0.01"
-                                            value={portalSettings.claim_portal_installment_surcharge_percent}
-                                            onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_installment_surcharge_percent: e.target.value })}
-                                        />
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        {portalSettings.claim_portal_installment_options.map((opt, index) => (
+                                            <div key={index} style={{ display: 'flex', alignItems: 'flex-end', gap: '12px', paddingBottom: '12px', borderBottom: index < portalSettings.claim_portal_installment_options.length - 1 ? '1px dashed #E5E7EB' : 'none' }}>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Anzahl Raten</label>
+                                                    <Input 
+                                                        type="number" 
+                                                        min="2" max="48"
+                                                        value={opt.months}
+                                                        onChange={(e) => updateInstallmentOption(index, 'months', e.target.value)}
+                                                    />
+                                                </div>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Aufschlag (%)</label>
+                                                    <Input 
+                                                        type="number" 
+                                                        step="0.01"
+                                                        value={opt.surcharge_percent}
+                                                        onChange={(e) => updateInstallmentOption(index, 'surcharge_percent', e.target.value)}
+                                                    />
+                                                </div>
+                                                <Button variant="secondary" onClick={() => removeInstallmentOption(index)} style={{ padding: '8px', height: '38px', color: '#EF4444', borderColor: '#FCA5A5', backgroundColor: '#FEF2F2' }}>
+                                                    <Trash2 size={16} />
+                                                </Button>
+                                            </div>
+                                        ))}
+                                        {portalSettings.claim_portal_installment_options.length === 0 && (
+                                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>Keine Vorschläge definiert. Der Mieter wird keine Auswahl haben.</p>
+                                        )}
                                     </div>
                                 </div>
                             )}

@@ -61,30 +61,35 @@ export default function ClaimPortal() {
         return new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(dateString));
     };
 
+    const getPaymentOptions = () => {
+        let options = claimData?.settings?.installment_options;
+        if (typeof options === 'string') {
+            try { options = JSON.parse(options); } catch (e) { options = null; }
+        }
+        if (!Array.isArray(options) || options.length === 0) {
+            return [
+                { months: 3, surcharge_percent: 7.00 },
+                { months: 6, surcharge_percent: 9.00 },
+                { months: 12, surcharge_percent: 12.00 }
+            ];
+        }
+        return options.sort((a, b) => a.months - b.months);
+    };
+
     const calculatePaymentPlan = (months) => {
         if (!claimData?.totals?.total_due) return { total: 0, rate: 0, adjustment: 0 };
         const base = Number(claimData.totals.total_due);
         
-        // Use global setting if available, otherwise default to 7%
-        const surchargePercentVal = Number(claimData.settings?.surcharge_percent || 7.00);
+        const options = getPaymentOptions();
+        const selectedOpt = options.find(o => o.months === months) || options[0];
+        
+        const surchargePercentVal = Number(selectedOpt?.surcharge_percent || 7.00);
         const surchargePercent = surchargePercentVal / 100.0;
 
         const adjustment = base * surchargePercent;
         const total = base + adjustment;
         const rate = total / months;
         return { total, rate, adjustment };
-    };
-
-    // Calculate dynamic options based on max_months setting
-    const getPaymentOptions = () => {
-        const maxMonths = Number(claimData?.settings?.max_months || 12);
-        let options = [];
-        if (maxMonths >= 2) options.push(2);
-        if (maxMonths >= 4) options.push(4);
-        if (maxMonths >= 6) options.push(6);
-        if (maxMonths >= 12 && maxMonths !== 6) options.push(12);
-        if (maxMonths > 12 && maxMonths !== 12 && maxMonths !== 6 && maxMonths !== 4 && maxMonths !== 2) options.push(maxMonths);
-        return options.length > 0 ? options : [2]; // Fallback
     };
 
     const handleRequestSubmit = async () => {
@@ -320,24 +325,24 @@ export default function ClaimPortal() {
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.9rem' }}>Wählen Sie eine gewünschte Laufzeit. Die Aufschläge decken die administrativen Bearbeitungskosten ab.</p>
                         
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '24px' }}>
-                            {getPaymentOptions().map(months => (
+                            {getPaymentOptions().map(opt => (
                                 <div 
-                                    key={months}
-                                    onClick={() => setRequestOption(months)}
+                                    key={opt.months}
+                                    onClick={() => setRequestOption(opt.months)}
                                     style={{ 
                                         padding: '16px', 
                                         border: `2px solid ${requestOption === opt.months ? '#3B82F6' : '#E5E7EB'}`, 
-                                        borderRadius: '8px', 
+                                        borderRadius: 'var(--radius-md)', 
                                         cursor: 'pointer',
-                                        backgroundColor: requestOption === opt.months ? '#EFF6FF' : 'white',
-                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                        backgroundColor: requestOption === opt.months ? '#EFF6FF' : 'white'
                                     }}
                                 >
                                     <div>
-                                        <div style={{ fontWeight: 600, color: requestOption === months ? '#1E40AF' : 'var(--text-primary)' }}>{months} Monate</div>
+                                        <div style={{ fontWeight: 600, color: requestOption === opt.months ? '#1E40AF' : 'var(--text-primary)' }}>{opt.months} Monate</div>
                                     </div>
-                                    <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: `2px solid ${requestOption === months ? '#3B82F6' : '#D1D5DB'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'white' }}>
-                                        {requestOption === months && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#3B82F6' }} />}
+                                    <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: `2px solid ${requestOption === opt.months ? '#3B82F6' : '#D1D5DB'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'white' }}>
+                                        {requestOption === opt.months && <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#3B82F6' }} />}
                                     </div>
                                 </div>
                             ))}
