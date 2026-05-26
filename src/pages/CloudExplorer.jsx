@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud, UploadCloud } from 'lucide-react';
+import { Folder, Loader2, CheckCircle2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Settings, Cloud, UploadCloud, FolderPlus } from 'lucide-react';
 import Card from '../components/ui/Card';
 
 const CloudExplorer = () => {
@@ -228,6 +228,30 @@ const CloudExplorer = () => {
         }
     };
 
+    const handleCreateFolder = async () => {
+        const folderName = prompt("Bitte Namen für den neuen Ordner eingeben:");
+        if (!folderName || folderName.trim() === '') return;
+        
+        setIsLoadingFiles(true);
+        try {
+            const subPath = currentPath.map(p => p.name).join('/');
+            const fullPath = selectedProperty.displayFolderName + (subPath ? '/' + subPath : '');
+            
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: { action: 'create_folder', provider: 'onedrive', path: fullPath, folderName: folderName.trim() }
+            });
+            
+            if (error) throw error;
+            if (data && data.error) throw new Error(data.error);
+            
+            fetchFiles(selectedProperty, currentPath);
+        } catch (err) {
+            console.error("Create folder error:", err);
+            alert("Fehler beim Erstellen des Ordners.");
+            setIsLoadingFiles(false);
+        }
+    };
+
     if (status === 'no_connection') {
         return (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: '20px' }}>
@@ -398,7 +422,17 @@ const CloudExplorer = () => {
                                     ))}
                                 </div>
                                 
-                                <div>
+                                <div style={{ display: 'flex', gap: '10px' }}>
+                                    <button 
+                                        className="btn btn-outline" 
+                                        onClick={handleCreateFolder}
+                                        disabled={isUploading || isLoadingFiles}
+                                        style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', fontSize: '0.85rem' }}
+                                    >
+                                        <FolderPlus size={16} />
+                                        Neuer Ordner
+                                    </button>
+                                    
                                     <input 
                                         type="file" 
                                         ref={fileInputRef} 
