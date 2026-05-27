@@ -451,9 +451,21 @@ const InvestorPortal = () => {
 
     const handleUpdateWE = async (id, updates) => {
         try {
-            const { error } = await supabase.from('economic_units').update(updates).eq('id', id);
+            const rowData = {
+                id,
+                user_id: user.id,
+                ...updates,
+                updated_at: new Date().toISOString()
+            };
+            const { error } = await supabase.from('economic_units').upsert(rowData, { onConflict: 'id' });
             if (error) throw error;
-            const updatedWEs = economicUnits.map(eu => eu.id === id ? { ...eu, ...updates } : eu);
+            const exists = economicUnits.some(eu => eu.id === id);
+            let updatedWEs;
+            if (exists) {
+                updatedWEs = economicUnits.map(eu => eu.id === id ? { ...eu, ...updates } : eu);
+            } else {
+                updatedWEs = [...economicUnits, rowData];
+            }
             setEconomicUnits(updatedWEs);
             calculateCockpitStats(properties, loans, updatedWEs);
         } catch (err) {
