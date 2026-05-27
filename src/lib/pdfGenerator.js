@@ -271,26 +271,26 @@ function buildHtml({
                 rowHtml += `
                 <tr>
                     <td colspan="${columns.length}" style="padding:4px 10px 10px 28px;border-bottom:1px solid #e2e8f0;background:#f8fafc;">
-                        <table style="width:100%;border-collapse:collapse;margin-top:2px;">
+                        <table style="width:100%;border-collapse:collapse;margin-top:2px;table-layout:fixed;">
                             <thead>
                                 <tr>
-                                    <th style="padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Einheit</th>
-                                    <th style="padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Etage</th>
-                                    <th style="padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Fläche</th>
-                                    <th style="padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Zimmer</th>
-                                    <th style="padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Soll-Miete</th>
-                                    <th style="padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Status</th>
+                                    <th style="width:35%;padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Einheit</th>
+                                    <th style="width:15%;padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Etage</th>
+                                    <th style="width:12%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Fläche</th>
+                                    <th style="width:10%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Zimmer</th>
+                                    <th style="width:15%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Soll-Miete</th>
+                                    <th style="width:13%;padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Status</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 ${units.map((u, ui) => `
                                 <tr style="${ui % 2 === 1 ? 'background:#f1f5f9;' : ''}">
-                                    <td style="padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;">${u.unit_name || '–'}</td>
-                                    <td style="padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;">${u.floor || '–'}</td>
-                                    <td style="padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.sqm ? formatValue(u.sqm, 'area') : '–'}</td>
-                                    <td style="padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.rooms || '–'}</td>
-                                    <td style="padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.target_rent ? formatValue(u.target_rent, 'currency') : '–'}</td>
-                                    <td style="padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;">
+                                    <td style="width:35%;padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${u.unit_name || '–'}</td>
+                                    <td style="width:15%;padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${u.floor || '–'}</td>
+                                    <td style="width:12%;padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.sqm ? formatValue(u.sqm, 'area') : '–'}</td>
+                                    <td style="width:10%;padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.rooms || '–'}</td>
+                                    <td style="width:15%;padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.target_rent ? formatValue(u.target_rent, 'currency') : '–'}</td>
+                                    <td style="width:13%;padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;white-space:nowrap;overflow:hidden;">
                                         <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;${u.status === 'Vermietet' ? 'background:#dcfce7;color:#15803d;' : (u.status === 'Ferienwohnung' ? 'background:#dbeafe;color:#1d4ed8;' : 'background:#fee2e2;color:#b91c1c;')}">${u.status || '–'}</span>
                                     </td>
                                 </tr>
