@@ -34,6 +34,7 @@ const ExportModal = ({
     const [scope, setScope] = useState('current');
     const [selectedPropertyId, setSelectedPropertyId] = useState('');
     const [selectedColumns, setSelectedColumns] = useState(() => getColumnsForPreset(reportType, 'compact'));
+    const [orientation, setOrientation] = useState('auto');
     const [showSums, setShowSums] = useState(config?.sumsEnabled ?? false);
     const [groupByProperty, setGroupByProperty] = useState(false);
     const [dsgvoAnonymize, setDsgvoAnonymize] = useState(false);
@@ -100,7 +101,7 @@ const ExportModal = ({
                 reportType,
                 data: filteredData,
                 selectedColumns,
-                orientation: null, // taken from template
+                orientation,
                 showSums,
                 groupByProperty,
                 dsgvoAnonymize,
@@ -236,6 +237,34 @@ const ExportModal = ({
                                 {col.always && '✓ '}{col.label}
                             </button>
                         ))}
+                    </div>
+                </div>
+
+                {/* ─── Section C: Orientation ─────────── */}
+                <div style={sectionStyle}>
+                    <div style={sectionTitleStyle}>Ausrichtung</div>
+                    <div style={chipContainerStyle}>
+                        <button
+                            type="button"
+                            style={chipStyle(orientation === 'auto', false)}
+                            onClick={() => setOrientation('auto')}
+                        >
+                            Automatisch (empfohlen)
+                        </button>
+                        <button
+                            type="button"
+                            style={chipStyle(orientation === 'portrait', false)}
+                            onClick={() => setOrientation('portrait')}
+                        >
+                            Hochformat
+                        </button>
+                        <button
+                            type="button"
+                            style={chipStyle(orientation === 'landscape', false)}
+                            onClick={() => setOrientation('landscape')}
+                        >
+                            Querformat
+                        </button>
                     </div>
                 </div>
 

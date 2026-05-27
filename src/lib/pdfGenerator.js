@@ -102,6 +102,25 @@ export const generateClientPdf = ({
     // Get column definitions for selected columns
     const columns = config.columns.filter(c => selectedColumns.includes(c.key));
 
+    // Estimate required width of the selected columns in pixels
+    // A4 Portrait printable width is 180mm (≈ 680px) assuming 15mm margins (tplMargin)
+    const getEstWidth = (col) => {
+        let w = Math.max(col.label.length * 7 + 24, 60);
+        if (col.format === 'currency') w = Math.max(w, 85);
+        else if (col.format === 'area') w = Math.max(w, 75);
+        else if (col.format === 'percent') w = Math.max(w, 65);
+        else if (col.format === 'decimal') w = Math.max(w, 65);
+        else if (col.format === 'date') w = Math.max(w, 75);
+        else if (['adresse', 'objekt', 'immobilie', 'immobilie_einheit'].includes(col.key)) w = Math.max(w, 130);
+        else if (['verwendungszweck', 'empfaenger', 'notizen', 'positionen'].includes(col.key)) w = Math.max(w, 150);
+        else if (['mietername', 'mieter', 'projekt', 'dealname'].includes(col.key)) w = Math.max(w, 110);
+        return w;
+    };
+    const totalEstWidth = columns.reduce((acc, col) => acc + getEstWidth(col), 0);
+    const marginMm = tplMargin || 15;
+    const printableWidthPortraitPx = (210 - 2 * marginMm) * 3.78;
+    const autoOrient = totalEstWidth > printableWidthPortraitPx ? 'landscape' : 'portrait';
+
     // Resolve orientation: explicit > template per-reportType > any global template value > config default
     const templateOrientations = template?.orientationByReport || {};
     let orient = orientation
@@ -110,7 +129,12 @@ export const generateClientPdf = ({
         || config.defaultOrientation;
 
     if (!orient || orient === 'auto') {
-        orient = columns.length > 7 ? 'landscape' : 'portrait';
+        orient = autoOrient;
+    } else if (orientation !== 'portrait' && orientation !== 'landscape') {
+        // Upgrade to landscape if it resolved to portrait but columns exceed page width
+        if (orient === 'portrait' && totalEstWidth > printableWidthPortraitPx) {
+            orient = 'landscape';
+        }
     }
 
     // Resolve elements: use global elements from template
