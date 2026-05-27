@@ -80,6 +80,7 @@ const Properties = () => {
     const { isMobile } = useViewMode();
     const [properties, setProperties] = useState([]);
     const [loans, setLoans] = useState([]);
+    const [economicUnits, setEconomicUnits] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
@@ -174,6 +175,11 @@ const Properties = () => {
             if (loanError) throw loanError;
 
             setLoans(loanData || []);
+
+            // Fetch Economic Units
+            const { data: weData, error: weError } = await supabase.from('economic_units').select('*');
+            if (weError) throw weError;
+            setEconomicUnits(weData || []);
 
             // Calculate Aggregations
             const propertiesWithStats = data.map(p => {
@@ -289,6 +295,21 @@ const Properties = () => {
                 finalEconomicUnitId = null;
             }
 
+            // If it is part of an economic unit, save these values to economic_units table
+            if (finalEconomicUnitId) {
+                const weData = {
+                    id: finalEconomicUnitId,
+                    user_id: user.id,
+                    total_investment_cost: parseFloat(propertyForm.total_investment_cost) || 0,
+                    equity_invested: parseFloat(propertyForm.equity_invested) || 0,
+                    updated_at: new Date().toISOString()
+                };
+                const { error: weError } = await supabase
+                    .from('economic_units')
+                    .upsert(weData, { onConflict: 'id' });
+                if (weError) throw weError;
+            }
+
             const propData = {
                 user_id: user.id,
                 portfolio_id: propertyForm.portfolio_id || null,
@@ -298,36 +319,42 @@ const Properties = () => {
                 city: propertyForm.city,
                 construction_year: parseInt(propertyForm.construction_year) || null,
                 property_type: propertyForm.property_type,
-                total_investment_cost: parseFloat(propertyForm.total_investment_cost) || 0,
-                equity_invested: parseFloat(propertyForm.equity_invested) || 0,
+                total_investment_cost: finalEconomicUnitId ? 0 : (parseFloat(propertyForm.total_investment_cost) || 0),
+                equity_invested: finalEconomicUnitId ? 0 : (parseFloat(propertyForm.equity_invested) || 0),
                 economic_unit_id: finalEconomicUnitId
             };
 
             let error;
+            let currentPropId = editingPropertyId;
+
             if (editingPropertyId) {
                 const { error: updateError } = await supabase.from('properties').update(propData).eq('id', editingPropertyId);
                 error = updateError;
             } else {
-                // Insert first to get the ID, but since we are inserting, we can just insert with the unit ID
-                const { error: insertError } = await supabase.from('properties').insert([propData]);
+                // Insert first to get the ID
+                const { data: insertData, error: insertError } = await supabase
+                    .from('properties')
+                    .insert([propData])
+                    .select('id')
+                    .single();
                 error = insertError;
+                if (insertData) currentPropId = insertData.id;
             }
 
             if (error) throw error;
             
             // Now handle updating other members
             if (finalEconomicUnitId) {
-                // Add newly checked members
-                const newMembers = propertyForm.economic_unit_members.filter(id => {
-                    const p = properties.find(prop => prop.id === id);
-                    return p && p.economic_unit_id !== finalEconomicUnitId;
-                });
+                // Add newly checked members and set their property-level investment/equity to 0
+                const allMembers = [currentPropId, ...propertyForm.economic_unit_members].filter(Boolean);
                 
-                if (newMembers.length > 0) {
-                    await supabase.from('properties')
-                        .update({ economic_unit_id: finalEconomicUnitId })
-                        .in('id', newMembers);
-                }
+                await supabase.from('properties')
+                    .update({ 
+                        economic_unit_id: finalEconomicUnitId,
+                        total_investment_cost: 0,
+                        equity_invested: 0
+                    })
+                    .in('id', allMembers);
                 
                 // Remove unchecked members that were previously in THIS unit
                 if (propertyForm._original_economic_unit_id) {
@@ -341,6 +368,13 @@ const Properties = () => {
                             .update({ economic_unit_id: null })
                             .in('id', removedMembers);
                     }
+                }
+            } else {
+                // If it was previously in a unit but now has no members, remove it from the unit
+                if (propertyForm._original_economic_unit_id && editingPropertyId) {
+                    const otherMembers = properties.filter(p => p.economic_unit_id === propertyForm._original_economic_unit_id && p.id !== editingPropertyId);
+                    // If only 1 other member is left, it's no longer a group, so we can dissolve it or leave it.
+                    // For now, just set the original unit ID to null on this property (handled by propData).
                 }
             }
 
@@ -495,6 +529,12 @@ const Properties = () => {
     const handleEditProperty = (property, source = null) => {
         setEditingPropertyId(property.id);
         if (source) setReturnTo(source);
+        
+        // Find economic unit if it exists
+        const weRow = property.economic_unit_id 
+            ? economicUnits.find(eu => eu.id === property.economic_unit_id) 
+            : null;
+
         setPropertyForm({
             portfolio_id: property.portfolio_id || '',
             street: property.street || '',
@@ -503,8 +543,8 @@ const Properties = () => {
             city: property.city || '',
             construction_year: property.construction_year || '',
             property_type: property.property_type || 'residential',
-            total_investment_cost: property.total_investment_cost || '',
-            equity_invested: property.equity_invested || '',
+            total_investment_cost: weRow ? (weRow.total_investment_cost || '') : (property.total_investment_cost || ''),
+            equity_invested: weRow ? (weRow.equity_invested || '') : (property.equity_invested || ''),
             economic_unit_members: property.economic_unit_id 
                 ? properties.filter(p => p.economic_unit_id === property.economic_unit_id && p.id !== property.id).map(p => p.id) 
                 : [],
@@ -575,8 +615,9 @@ const Properties = () => {
             }
         });
 
-        // Resolve Groups: If a group only has 1 property, flatten it. Otherwise, generate name and add to result.
+        // Resolve Groups: If a group only has 1 property, flatten it (unless it has custom WE data). Otherwise, generate name and add to result.
         Object.values(groups).forEach(g => {
+            const weRow = economicUnits.find(eu => eu.id === g.economic_unit_id);
             const weLoans = (loans || []).filter(l => l.economic_unit_id === g.economic_unit_id && !l.property_id);
             const weRemainingDebt = weLoans.reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
             const weMonthlyLoanPayment = weLoans.reduce((sum, l) => sum + calculateMonthlyPayment(l), 0);
@@ -584,24 +625,31 @@ const Properties = () => {
             g.remaining_debt += weRemainingDebt;
             g.monthly_loan_payment += weMonthlyLoanPayment;
 
-            if (g.properties.length === 1) {
+            if (g.properties.length === 1 && !weRow) {
                 const flatProp = { ...g.properties[0] };
                 flatProp.remaining_debt += weRemainingDebt;
                 flatProp.monthly_loan_payment += weMonthlyLoanPayment;
                 result.push(flatProp);
-            } else if (g.properties.length > 1) {
+            } else if (g.properties.length > 0) {
                 const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
                 const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
                 const numbers = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
-                g.street = `Wirtschaftseinheit: ${streetName}`;
+                g.street = weRow?.name || `Wirtschaftseinheit: ${streetName}`;
                 g.house_number = numbers;
+
+                if (weRow) {
+                    if (parseFloat(weRow.total_investment_cost) > 0) g.total_investment_cost = parseFloat(weRow.total_investment_cost);
+                    if (parseFloat(weRow.equity_invested) > 0) g.equity_invested = parseFloat(weRow.equity_invested);
+                    if (parseFloat(weRow.market_value_total) > 0) g.market_value_total = parseFloat(weRow.market_value_total);
+                }
+
                 result.push(g);
             }
         });
 
         // Sort by street name
         return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
-    }, [filteredProperties, loans]);
+    }, [filteredProperties, loans, economicUnits]);
 
     const propertyColumns = [
         {
