@@ -18,6 +18,59 @@ import ExportDropdown from '../components/ExportDropdown';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
+// Loan Helper functions
+const calculateCurrentDebt = (loan) => {
+    const originalAmount = parseFloat(loan.loan_amount || 0);
+    const interestRate = parseFloat(loan.interest_rate || 0) / 100;
+    let monthlyPayment = parseFloat(loan.fixed_annuity || 0);
+
+    if (!monthlyPayment) {
+        const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
+        monthlyPayment = (originalAmount * (interestRate + repaymentRate)) / 12;
+    }
+
+    const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
+    const amount = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
+    const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
+
+    if (!startDateStr) return amount;
+    
+    const startDate = new Date(startDateStr);
+    let endDateTarget = loan.end_date ? new Date(loan.end_date) : null;
+
+    if (!endDateTarget || isNaN(endDateTarget.getTime())) {
+        endDateTarget = new Date(startDate);
+        endDateTarget.setFullYear(endDateTarget.getFullYear() + 50);
+    }
+
+    const validUntil = new Date(); // TODAY
+
+    let currentBalance = amount;
+    let currentDate = new Date(startDate);
+
+    let months = 0;
+    while (currentBalance > 0.01 && months < 600) {
+        if (currentDate > validUntil) break;
+        const monthlyInterest = currentBalance * interestRate / 12;
+        const principal = monthlyPayment - monthlyInterest;
+        const endBalance = currentBalance - principal;
+
+        currentBalance = endBalance < 0 ? 0 : endBalance;
+        currentDate.setMonth(currentDate.getMonth() + 1);
+        months++;
+    }
+
+    return currentBalance;
+};
+
+const calculateMonthlyPayment = (loan) => {
+    if (loan.fixed_annuity) return parseFloat(loan.fixed_annuity);
+    const originalAmount = parseFloat(loan.loan_amount || 0);
+    const interestRate = parseFloat(loan.interest_rate || 0) / 100;
+    const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
+    return (originalAmount * (interestRate + repaymentRate)) / 12;
+};
+
 const Properties = () => {
     const navigate = useNavigate();
     const location = useLocation();
@@ -26,6 +79,7 @@ const Properties = () => {
     const { checkUsageLimit, checkGlobalAccess } = useSubscription();
     const { isMobile } = useViewMode();
     const [properties, setProperties] = useState([]);
+    const [loans, setLoans] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
@@ -119,58 +173,7 @@ const Properties = () => {
             const { data: loanData, error: loanError } = await loanQuery;
             if (loanError) throw loanError;
 
-            // Loan Helper functions
-            const calculateCurrentDebt = (loan) => {
-                const originalAmount = parseFloat(loan.loan_amount || 0);
-                const interestRate = parseFloat(loan.interest_rate || 0) / 100;
-                let monthlyPayment = parseFloat(loan.fixed_annuity || 0);
-
-                if (!monthlyPayment) {
-                    const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
-                    monthlyPayment = (originalAmount * (interestRate + repaymentRate)) / 12;
-                }
-
-                const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
-                const amount = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
-                const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
-
-                if (!startDateStr) return amount;
-                
-                const startDate = new Date(startDateStr);
-                let endDateTarget = loan.end_date ? new Date(loan.end_date) : null;
-
-                if (!endDateTarget || isNaN(endDateTarget.getTime())) {
-                    endDateTarget = new Date(startDate);
-                    endDateTarget.setFullYear(endDateTarget.getFullYear() + 50);
-                }
-
-                const validUntil = new Date(); // TODAY
-
-                let currentBalance = amount;
-                let currentDate = new Date(startDate);
-
-                let months = 0;
-                while (currentBalance > 0.01 && months < 600) {
-                    if (currentDate > validUntil) break;
-                    const monthlyInterest = currentBalance * interestRate / 12;
-                    const principal = monthlyPayment - monthlyInterest;
-                    const endBalance = currentBalance - principal;
-
-                    currentBalance = endBalance < 0 ? 0 : endBalance;
-                    currentDate.setMonth(currentDate.getMonth() + 1);
-                    months++;
-                }
-
-                return currentBalance;
-            };
-
-            const calculateMonthlyPayment = (loan) => {
-                if (loan.fixed_annuity) return parseFloat(loan.fixed_annuity);
-                const originalAmount = parseFloat(loan.loan_amount || 0);
-                const interestRate = parseFloat(loan.interest_rate || 0) / 100;
-                const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
-                return (originalAmount * (interestRate + repaymentRate)) / 12;
-            };
+            setLoans(loanData || []);
 
             // Calculate Aggregations
             const propertiesWithStats = data.map(p => {
@@ -574,8 +577,18 @@ const Properties = () => {
 
         // Resolve Groups: If a group only has 1 property, flatten it. Otherwise, generate name and add to result.
         Object.values(groups).forEach(g => {
+            const weLoans = (loans || []).filter(l => l.economic_unit_id === g.economic_unit_id && !l.property_id);
+            const weRemainingDebt = weLoans.reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
+            const weMonthlyLoanPayment = weLoans.reduce((sum, l) => sum + calculateMonthlyPayment(l), 0);
+
+            g.remaining_debt += weRemainingDebt;
+            g.monthly_loan_payment += weMonthlyLoanPayment;
+
             if (g.properties.length === 1) {
-                result.push(g.properties[0]);
+                const flatProp = { ...g.properties[0] };
+                flatProp.remaining_debt += weRemainingDebt;
+                flatProp.monthly_loan_payment += weMonthlyLoanPayment;
+                result.push(flatProp);
             } else if (g.properties.length > 1) {
                 const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
                 const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
@@ -588,7 +601,7 @@ const Properties = () => {
 
         // Sort by street name
         return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
-    }, [filteredProperties]);
+    }, [filteredProperties, loans]);
 
     const propertyColumns = [
         {
@@ -744,9 +757,9 @@ const Properties = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <ExportDropdown
                         reportType="immobilien"
-                        data={properties.map(p => ({
+                        data={groupedProperties.map(p => ({
                             property_id: p.id,
-                            adresse: `${p.street} ${p.house_number || ''}`.trim(),
+                            adresse: p.isGroup ? p.street : `${p.street} ${p.house_number || ''}`.trim(),
                             einheiten: p.stats?.totalUnits || 0,
                             kaufpreis: p.total_investment_cost || 0,
                             marktpreis: p.market_value_total || 0,
@@ -757,21 +770,21 @@ const Properties = () => {
                             leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
                             ltv: p.market_value_total > 0 ? (p.remaining_debt || 0) / p.market_value_total : 0,
                             dscr: p.monthly_loan_payment > 0 ? (p.stats?.totalActualRent || 0) / p.monthly_loan_payment : 0,
-                            _propertyLabel: `${p.street} ${p.house_number || ''}`.trim(),
+                            _propertyLabel: p.isGroup ? p.street : `${p.street} ${p.house_number || ''}`.trim(),
                         }))}
-                        unitData={Object.fromEntries(properties.map(p => [
+                        unitData={Object.fromEntries(groupedProperties.map(p => [
                             p.id,
-                            (p.units || []).map(u => ({
+                            (p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || [])).map(u => ({
                                 unit_name: u.unit_name || '–',
                                 floor: u.floor || '–',
                                 sqm: u.sqm || 0,
                                 rooms: u.rooms || '–',
                                 target_rent: u.target_rent || 0,
-                                status: u.leases?.find(l => l.status === 'active') ? 'Vermietet' : 'Leerstand',
+                                status: u.is_vacation_rental ? 'Ferienwohnung' : (u.leases?.find(l => l.status === 'active') ? 'Vermietet' : 'Leerstand'),
                             })),
                         ]))}
                         properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number || ''}`.trim() }))}
-                        totalRows={properties.length}
+                        totalRows={groupedProperties.length}
                     />
                     <Button icon={Plus} onClick={() => {
                         if (!checkGlobalAccess()) return;

@@ -99,12 +99,19 @@ export const generateClientPdf = ({
     const tplHeaderH = template?.headerHeight || rawHeaderH;
     const tplFooterH = template?.footerHeight || rawFooterH;
 
+    // Get column definitions for selected columns
+    const columns = config.columns.filter(c => selectedColumns.includes(c.key));
+
     // Resolve orientation: explicit > template per-reportType > any global template value > config default
     const templateOrientations = template?.orientationByReport || {};
-    const orient = orientation
+    let orient = orientation
         || templateOrientations[reportType]
         || Object.values(templateOrientations)[0]
         || config.defaultOrientation;
+
+    if (!orient || orient === 'auto') {
+        orient = columns.length > 7 ? 'landscape' : 'portrait';
+    }
 
     // Resolve elements: use global elements from template
     let tplElements = rawElements;
@@ -114,9 +121,6 @@ export const generateClientPdf = ({
     const filename = generateFilename(reportType, portfolioName, propertyName);
     const dateStr = new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const timeStr = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
-
-    // Get column definitions for selected columns
-    const columns = config.columns.filter(c => selectedColumns.includes(c.key));
 
     // Anonymize DSGVO fields
     const processedData = dsgvoAnonymize && config.dsgvoRelevant
