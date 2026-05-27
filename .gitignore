@@ -30,3 +30,9 @@ android/
 backups/
 .agent/
 .env
+
+# Credentials & Temp
+*Zugangsdaten*
+*.rtf
+temp.sql
+scratch_*

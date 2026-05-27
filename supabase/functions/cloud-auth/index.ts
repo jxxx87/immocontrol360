@@ -26,7 +26,8 @@ serve(async (req) => {
       throw new Error('Missing Authorization header')
     }
 
-    const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
+    const jwt = authHeader.replace('Bearer ', '').trim()
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(jwt)
     if (userError || !user) {
       throw new Error(`Auth Error: ${userError?.message || 'User not found'}`)
     }

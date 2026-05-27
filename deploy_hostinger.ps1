@@ -29,15 +29,26 @@ if ($LASTEXITCODE -ne 0) {
 # 4. Deployment Branch 'production' erstellen/aktualisieren
 Write-Host "Bereite 'production' Branch vor..." -ForegroundColor Cyan
 
+# Dummy package.json in dist erstellen, um Hostinger-Prüfung zu bestehen
+$dummyPkg = '{"name": "immocontrol360-app", "version": "1.0.0", "scripts": {"build": "echo ''No build needed''"}}'
+Set-Content -Path "dist\package.json" -Value $dummyPkg
+
+# Cleanup local temporary branch if it exists
+git branch -D production-local 2>$null
+
 # Dist ordner temporär committen (ist normalerweise ignoriert)
 git add dist -f
-git commit -m "Deploy Build Artifacts"
+git commit -m "Deploy Build Artifacts (With Dummy package.json)"
 
-# Subtree Push: Schiebt den Inhalt von 'dist' in das Root-Verzeichnis des 'production' Branches
-Write-Host "Pushe 'dist' Ordner in den 'production' Branch..." -ForegroundColor Cyan
-git subtree push --prefix dist origin production
+# Split Dist-Ordner in lokalen Branch und force-pushe diesen
+Write-Host "Erstelle lokalen Deployment-Branch..." -ForegroundColor Cyan
+git subtree split --prefix dist -b production-local
 
-# Aufräumen: Den temporären Commit wieder entfernen
+Write-Host "Pushe 'dist' Ordner in den 'production' Branch (Force)..." -ForegroundColor Cyan
+git push origin production-local:production --force
+
+# Aufräumen: Den temporären Branch und Commit wieder entfernen
+git branch -D production-local
 git reset HEAD~1
 
 Write-Host "--------------------------------------------------------" -ForegroundColor Green

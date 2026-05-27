@@ -17,10 +17,13 @@ const Privacy = () => {
                 <li><strong>Weitergabe:</strong> Es findet keine Weitergabe Ihrer Cloud-Daten oder Tokens an Dritte statt.</li>
             </ul>
 
-            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>3. Datenerfassung auf dieser Website</h2>
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>3. Zahlungsdienstleister (Stripe)</h2>
+            <p>Für die Abwicklung von kostenpflichtigen Abonnements binden wir den Dienst des Zahlungsabwicklers Stripe (Stripe Payments Europe Ltd., 1 Grand Canal Street Lower, Grand Canal Dock, Dublin, Irland) ein. Die von Ihnen im Checkout-Prozess eingegebenen Zahlungsdaten werden zum Zwecke der Abrechnung und Vertragserfüllung (Art. 6 Abs. 1 lit. b DSGVO) sicher an Stripe übermittelt.</p>
+
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>4. Datenerfassung auf dieser Website</h2>
             <p>Die Datenerfassung auf dieser Website erfolgt durch den Websitebetreiber. Die Daten, die Sie uns übermitteln (z.B. bei der Registrierung), werden ausschließlich für die Bereitstellung unserer Software-Dienstleistung genutzt.</p>
             
-            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>4. Kontakt</h2>
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>5. Kontakt</h2>
             <p>Bei Fragen zum Datenschutz wenden Sie sich bitte an den Support oder Betreiber der Anwendung.</p>
         </div>
     );

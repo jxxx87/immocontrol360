@@ -16,10 +16,13 @@ const Terms = () => {
             <p>Wenn Sie Ihren Google Drive- oder Microsoft OneDrive-Account verknüpfen, erklären Sie sich damit einverstanden, dass ImmoControlpro360 in Ihrem Namen auf diesen Dienst zugreift, um Ordner zu erstellen und Dateien hochzuladen. Sie sind selbst dafür verantwortlich, dass ausreichend Speicherplatz in Ihrem Cloud-Konto zur Verfügung steht und die dort geltenden Nutzungsbedingungen des Drittanbieters (Google/Microsoft) eingehalten werden.</p>
             <p>Wir übernehmen keine Haftung für Datenverluste, die durch Fehler bei Drittanbietern entstehen.</p>
 
-            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>4. Haftungsausschluss</h2>
-            <p>Die Anwendung wird "wie besehen" bereitgestellt. Wir übernehmen keine Gewähr für die ständige Verfügbarkeit oder Fehlerfreiheit der Software. Die Nutzung erfolgt auf eigene Gefahr.</p>
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>4. Ausschluss von Beratung und Berechnungen</h2>
+            <p><strong>WICHTIGER HINWEIS:</strong> Die auf der Plattform bereitgestellten Rechner (Renditerechner, Zinsrechner, Cashflow-Kalkulatoren etc.) sowie alle bereitgestellten Dokumentvorlagen dienen ausschließlich zu Informationszwecken. Sie stellen keine Rechts-, Steuer- oder Finanzberatung dar. Der Nutzer ist verpflichtet, Berechnungen und Verträge vor Verwendung selbstständig auf Richtigkeit und rechtliche Konformität zu prüfen.</p>
 
-            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>5. Änderungen der Bedingungen</h2>
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>5. Haftungsausschluss</h2>
+            <p>Die Anwendung wird "wie besehen" bereitgestellt. Wir übernehmen keine Gewähr für die ständige Verfügbarkeit oder Fehlerfreiheit der Software. Die Haftung für leichte Fahrlässigkeit, Datenverlust oder entgangenen Gewinn ist ausgeschlossen, soweit gesetzlich zulässig. Die Nutzung erfolgt auf eigene Gefahr.</p>
+
+            <h2 style={{ fontSize: '1.5rem', marginTop: '30px', marginBottom: '15px' }}>6. Änderungen der Bedingungen</h2>
             <p>Wir behalten uns das Recht vor, diese Nutzungsbedingungen jederzeit zu ändern. Änderungen werden in der Anwendung kommuniziert.</p>
         </div>
     );
