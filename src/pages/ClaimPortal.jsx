@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Scale, Lock, Clock, Calendar, CheckCircle2, FileText, Send, Loader2 } from 'lucide-react';
+import { Scale, Lock, Clock, Calendar, CheckCircle2, FileText, Send, Loader2, CreditCard } from 'lucide-react';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import Card from '../components/ui/Card';
+import QRCode from 'qrcode';
 
 export default function ClaimPortal() {
     const { token } = useParams();
@@ -23,9 +24,8 @@ export default function ClaimPortal() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [requestSuccess, setRequestSuccess] = useState(false);
 
-    // Online Payment State
-    const [paymentLoading, setPaymentLoading] = useState(false);
-    const [paymentStatus, setPaymentStatus] = useState(null); // 'success' | 'cancel'
+    // EPC-QR-Code State
+    const [qrCodeUrl, setQrCodeUrl] = useState('');
 
     const loadClaimData = async (enteredPin) => {
         setLoading(true);
@@ -63,68 +63,38 @@ export default function ClaimPortal() {
         if (savedPin) {
             loadClaimData(savedPin);
         }
-
-        const params = new URLSearchParams(window.location.search);
-        const paymentParam = params.get('payment');
-        if (paymentParam) {
-            setPaymentStatus(paymentParam);
-            // URL aufräumen ohne Neuladen der Seite
-            window.history.replaceState({}, document.title, window.location.pathname);
-        }
     }, [token]);
+
+    useEffect(() => {
+        if (claimData?.bank_details?.iban && claimData?.totals?.total_due > 0) {
+            const epcString = [
+                'BCD',
+                '002',
+                '1',
+                'SCT',
+                (claimData.bank_details.bic || '').trim().toUpperCase(),
+                (claimData.bank_details.account_holder || '').trim().substring(0, 70),
+                (claimData.bank_details.iban || '').trim().replace(/\s+/g, '').toUpperCase(),
+                `EUR${parseFloat(claimData.totals.total_due || 0).toFixed(2)}`,
+                '',
+                '',
+                `Mahnung-${claimData.claim_id.substring(0, 8).toUpperCase()}`,
+                ''
+            ].join('\n');
+
+            QRCode.toDataURL(epcString, { width: 256, margin: 2 }, (err, url) => {
+                if (err) {
+                    console.error('Error generating EPC QR Code:', err);
+                } else {
+                    setQrCodeUrl(url);
+                }
+            });
+        }
+    }, [claimData]);
 
     const handleLogin = async (e) => {
         e.preventDefault();
         await loadClaimData(pin);
-    };
-
-    const handleOnlinePayment = async () => {
-        setPaymentLoading(true);
-        setError(null);
-        try {
-            const activePin = pin || sessionStorage.getItem(`claim_pin_${token}`);
-            if (!activePin) {
-                throw new Error('Sicherheits-PIN fehlt. Bitte melden Sie sich erneut an.');
-            }
-
-            const { data, error: functionError } = await supabase.functions.invoke('create-portal-checkout-session', {
-                body: { 
-                    token, 
-                    pin: activePin, 
-                    origin: window.location.origin 
-                }
-            });
-
-            if (functionError) throw functionError;
-            if (data?.url) {
-                window.location.href = data.url;
-            } else {
-                throw new Error('Keine Checkout-URL erhalten.');
-            }
-        } catch (err) {
-            console.error(err);
-            let detailedMsg = err.message;
-            if (err.context && typeof err.context.text === 'function') {
-                try {
-                    const responseText = await err.context.text();
-                    try {
-                        const parsed = JSON.parse(responseText);
-                        if (parsed && parsed.error) {
-                            detailedMsg = parsed.error;
-                        } else if (parsed && parsed.message) {
-                            detailedMsg = parsed.message;
-                        } else {
-                            detailedMsg = responseText;
-                        }
-                    } catch (_) {
-                        detailedMsg = responseText;
-                    }
-                } catch (_) {}
-            }
-            alert('Fehler beim Starten der Online-Zahlung: ' + detailedMsg);
-        } finally {
-            setPaymentLoading(false);
-        }
     };
 
     const formatCurrency = (amount) => {
@@ -287,55 +257,11 @@ export default function ClaimPortal() {
     }
 
     const planPreview = calculatePaymentPlan(requestOption);
-    const showStripePayment = claimData.settings?.stripe_connect_enabled && claimData.settings?.allow_stripe;
+    const showBankTransfer = claimData.bank_details?.iban && claimData.bank_details?.account_holder;
 
     return (
         <div style={{ minHeight: '100vh', backgroundColor: '#F3F4F6', padding: 'var(--spacing-xl) 16px' }}>
             <div style={{ maxWidth: '800px', margin: '0 auto' }}>
-                
-                {paymentStatus === 'success' && (
-                    <div style={{ 
-                        marginBottom: '24px', 
-                        padding: '16px 20px', 
-                        backgroundColor: '#ECFDF5', 
-                        border: '1px solid #10B981', 
-                        borderRadius: '12px', 
-                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '12px'
-                    }}>
-                        <CheckCircle2 size={24} color="#059669" style={{ flexShrink: 0 }} />
-                        <div>
-                            <h4 style={{ fontWeight: 600, color: '#065F46', margin: 0 }}>Zahlung erfolgreich!</h4>
-                            <p style={{ color: '#047857', fontSize: '0.9rem', margin: '4px 0 0 0', lineHeight: 1.4 }}>
-                                Ihre Zahlung wurde erfolgreich über Stripe initiiert. Der Zahlungseingang wird in Kürze verbucht.
-                            </p>
-                        </div>
-                    </div>
-                )}
-
-                {paymentStatus === 'cancel' && (
-                    <div style={{ 
-                        marginBottom: '24px', 
-                        padding: '16px 20px', 
-                        backgroundColor: '#FEF2F2', 
-                        border: '1px solid #EF4444', 
-                        borderRadius: '12px', 
-                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '12px'
-                    }}>
-                        <Clock size={24} color="#DC2626" style={{ flexShrink: 0 }} />
-                        <div>
-                            <h4 style={{ fontWeight: 600, color: '#991B1B', margin: 0 }}>Zahlung abgebrochen</h4>
-                            <p style={{ color: '#B91C1C', fontSize: '0.9rem', margin: '4px 0 0 0', lineHeight: 1.4 }}>
-                                Der Bezahlvorgang wurde abgebrochen und es wurde keine Zahlung durchgeführt.
-                            </p>
-                        </div>
-                    </div>
-                )}
 
                 {/* Header */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '32px' }}>
@@ -414,108 +340,97 @@ export default function ClaimPortal() {
                         </Card>
                     )}
 
-                    {/* Action Area */}
+                    {/* Action Area (Banküberweisung & GiroCode) */}
                     {!requestSuccess && claimData.status !== 'payment_plan_requested' && claimData.totals?.total_due > 0 && (
-                        (showStripePayment || claimData.settings?.allow_installments !== false) && (
+                        showBankTransfer ? (
                             <Card style={{ padding: '24px', backgroundColor: 'white' }}>
-                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '8px' }}>Optionen zur Zahlungsabwicklung</h3>
-                                <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem', lineHeight: '1.5' }}>
-                                    {showStripePayment 
-                                        ? 'Sie können die ausstehende Forderung direkt sicher online bezahlen. Alternativ können Sie eine Ratenzahlung beantragen.' 
-                                        : 'Falls Sie den Gesamtbetrag nicht fristgerecht begleichen können, bieten wir Ihnen die Möglichkeit einer Ratenzahlung an. Bitte beachten Sie, dass bei einer Ratenzahlung zusätzliche Bearbeitungskosten anfallen.'}
-                                </p>
-                                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                                    {showStripePayment && (
-                                        <Button 
-                                            onClick={handleOnlinePayment} 
-                                            disabled={paymentLoading}
-                                            style={{ 
-                                                flex: 1, 
-                                                minWidth: '200px', 
-                                                padding: '14px 20px', 
-                                                fontSize: '1rem', 
-                                                fontWeight: '600',
-                                                backgroundColor: '#0F172A',
-                                                backgroundImage: 'linear-gradient(to bottom right, #1E293B, #0F172A)',
-                                                color: '#F8FAFC', 
-                                                border: '1px solid #334155',
-                                                borderRadius: '8px',
-                                                display: 'flex', 
-                                                alignItems: 'center', 
-                                                justifyContent: 'center', 
-                                                gap: '10px',
-                                                boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)',
-                                                cursor: 'pointer',
-                                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                                                transform: paymentLoading ? 'none' : 'translateY(0)',
-                                            }}
-                                            onMouseEnter={(e) => {
-                                                if (!paymentLoading) {
-                                                    e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #334155, #1E293B)';
-                                                    e.currentTarget.style.transform = 'translateY(-1px)';
-                                                    e.currentTarget.style.boxShadow = '0 6px 12px -2px rgba(0,0,0,0.15), 0 3px 6px -2px rgba(0,0,0,0.1)';
-                                                }
-                                            }}
-                                            onMouseLeave={(e) => {
-                                                if (!paymentLoading) {
-                                                    e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #1E293B, #0F172A)';
-                                                    e.currentTarget.style.transform = 'translateY(0)';
-                                                    e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)';
-                                                }
-                                            }}
-                                        >
-                                            {paymentLoading ? (
-                                                <>
-                                                    <Loader2 className="animate-spin" size={18} />
-                                                    <span>Verbindung zu Stripe...</span>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <Lock size={18} />
-                                                    <span>Jetzt online bezahlen</span>
-                                                </>
-                                            )}
-                                        </Button>
+                                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <CreditCard size={20} color="var(--primary-color)" />
+                                    Per Banküberweisung bezahlen
+                                </h3>
+                                
+                                <div style={{ display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                    {/* QR Code Container */}
+                                    {qrCodeUrl && (
+                                        <div style={{ 
+                                            display: 'flex', 
+                                            flexDirection: 'column', 
+                                            alignItems: 'center', 
+                                            gap: '8px', 
+                                            padding: '16px', 
+                                            backgroundColor: '#F8FAFC', 
+                                            border: '1px solid var(--border-color)', 
+                                            borderRadius: '12px',
+                                            width: 'fit-content',
+                                            margin: '0 auto'
+                                        }}>
+                                            <img src={qrCodeUrl} alt="EPC-QR-Code (GiroCode)" style={{ width: '160px', height: '160px', display: 'block' }} />
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                                GiroCode (Scannen & Bezahlen)
+                                            </div>
+                                        </div>
                                     )}
-                                    {claimData.settings?.allow_installments !== false && (
-                                        <Button 
-                                            onClick={() => setShowRequestModal(true)} 
-                                            style={{ 
-                                                flex: 1, 
-                                                minWidth: '200px', 
-                                                padding: '14px 20px', 
-                                                fontSize: '1rem', 
-                                                fontWeight: '600',
-                                                backgroundColor: '#10B981', 
-                                                backgroundImage: 'linear-gradient(to bottom right, #10B981, #059669)',
-                                                color: 'white', 
-                                                border: 'none',
-                                                borderRadius: '8px',
-                                                display: 'flex', 
-                                                alignItems: 'center', 
-                                                justifyContent: 'center', 
-                                                gap: '10px',
-                                                boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)',
-                                                cursor: 'pointer',
-                                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                                            }}
-                                            onMouseEnter={(e) => {
-                                                e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #34D399, #10B981)';
-                                                e.currentTarget.style.transform = 'translateY(-1px)';
-                                                e.currentTarget.style.boxShadow = '0 6px 12px -2px rgba(0,0,0,0.15), 0 3px 6px -2px rgba(0,0,0,0.1)';
-                                            }}
-                                            onMouseLeave={(e) => {
-                                                e.currentTarget.style.backgroundImage = 'linear-gradient(to bottom right, #10B981, #059669)';
-                                                e.currentTarget.style.transform = 'translateY(0)';
-                                                e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)';
-                                            }}
-                                        >
-                                            <Calendar size={18} />
-                                            <span>Ratenzahlung anfragen</span>
-                                        </Button>
-                                    )}
+                                    
+                                    {/* Instructions & Bank details */}
+                                    <div style={{ flex: 1, minWidth: '280px' }}>
+                                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.5', marginBottom: '16px' }}>
+                                            Öffnen Sie Ihre Banking-App und scannen Sie diesen Code, um den Überweisungsträger automatisch und fehlerfrei auszufüllen.
+                                        </p>
+                                        
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', backgroundColor: '#F8FAFC', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                                <span style={{ color: 'var(--text-secondary)' }}>Empfänger:</span>
+                                                <span style={{ fontWeight: 600 }}>{claimData.bank_details.account_holder}</span>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                                <span style={{ color: 'var(--text-secondary)' }}>IBAN:</span>
+                                                <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{claimData.bank_details.iban}</span>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                                <span style={{ color: 'var(--text-secondary)' }}>BIC:</span>
+                                                <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{claimData.bank_details.bic || '-'}</span>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                                <span style={{ color: 'var(--text-secondary)' }}>Verwendungszweck:</span>
+                                                <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>Mahnung-{claimData.claim_id.substring(0, 8).toUpperCase()}</span>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                                <span style={{ color: 'var(--text-secondary)' }}>Betrag:</span>
+                                                <span style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(claimData.totals?.total_due)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
+                                
+                                {claimData.settings?.allow_installments !== false && (
+                                    <div style={{ marginTop: '20px', borderTop: '1px solid var(--border-color)', paddingTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
+                                        <Button 
+                                            variant="secondary"
+                                            onClick={() => setShowRequestModal(true)} 
+                                            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                                        >
+                                            <Calendar size={16} />
+                                            Ratenzahlung anfragen
+                                        </Button>
+                                    </div>
+                                )}
                             </Card>
+                        ) : (
+                            claimData.settings?.allow_installments !== false && (
+                                <Card style={{ padding: '24px', backgroundColor: 'white' }}>
+                                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '8px' }}>Ratenzahlung anfragen</h3>
+                                    <p style={{ color: 'var(--text-secondary)', marginBottom: '16px', fontSize: '0.95rem' }}>
+                                        Falls Sie den Gesamtbetrag nicht fristgerecht begleichen können, bieten wir Ihnen die Möglichkeit einer Ratenzahlung an.
+                                    </p>
+                                    <Button 
+                                        onClick={() => setShowRequestModal(true)} 
+                                        style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                                    >
+                                        <Calendar size={16} />
+                                        Ratenzahlung anfragen
+                                    </Button>
+                                </Card>
+                            )
                         )
                     )}
 
