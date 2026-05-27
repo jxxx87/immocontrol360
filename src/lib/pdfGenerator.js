@@ -222,6 +222,20 @@ function buildHtml({
     const title = config.label;
     const hasTemplate = templateElements && templateElements.length > 0;
 
+    const getEstWidth = (col) => {
+        let w = Math.max(col.label.length * 7 + 24, 60);
+        if (col.format === 'currency') w = Math.max(w, 85);
+        else if (col.format === 'area') w = Math.max(w, 75);
+        else if (col.format === 'percent') w = Math.max(w, 65);
+        else if (col.format === 'decimal') w = Math.max(w, 65);
+        else if (col.format === 'date') w = Math.max(w, 75);
+        else if (['adresse', 'objekt', 'immobilie', 'immobilie_einheit'].includes(col.key)) w = Math.max(w, 130);
+        else if (['verwendungszweck', 'empfaenger', 'notizen', 'positionen'].includes(col.key)) w = Math.max(w, 150);
+        else if (['mietername', 'mieter', 'projekt', 'dealname'].includes(col.key)) w = Math.max(w, 110);
+        return w;
+    };
+    const totalEstWidth = columns.reduce((acc, col) => acc + getEstWidth(col), 0);
+
     const getAlign = (col) => {
         if (['currency', 'area', 'percent', 'decimal'].includes(col.format)) return 'right';
         return 'left';
@@ -242,8 +256,9 @@ function buildHtml({
             ${columns.map(col => {
             const cellContent = renderCell(row, col);
             const hasBreaks = cellContent.includes('<br/>');
+            const pct = (getEstWidth(col) / totalEstWidth) * 100;
             return `
-                <td style="padding:6px 10px;text-align:${getAlign(col)};font-size:9px;border-bottom:1px solid #eee;${hasBreaks ? 'white-space:pre-line;' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;'}">
+                <td style="width:${pct}%;padding:6px 10px;text-align:${getAlign(col)};font-size:9px;border-bottom:1px solid #eee;${hasBreaks ? 'white-space:pre-line;' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;'}">
                     ${cellContent}
                 </td>`;
         }).join('')}
@@ -276,7 +291,7 @@ function buildHtml({
                                     <td style="padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.rooms || '–'}</td>
                                     <td style="padding:3px 8px;font-size:8px;text-align:right;border-bottom:1px solid #f1f5f9;">${u.target_rent ? formatValue(u.target_rent, 'currency') : '–'}</td>
                                     <td style="padding:3px 8px;font-size:8px;border-bottom:1px solid #f1f5f9;">
-                                        <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;${u.status === 'Vermietet' ? 'background:#dcfce7;color:#16a34a;' : 'background:#fef3c7;color:#d97706;'}">${u.status || '–'}</span>
+                                        <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;${u.status === 'Vermietet' ? 'background:#dcfce7;color:#15803d;' : (u.status === 'Ferienwohnung' ? 'background:#dbeafe;color:#1d4ed8;' : 'background:#fee2e2;color:#b91c1c;')}">${u.status || '–'}</span>
                                     </td>
                                 </tr>
                                 `).join('')}
@@ -300,11 +315,13 @@ function buildHtml({
         });
         return `
             <tr style="background:${accentColor}11;font-weight:700;border-top:2px solid ${accentColor};">
-                ${columns.map(col => `
-                    <td style="padding:7px 10px;text-align:${getAlign(col)};font-size:9px;border-bottom:2px solid ${accentColor}30;">
+                ${columns.map(col => {
+                    const pct = (getEstWidth(col) / totalEstWidth) * 100;
+                    return `
+                    <td style="width:${pct}%;padding:7px 10px;text-align:${getAlign(col)};font-size:9px;border-bottom:2px solid ${accentColor}30;">
                         ${localSums[col.key] !== undefined ? formatValue(localSums[col.key], col.format) : (col === columns[0] ? 'Summe' : '')}
-                    </td>
-                `).join('')}
+                    </td>`;
+                }).join('')}
             </tr>
         `;
     };
@@ -322,11 +339,13 @@ function buildHtml({
                     <table style="width:100%;border-collapse:collapse;">
                         <thead>
                             <tr>
-                                ${columns.map(col => `
-                                    <th style="padding:7px 10px;text-align:${getAlign(col)};font-size:8px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;white-space:nowrap;">
+                                ${columns.map(col => {
+                                    const pct = (getEstWidth(col) / totalEstWidth) * 100;
+                                    return `
+                                    <th style="width:${pct}%;padding:7px 10px;text-align:${getAlign(col)};font-size:8px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;white-space:nowrap;">
                                         ${col.label}
-                                    </th>
-                                `).join('')}
+                                    </th>`;
+                                }).join('')}
                             </tr>
                         </thead>
                         <tbody>
@@ -342,11 +361,13 @@ function buildHtml({
             <table style="width:100%;border-collapse:collapse;">
                 <thead>
                     <tr>
-                        ${columns.map(col => `
-                            <th style="padding:7px 10px;text-align:${getAlign(col)};font-size:8px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;white-space:nowrap;">
+                        ${columns.map(col => {
+                            const pct = (getEstWidth(col) / totalEstWidth) * 100;
+                            return `
+                            <th style="width:${pct}%;padding:7px 10px;text-align:${getAlign(col)};font-size:8px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;white-space:nowrap;">
                                 ${col.label}
-                            </th>
-                        `).join('')}
+                            </th>`;
+                        }).join('')}
                     </tr>
                 </thead>
                 <tbody>
