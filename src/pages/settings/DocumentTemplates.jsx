@@ -1,0 +1,990 @@
+import React, { useState, useEffect } from 'react';
+import { useEditor, EditorContent } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import Underline from '@tiptap/extension-underline';
+import Mention from '@tiptap/extension-mention';
+import Image from '@tiptap/extension-image';
+import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/AuthContext';
+import { usePortfolio } from '../../context/PortfolioContext';
+import Card from '../../components/ui/Card';
+import Button from '../../components/ui/Button';
+import Input from '../../components/ui/Input';
+import Modal from '../../components/ui/Modal';
+import { 
+    Bold, Italic, Underline as UnderlineIcon, 
+    AlignLeft, AlignCenter, AlignRight, 
+    List, ListOrdered, Undo, Redo, 
+    Save, RotateCcw, FileText, ChevronRight, 
+    HelpCircle, Image as ImageIcon, Plus, Trash2, Folder
+} from 'lucide-react';
+
+// Deutsche Variablen für globale Verwendung
+const GLOBAL_VARIABLES = [
+    { id: 'mieter_name', label: 'Mieter Name', icon: '👤' },
+    { id: 'mieter_anrede', label: 'Sehr geehrte/r ...', icon: '✉️' },
+    { id: 'mieter_adresse', label: 'Mieter Adresse', icon: '🏠' },
+    { id: 'objekt_name', label: 'Objektname', icon: '🏢' },
+    { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪' },
+    { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍' },
+    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤' },
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳' }
+];
+
+// Deutsche Variablen für das Mahnwesen
+const DUNNING_VARIABLES = [
+    ...GLOBAL_VARIABLES,
+    { id: 'offener_betrag', label: 'Offener Betrag', icon: '💰' },
+    { id: 'zahlungsfrist_datum', label: 'Fälligkeitsdatum', icon: '📅' },
+    { id: 'verzugstage', label: 'Verzugstage', icon: '⏱️' },
+    { id: 'mahnstufe', label: 'Mahnstufe', icon: '📈' },
+    { id: 'zinsbetrag', label: 'Verzugszinsen', icon: '💸' },
+    { id: 'forderungs_tabelle', label: 'Forderungstabelle', icon: '📊' }
+];
+
+// Deutsche Variablen für Nebenkosten
+const UTILITY_VARIABLES = [
+    ...GLOBAL_VARIABLES,
+    { id: 'abrechnungsjahr', label: 'Abrechnungsjahr', icon: '📅' },
+    { id: 'abrechnungszeitraum', label: 'Abrechnungszeitraum', icon: '📆' },
+    { id: 'nutzungszeitraum', label: 'Nutzungszeitraum', icon: '⏳' },
+    { id: 'gesamtkosten_mieter', label: 'Gesamtkosten Mieter', icon: '💰' },
+    { id: 'vorauszahlungs_betrag', label: 'Geleistete Vorauszahlung', icon: '📥' },
+    { id: 'saldo_betrag', label: 'Saldo (Ergebnis)', icon: '💵' },
+    { id: 'saldo_art', label: 'Saldo Art (Nachzahlung/Gutschrift)', icon: '📝' },
+    { id: 'nebenkosten_tabelle', label: 'Umlagetabelle', icon: '📊' }
+];
+
+// Deutsche Variablen für Fewo-Rechnungen
+const INVOICE_VARIABLES = [
+    { id: 'gast_name', label: 'Gast Name', icon: '👤' },
+    { id: 'gast_adresse', label: 'Gast Adresse', icon: '🏠' },
+    { id: 'buchungszeitraum', label: 'Leistungszeitraum', icon: '📅' },
+    { id: 'gaeste_anzahl', label: 'Anzahl Gäste', icon: '👥' },
+    { id: 'rechnungsnummer', label: 'Rechnungsnummer', icon: '🔢' },
+    { id: 'rechnungsdatum', label: 'Rechnungsdatum', icon: '📆' },
+    { id: 'netto_betrag', label: 'Netto-Betrag', icon: '💰' },
+    { id: 'mwst_betrag', label: 'MwSt-Betrag (7%)', icon: '💸' },
+    { id: 'brutto_betrag', label: 'Gesamtbetrag (Brutto)', icon: '💵' },
+    { id: 'original_rechnungsnummer', label: 'Ref-Rechnungsnummer', icon: '📎' },
+    { id: 'positions_tabelle', label: 'Rechnungspositionen-Tabelle', icon: '📊' },
+    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤' },
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳' },
+    { id: 'vermieter_steuernummer', label: 'Vermieter Steuernummer', icon: '📝' },
+    { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔' }
+];
+
+// Deutsche Variablen für Mieterhöhungen
+const RENT_INCREASE_VARIABLES = [
+    ...GLOBAL_VARIABLES,
+    { id: 'aktuelle_miete', label: 'Aktuelle Miete', icon: '💵' },
+    { id: 'neue_miete', label: 'Neue Miete', icon: '📈' },
+    { id: 'erhoehungs_betrag', label: 'Erhöhungsbetrag', icon: '💰' },
+    { id: 'erhoehungs_datum', label: 'Wirksamkeitsdatum', icon: '📅' },
+    { id: 'zustimmungs_frist', label: 'Zustimmungsfrist', icon: '⏱️' }
+];
+
+// Deutsche Variablen für sonstige Bescheinigungen
+const CERTIFICATE_VARIABLES = [
+    ...GLOBAL_VARIABLES,
+    { id: 'einzug_datum', label: 'Einzugsdatum', icon: '📅' }
+];
+
+const DEFAULT_TEMPLATES = {
+    payment_reminder: {
+        name: 'Zahlungserinnerung',
+        category: 'Mahnwesen',
+        subject: 'Zahlungserinnerung zu offenen Mietforderungen',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    dunning_1: {
+        name: 'Mahnung (Stufe 1)',
+        category: 'Mahnwesen',
+        subject: 'Mahnung wegen Mietrückstand',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    dunning_2: {
+        name: 'Abmahnung (Stufe 2)',
+        category: 'Mahnwesen',
+        subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    dunning_final: {
+        name: 'Letzte Zahlungsaufforderung',
+        category: 'Mahnwesen',
+        subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    utility_intro: {
+        name: 'Nebenkosten (Einleitung)',
+        category: 'Nebenkosten',
+        subject: '',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`
+    },
+    utility_outro: {
+        name: 'Nebenkosten (Schlusswort)',
+        category: 'Nebenkosten',
+        subject: '',
+        content_html: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    invoice_intro: {
+        name: 'Fewo-Rechnung (Einleitung)',
+        category: 'FEWO-Rechnungen',
+        subject: '',
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span>:</p>`
+    },
+    invoice_outro: {
+        name: 'Fewo-Rechnung (Schlusswort)',
+        category: 'FEWO-Rechnungen',
+        subject: '',
+        content_html: `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto. Vielen Dank für Ihren Aufenthalt und wir freuen uns auf Ihren nächsten Besuch.</p>`
+    },
+    credit_note_intro: {
+        name: 'Fewo-Gutschrift (Einleitung)',
+        category: 'FEWO-Rechnungen',
+        subject: '',
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
+    },
+    rental_agreement: {
+        name: 'Mietvertrag Anschreiben',
+        category: 'Verträge',
+        subject: 'Übersendung des Mietvertrags zur Unterschrift',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich freue mich, Sie bald als neuen Mieter begrüßen zu dürfen. Anbei übersende ich Ihnen den Mietvertrag für das Objekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Dokumente, unterzeichnen Sie beide Ausfertigungen an den markierten Stellen und senden Sie ein Exemplar an mich zurück.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    sublease_agreement: {
+        name: 'Untermietvertrag Anschreiben',
+        category: 'Verträge',
+        subject: 'Übersendung des Untermietvertrags zur Unterschrift',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen den Untermietvertrag für die Wohnung/das Zimmer in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> zur Unterschrift in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Vertragsbedingungen, unterzeichnen Sie beide Exemplare und senden Sie eine Ausfertigung an mich zurück.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    rent_increase: {
+        name: 'Mieterhöhungsschreiben',
+        category: 'Mieterhöhung',
+        subject: 'Mieterhöhung für Ihr Mietobjekt',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>seit dem Mietbeginn wurde die Miete für Ihre Wohnung nicht mehr angepasst. Die ortsübliche Vergleichsmiete hat sich in der Zwischenzeit erhöht.</p><p>Ich schlage daher vor, die Nettokaltmiete von derzeit <span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span> um <span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span> auf zukünftig <span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span> zum <span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span> anzupassen.</p><p>Bitte erteilen Sie mir hierzu Ihre schriftliche Zustimmung bis spätestens zum <span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span>. Eine entsprechende Zustimmungserklärung liegt diesem Schreiben bei.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    rent_increase_consent: {
+        name: 'Zustimmungserklärung',
+        category: 'Mieterhöhung',
+        subject: 'Zustimmungserklärung zur Mieterhöhung',
+        content_html: `<p><b>Zustimmungserklärung</b></p><p>Hiermit stimme ich, <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span>, der Erhöhung der Nettokaltmiete für die Wohnung in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> von bisher <span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span> um <span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span> auf nunmehr <span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span> ab dem <span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span> zu.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mieters</p>`
+    },
+    landlord_confirmation: {
+        name: 'Wohnungsgeberbestätigung',
+        category: 'Bescheinigungen',
+        subject: '',
+        content_html: `<h1 style="text-align:center">Wohnungsgeberbestätigung</h1><p style="text-align:center">nach § 19 Abs. 3 des Bundesmeldegesetzes (BMG)</p><p><br><b>1. Einzug des Mieters</b><br>Es wird bestätigt, dass am <span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span> folgende Personen in die unten genannte Wohnung eingezogen sind:<br><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></p><p><b>2. Anschrift der Wohnung</b><br><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Wohneinheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></p><p><b>3. Angaben zum Wohnungsgeber (Vermieter)</b><br>Name: <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br>Anschrift: <span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers</p>`
+    },
+    rent_clearance_certificate: {
+        name: 'Mietschuldenfreiheitsbescheinigung',
+        category: 'Bescheinigungen',
+        subject: 'Bescheinigung über Mietschuldenfreiheit',
+        content_html: `<p>Hiermit bestätige ich, <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span>, als Vermieter der Wohnung in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, dass das Mietverhältnis mit <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span> vertragsgemäß verlaufen ist.</p><p>Der Mieter hat alle Mietzahlungen und Betriebskosten bis zum heutigen Tag vollständig und fristgerecht geleistet. Es bestehen keine Mietrückstände.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    handover_intro: {
+        name: 'Übergabeprotokoll Anschreiben',
+        category: 'Bescheinigungen',
+        subject: 'Übersendung des Wohnungsübergabeprotokolls',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen eine Kopie des Übergabeprotokolls für Ihr Mietobjekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span>, das wir im Rahmen des Einzugs/Auszugs gemeinsam erstellt haben.</p><p>Bitte bewahren Sie das Dokument für Ihre Unterlagen auf.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    sepa_mandate: {
+        name: 'SEPA-Lastschriftmandat',
+        category: 'Bescheinigungen',
+        subject: 'SEPA-Lastschriftmandat für Mietzahlungen',
+        content_html: `<h2 style="text-align:center">SEPA-Lastschriftmandat</h2><p><b>Zahlungsempfänger (Gläubiger):</b><br>Name: <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br>Gläubiger-Identifikationsnummer: DE99ZZZ00000000000</p><p><b>Zahlungspflichtiger (Schuldner):</b><br>Name: <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span><br>Adresse: <span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></p><p>Ich ermächtige den Zahlungsempfänger <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span>, Zahlungen von meinem Konto mittels Lastschrift einzuziehen. Zugleich weise ich mein Kreditinstitut an, die vom Zahlungsempfänger auf mein Konto gezogenen Lastschriften einzulösen.</p><p><b>Bankverbindung des Zahlungspflichtigen:</b><br>IBAN: ___________________________<br>BIC: ___________________________</p><p>Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum, die Erstattung des belasteten Betrages verlangen. Es gelten dabei die mit meinem Kreditinstitut vereinbarten Bedingungen.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Kontoinhabers</p>`
+    },
+    termination_receipt: {
+        name: 'Kündigungsbestätigung',
+        category: 'Bescheinigungen',
+        subject: 'Bestätigung Ihrer Wohnungskündigung',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>.</p><p>Das Mietverhältnis endet vereinbarungsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werde ich mich in Kürze mit Ihnen in Verbindung setzen.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    },
+    tenant_self_disclosure: {
+        name: 'Mieterselbstauskunft',
+        category: 'Bescheinigungen',
+        subject: 'Selbstauskunft für Mietinteressenten',
+        content_html: `<h2 style="text-align:center">Mieterselbstauskunft</h2><p>Ich bin daran interessiert, das Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> anzumieten. Hierfür gebe ich folgende Auskünfte:</p><p><b>1. Persönliche Daten:</b><br>Name, Vorname: <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span><br>Geburtsdatum: ___________________________<br>Beruf/Tätigkeit: ___________________________<br>Nettoeinkommen p.M.: ___________________________</p><p><b>2. Weitere Fragen:</b><br>Bestehen Mietrückstände aus früheren Mietverhältnissen? [ ] Ja [ ] Nein<br>Wurde in den letzten 5 Jahren ein Insolvenzverfahren eröffnet? [ ] Ja [ ] Nein</p><p>Ich versichere, die Angaben wahrheitsgemäß gemacht zu haben.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mietinteressenten</p>`
+    },
+    rental_guarantee: {
+        name: 'Mietbürgschaft',
+        category: 'Bescheinigungen',
+        subject: 'Mietbürgschaftserklärung',
+        content_html: `<h2 style="text-align:center">Mietbürgschaftserklärung</h2><p>Für die Forderungen aus dem Mietverhältnis über das Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> zwischen dem Vermieter <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> und dem Mieter <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span> übernehme ich:</p><p>Bürge Name: ___________________________<br>Anschrift: ___________________________</p><p>hiermit die selbstschuldnerische Bürgschaft bis zu einem Höchstbetrag von drei Nettokaltmieten zur Absicherung aller Ansprüche aus dem Mietvertrag (z.B. Mietzins, Nebenkosten, Beschädigungen).</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Bürgen</p>`
+    },
+    house_rules: {
+        name: 'Hausordnung',
+        category: 'Bescheinigungen',
+        subject: 'Hausordnung',
+        content_html: `<h2 style="text-align:center">Hausordnung</h2><p>Für ein harmonisches Zusammenleben im Mietobjekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span> gilt folgende Hausordnung:</p><p><b>1. Ruhezeiten:</b><br>Die allgemeinen Ruhezeiten von 22:00 bis 07:00 Uhr sowie von 13:00 bis 15:00 Uhr sind einzuhalten. In dieser Zeit sind störende Geräusche (z.B. laute Musik, Bohren) zu vermeiden.</p><p><b>2. Sicherheit:</b><br>Die Hauseingangstüren sind stets geschlossen zu halten. Fluchtwege und Treppenhäuser müssen von Gegenständen freigehalten werden.</p><p><b>3. Reinigung & Pflege:</b><br>Die Reinigung des Treppenhauses erfolgt nach dem vereinbarten Kehrwochenplan.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+    }
+};
+
+const SYSTEM_TEMPLATES = [
+    { id: 'payment_reminder', label: 'Zahlungserinnerung', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
+    { id: 'dunning_1', label: 'Mahnung (Stufe 1)', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
+    { id: 'dunning_2', label: 'Abmahnung (Stufe 2)', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
+    { id: 'dunning_final', label: 'Letzte Zahlungsaufforderung', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
+    { id: 'utility_intro', label: 'Nebenkosten (Einleitung)', hasSubject: false, variables: UTILITY_VARIABLES, group: 'Nebenkosten' },
+    { id: 'utility_outro', label: 'Nebenkosten (Schlusswort)', hasSubject: false, variables: UTILITY_VARIABLES, group: 'Nebenkosten' },
+    { id: 'invoice_intro', label: 'Fewo-Rechnung (Einleitung)', hasSubject: false, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
+    { id: 'invoice_outro', label: 'Fewo-Rechnung (Schlusswort)', hasSubject: false, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
+    { id: 'credit_note_intro', label: 'Fewo-Gutschrift (Einleitung)', hasSubject: false, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
+    { id: 'rental_agreement', label: 'Mietvertrag Anschreiben', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Verträge' },
+    { id: 'sublease_agreement', label: 'Untermietvertrag Anschreiben', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Verträge' },
+    { id: 'rent_increase', label: 'Mieterhöhungsschreiben', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
+    { id: 'rent_increase_consent', label: 'Zustimmungserklärung', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
+    { id: 'landlord_confirmation', label: 'Wohnungsgeberbestätigung', hasSubject: false, variables: CERTIFICATE_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'rent_clearance_certificate', label: 'Mietschuldenfreiheitsbescheinigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'handover_intro', label: 'Übergabeprotokoll Anschreiben', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'sepa_mandate', label: 'SEPA-Lastschriftmandat', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'tenant_self_disclosure', label: 'Mieterselbstauskunft', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'rental_guarantee', label: 'Mietbürgschaft', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'house_rules', label: 'Hausordnung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' }
+];
+
+export const DocumentTemplates = () => {
+    const { user } = useAuth();
+    const { portfolios } = usePortfolio();
+    
+    const [selectedPortfolioId, setSelectedPortfolioId] = useState('global');
+    const [activeType, setActiveType] = useState('payment_reminder');
+    const [subject, setSubject] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    
+    // Custom template list from DB
+    const [customTemplates, setCustomTemplates] = useState([]);
+    
+    // Modals
+    const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+    const [newTemplateName, setNewTemplateName] = useState('');
+    const [newTemplateCategory, setNewTemplateCategory] = useState('Eigene');
+    const [newTemplateSubject, setNewTemplateSubject] = useState('');
+
+    // TipTap Editor initialization
+    const editor = useEditor({
+        extensions: [
+            StarterKit,
+            Underline,
+            Mention.configure({
+                HTMLAttributes: {
+                    class: 'variable-chip',
+                },
+                renderLabel({ node }) {
+                    return `${node.attrs.label ?? node.attrs.id}`;
+                },
+            }),
+            Image.configure({
+                inline: true,
+                HTMLAttributes: {
+                    class: 'editor-image',
+                    style: 'max-height: 120px; object-fit: contain; margin: 10px 0; display: block;'
+                }
+            })
+        ],
+        content: '',
+    });
+
+    // Combine system and custom templates
+    const allTemplates = [
+        ...SYSTEM_TEMPLATES.map(t => ({ ...t, isCustom: false })),
+        ...customTemplates.map(t => ({ 
+            id: t.type, 
+            label: t.name, 
+            hasSubject: true, 
+            variables: GLOBAL_VARIABLES, 
+            group: t.category || 'Eigene', 
+            isCustom: true,
+            dbId: t.id
+        }))
+    ];
+
+    const activeConfig = allTemplates.find(t => t.id === activeType) || allTemplates[0];
+
+    // Load templates from DB
+    const fetchCustomTemplates = async () => {
+        if (!user) return;
+        try {
+            const { data, error } = await supabase
+                .from('document_templates')
+                .select('*')
+                .eq('user_id', user.id)
+                .eq('is_custom', true);
+            if (!error && data) {
+                setCustomTemplates(data);
+            }
+        } catch (e) {
+            console.error('Error fetching custom templates:', e);
+        }
+    };
+
+    const loadTemplate = async () => {
+        if (!user) return;
+        setLoading(true);
+        try {
+            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+            
+            let query = supabase
+                .from('document_templates')
+                .select('*')
+                .eq('user_id', user.id)
+                .eq('type', activeType);
+
+            if (portfolioFilter) {
+                query = query.eq('portfolio_id', portfolioFilter);
+            } else {
+                query = query.is('portfolio_id', null);
+            }
+
+            const { data, error } = await query.maybeSingle();
+
+            if (error) throw error;
+
+            if (data) {
+                setSubject(data.subject || '');
+                editor?.commands.setContent(data.content_html || '');
+            } else {
+                // If it's a custom template, it must be in the DB.
+                // If not found in portfolio-specific, try global custom template
+                if (activeConfig.isCustom) {
+                    if (portfolioFilter) {
+                        const { data: globalCustom } = await supabase
+                            .from('document_templates')
+                            .select('*')
+                            .eq('user_id', user.id)
+                            .eq('type', activeType)
+                            .is('portfolio_id', null)
+                            .maybeSingle();
+                        if (globalCustom) {
+                            setSubject(globalCustom.subject || '');
+                            editor?.commands.setContent(globalCustom.content_html || '');
+                            setLoading(false);
+                            return;
+                        }
+                    }
+                    editor?.commands.setContent('');
+                    setSubject('');
+                    setLoading(false);
+                    return;
+                }
+
+                // If portfolio-specific template doesn't exist, try loading the global template first
+                if (portfolioFilter) {
+                    const { data: globalData } = await supabase
+                        .from('document_templates')
+                        .select('*')
+                        .eq('user_id', user.id)
+                        .eq('type', activeType)
+                        .is('portfolio_id', null)
+                        .maybeSingle();
+                    
+                    if (globalData) {
+                        setSubject(globalData.subject || '');
+                        editor?.commands.setContent(globalData.content_html || '');
+                        setLoading(false);
+                        return;
+                    }
+                }
+                
+                // Fallback to hardcoded defaults
+                const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
+                setSubject(defaultVal.subject || '');
+                editor?.commands.setContent(defaultVal.content_html || '');
+            }
+        } catch (error) {
+            console.error('Error loading template:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (user) {
+            fetchCustomTemplates();
+        }
+    }, [user]);
+
+    useEffect(() => {
+        if (editor) {
+            loadTemplate();
+        }
+    }, [activeType, selectedPortfolioId, editor]);
+
+    // Save template
+    const handleSave = async () => {
+        if (!user || !editor) return;
+        setSaving(true);
+        try {
+            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+            const contentHtml = editor.getHTML();
+
+            let query = supabase
+                .from('document_templates')
+                .select('id')
+                .eq('user_id', user.id)
+                .eq('type', activeType);
+
+            if (portfolioFilter) {
+                query = query.eq('portfolio_id', portfolioFilter);
+            } else {
+                query = query.is('portfolio_id', null);
+            }
+
+            const { data: existingRecord } = await query.maybeSingle();
+
+            const payload = {
+                user_id: user.id,
+                portfolio_id: portfolioFilter,
+                type: activeType,
+                name: activeConfig.label || activeConfig.name,
+                subject: activeConfig.hasSubject ? subject : null,
+                content_html: contentHtml,
+                is_custom: activeConfig.isCustom,
+                category: activeConfig.group,
+                updated_at: new Date()
+            };
+
+            if (existingRecord) {
+                payload.id = existingRecord.id;
+            }
+
+            const { error } = await supabase
+                .from('document_templates')
+                .upsert([payload]);
+
+            if (error) throw error;
+            alert('Vorlage erfolgreich gespeichert.');
+            fetchCustomTemplates();
+        } catch (error) {
+            console.error('Error saving template:', error);
+            alert('Fehler beim Speichern der Vorlage: ' + error.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Reset to defaults (system templates only)
+    const handleReset = () => {
+        if (activeConfig.isCustom) return;
+        if (window.confirm('Möchten Sie diese Vorlage wirklich auf die Standardeinstellungen zurücksetzen? Ungespeicherte Änderungen gehen verloren.')) {
+            const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
+            setSubject(defaultVal.subject || '');
+            editor?.commands.setContent(defaultVal.content_html || '');
+        }
+    };
+
+    // Create custom template
+    const handleCreateTemplate = async () => {
+        if (!newTemplateName.trim()) return alert('Name fehlt.');
+        try {
+            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+            const customType = `custom_${Date.now()}`;
+
+            const payload = {
+                user_id: user.id,
+                portfolio_id: portfolioFilter,
+                type: customType,
+                name: newTemplateName.trim(),
+                subject: newTemplateSubject.trim() || null,
+                content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
+                is_custom: true,
+                category: newTemplateCategory
+            };
+
+            const { error } = await supabase
+                .from('document_templates')
+                .insert([payload]);
+
+            if (error) throw error;
+
+            setIsCreateModalOpen(false);
+            setNewTemplateName('');
+            setNewTemplateSubject('');
+            
+            await fetchCustomTemplates();
+            setActiveType(customType);
+        } catch (error) {
+            alert('Fehler beim Erstellen der Vorlage: ' + error.message);
+        }
+    };
+
+    // Delete custom template
+    const handleDeleteTemplate = async (templateId, type) => {
+        if (!window.confirm('Möchten Sie diese Vorlage wirklich löschen?')) return;
+        try {
+            const { error } = await supabase
+                .from('document_templates')
+                .delete()
+                .eq('user_id', user.id)
+                .eq('type', type);
+
+            if (error) throw error;
+
+            await fetchCustomTemplates();
+            setActiveType('payment_reminder');
+        } catch (error) {
+            alert('Fehler beim Löschen: ' + error.message);
+        }
+    };
+
+    // Insert variable chip into editor
+    const insertVariable = (variable) => {
+        if (!editor) return;
+        
+        editor.chain().focus().insertContent({
+            type: 'mention',
+            attrs: {
+                id: variable.id,
+                label: variable.label
+            }
+        }).insertContent(' ').run();
+    };
+
+    // Handle Image insertion (Base64)
+    const handleImageInsert = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            if (file.size > 2 * 1024 * 1024) {
+                alert('Das Bild darf maximal 2MB groß sein.');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = (readerEvent) => {
+                const base64 = readerEvent.target.result;
+                editor?.chain().focus().setImage({ src: base64 }).run();
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
+    // Categories groups list
+    const groups = [
+        'Mahnwesen', 
+        'Nebenkosten', 
+        'FEWO-Rechnungen', 
+        'Verträge', 
+        'Mieterhöhung', 
+        'Bescheinigungen', 
+        'Eigene'
+    ];
+
+    // Filter templates to make sure we don't display empty groups
+    const availableGroups = groups.filter(g => allTemplates.some(t => t.group === g));
+
+    return (
+        <Card title="Schreibvorlagen verwalten" subtitle="Passe hier die automatischen Anschreiben, Mahnstufen, Verträge und Rechnungs-Texte nach deinen Vorstellungen an oder erstelle freie Briefe.">
+            {/* Portfolio Selector & Add template button */}
+            <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Portfolio-Auswahl:</span>
+                    <select 
+                        value={selectedPortfolioId} 
+                        onChange={e => setSelectedPortfolioId(e.target.value)}
+                        style={{ 
+                            padding: '6px 12px', 
+                            borderRadius: '6px', 
+                            border: '1px solid var(--border-color)',
+                            fontSize: '0.875rem',
+                            backgroundColor: 'var(--surface-color)'
+                        }}
+                    >
+                        <option value="global">Standard (alle Portfolios)</option>
+                        {portfolios.map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                    </select>
+                    <div style={{ display: 'flex', alignItems: 'center', color: 'var(--text-secondary)' }} title="Vorlagen können global oder für ein spezifisches Portfolio definiert werden. Wenn für ein Portfolio keine eigene Vorlage existiert, wird die globale Vorlage verwendet.">
+                        <HelpCircle size={16} />
+                    </div>
+                </div>
+
+                <Button 
+                    variant="primary" 
+                    size="sm" 
+                    icon={Plus} 
+                    onClick={() => setIsCreateModalOpen(true)}
+                >
+                    Neue Vorlage
+                </Button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '1.5rem', alignItems: 'stretch' }}>
+                {/* Left side: Navigation of templates & Variable Library */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    
+                    {/* Templates Navigation list */}
+                    <div style={{ 
+                        display: 'flex', 
+                        flexDirection: 'column', 
+                        gap: '1rem', 
+                        border: '1px solid var(--border-color)', 
+                        borderRadius: 'var(--radius-md)', 
+                        padding: '12px', 
+                        backgroundColor: 'var(--background-color)',
+                        maxHeight: '350px',
+                        overflowY: 'auto'
+                    }}>
+                        <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: '0 0 5px 0' }}>Vorlagen-Kategorien</h4>
+                        {availableGroups.map(groupName => (
+                            <div key={groupName} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-secondary)', paddingLeft: '4px', marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    <Folder size={12} /> {groupName}
+                                </div>
+                                {allTemplates.filter(t => t.group === groupName).map(t => (
+                                    <div 
+                                        key={t.id} 
+                                        style={{ 
+                                            display: 'flex', 
+                                            alignItems: 'center', 
+                                            justifyContent: 'space-between',
+                                            paddingRight: '4px',
+                                            borderRadius: '6px',
+                                            backgroundColor: activeType === t.id ? 'var(--primary-color)' : 'transparent',
+                                        }}
+                                    >
+                                        <button
+                                            onClick={() => setActiveType(t.id)}
+                                            style={{
+                                                flex: 1,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                padding: '8px 10px',
+                                                border: 'none',
+                                                background: 'none',
+                                                color: activeType === t.id ? 'white' : 'var(--text-primary)',
+                                                textAlign: 'left',
+                                                cursor: 'pointer',
+                                                fontSize: '0.85rem',
+                                                fontWeight: activeType === t.id ? 500 : 400,
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap'
+                                            }}
+                                        >
+                                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.label}</span>
+                                        </button>
+                                        
+                                        {t.isCustom && (
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t.dbId, t.id); }}
+                                                title="Vorlage löschen"
+                                                style={{
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    cursor: 'pointer',
+                                                    color: activeType === t.id ? '#fee2e2' : 'var(--danger-color)',
+                                                    padding: '6px',
+                                                    display: 'flex',
+                                                    alignItems: 'center'
+                                                }}
+                                            >
+                                                <Trash2 size={13} />
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Variable Library */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '12px', backgroundColor: 'var(--background-color)', flex: 1 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: '0' }}>Platzhalter</h4>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Klicke zum Einfügen in das Dokument.</span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflowY: 'auto', maxHeight: '300px', paddingRight: '4px' }}>
+                            {activeConfig.variables?.map(v => (
+                                <button
+                                    key={v.id}
+                                    onClick={() => insertVariable(v)}
+                                    title={`Klicke, um ${v.label} an Cursorposition einzufügen`}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        padding: '6px 8px',
+                                        borderRadius: '6px',
+                                        border: '1px solid var(--border-color)',
+                                        backgroundColor: 'var(--surface-color)',
+                                        cursor: 'pointer',
+                                        fontSize: '0.75rem',
+                                        fontWeight: 500,
+                                        color: 'var(--text-primary)',
+                                        textAlign: 'left',
+                                        transition: 'all 0.15s ease'
+                                    }}
+                                    onMouseEnter={e => {
+                                        e.currentTarget.style.borderColor = 'var(--primary-color)';
+                                        e.currentTarget.style.backgroundColor = '#f0f9ff';
+                                    }}
+                                    onMouseLeave={e => {
+                                        e.currentTarget.style.borderColor = 'var(--border-color)';
+                                        e.currentTarget.style.backgroundColor = 'var(--surface-color)';
+                                    }}
+                                >
+                                    <span>{v.icon}</span>
+                                    <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{v.label}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Right side: The Word-like Editor */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
+                    {loading ? (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '400px' }}>
+                            <Loader2 className="animate-spin" size={32} style={{ color: 'var(--primary-color)' }} />
+                        </div>
+                    ) : (
+                        <>
+                            {/* Subject Line (if applicable) */}
+                            {activeConfig.hasSubject && (
+                                <div style={{ animation: 'fadeIn 0.2s ease-out' }}>
+                                    <Input
+                                        label="Betreff"
+                                        placeholder="z.B. Mieterhöhung für Ihr Mietobjekt"
+                                        value={subject}
+                                        onChange={e => setSubject(e.target.value)}
+                                        style={{ fontWeight: 600 }}
+                                    />
+                                </div>
+                            )}
+
+                            {/* Editor Toolbar & Canvas */}
+                            <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)' }}>
+                                {/* Toolbar */}
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '8px', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', alignItems: 'center' }}>
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().toggleBold().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('bold') ? '#e2e8f0' : 'transparent' }}
+                                        title="Fett"
+                                    >
+                                        <Bold size={16} />
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().toggleItalic().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('italic') ? '#e2e8f0' : 'transparent' }}
+                                        title="Kursiv"
+                                    >
+                                        <Italic size={16} />
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().toggleUnderline().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('underline') ? '#e2e8f0' : 'transparent' }}
+                                        title="Unterstreichen"
+                                    >
+                                        <UnderlineIcon size={16} />
+                                    </button>
+                                    
+                                    <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().toggleBulletList().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('bulletList') ? '#e2e8f0' : 'transparent' }}
+                                        title="Aufzählungsliste"
+                                    >
+                                        <List size={16} />
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().toggleOrderedList().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('orderedList') ? '#e2e8f0' : 'transparent' }}
+                                        title="Nummerierte Liste"
+                                    >
+                                        <ListOrdered size={16} />
+                                    </button>
+
+                                    <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                    {/* Image / Signature Upload Button */}
+                                    <button 
+                                        type="button"
+                                        onClick={() => document.getElementById('template-image-upload').click()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                        title="Bild / Unterschrift einfügen"
+                                    >
+                                        <ImageIcon size={16} />
+                                    </button>
+                                    <input 
+                                        id="template-image-upload" 
+                                        type="file" 
+                                        accept="image/*" 
+                                        onChange={handleImageInsert} 
+                                        style={{ display: 'none' }} 
+                                    />
+
+                                    <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().undo().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                        title="Rückgängig"
+                                    >
+                                        <Undo size={16} />
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().redo().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                        title="Wiederholen"
+                                    >
+                                        <Redo size={16} />
+                                    </button>
+
+                                    <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                                        {!activeConfig.isCustom && (
+                                            <Button variant="ghost" size="sm" icon={RotateCcw} onClick={handleReset} style={{ color: 'var(--text-secondary)' }}>
+                                                Standard
+                                            </Button>
+                                        )}
+                                        <Button variant="primary" size="sm" icon={Save} onClick={handleSave} loading={saving}>
+                                            Speichern
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                {/* Editor Content Area (Word-like white sheet) */}
+                                <div style={{ 
+                                    padding: '2.5rem', 
+                                    backgroundColor: '#f8fafc', 
+                                    display: 'flex', 
+                                    justifyContent: 'center', 
+                                    overflowY: 'auto',
+                                    maxHeight: '600px'
+                                }}>
+                                    <div style={{
+                                        width: '100%',
+                                        maxWidth: '700px',
+                                        backgroundColor: '#ffffff',
+                                        minHeight: '400px',
+                                        padding: '2.5rem',
+                                        boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
+                                        borderRadius: '4px',
+                                        border: '1px solid #e2e8f0',
+                                        outline: 'none'
+                                    }}>
+                                        {/* CSS styling for Tiptap editor */}
+                                        <style>{`
+                                            .ProseMirror {
+                                                outline: none;
+                                                min-height: 350px;
+                                                font-family: 'Segoe UI', Arial, sans-serif;
+                                                font-size: 14px;
+                                                line-height: 1.6;
+                                                color: #1e293b;
+                                            }
+                                            .ProseMirror p {
+                                                margin-top: 0;
+                                                margin-bottom: 0.75rem;
+                                            }
+                                            .ProseMirror ul, .ProseMirror ol {
+                                                padding-left: 1.5rem;
+                                                margin-top: 0;
+                                                margin-bottom: 0.75rem;
+                                            }
+                                            .variable-chip {
+                                                background-color: #e0f2fe !important;
+                                                color: #0369a1 !important;
+                                                border: 1px solid #bae6fd !important;
+                                                border-radius: 4px !important;
+                                                padding: 2px 6px !important;
+                                                font-weight: 500 !important;
+                                                display: inline-flex !important;
+                                                align-items: center !important;
+                                                margin: 0 2px !important;
+                                                user-select: none !important;
+                                                cursor: pointer !important;
+                                                box-decoration-break: clone;
+                                                font-size: 0.85em;
+                                            }
+                                            .editor-image {
+                                                max-width: 100%;
+                                                height: auto;
+                                                max-height: 150px;
+                                                border: 1px dashed #cbd5e1;
+                                                border-radius: 4px;
+                                                padding: 4px;
+                                                display: block;
+                                                margin: 10px 0;
+                                            }
+                                        `}</style>
+                                        <EditorContent editor={editor} />
+                                    </div>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </div>
+
+            {/* Modal: Create new custom template */}
+            <Modal
+                isOpen={isCreateModalOpen}
+                onClose={() => setIsCreateModalOpen(false)}
+                title="Eigene Schreibvorlage erstellen"
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
+                        <Button variant="primary" onClick={handleCreateTemplate}>Erstellen</Button>
+                    </>
+                }
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    <Input 
+                        label="Name der Vorlage *"
+                        placeholder="z.B. Kündigungsbestätigung"
+                        value={newTemplateName}
+                        onChange={e => setNewTemplateName(e.target.value)}
+                    />
+                    <Input 
+                        label="Betreffzeile (optional)"
+                        placeholder="z.B. Bestätigung Ihres Kündigungsschreibens"
+                        value={newTemplateSubject}
+                        onChange={e => setNewTemplateSubject(e.target.value)}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-primary)' }}>Kategorie</span>
+                        <select 
+                            value={newTemplateCategory} 
+                            onChange={e => setNewTemplateCategory(e.target.value)}
+                            style={{ 
+                                padding: '8px 12px', 
+                                borderRadius: '6px', 
+                                border: '1px solid var(--border-color)',
+                                fontSize: '0.875rem',
+                                backgroundColor: 'var(--surface-color)'
+                            }}
+                        >
+                            <option value="Mahnwesen">Mahnwesen</option>
+                            <option value="Nebenkosten">Nebenkosten</option>
+                            <option value="FEWO-Rechnungen">FEWO-Rechnungen</option>
+                            <option value="Verträge">Verträge</option>
+                            <option value="Mieterhöhung">Mieterhöhung</option>
+                            <option value="Bescheinigungen">Bescheinigungen</option>
+                            <option value="Eigene">Eigene</option>
+                        </select>
+                    </div>
+                </div>
+            </Modal>
+        </Card>
+    );
+};
+
+export default DocumentTemplates;

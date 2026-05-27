@@ -19,6 +19,7 @@ import { PortfolioShareModal } from '../components/portfolio/PortfolioShareModal
 import { PendingInvitations } from '../components/portfolio/PendingInvitations';
 import { ActiveShares } from '../components/portfolio/ActiveShares';
 import { CloudSettings } from './settings/CloudSettings';
+import DocumentTemplates from './settings/DocumentTemplates';
 
 const Settings = () => {
     const { user } = useAuth();
@@ -677,6 +678,7 @@ const Settings = () => {
         { id: 'general', label: 'Allgemeine Einstellungen', icon: SettingsIcon },
         { id: 'portfolios', label: 'Portfolios', icon: Briefcase },
         { id: 'pdf-template', label: 'PDF-Vorlage', icon: FileText, link: '/portfolio/settings/pdf-template' },
+        { id: 'document-templates', label: 'Schreibvorlagen', icon: FileText },
         { id: 'expenses', label: 'Kostenarten', icon: Tag },
         { id: 'navigation', label: 'Navigationsleiste', icon: PanelLeft },
         { id: 'security', label: 'Sicherheit', icon: Lock },
@@ -1163,6 +1165,10 @@ const Settings = () => {
 
                     {activeTab === 'billing' && (
                         <Billing />
+                    )}
+
+                    {activeTab === 'document-templates' && (
+                        <DocumentTemplates />
                     )}
                 </div>
             </div>

@@ -220,9 +220,57 @@ const Invoices = () => {
         setFilterSearch('');
     };
 
+    const fetchInvoiceTemplates = async (portfolioId) => {
+        const types = ['invoice_intro', 'invoice_outro', 'credit_note_intro'];
+        const results = {
+            invoice_intro: `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-id="buchungszeitraum">Leistungszeitraum</span>:</p>`,
+            invoice_outro: `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto. Vielen Dank für Ihren Aufenthalt und wir freuen uns auf Ihren nächsten Besuch.</p>`,
+            credit_note_intro: `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
+        };
+
+        if (!user) return results;
+
+        try {
+            for (const type of types) {
+                let query = supabase
+                    .from('document_templates')
+                    .select('content_html')
+                    .eq('user_id', user.id)
+                    .eq('type', type);
+
+                if (portfolioId) {
+                    query = query.eq('portfolio_id', portfolioId);
+                } else {
+                    query = query.is('portfolio_id', null);
+                }
+
+                const { data, error } = await query.maybeSingle();
+                if (!error && data?.content_html) {
+                    results[type] = data.content_html;
+                } else if (portfolioId) {
+                    const { data: globalData } = await supabase
+                        .from('document_templates')
+                        .select('content_html')
+                        .eq('user_id', user.id)
+                        .eq('type', type)
+                        .is('portfolio_id', null)
+                        .maybeSingle();
+                    if (globalData?.content_html) {
+                        results[type] = globalData.content_html;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Error fetching invoice writing templates:', e);
+        }
+
+        return results;
+    };
+
     // ===== PRINT =====
-    const handlePrint = (invoice) => {
-        const html = generateInvoiceHTML(invoice);
+    const handlePrint = async (invoice) => {
+        const writingTemplates = await fetchInvoiceTemplates(invoice.portfolio_id);
+        const html = generateInvoiceHTML(invoice, writingTemplates);
         const win = window.open('', '_blank');
         if (!win) {
             alert('Bitte Popups erlauben.');
@@ -287,6 +335,8 @@ const Invoices = () => {
                 unit: 'mm',
                 format: 'a4'
             });
+
+            const writingTemplates = await fetchInvoiceTemplates(invoice.portfolio_id);
 
             // --- DATA PREPARATION ---
             const portfolio = portfolios.find(p => p.id === invoice.portfolio_id);
@@ -406,17 +456,66 @@ const Invoices = () => {
 
             // Intro
             y += 10;
-            doc.setFontSize(11);
-            doc.setFont("helvetica", "normal");
-            doc.text("Sehr geehrte Damen und Herren,", leftMargin, y);
-            y += 6;
+            const defaultIntro = isCredit
+                ? `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
+                : `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-id="buchungszeitraum">Leistungszeitraum</span>:</p>`;
+            
+            const introHtml = isCredit 
+                ? (writingTemplates?.credit_note_intro || defaultIntro)
+                : (writingTemplates?.invoice_intro || defaultIntro);
+            
+            const localVars = {
+                gast_name: recipientName,
+                gast_adresse: recipientAddress.replace(/<br>/g, ', '),
+                buchungszeitraum: servicePeriod,
+                gaeste_anzahl: `${inv.persons || 1}`,
+                rechnungsnummer: displayNum,
+                rechnungsdatum: invoiceDate,
+                netto_betrag: `${fmt(inv.net_amount || 0)} €`,
+                mwst_betrag: `${fmt(inv.vat_amount || 0)} €`,
+                brutto_betrag: `${fmt(inv.gross_amount || 0)} €`,
+                original_rechnungsnummer: originalInvoiceNum,
+                vermieter_name: sender.name,
+                vermieter_bankverbindung: `Bank: ${sender.bank}, IBAN: ${sender.iban}, BIC: ${sender.bic}`,
+                vermieter_steuernummer: sender.tax_number,
+                vermieter_ust_id: sender.vat_id
+            };
 
-            if (isCredit) {
-                doc.text("wir schreiben Ihnen folgende Leistungen gut:", leftMargin, y);
-            } else {
-                doc.text("vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen folgende Leistungen:", leftMargin, y);
-            }
-            y += 15;
+            const drawInvoiceText = (htmlText, vars, x, yStart) => {
+                let text = htmlText;
+                for (const [key, value] of Object.entries(vars)) {
+                    const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
+                    text = text.replace(regex, value);
+                }
+                
+                let cleanText = text
+                    .replace(/<p>/g, '')
+                    .replace(/<\/p>/g, '\n\n')
+                    .replace(/<br\s*\/?>/g, '\n')
+                    .replace(/<[^>]+>/g, '')
+                    .trim();
+
+                const paragraphs = cleanText.split('\n\n');
+                doc.setFont("helvetica", "normal");
+                doc.setFontSize(11);
+                
+                let currY = yStart;
+                for (const p of paragraphs) {
+                    if (!p.trim()) continue;
+                    const splitP = doc.splitTextToSize(p.trim(), 165);
+                    
+                    if (currY + splitP.length * 5 > 240) {
+                        doc.addPage();
+                        currY = 30;
+                    }
+                    doc.text(splitP, x, currY);
+                    currY += splitP.length * 5 + 6;
+                }
+                return currY;
+            };
+
+            y = drawInvoiceText(introHtml, localVars, leftMargin, y);
+            y += 5;
 
             // Table Header Helper
             const drawTableHeader = (posY) => {
@@ -511,14 +610,13 @@ const Invoices = () => {
             doc.setFontSize(10);
 
             // Footer Instructions
-            y += 20;
-            if (y > 250) { doc.addPage(); y = 30; }
-
-            if (isCredit) {
-                doc.text("Der Betrag wird Ihrem Konto gutgeschrieben.", leftMargin, y);
-            } else {
-                doc.text("Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.", leftMargin, y);
-            }
+            y += 10;
+            const defaultOutro = isCredit
+                ? `<p>Der Betrag wird Ihrem Konto gutgeschrieben.</p>`
+                : `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto.</p>`;
+            
+            const outroHtml = writingTemplates?.invoice_outro || defaultOutro;
+            y = drawInvoiceText(outroHtml, localVars, leftMargin, y);
 
             // Draw Footer on ALL pages
             const pageCount = doc.getNumberOfPages();
@@ -538,7 +636,7 @@ const Invoices = () => {
         }
     };
 
-    const generateInvoiceHTML = (inv) => {
+    const generateInvoiceHTML = (inv, writingTemplates = null) => {
         const portfolio = portfolios.find(p => p.id === inv.portfolio_id);
 
         const sender = {
@@ -568,6 +666,57 @@ const Invoices = () => {
         `).join('');
 
         const fmtDate = (d) => d ? new Date(d).toLocaleDateString('de-DE') : '–';
+
+        const servicePeriod = inv.move_in && inv.move_out
+            ? `${new Date(inv.move_in).toLocaleDateString('de-DE')} - ${new Date(inv.move_out).toLocaleDateString('de-DE')}`
+            : (inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : '');
+
+        const recipientName = inv.recipient_name || (inv.tenant?.name || 'Unbekannt');
+        const recipientAddress = inv.recipient_street ? `${inv.recipient_street}\n${inv.recipient_zip} ${inv.recipient_city}` : (inv.tenant?.address || '');
+        const invoiceDate = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : new Date().toLocaleDateString('de-DE');
+        const originalInvoiceNum = inv.invoice_number || 'ENTWURF';
+        const isCredit = inv.status === 'credited';
+        const displayNum = isCredit ? `GS-${originalInvoiceNum}` : originalInvoiceNum;
+
+        const localVars = {
+            gast_name: recipientName,
+            gast_adresse: recipientAddress.replace(/\n/g, ', '),
+            buchungszeitraum: servicePeriod,
+            gaeste_anzahl: `${inv.persons || 1}`,
+            rechnungsnummer: displayNum,
+            rechnungsdatum: invoiceDate,
+            netto_betrag: `${fmt(inv.net_amount || 0)} €`,
+            mwst_betrag: `${fmt(inv.vat_amount || 0)} €`,
+            brutto_betrag: `${fmt(inv.gross_amount || 0)} €`,
+            original_rechnungsnummer: originalInvoiceNum,
+            vermieter_name: sender.name,
+            vermieter_bankverbindung: `Bank: ${sender.bank}, IBAN: ${sender.iban}, BIC: ${sender.bic}`,
+            vermieter_steuernummer: sender.tax_number,
+            vermieter_ust_id: sender.vat_id
+        };
+
+        const replaceHTMLVariables = (htmlStr, vars) => {
+            if (!htmlStr) return '';
+            let result = htmlStr;
+            for (const [key, value] of Object.entries(vars)) {
+                const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
+                result = result.replace(regex, value);
+            }
+            return result;
+        };
+
+        const defaultIntro = isCredit
+            ? `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
+            : `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-id="buchungszeitraum">Leistungszeitraum</span>:</p>`;
+            
+        const defaultOutro = isCredit
+            ? `<p>Der Betrag wird Ihrem Konto gutgeschrieben.</p>`
+            : `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto.</p>`;
+
+        const displayIntro = isCredit 
+            ? replaceHTMLVariables(writingTemplates?.credit_note_intro || defaultIntro, localVars)
+            : replaceHTMLVariables(writingTemplates?.invoice_intro || defaultIntro, localVars);
+        const displayOutro = replaceHTMLVariables(writingTemplates?.invoice_outro || defaultOutro, localVars);
 
         return `<!DOCTYPE html>
         <html lang="de">
@@ -739,10 +888,9 @@ const Invoices = () => {
 
                 <!-- Main Content -->
                 <div class="content">
-                    <div class="doc-title">Rechnung</div>
+                    <div class="doc-title">${isCredit ? 'Gutschrift' : 'Rechnung'}</div>
                     <div class="intro-text">
-                        Sehr geehrte Damen und Herren,<br><br>
-                        vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen folgende Leistungen:
+                        ${displayIntro}
                     </div>
 
                     <table>
@@ -768,7 +916,7 @@ const Invoices = () => {
                     </div>
 
                     <div class="intro-text">
-                        Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.<br>
+                        ${displayOutro}
                     </div>
                 </div>
 

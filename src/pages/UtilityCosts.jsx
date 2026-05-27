@@ -594,7 +594,7 @@ const UtilityCosts = () => {
     };
 
     // ===== SETTLEMENT HTML GENERATION =====
-    const generateSettlementHTML = (settlement, singleUnitId = null, targetTenantId = null, templateOverride = null) => {
+    const generateSettlementHTML = (settlement, singleUnitId = null, targetTenantId = null, templateOverride = null, writingTemplates = null) => {
         const tpl = templateOverride || pdfTemplate;
         const prop = getPropertyFull(settlement.property_id);
         const data = settlement.data || {};
@@ -684,16 +684,57 @@ const UtilityCosts = () => {
 
             const balance = tenantTotal - tenantPrepay;
 
+            const landlordPortfolio = portfolios.find(p => p.id === prop?.portfolio_id);
+            const landlordName = landlordPortfolio?.company_name || landlordPortfolio?.name || 'Vermieter';
+            const bankDetailsStr = (landlordPortfolio?.bank_name)
+                ? `Inhaber: ${landlordPortfolio?.company_name || landlordPortfolio?.name}, Bank: ${landlordPortfolio.bank_name}, IBAN: ${landlordPortfolio.iban}, BIC: ${landlordPortfolio.bic}`
+                : '';
+
+            const localVars = {
+                mieter_name: page.tenantName,
+                mieter_anrede: `Sehr geehrte/r ${page.tenantName}`,
+                objekt_adresse: `${propAddress}, ${propCity}`,
+                einheit_name: page.unitName,
+                abrechnungsjahr: settlement.year || '',
+                abrechnungszeitraum: `${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}`,
+                nutzungszeitraum: page.periodText,
+                gesamtkosten_mieter: `${fmt(tenantTotal)} €`,
+                vorauszahlungs_betrag: `${fmt(tenantPrepay)} €`,
+                saldo_betrag: `${fmt(Math.abs(balance))} €`,
+                saldo_art: balance > 0 ? 'Nachzahlung' : 'Gutschrift',
+                vermieter_name: landlordName,
+                vermieter_bankverbindung: bankDetailsStr
+            };
+
+            const replaceHTMLVariables = (htmlStr, vars) => {
+                if (!htmlStr) return '';
+                let result = htmlStr;
+                for (const [key, value] of Object.entries(vars)) {
+                    const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
+                    result = result.replace(regex, value);
+                }
+                return result;
+            };
+
+            const defaultIntro = `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-id="objekt_adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-id="abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`;
+            const defaultOutro = `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`;
+
+            const introHtml = replaceHTMLVariables(writingTemplates?.utility_intro || defaultIntro, localVars);
+            const outroHtml = replaceHTMLVariables(writingTemplates?.utility_outro || defaultOutro, localVars);
+
             // Generate Page 1
             pagesHTML += `
-            <div style="page-break-before:${idx > 0 ? 'always' : 'auto'};min-height:250mm;position:relative;background:#fff">
+            <div style="page-break-before:${idx > 0 ? 'always' : 'auto'};min-height:250mm;position:relative;background:#fff;font-family:'Segoe UI', Arial, sans-serif;font-size:11px;color:#1f2937">
                 ${logoUrl ? `<div style="text-align:right;margin-bottom:25px"><img src="${logoUrl}" style="max-height:50px;max-width:200px;object-fit:contain" alt="Logo" /></div>` : ''}
                 <div style="margin-bottom:16px">
                     <div style="font-size:8px;color:#aaa;border-bottom:1px solid #ddd;display:inline-block;padding-bottom:1px;margin-bottom:3px">${(() => { const pf = portfolios.find(p => p.id === prop?.portfolio_id); return pf?.name || ''; })()}, ${propAddress}, ${propCity}</div>
                     <div style="font-size:11px;line-height:1.5">${page.tenantName}<br>${propAddress}<br>${propCity}</div>
                 </div>
                 <div style="text-align:right;font-size:11px;margin:10px 0">${formatDate(settlement.created_at)}</div>
-                <h2 style="font-size:15px;font-weight:700;margin:0 0 10px">Ihre Betriebskostenabrechnung</h2>
+                
+                <!-- Dynamic Intro Anschreiben -->
+                <div style="margin-bottom:15px;line-height:1.5;font-size:11px">${introHtml}</div>
+                
                 <div style="border:1px solid ${accentColor};border-radius:3px;padding:10px 12px;margin-bottom:18px;position:relative">
                     <div style="position:absolute;top:-8px;left:8px;background:#fff;padding:0 5px;font-weight:600;color:${accentColor};font-size:11px">Ihre Daten</div>
                     <table style="width:100%;font-size:10px;margin-top:2px">
@@ -721,8 +762,10 @@ const UtilityCosts = () => {
                         <td style="padding:6px 0;text-align:right;font-weight:700;font-size:12px;color:${balance > 0 ? '#dc2626' : '#16a34a'}">${fmt(Math.abs(balance))} €</td>
                     </tr>
                 </table>
-                <div style="margin-top:14px;font-size:10px;color:#555;line-height:1.4">Die Aufteilung der Gesamtkosten können Sie den nächsten Seiten entnehmen. ${balance > 0 ? 'Nachzahlungen bitten wir umgehend zu überweisen.' : 'Das Guthaben wird Ihnen umgehend erstattet.'}</div>
-                <div style="margin-top:10px;font-size:10px">Mit freundlichen Grüßen</div>
+                
+                <!-- Dynamic Outro Anschreiben -->
+                <div style="margin-top:15px;font-size:11px;line-height:1.5">${outroHtml}</div>
+                
                 <div style="position:absolute;bottom:-12mm;left:0;font-size:8px;color:#e6a817;letter-spacing:2px;font-weight:600">SEITE ${idx * 2 + 1} / ${allPages.length * 2}</div>
             </div>
             <div style="page-break-before:always;min-height:250mm;position:relative;background:#fff;padding-top:35px">
@@ -811,13 +854,59 @@ const UtilityCosts = () => {
     };
 
 
+    const fetchWritingTemplates = async (portfolioId) => {
+        const types = ['utility_intro', 'utility_outro'];
+        const results = {
+            utility_intro: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-id="objekt_adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-id="abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`,
+            utility_outro: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+        };
+
+        if (!user) return results;
+
+        try {
+            for (const type of types) {
+                let query = supabase
+                    .from('document_templates')
+                    .select('content_html')
+                    .eq('user_id', user.id)
+                    .eq('type', type);
+
+                if (portfolioId) {
+                    query = query.eq('portfolio_id', portfolioId);
+                } else {
+                    query = query.is('portfolio_id', null);
+                }
+
+                const { data, error } = await query.maybeSingle();
+                if (!error && data?.content_html) {
+                    results[type] = data.content_html;
+                } else if (portfolioId) {
+                    const { data: globalData } = await supabase
+                        .from('document_templates')
+                        .select('content_html')
+                        .eq('user_id', user.id)
+                        .eq('type', type)
+                        .is('portfolio_id', null)
+                        .maybeSingle();
+                    if (globalData?.content_html) {
+                        results[type] = globalData.content_html;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Error fetching writing templates:', e);
+        }
+
+        return results;
+    };
+
     const previewSettlement = async (settlement, unitId = null, tenantId = null) => {
-        // Resolve the correct PDF template for this property's portfolio
         const prop = getPropertyFull(settlement.property_id);
         const tpl = prop?.portfolio_id
             ? await fetchPdfTemplate(prop.portfolio_id, 'nebenkostenabrechnung')
             : pdfTemplate;
-        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl);
+        const writingTemplates = await fetchWritingTemplates(prop?.portfolio_id);
+        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl, writingTemplates);
         const win = window.open('', '_blank');
         win.document.write(html);
         win.document.close();
@@ -825,12 +914,12 @@ const UtilityCosts = () => {
     };
 
     const downloadSettlement = async (settlement, unitId = null, tenantId = null) => {
-        // Resolve the correct PDF template for this property's portfolio
         const prop = getPropertyFull(settlement.property_id);
         const tpl = prop?.portfolio_id
             ? await fetchPdfTemplate(prop.portfolio_id, 'nebenkostenabrechnung')
             : pdfTemplate;
-        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl);
+        const writingTemplates = await fetchWritingTemplates(prop?.portfolio_id);
+        const html = generateSettlementHTML(settlement, unitId, tenantId, tpl, writingTemplates);
 
         let suffix = '';
         if (unitId && tenantId) {
