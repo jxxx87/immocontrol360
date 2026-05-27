@@ -197,43 +197,6 @@ export default function ClaimPortal() {
                         </p>
                     </div>
                     
-                    {paymentStatus === 'success' && (
-                        <div style={{ 
-                            marginBottom: '20px', 
-                            padding: '12px 16px', 
-                            backgroundColor: '#ECFDF5', 
-                            border: '1px solid #10B981', 
-                            borderRadius: '8px', 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            gap: '8px',
-                            textAlign: 'left'
-                        }}>
-                            <CheckCircle2 size={20} color="#059669" style={{ flexShrink: 0 }} />
-                            <div style={{ fontSize: '0.85rem', color: '#047857' }}>
-                                <strong>Zahlung erfolgreich!</strong> Ihre Zahlung wurde gestartet. Bitte loggen Sie sich ein, um den aktuellen Status zu sehen.
-                            </div>
-                        </div>
-                    )}
-                    
-                    {paymentStatus === 'cancel' && (
-                        <div style={{ 
-                            marginBottom: '20px', 
-                            padding: '12px 16px', 
-                            backgroundColor: '#FEF2F2', 
-                            border: '1px solid #EF4444', 
-                            borderRadius: '8px', 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            gap: '8px',
-                            textAlign: 'left'
-                        }}>
-                            <Clock size={20} color="#DC2626" style={{ flexShrink: 0 }} />
-                            <div style={{ fontSize: '0.85rem', color: '#B91C1C' }}>
-                                <strong>Abgebrochen.</strong> Der Bezahlvorgang wurde abgebrochen.
-                            </div>
-                        </div>
-                    )}
 
                     <form onSubmit={handleLogin}>
                         <div style={{ marginBottom: '24px' }}>
