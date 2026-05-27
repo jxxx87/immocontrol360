@@ -181,9 +181,29 @@ serve(async (req) => {
              status: 200,
            })
         }
-        const children = await msGraphCall(`/me/drive/items/${rootFolder.id}/children?$select=name`)
-        const existingNames = children.value.map((c: any) => c.name)
-        const missingFolders = foldersToCreate.filter((f: string) => !existingNames.includes(f.replace(/["*:<>?\/\\|]/g, '')))
+        const children = await msGraphCall(`/me/drive/items/${rootFolder.id}/children?$select=id,name`)
+        const existingFolders = children?.value || []
+        const existingNames = existingFolders.map((c: any) => c.name)
+        
+        const missingFolders: string[] = []
+        const checkPromises = foldersToCreate.map(async (f) => {
+          const sanitizedF = f.replace(/["*:<>?\/\\|]/g, '')
+          const folderIdx = existingNames.indexOf(sanitizedF)
+          
+          if (folderIdx === -1) {
+            missingFolders.push(f)
+          } else {
+            const folderId = existingFolders[folderIdx].id
+            const subChildren = await msGraphCall(`/me/drive/items/${folderId}/children?$select=name`)
+            const subNames = (subChildren?.value || []).map((c: any) => c.name)
+            
+            const hasAllSubs = DEFAULT_SUBFOLDERS.every(sub => subNames.includes(sub))
+            if (!hasAllSubs) {
+              missingFolders.push(f)
+            }
+          }
+        })
+        await Promise.all(checkPromises)
         
         return new Response(JSON.stringify({ missingFolders }), {
            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -262,8 +282,28 @@ serve(async (req) => {
           q: `'${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
           fields: 'files(id, name)'
         })
-        const existingNames = (childrenSearch?.files || []).map((f: any) => f.name)
-        const missingFolders = foldersToCreate.filter((f: string) => !existingNames.includes(f))
+        const existingFolders = childrenSearch?.files || []
+        const existingNames = existingFolders.map((f: any) => f.name)
+        
+        const missingFolders: string[] = []
+        const checkPromises = foldersToCreate.map(async (f) => {
+          const folderIdx = existingNames.indexOf(f)
+          if (folderIdx === -1) {
+            missingFolders.push(f)
+          } else {
+            const folderId = existingFolders[folderIdx].id
+            const subSearch = await googleDriveCall('/files', 'GET', null, {
+              q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+              fields: 'files(id, name)'
+            })
+            const subNames = (subSearch?.files || []).map((subF: any) => subF.name)
+            const hasAllSubs = DEFAULT_SUBFOLDERS.every(sub => subNames.includes(sub))
+            if (!hasAllSubs) {
+              missingFolders.push(f)
+            }
+          }
+        })
+        await Promise.all(checkPromises)
         
         return new Response(JSON.stringify({ missingFolders }), {
            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
