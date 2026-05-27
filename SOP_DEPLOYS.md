@@ -29,51 +29,62 @@ Wenn das offizielle MCP-Tool `execute_sql` wegen unzureichender Berechtigungen (
    ```
 4. Führe das Skript über das Terminal aus (`node apply_sql.cjs`).
 
-## 2. GitHub & Hostinger Deployment (Dual-Branch Setup)
-Da die Landingpage (`immowebsite`) und die Haupt-App (`immo-web`) getrennt betrieben werden (Hauptdomain vs Subdomain `app.`), verwenden wir dasselbe GitHub-Repository (`jxxx87/immocontrol360.git`), schieben die fertigen Builds aber auf unterschiedliche Deployment-Branches.
+## 2. GitHub & Hostinger Deployment (Native Vite-Build auf Hostinger)
+Da die Landingpage (`immowebsite`) und die Haupt-App (`immo-web`) getrennt betrieben werden (Hauptdomain vs. Subdomain `app.`), verwenden wir dasselbe GitHub-Repository (`jxxx87/immocontrol360.git`), aber mit zwei separaten Source-Code-Branches. Hostinger baut das jeweilige Projekt direkt auf dem Server mit Vite.
+
+---
 
 ### A. Haupt-Web-App (`immo-web` -> `app.immocontrol360.de`)
-Die Web-App wird auf der Subdomain `app.` bereitgestellt. Das Stammverzeichnis auf Hostinger lautet `/public_html/app`.
-Die deployten Build-Dateien liegen im Branch **`production`**.
+Der Source-Code der Web-App liegt im Branch **`master`**.
+Das Stammverzeichnis auf Hostinger lautet `/public_html/app`.
 
 **Deployment ausführen:**
-1. Öffne ein PowerShell-Terminal im Ordner `immo-web`.
-2. Führe das Deployment-Skript aus:
+1. Git-Änderungen in `immo-web` committen und pushen:
    ```powershell
-   .\deploy_hostinger.ps1
+   git add .
+   git commit -m "deine beschreibung"
+   git push origin master
    ```
-3. Das Skript baut die App (`npm run build`) und schiebt den `dist`-Ordner in den Branch `production` auf GitHub.
-4. Hostinger zieht sich diesen Branch automatisch in das Verzeichnis `/public_html/app` und schaltet die Änderungen live.
+2. Hostinger holt sich den `master`-Branch, führt dort automatisch `npm run build` aus und stellt die App live.
 
 ---
 
 ### B. Marketing-Website (`immowebsite` -> `immocontrol360.de`)
-Die Marketingpage wird auf der Hauptdomain betrieben. Das Stammverzeichnis auf Hostinger lautet `/public_html`.
-Die deployten Build-Dateien liegen im Branch **`production-landing`**.
+Der Source-Code der Landingpage liegt im Branch **`landing-master`**.
+Das Stammverzeichnis auf Hostinger lautet `/public_html`.
 
 **Deployment ausführen:**
-1. Öffne ein PowerShell-Terminal im Ordner `immowebsite`.
-2. Führe das Deployment-Skript aus:
+1. Git-Änderungen in `immowebsite` committen und pushen:
    ```powershell
-   .\deploy_marketing.ps1
+   git add .
+   git commit -m "deine beschreibung"
+   git push origin landing-master
    ```
-3. Das Skript installiert Abhängigkeiten, baut die Seite und schiebt den `dist`-Ordner in den Branch `production-landing` auf GitHub.
-4. Hostinger zieht sich diesen Branch automatisch in das Verzeichnis `/public_html` und schaltet die Änderungen live.
+2. Hostinger holt sich den `landing-master`-Branch, führt dort automatisch `npm run build` aus und stellt die Landingpage live.
 
 ---
 
 ### C. Hostinger Git-Konfiguration (Einmalig)
-Stelle sicher, dass im Hostinger-Panel folgende Git-Verknüpfungen aktiv sind:
+Stelle sicher, dass im Hostinger-Panel folgende Git-Verknüpfungen und Build-Einstellungen aktiv sind:
 
 1. **Für die Hauptdomain (`immocontrol360.de`):**
    * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
-   * Branch: `production-landing`
+   * Branch: **`landing-master`**
    * Installationsverzeichnis: `/public_html`
+   * Framework-Voreinstellung: **`Vite`** (wichtig!)
+   * Build-Befehl: `npm run build`
+   * Ausgabeverzeichnis: `dist`
 
 2. **Für die Subdomain (`app.immocontrol360.de`):**
    * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
-   * Branch: `production`
+   * Branch: **`master`**
    * Installationsverzeichnis: `/public_html/app`
+   * Framework-Voreinstellung: **`Vite`** (wichtig!)
+   * Build-Befehl: `npm run build`
+   * Ausgabeverzeichnis: `dist`
+
+Hostinger baut und verteilt bei jedem Push vollautomatisch! Lokale `deploy_*.ps1` Skripte werden nicht mehr benötigt, da Hostinger den Build-Prozess nativ übernimmt.
+
 
 
 ## 3. RLS Policies Pitfall: `auth.users`
