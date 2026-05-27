@@ -900,6 +900,9 @@ const ClaimDetail = () => {
                         <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>Forderungsakte</h1>
                         {getStatusBadge(claim.status)}
                     </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                        Verwendungszweck für Überweisungen: <strong style={{ color: 'var(--primary-color)', fontFamily: 'monospace', fontSize: '0.9rem' }}>Mahnung-{claim.id.substring(0, 8).toUpperCase()}</strong>
+                    </div>
                 </div>
             </div>
 

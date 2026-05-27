@@ -341,23 +341,23 @@ export default function ClaimPortal() {
                                         </p>
                                         
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', backgroundColor: '#F8FAFC', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', fontSize: '0.85rem' }}>
                                                 <span style={{ color: 'var(--text-secondary)' }}>Empfänger:</span>
                                                 <span style={{ fontWeight: 600 }}>{claimData.bank_details.account_holder}</span>
                                             </div>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', fontSize: '0.85rem' }}>
                                                 <span style={{ color: 'var(--text-secondary)' }}>IBAN:</span>
                                                 <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{claimData.bank_details.iban}</span>
                                             </div>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', fontSize: '0.85rem' }}>
                                                 <span style={{ color: 'var(--text-secondary)' }}>BIC:</span>
                                                 <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{claimData.bank_details.bic || '-'}</span>
                                             </div>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', fontSize: '0.85rem' }}>
                                                 <span style={{ color: 'var(--text-secondary)' }}>Verwendungszweck:</span>
                                                 <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>Mahnung-{claimData.claim_id.substring(0, 8).toUpperCase()}</span>
                                             </div>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', fontSize: '0.85rem' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', fontSize: '0.85rem' }}>
                                                 <span style={{ color: 'var(--text-secondary)' }}>Betrag:</span>
                                                 <span style={{ fontWeight: 700, color: '#991B1B' }}>{formatCurrency(claimData.totals?.total_due)}</span>
                                             </div>
