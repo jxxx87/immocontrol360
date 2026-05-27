@@ -819,7 +819,7 @@ const Tenants = () => {
                         reportType="mietverhaeltnisse"
                         data={displayedUnits.map(u => ({
                             property_id: u.property_id,
-                            mietername: u.activeLease?.tenant_name || '–',
+                            mietername: u.activeLease?.tenant ? `${u.activeLease.tenant.last_name}, ${u.activeLease.tenant.first_name}` : '–',
                             immobilie_einheit: `${u.propertyLabel || ''} / ${u.unit_name || ''}`.trim(),
                             kaltmiete: u.activeLease?.cold_rent || 0,
                             nebenkosten: (parseFloat(u.activeLease?.service_charge) || 0) + (parseFloat(u.activeLease?.heating_cost) || 0) + (parseFloat(u.activeLease?.other_costs) || 0),

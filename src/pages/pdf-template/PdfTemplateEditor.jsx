@@ -310,7 +310,7 @@ const PdfTemplateEditor = () => {
         try {
             // Build a consistent orientation map for all report types (global orientation)
             const orientationMap = {};
-            ['immobilien', 'einheiten', 'mietverhaeltnisse', 'bankaufstellung', 'offene_mieten', 'buchhaltung', 'kpi', 'deals', 'deal_kalkulation', 'finanzierungen', 'sanierung', 'sanierung_rechner'].forEach(rt => {
+            ['immobilien', 'einheiten', 'mietverhaeltnisse', 'bankaufstellung', 'offene_mieten', 'buchhaltung', 'kpi', 'deals', 'deal_kalkulation', 'finanzierungen', 'sanierung', 'sanierung_rechner', 'mahnwesen'].forEach(rt => {
                 orientationMap[rt] = currentOrientation;
             });
             const payload = {

@@ -37,6 +37,7 @@ const Finance = () => {
     const [rentPayments, setRentPayments] = useState([]);
     const [leases, setLeases] = useState([]); // Needed for Expected Rent
     const [recentBookings, setRecentBookings] = useState([]);
+    const [filteredBookingsForExport, setFilteredBookingsForExport] = useState([]);
 
     // Filters
     // Filters
@@ -295,12 +296,13 @@ const Finance = () => {
         });
 
         // Filter Expenses & Payments for Table (combine)
-        const combined = [
+        const combinedAll = [
             ...filteredExpenses.map(e => ({ ...e, type: 'expense', date: e.booking_date, amount: -e.amount })),
             ...filteredPayments.map(r => ({ ...r, type: 'income', date: r.payment_date, amount: r.amount }))
-        ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 50);
+        ].sort((a, b) => new Date(b.date) - new Date(a.date));
 
-        setRecentBookings(combined);
+        setRecentBookings(combinedAll.slice(0, 50));
+        setFilteredBookingsForExport(combinedAll);
     };
 
 
@@ -840,6 +842,46 @@ const Finance = () => {
         }
     ];
 
+    const mapBookingsForExport = (bookings) => {
+        return bookings.map(b => {
+            let empfaenger = '–';
+            let kategorie = '–';
+            let immobilie = '–';
+            
+            if (b.type === 'income') {
+                if (b.lease?.tenant_id) {
+                    const t = tenants.find(tenant => tenant.id === b.lease.tenant_id);
+                    empfaenger = t ? `${t.last_name}, ${t.first_name}` : 'Unbekannter Mieter';
+                } else {
+                    empfaenger = 'Mieteinnahme';
+                }
+                kategorie = 'Miete';
+                if (b.lease?.unit?.property) {
+                    immobilie = `${b.lease.unit.property.street} ${b.lease.unit.property.house_number || ''}`.trim();
+                } else if (b.lease?.unit?.property_id) {
+                    const p = properties.find(prop => prop.id === b.lease.unit.property_id);
+                    immobilie = p ? `${p.street} ${p.house_number || ''}`.trim() : '–';
+                }
+            } else {
+                empfaenger = b.payee || 'Unbekannt';
+                kategorie = b.expense_categories?.name || b.category_custom || 'Ausgabe';
+                const p = properties.find(prop => prop.id === b.property_id);
+                immobilie = p ? `${p.street} ${p.house_number || ''}`.trim() : 'Allgemein';
+            }
+            
+            return {
+                property_id: b.property_id || (b.lease?.unit?.property_id),
+                datum: b.date || b.booking_date || b.payment_date || '',
+                empfaenger,
+                verwendungszweck: b.note || '–',
+                betrag: b.amount || 0,
+                kategorie,
+                immobilie,
+                _propertyLabel: immobilie,
+            };
+        });
+    };
+
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
 
     return (
@@ -852,19 +894,10 @@ const Finance = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <ExportDropdown
                         reportType="buchhaltung"
-                        data={recentBookings.map(b => ({
-                            property_id: b.property_id,
-                            datum: b.date || b.booking_date || b.payment_date || '',
-                            empfaenger: b.recipient || b.tenant_name || '–',
-                            verwendungszweck: b.purpose || b.description || b.notes || '–',
-                            betrag: b.amount || 0,
-                            kategorie: b.category || b.type || '–',
-                            immobilie: b.propertyLabel || '–',
-                            _propertyLabel: b.propertyLabel || '–',
-                        }))}
+                        data={mapBookingsForExport(filteredBookingsForExport)}
                         properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number}` }))}
                         currentFilters={{ property_id: filterPropertyId, start_date: filterStartDate, end_date: filterEndDate }}
-                        totalRows={recentBookings.length}
+                        totalRows={filteredBookingsForExport.length}
                     />
                     <Button icon={Plus} onClick={() => { setIsModalOpen(true); setBookingType('expense'); }}>Buchung erfassen</Button>
                 </div>

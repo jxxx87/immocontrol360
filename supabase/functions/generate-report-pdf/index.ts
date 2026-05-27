@@ -114,6 +114,17 @@ const COLUMN_DEFS: Record<string, Record<string, { label: string; format?: strin
         gewerk: { label: 'Gewerk' },
         summe: { label: 'Summe', format: 'currency' },
     },
+    mahnwesen: {
+        mietername: { label: 'Mieter' },
+        immobilie: { label: 'Immobilie' },
+        ursprung: { label: 'Ursprung', format: 'currency' },
+        offen: { label: 'Offener Betrag', format: 'currency' },
+        status: { label: 'Status' },
+        frist: { label: 'Zahlungsfrist', format: 'date' },
+        gebuehren: { label: 'Mahngebühren', format: 'currency' },
+        zinsen: { label: 'Verzugszinsen', format: 'currency' },
+        erstellt_am: { label: 'Erstellt am', format: 'date' },
+    },
 }
 
 // ── Report title map ────────────────────────────────────────────────
@@ -127,6 +138,7 @@ const REPORT_TITLES: Record<string, string> = {
     deals: 'Deal-Übersicht',
     sanierung: 'Sanierungsprojekte',
     sanierung_rechner: 'Sanierungsrechner',
+    mahnwesen: 'Mahnwesen & Forderungen',
 }
 
 // ── Data fetching per report type ───────────────────────────────────

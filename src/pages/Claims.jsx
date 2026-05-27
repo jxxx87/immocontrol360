@@ -10,6 +10,7 @@ import Modal from '../components/ui/Modal';
 import { createPortal } from 'react-dom';
 import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical, Settings as SettingsIcon, CreditCard } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import ExportDropdown from '../components/ExportDropdown';
 
 const Claims = () => {
     const { user } = useAuth();
@@ -158,7 +159,7 @@ const Claims = () => {
         let claimsQuery = supabase
             .from('claims')
             .select(`
-                id, status, escalation_level, deadline, next_action_at,
+                id, status, escalation_level, deadline, next_action_at, created_at,
                 interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
                 tenants ( first_name, last_name ),
                 leases!inner ( 
@@ -662,7 +663,36 @@ const Claims = () => {
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwalten Sie Mietrückstände, Mahnungen und Ratenzahlungen.</p>
                 </div>
-                <div style={{ display: 'flex', gap: '12px' }}>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <ExportDropdown
+                        reportType="mahnwesen"
+                        data={claims.map(claim => {
+                            const propData = claim.leases?.units?.properties;
+                            const prop = propData ? `${propData.street} ${propData.house_number}`.trim() : '';
+                            const unit = claim.leases?.units?.unit_name || '';
+                            const immobilie = prop && unit ? `${prop} / ${unit}` : (prop || unit || '–');
+                            
+                            return {
+                                property_id: propData?.id,
+                                mietername: getTenantName(claim.tenants),
+                                immobilie,
+                                ursprung: claim.totalUrsprung || 0,
+                                offen: claim.totalOffen || 0,
+                                status: claim.status === 'open' ? 'Offen' : claim.status === 'overdue' ? 'Überfällig' : claim.status === 'paid' ? 'Bezahlt' : claim.status === 'payment_plan' ? 'Ratenzahlung' : claim.status,
+                                frist: claim.deadline || '',
+                                gebuehren: claim.accumulated_unpaid_fees || 0,
+                                zinsen: claim.accumulated_unpaid_interest || 0,
+                                erstellt_am: claim.created_at || '',
+                                _propertyLabel: prop || '–',
+                            };
+                        })}
+                        properties={Array.from(new Set(claims.map(c => c.leases?.units?.properties).filter(Boolean).map(p => p.id)))
+                            .map(id => {
+                                const p = claims.find(c => c.leases?.units?.properties?.id === id)?.leases?.units?.properties;
+                                return { id: p?.id, label: `${p?.street || ''} ${p?.house_number || ''}`.trim() };
+                            })}
+                        totalRows={claims.length}
+                    />
                     <Button 
                         variant="secondary" 
                         onClick={() => { loadPortalSettings(); setIsSettingsModalOpen(true); }} 

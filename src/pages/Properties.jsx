@@ -111,6 +111,67 @@ const Properties = () => {
             const { data, error } = await query;
             if (error) throw error;
 
+            // Fetch Loans
+            let loanQuery = supabase.from('loans').select('*');
+            if (selectedPortfolioID) {
+                loanQuery = loanQuery.eq('portfolio_id', selectedPortfolioID);
+            }
+            const { data: loanData, error: loanError } = await loanQuery;
+            if (loanError) throw loanError;
+
+            // Loan Helper functions
+            const calculateCurrentDebt = (loan) => {
+                const originalAmount = parseFloat(loan.loan_amount || 0);
+                const interestRate = parseFloat(loan.interest_rate || 0) / 100;
+                let monthlyPayment = parseFloat(loan.fixed_annuity || 0);
+
+                if (!monthlyPayment) {
+                    const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
+                    monthlyPayment = (originalAmount * (interestRate + repaymentRate)) / 12;
+                }
+
+                const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
+                const amount = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
+                const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
+
+                if (!startDateStr) return amount;
+                
+                const startDate = new Date(startDateStr);
+                let endDateTarget = loan.end_date ? new Date(loan.end_date) : null;
+
+                if (!endDateTarget || isNaN(endDateTarget.getTime())) {
+                    endDateTarget = new Date(startDate);
+                    endDateTarget.setFullYear(endDateTarget.getFullYear() + 50);
+                }
+
+                const validUntil = new Date(); // TODAY
+
+                let currentBalance = amount;
+                let currentDate = new Date(startDate);
+
+                let months = 0;
+                while (currentBalance > 0.01 && months < 600) {
+                    if (currentDate > validUntil) break;
+                    const monthlyInterest = currentBalance * interestRate / 12;
+                    const principal = monthlyPayment - monthlyInterest;
+                    const endBalance = currentBalance - principal;
+
+                    currentBalance = endBalance < 0 ? 0 : endBalance;
+                    currentDate.setMonth(currentDate.getMonth() + 1);
+                    months++;
+                }
+
+                return currentBalance;
+            };
+
+            const calculateMonthlyPayment = (loan) => {
+                if (loan.fixed_annuity) return parseFloat(loan.fixed_annuity);
+                const originalAmount = parseFloat(loan.loan_amount || 0);
+                const interestRate = parseFloat(loan.interest_rate || 0) / 100;
+                const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
+                return (originalAmount * (interestRate + repaymentRate)) / 12;
+            };
+
             // Calculate Aggregations
             const propertiesWithStats = data.map(p => {
                 const units = p.units || [];
@@ -125,8 +186,15 @@ const Properties = () => {
                     return sum + (activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0);
                 }, 0);
 
+                // Calculate Loan Stats
+                const propLoans = (loanData || []).filter(l => l.property_id === p.id);
+                const remainingDebt = propLoans.reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
+                const monthlyLoanPayment = propLoans.reduce((sum, l) => sum + calculateMonthlyPayment(l), 0);
+
                 return {
                     ...p,
+                    remaining_debt: remainingDebt,
+                    monthly_loan_payment: monthlyLoanPayment,
                     stats: {
                         totalUnits,
                         totalArea,
@@ -682,6 +750,8 @@ const Properties = () => {
                             cashflow_monat: (p.stats?.totalActualRent || 0) - (p.monthly_loan_payment || 0),
                             wohnflaeche: p.stats?.totalArea || 0,
                             leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
+                            ltv: p.market_value > 0 ? (p.remaining_debt || 0) / p.market_value : 0,
+                            dscr: p.monthly_loan_payment > 0 ? (p.stats?.totalActualRent || 0) / p.monthly_loan_payment : 0,
                             _propertyLabel: `${p.street} ${p.house_number || ''}`.trim(),
                         }))}
                         unitData={Object.fromEntries(properties.map(p => [

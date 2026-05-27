@@ -231,6 +231,26 @@ export const REPORT_CONFIGS = {
             { key: 'positionen', label: 'Positionen', detail: true },
         ],
     },
+    mahnwesen: {
+        label: 'Mahnwesen & Forderungen',
+        defaultOrientation: 'landscape',
+        sumsEnabled: true,
+        groupByProperty: false,
+        dsgvoRelevant: true,
+        sumColumns: ['ursprung', 'offen', 'gebuehren', 'zinsen'],
+        dsgvoFields: ['mietername'],
+        columns: [
+            { key: 'mietername', label: 'Mieter', always: true, dsgvo: true },
+            { key: 'immobilie', label: 'Immobilie', compact: true },
+            { key: 'ursprung', label: 'Ursprung', compact: true, format: 'currency' },
+            { key: 'offen', label: 'Offener Betrag', compact: true, format: 'currency' },
+            { key: 'status', label: 'Status', compact: true },
+            { key: 'frist', label: 'Zahlungsfrist', compact: true, format: 'date' },
+            { key: 'gebuehren', label: 'Mahngebühren', detail: true, format: 'currency' },
+            { key: 'zinsen', label: 'Verzugszinsen', detail: true, format: 'currency' },
+            { key: 'erstellt_am', label: 'Erstellt am', detail: true, format: 'date' },
+        ],
+    },
 };
 
 // Which columns to include for compact vs. detail presets

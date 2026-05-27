@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
-import { Upload, FileSpreadsheet, CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { Upload, FileSpreadsheet, CheckCircle, AlertTriangle, Loader2, Download } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -422,6 +422,31 @@ const Import = () => {
             <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-xl)' }}>
                 Hier kannst du Immobilien, Einheiten und Mieter aus der offiziellen ImmoControlpro360-Excelvorlage importieren.
             </p>
+
+            <Card style={{ padding: 'var(--spacing-xl)', marginBottom: 'var(--spacing-xl)', borderLeft: '4px solid var(--primary-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '20px' }}>
+                    <div style={{ flex: '1', minWidth: '280px' }}>
+                        <h3 style={{ fontSize: '1.125rem', fontWeight: 600, marginBottom: '5px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <FileSpreadsheet className="text-primary" size={20} />
+                            Excel-Vorlage herunterladen
+                        </h3>
+                        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                            Verwende die offizielle Import-Vorlage, um deine Daten korrekt vorzubereiten. Importiere keine manipulierten Tabellenstrukturen.
+                        </p>
+                    </div>
+                    <div>
+                        <a 
+                            href="/Import_immocontrolpro360_Excelvorlage.xlsx" 
+                            download="Import_immocontrolpro360_Excelvorlage.xlsx"
+                            className="btn btn-secondary btn-md"
+                            style={{ display: 'inline-flex', alignItems: 'center', textDecoration: 'none' }}
+                        >
+                            <Download size={18} style={{ marginRight: '0.5rem' }} />
+                            Vorlage herunterladen
+                        </a>
+                    </div>
+                </div>
+            </Card>
 
             <Card style={{ padding: 'var(--spacing-xl)' }}>
                 <div

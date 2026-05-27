@@ -31,6 +31,7 @@ export const REPORT_TYPES = [
     { id: 'kpi', label: 'KPI' },
     { id: 'deals', label: 'Deals' },
     { id: 'sanierung', label: 'Sanierung' },
+    { id: 'mahnwesen', label: 'Mahnwesen & Forderungen' },
 ];
 
 export const REPORT_TITLE_MAP = {
@@ -42,6 +43,7 @@ export const REPORT_TITLE_MAP = {
     kpi: 'KPI-Report',
     deals: 'Deal-Übersicht',
     sanierung: 'Sanierungsreport',
+    mahnwesen: 'Mahnwesen & Forderungsübersicht',
 };
 
 // ─── Default Orientation per Report Type ────────────────────────────
@@ -54,6 +56,7 @@ export const DEFAULT_ORIENTATION_BY_REPORT = {
     kpi: 'portrait',
     deals: 'landscape',
     sanierung: 'landscape',
+    mahnwesen: 'landscape',
 };
 
 export const ZOOM_LEVELS = [0.4, 0.5, 0.6, 0.75, 1, 1.25, 1.5];
