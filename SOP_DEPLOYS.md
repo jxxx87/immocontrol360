@@ -29,18 +29,52 @@ Wenn das offizielle MCP-Tool `execute_sql` wegen unzureichender Berechtigungen (
    ```
 4. Führe das Skript über das Terminal aus (`node apply_sql.cjs`).
 
-## 2. GitHub & Hostinger Deployment (Windows)
-Das Deployment auf Hostinger erfolgt automatisch über den GitHub-`master`-Branch.
+## 2. GitHub & Hostinger Deployment (Dual-Branch Setup)
+Da die Landingpage (`immowebsite`) und die Haupt-App (`immo-web`) getrennt betrieben werden (Hauptdomain vs Subdomain `app.`), verwenden wir dasselbe GitHub-Repository (`jxxx87/immocontrol360.git`), schieben die fertigen Builds aber auf unterschiedliche Deployment-Branches.
 
-**Vorgehen:**
-1. Änderungen zu Git hinzufügen: `git add .`
-2. Unter Windows kann der Commit-Befehl fehlschlagen mit: `fatal: cannot update the ref 'HEAD': unable to append to '.git/logs/HEAD': Invalid argument`. 
-   **Lösung:** Vor dem Commit `git config windows.appendAtomically false` ausführen.
-3. Commit und Push in einem Befehl (PowerShell-Syntax mit `;`):
+### A. Haupt-Web-App (`immo-web` -> `app.immocontrol360.de`)
+Die Web-App wird auf der Subdomain `app.` bereitgestellt. Das Stammverzeichnis auf Hostinger lautet `/public_html/app`.
+Die deployten Build-Dateien liegen im Branch **`production`**.
+
+**Deployment ausführen:**
+1. Öffne ein PowerShell-Terminal im Ordner `immo-web`.
+2. Führe das Deployment-Skript aus:
    ```powershell
-   git config windows.appendAtomically false ; git commit -m "feat: beschreibung" ; git push
+   .\deploy_hostinger.ps1
    ```
-4. Sobald der Push auf GitHub erfolgreich ist, holt Hostinger die Änderungen automatisch ab und geht live. Es ist kein manueller Hostinger-Login nötig.
+3. Das Skript baut die App (`npm run build`) und schiebt den `dist`-Ordner in den Branch `production` auf GitHub.
+4. Hostinger zieht sich diesen Branch automatisch in das Verzeichnis `/public_html/app` und schaltet die Änderungen live.
+
+---
+
+### B. Marketing-Website (`immowebsite` -> `immocontrol360.de`)
+Die Marketingpage wird auf der Hauptdomain betrieben. Das Stammverzeichnis auf Hostinger lautet `/public_html`.
+Die deployten Build-Dateien liegen im Branch **`production-landing`**.
+
+**Deployment ausführen:**
+1. Öffne ein PowerShell-Terminal im Ordner `immowebsite`.
+2. Führe das Deployment-Skript aus:
+   ```powershell
+   .\deploy_marketing.ps1
+   ```
+3. Das Skript installiert Abhängigkeiten, baut die Seite und schiebt den `dist`-Ordner in den Branch `production-landing` auf GitHub.
+4. Hostinger zieht sich diesen Branch automatisch in das Verzeichnis `/public_html` und schaltet die Änderungen live.
+
+---
+
+### C. Hostinger Git-Konfiguration (Einmalig)
+Stelle sicher, dass im Hostinger-Panel folgende Git-Verknüpfungen aktiv sind:
+
+1. **Für die Hauptdomain (`immocontrol360.de`):**
+   * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
+   * Branch: `production-landing`
+   * Installationsverzeichnis: `/public_html`
+
+2. **Für die Subdomain (`app.immocontrol360.de`):**
+   * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
+   * Branch: `production`
+   * Installationsverzeichnis: `/public_html/app`
+
 
 ## 3. RLS Policies Pitfall: `auth.users`
 **WICHTIG:** In Supabase haben Nutzer (Rolle `authenticated`) **keinen Zugriff** auf die Tabelle `auth.users`!
