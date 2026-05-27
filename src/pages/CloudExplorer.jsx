@@ -19,6 +19,7 @@ const CloudExplorer = () => {
     const [files, setFiles] = useState([]);
     const [isLoadingFiles, setIsLoadingFiles] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [fetchError, setFetchError] = useState(null);
     const fileInputRef = useRef(null);
 
     useEffect(() => {
@@ -200,6 +201,7 @@ const CloudExplorer = () => {
 
     const fetchFiles = async (property, pathArray) => {
         setIsLoadingFiles(true);
+        setFetchError(null);
         try {
             const subPath = pathArray.map(p => p.name).join('/');
             const fullPath = property.displayFolderName + (subPath ? '/' + subPath : '');
@@ -214,6 +216,7 @@ const CloudExplorer = () => {
             setFiles(data.files || []);
         } catch (err) {
             console.error("Error fetching files:", err);
+            setFetchError(err.message || String(err));
             setFiles([]);
         } finally {
             setIsLoadingFiles(false);
@@ -229,6 +232,7 @@ const CloudExplorer = () => {
     const handleSelectProperty = (prop) => {
         setSelectedProperty(prop);
         setCurrentPath([]);
+        setFetchError(null);
     };
 
     const handleItemClick = (item) => {
@@ -277,7 +281,7 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Upload error:", err);
-            alert("Fehler beim Hochladen der Datei.");
+            alert("Fehler beim Hochladen der Datei: " + (err.message || String(err)));
         } finally {
             setIsUploading(true);
             setIsUploading(false);
@@ -304,7 +308,7 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Create folder error:", err);
-            alert("Fehler beim Erstellen des Ordners.");
+            alert("Fehler beim Erstellen des Ordners: " + (err.message || String(err)));
             setIsLoadingFiles(false);
         }
     };
@@ -326,7 +330,7 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Delete error:", err);
-            alert("Fehler beim Löschen.");
+            alert("Fehler beim Löschen: " + (err.message || String(err)));
             setIsLoadingFiles(false);
         }
     };
@@ -538,7 +542,14 @@ const CloudExplorer = () => {
                                     </div>
                                 )}
                                 
-                                {!isLoadingFiles && files.length === 0 && (
+                                {fetchError && (
+                                    <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '40px', color: '#EF4444' }}>
+                                        <div style={{ fontWeight: 600, marginBottom: '8px' }}>Fehler beim Abrufen des Ordners:</div>
+                                        <div style={{ fontSize: '0.9rem' }}>{fetchError}</div>
+                                    </div>
+                                )}
+                                
+                                {!isLoadingFiles && !fetchError && files.length === 0 && (
                                     <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
                                         Dieser Ordner ist leer.
                                     </div>
