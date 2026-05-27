@@ -234,9 +234,7 @@ serve(async (req: Request) => {
                             p_payment_date: new Date().toISOString().split('T')[0],
                             p_amount: amount,
                             p_note: "Online-Zahlung via Stripe Checkout",
-                            p_installment_id: null,
-                            p_target_type: "auto",
-                            p_target_claim_item_id: null
+                            p_installment_id: null
                         })
                     });
 
