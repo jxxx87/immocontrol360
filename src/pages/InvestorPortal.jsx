@@ -213,7 +213,7 @@ const InvestorPortal = () => {
             setProperties(propData || []);
             setLoans(loanData || []);
             setEconomicUnits(weData || []);
-            calculateCockpitStats(propData || [], loanData || []);
+            calculateCockpitStats(propData || [], loanData || [], weData || []);
 
             // Fetch renovation stats for cockpit card
             try {
@@ -262,21 +262,46 @@ const InvestorPortal = () => {
         }
     };
 
-    const calculateCockpitStats = (props, lns) => {
+    const calculateCockpitStats = (props, lns, WEs = economicUnits) => {
         let totalMonthlyIncome = 0;
         let totalDebt = 0;
         let totalMarketValue = 0;
         let totalTargetRent = 0;
         let totalMonthlyDebtService = 0;
 
+        // Group properties to sum market value taking WEs into account
+        const groups = {};
+        let ungroupedMarketValue = 0;
+
         props.forEach(p => {
-            totalMarketValue += parseFloat(p.market_value_total) || 0;
+            if (p.economic_unit_id) {
+                if (!groups[p.economic_unit_id]) {
+                    groups[p.economic_unit_id] = { sum: 0 };
+                }
+                groups[p.economic_unit_id].sum += parseFloat(p.market_value_total) || 0;
+            } else {
+                ungroupedMarketValue += parseFloat(p.market_value_total) || 0;
+            }
+
             (p.units || []).forEach(u => {
                 const activeLease = u.leases?.find(l => l.status === 'active');
                 totalMonthlyIncome += activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0;
                 totalTargetRent += (parseFloat(u.target_rent) || 0);
             });
         });
+
+        // Sum up groups, using WE-level override if present
+        let groupedMarketValue = 0;
+        Object.entries(groups).forEach(([weId, g]) => {
+            const weRow = WEs.find(eu => eu.id === weId);
+            if (weRow && parseFloat(weRow.market_value_total) > 0) {
+                groupedMarketValue += parseFloat(weRow.market_value_total);
+            } else {
+                groupedMarketValue += g.sum;
+            }
+        });
+
+        totalMarketValue = ungroupedMarketValue + groupedMarketValue;
 
         lns.forEach(loan => {
             totalDebt += calculateCurrentDebt(loan);
@@ -404,7 +429,7 @@ const InvestorPortal = () => {
 
         return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [properties, loans]);
+    }, [properties, loans, economicUnits]);
 
     const handleUpdateProperty = async (id, updates) => {
         try {
@@ -415,7 +440,7 @@ const InvestorPortal = () => {
             setProperties(updatedProps);
             if (detailProperty?.id === id) setDetailProperty({ ...detailProperty, ...updates });
             if (updates.market_value_total !== undefined) {
-                calculateCockpitStats(updatedProps, loans);
+                calculateCockpitStats(updatedProps, loans, economicUnits);
             }
         } catch (err) {
             alert('Fehler beim Speichern: ' + err.message);
@@ -430,6 +455,7 @@ const InvestorPortal = () => {
             if (error) throw error;
             const updatedWEs = economicUnits.map(eu => eu.id === id ? { ...eu, ...updates } : eu);
             setEconomicUnits(updatedWEs);
+            calculateCockpitStats(properties, loans, updatedWEs);
         } catch (err) {
             alert('Fehler beim Speichern der Wirtschaftseinheit: ' + err.message);
         }
@@ -1192,7 +1218,19 @@ const InvestorPortal = () => {
                     isOpen={!!weEditModal}
                     onClose={() => setWeEditModal(null)}
                     title="Wirtschaftseinheit Finanzen"
-                    footer={<Button onClick={() => setWeEditModal(null)}>Schließen</Button>}
+                    footer={
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                            <Button variant="secondary" onClick={() => setWeEditModal(null)}>Abbrechen</Button>
+                            <Button onClick={async () => {
+                                await handleUpdateWE(weEditModal.economic_unit_id, {
+                                    total_investment_cost: weEditModal.total_investment_cost,
+                                    equity_invested: weEditModal.equity_invested,
+                                    market_value_total: weEditModal.market_value_total
+                                });
+                                setWeEditModal(null);
+                            }}>Speichern</Button>
+                        </div>
+                    }
                 >
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
                         <CurrencyInput
@@ -1201,7 +1239,6 @@ const InvestorPortal = () => {
                             onChange={e => {
                                 const val = e.target.value;
                                 setWeEditModal(prev => ({ ...prev, total_investment_cost: val }));
-                                handleUpdateWE(weEditModal.economic_unit_id, { total_investment_cost: val });
                             }}
                         />
                         <CurrencyInput
@@ -1210,7 +1247,6 @@ const InvestorPortal = () => {
                             onChange={e => {
                                 const val = e.target.value;
                                 setWeEditModal(prev => ({ ...prev, equity_invested: val }));
-                                handleUpdateWE(weEditModal.economic_unit_id, { equity_invested: val });
                             }}
                         />
                         <CurrencyInput
@@ -1219,7 +1255,6 @@ const InvestorPortal = () => {
                             onChange={e => {
                                 const val = e.target.value;
                                 setWeEditModal(prev => ({ ...prev, market_value_total: val }));
-                                handleUpdateWE(weEditModal.economic_unit_id, { market_value_total: val });
                             }}
                         />
                     </div>
