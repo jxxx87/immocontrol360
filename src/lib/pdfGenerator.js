@@ -244,6 +244,16 @@ function buildHtml({
     const renderCell = (row, col) => {
         const val = row[col.key];
         if (val === null || val === undefined || val === '') return '–';
+        if (col.key === 'status') {
+            const statusStr = String(val);
+            if (statusStr === 'Vermietet' || statusStr === 'vermietet') {
+                return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;background:#dcfce7;color:#15803d;">${val}</span>`;
+            } else if (statusStr === 'Ferienwohnung' || statusStr === 'ferienwohnung') {
+                return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;background:#dbeafe;color:#1d4ed8;">${val}</span>`;
+            } else {
+                return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:7px;font-weight:600;background:#fee2e2;color:#b91c1c;">${val}</span>`;
+            }
+        }
         if (col.format) return formatValue(val, col.format);
         const str = String(val);
         if (col.maxLen && str.length > col.maxLen) return str.substring(0, col.maxLen) + '…';

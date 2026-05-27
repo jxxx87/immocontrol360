@@ -174,7 +174,8 @@ const Tenants = () => {
                     ...unit,
                     activeLease: activeLease || null,
                     endedLeases,
-                    status: unit.is_vacation_rental ? 'vacation_rental' : (activeLease ? 'rented' : 'vacant')
+                    status: unit.is_vacation_rental ? 'vacation_rental' : (activeLease ? 'rented' : 'vacant'),
+                    propertyLabel: unit.property ? `${unit.property.street} ${unit.property.house_number}` : '–'
                 };
             });
 
@@ -819,15 +820,15 @@ const Tenants = () => {
                         reportType="mietverhaeltnisse"
                         data={displayedUnits.map(u => ({
                             property_id: u.property_id,
-                            mietername: u.activeLease?.tenant ? `${u.activeLease.tenant.last_name}, ${u.activeLease.tenant.first_name}` : '–',
+                            mietername: u.status === 'vacation_rental' ? 'Ferienwohnung' : (u.activeLease?.tenant ? `${u.activeLease.tenant.last_name}, ${u.activeLease.tenant.first_name}` : '–'),
                             immobilie_einheit: `${u.propertyLabel || ''} / ${u.unit_name || ''}`.trim(),
-                            kaltmiete: u.activeLease?.cold_rent || 0,
-                            nebenkosten: (parseFloat(u.activeLease?.service_charge) || 0) + (parseFloat(u.activeLease?.heating_cost) || 0) + (parseFloat(u.activeLease?.other_costs) || 0),
-                            warmmiete: (parseFloat(u.activeLease?.cold_rent) || 0) + (parseFloat(u.activeLease?.service_charge) || 0) + (parseFloat(u.activeLease?.heating_cost) || 0) + (parseFloat(u.activeLease?.other_costs) || 0),
-                            mietbeginn: u.activeLease?.start_date || '',
+                            kaltmiete: u.status === 'vacation_rental' ? (u.target_rent || 0) : (u.activeLease?.cold_rent || 0),
+                            nebenkosten: u.status === 'vacation_rental' ? 0 : ((parseFloat(u.activeLease?.service_charge) || 0) + (parseFloat(u.activeLease?.heating_cost) || 0) + (parseFloat(u.activeLease?.other_costs) || 0)),
+                            warmmiete: u.status === 'vacation_rental' ? (u.target_rent || 0) : ((parseFloat(u.activeLease?.cold_rent) || 0) + (parseFloat(u.activeLease?.service_charge) || 0) + (parseFloat(u.activeLease?.heating_cost) || 0) + (parseFloat(u.activeLease?.other_costs) || 0)),
+                            mietbeginn: u.status === 'vacation_rental' ? '–' : (u.activeLease?.start_date || ''),
                             wohnflaeche: u.sqm || 0,
-                            kaution: u.activeLease?.deposit || 0,
-                            status: u.activeLease ? 'Vermietet' : 'Leer',
+                            kaution: u.status === 'vacation_rental' ? 0 : (u.activeLease?.deposit || 0),
+                            status: u.status === 'vacation_rental' ? 'Ferienwohnung' : (u.activeLease ? 'Vermietet' : 'Leerstand'),
                             _propertyLabel: u.propertyLabel || '–',
                         }))}
                         properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number}` }))}

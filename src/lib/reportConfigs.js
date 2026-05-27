@@ -63,7 +63,6 @@ export const REPORT_CONFIGS = {
             { key: 'wohnflaeche', label: 'Wohnfläche', detail: true, format: 'area' },
             { key: 'kaution', label: 'Kaution', detail: true, format: 'currency' },
             { key: 'status', label: 'Status', detail: true },
-            { key: 'zahlstatus', label: 'Zahlstatus', detail: true },
         ],
     },
     kpi: {
