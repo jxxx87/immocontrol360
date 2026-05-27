@@ -44,7 +44,8 @@ export const CloudSettings = ({ portfolios }) => {
         const clientId = import.meta.env.VITE_ONEDRIVE_CLIENT_ID;
         if (!clientId) return alert("Fehler: VITE_ONEDRIVE_CLIENT_ID ist in der .env Datei nicht konfiguriert.");
         
-        const redirectUri = encodeURIComponent(`${window.location.origin}/settings/cloud/callback`);
+        const basePath = window.location.pathname.startsWith('/app') ? '/app' : '';
+        const redirectUri = encodeURIComponent(`${window.location.origin}${basePath}/settings/cloud/callback`);
         const scope = encodeURIComponent('offline_access Files.ReadWrite.All User.Read');
         const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&response_mode=query&scope=${scope}&prompt=select_account&state=onedrive`;
         
@@ -55,7 +56,8 @@ export const CloudSettings = ({ portfolios }) => {
         const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
         if (!clientId) return alert("Fehler: VITE_GOOGLE_CLIENT_ID ist in der .env Datei nicht konfiguriert.");
         
-        const redirectUri = encodeURIComponent(`${window.location.origin}/settings/cloud/callback`);
+        const basePath = window.location.pathname.startsWith('/app') ? '/app' : '';
+        const redirectUri = encodeURIComponent(`${window.location.origin}${basePath}/settings/cloud/callback`);
         const scope = encodeURIComponent('https://www.googleapis.com/auth/drive.file email');
         const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=googledrive`;
         
