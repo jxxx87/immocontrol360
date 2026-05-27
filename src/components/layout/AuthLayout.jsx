@@ -13,7 +13,7 @@ const AuthLayout = ({ children, title, subtitle }) => {
         }}>
             <div style={{ width: '100%', maxWidth: '400px' }}>
                 <div style={{ textAlign: 'center', marginBottom: 'var(--spacing-xl)' }}>
-                    <a href="http://localhost:5174/">
+                    <a href={import.meta.env.DEV ? 'http://localhost:5174/' : 'https://immocontrol360.de/'}>
                         <img
                             src="/logo.svg"
                             alt="ImmoControl Pro 360"
