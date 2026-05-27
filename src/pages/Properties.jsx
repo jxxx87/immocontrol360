@@ -551,7 +551,9 @@ const Properties = () => {
                         stats: { totalUnits: 0, totalArea: 0, totalTargetRent: 0, totalActualRent: 0 },
                         total_investment_cost: 0,
                         equity_invested: 0,
-                        market_value: 0
+                        market_value_total: 0,
+                        remaining_debt: 0,
+                        monthly_loan_payment: 0
                     };
                 }
                 const group = groups[p.economic_unit_id];
@@ -562,6 +564,9 @@ const Properties = () => {
                 group.stats.totalActualRent += (p.stats?.totalActualRent || 0);
                 group.total_investment_cost += (p.total_investment_cost || 0);
                 group.equity_invested += (p.equity_invested || 0);
+                group.market_value_total += (p.market_value_total || 0);
+                group.remaining_debt += (p.remaining_debt || 0);
+                group.monthly_loan_payment += (p.monthly_loan_payment || 0);
             } else {
                 result.push(p);
             }
@@ -744,13 +749,13 @@ const Properties = () => {
                             adresse: `${p.street} ${p.house_number || ''}`.trim(),
                             einheiten: p.stats?.totalUnits || 0,
                             kaufpreis: p.total_investment_cost || 0,
-                            marktpreis: p.market_value || 0,
+                            marktpreis: p.market_value_total || 0,
                             restschuld: p.remaining_debt || 0,
                             miete_monat: p.stats?.totalActualRent || 0,
                             cashflow_monat: (p.stats?.totalActualRent || 0) - (p.monthly_loan_payment || 0),
                             wohnflaeche: p.stats?.totalArea || 0,
                             leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
-                            ltv: p.market_value > 0 ? (p.remaining_debt || 0) / p.market_value : 0,
+                            ltv: p.market_value_total > 0 ? (p.remaining_debt || 0) / p.market_value_total : 0,
                             dscr: p.monthly_loan_payment > 0 ? (p.stats?.totalActualRent || 0) / p.monthly_loan_payment : 0,
                             _propertyLabel: `${p.street} ${p.house_number || ''}`.trim(),
                         }))}
