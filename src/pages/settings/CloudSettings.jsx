@@ -58,7 +58,7 @@ export const CloudSettings = ({ portfolios }) => {
         
         const basePath = window.location.pathname.startsWith('/app') ? '/app' : '';
         const redirectUri = encodeURIComponent(`${window.location.origin}${basePath}/settings/cloud/callback`);
-        const scope = encodeURIComponent('https://www.googleapis.com/auth/drive.file email');
+        const scope = encodeURIComponent('https://www.googleapis.com/auth/drive email');
         const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=googledrive`;
         
         window.location.href = url;
