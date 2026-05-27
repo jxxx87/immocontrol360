@@ -336,7 +336,7 @@ function buildHtml({
                     <h3 style="font-size:11px;font-weight:600;color:${accentColor};margin:16px 0 8px;padding-bottom:4px;border-bottom:2px solid ${accentColor}30;">
                         ${groupName}
                     </h3>
-                    <table style="width:100%;border-collapse:collapse;">
+                    <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
                         <thead>
                             <tr>
                                 ${columns.map(col => {
@@ -358,7 +358,7 @@ function buildHtml({
         });
     } else {
         tableContent = `
-            <table style="width:100%;border-collapse:collapse;">
+            <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
                 <thead>
                     <tr>
                         ${columns.map(col => {

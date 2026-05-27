@@ -195,12 +195,17 @@ serve(async (req) => {
       let currentParentId = 'root';
       
       for (const segment of segments) {
+        console.log(`Searching for segment '${segment}' under parent ID '${currentParentId}'...`);
         const search = await googleDriveCall('/files', 'GET', null, {
           q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
           fields: 'files(id, name)'
         });
         const folder = search?.files?.[0];
-        if (!folder) return null;
+        if (!folder) {
+          console.error(`Segment '${segment}' not found under parent ID '${currentParentId}'. Search response:`, search);
+          return null;
+        }
+        console.log(`Found segment '${segment}' with ID '${folder.id}'`);
         currentParentId = folder.id;
       }
       return currentParentId;
@@ -272,7 +277,9 @@ serve(async (req) => {
       if (action === 'list') {
         const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
         const folderId = await getGoogleFolderIdByPath(cleanPath);
-        if (!folderId) return new Response(JSON.stringify({ files: [] }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+        if (!folderId) {
+          throw new Error(`Der Ordnerpfad '${cleanPath}' konnte in Google Drive nicht gefunden werden.`);
+        }
 
         const data = await googleDriveCall('/files', 'GET', null, {
           q: `'${folderId}' in parents and trashed = false`,
@@ -342,7 +349,11 @@ serve(async (req) => {
     throw new Error('Action or provider not supported');
 
   } catch (error: any) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    console.error("EDGE FUNCTION ERROR:", error);
+    return new Response(JSON.stringify({ 
+      error: error.message || String(error),
+      stack: error.stack
+    }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 400,
     })
