@@ -29,61 +29,37 @@ Wenn das offizielle MCP-Tool `execute_sql` wegen unzureichender Berechtigungen (
    ```
 4. Führe das Skript über das Terminal aus (`node apply_sql.cjs`).
 
-## 2. GitHub & Hostinger Deployment (Native Vite-Build auf Hostinger)
-Da die Landingpage (`immowebsite`) und die Haupt-App (`immo-web`) getrennt betrieben werden (Hauptdomain vs. Subdomain `app.`), verwenden wir dasselbe GitHub-Repository (`jxxx87/immocontrol360.git`), aber mit zwei separaten Source-Code-Branches. Hostinger baut das jeweilige Projekt direkt auf dem Server mit Vite.
+## 2. GitHub & Hostinger Deployment (Kombiniertes Pre-Built-Deployment)
+Da Hostinger in Standard-Hosting-Tarifen nur eine einzige Git-Verbindung pro Website (für das Verzeichnis `/public_html`) zulässt, nutzen wir ein kombiniertes Deployment. Beide Webseiten werden lokal gebaut, in eine Verzeichnisstruktur zusammengeführt (Landingpage im Root `/`, Web-App im Unterordner `/app/`) und auf den Branch **`production`** hochgeladen. 
+
+Hostinger zieht sich diesen Branch und stellt ihn eins zu eins bereit. Da die Subdomain `app.immocontrol360.de` in Hostinger auf das Unterverzeichnis `/public_html/app` verweist, funktioniert die Trennung perfekt über diese eine Git-Verbindung!
 
 ---
 
-### A. Haupt-Web-App (`immo-web` -> `app.immocontrol360.de`)
-Der Source-Code der Web-App liegt im Branch **`master`**.
-Das Stammverzeichnis auf Hostinger lautet `/public_html/app`.
-
-**Deployment ausführen:**
-1. Git-Änderungen in `immo-web` committen und pushen:
+### A. Deployment ausführen
+Um die Live-Umgebung (Marketingpage + Web-App) zu aktualisieren:
+1. Öffne ein PowerShell-Terminal im Ordner `immo-web`.
+2. Führe das kombinierte Deployment-Skript aus:
    ```powershell
-   git add .
-   git commit -m "deine beschreibung"
-   git push origin master
+   .\deploy_all.ps1
    ```
-2. Hostinger holt sich den `master`-Branch, führt dort automatisch `npm run build` aus und stellt die App live.
+3. Das Skript baut beide Projekte nacheinander, erstellt die richtige Ordnerstruktur, fügt eine Dummy-`package.json` hinzu und schiebt das fertige Ergebnis per Force-Push auf den Branch **`production`** auf GitHub.
 
 ---
 
-### B. Marketing-Website (`immowebsite` -> `immocontrol360.de`)
-Der Source-Code der Landingpage liegt im Branch **`landing-master`**.
-Das Stammverzeichnis auf Hostinger lautet `/public_html`.
+### B. Hostinger Git-Konfiguration (Einmalig)
+Nimm in deinem Hostinger-Panel unter **Erweitert -> Git** (oder über den Button "Weitere Einstellungen" bei der letzten Bereitstellung) folgende Einstellungen vor:
 
-**Deployment ausführen:**
-1. Git-Änderungen in `immowebsite` committen und pushen:
-   ```powershell
-   git add .
-   git commit -m "deine beschreibung"
-   git push origin landing-master
-   ```
-2. Hostinger holt sich den `landing-master`-Branch, führt dort automatisch `npm run build` aus und stellt die Landingpage live.
+* **Repository-URL:** `https://github.com/jxxx87/immocontrol360.git`
+* **Zweig (Branch):** **`production`**
+* **Installationsverzeichnis:** `/public_html` (oder leer lassen)
+* **Framework-Voreinstellung:** **`Other`**
+* **Build-Befehl:** `npm run build` *(Hostinger führt hierbei die Dummy-package.json aus, was sofort erfolgreich abschließt)*
+* **Ausgabeverzeichnis:** **`.`** (ein einzelner Punkt, damit der gesamte Inhalt übernommen wird)
+* **Startbefehl:** (leer lassen)
 
----
+Klicke auf **Speichern und erneut bereitstellen**. Danach läuft das Deployment innerhalb von Sekunden ohne Fehler durch und beide Seiten sind live!
 
-### C. Hostinger Git-Konfiguration (Einmalig)
-Stelle sicher, dass im Hostinger-Panel folgende Git-Verknüpfungen und Build-Einstellungen aktiv sind:
-
-1. **Für die Hauptdomain (`immocontrol360.de`):**
-   * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
-   * Branch: **`landing-master`**
-   * Installationsverzeichnis: `/public_html`
-   * Framework-Voreinstellung: **`Vite`** (wichtig!)
-   * Build-Befehl: `npm run build`
-   * Ausgabeverzeichnis: `dist`
-
-2. **Für die Subdomain (`app.immocontrol360.de`):**
-   * Repository-URL: `https://github.com/jxxx87/immocontrol360.git`
-   * Branch: **`master`**
-   * Installationsverzeichnis: `/public_html/app`
-   * Framework-Voreinstellung: **`Vite`** (wichtig!)
-   * Build-Befehl: `npm run build`
-   * Ausgabeverzeichnis: `dist`
-
-Hostinger baut und verteilt bei jedem Push vollautomatisch! Lokale `deploy_*.ps1` Skripte werden nicht mehr benötigt, da Hostinger den Build-Prozess nativ übernimmt.
 
 
 
