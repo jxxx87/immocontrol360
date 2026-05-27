@@ -41,7 +41,7 @@ function App() {
         {/* Legal Pages */}
         <Route path="/impressum" element={<Legal type="impressum" />} />
         <Route path="/datenschutz" element={<Legal type="datenschutz" />} />
-        <Route path="/agb" element={<Legal type="agb" />} />
+        <Route path="/agb" element={<Navigate to="/" replace />} />
 
         {/* Checkout Flow */}
         <Route path="/abo-starten" element={<CheckoutPage />} />

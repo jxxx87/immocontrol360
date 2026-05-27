@@ -19,9 +19,6 @@ const Hero = ({ isLanding = false }) => {
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.5 }}
                     >
-                        <span className="inline-block py-1.5 px-4 rounded-full bg-white/10 text-white text-sm font-semibold mb-6 border border-white/20 backdrop-blur-md shadow-sm">
-                            Von Investoren für Investoren
-                        </span>
                         <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight mb-6 text-white leading-tight drop-shadow-sm">
                             Dein Portfolio. <span className="text-blue-200 relative inline-block">
                                 Deine Kontrolle.

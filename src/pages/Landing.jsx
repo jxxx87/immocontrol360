@@ -87,7 +87,6 @@ const Landing = () => {
                 {/* DIFFERENTIATION & FEATURES */}
                 <section className="py-20 bg-slate-900 text-white">
                     <div className="container max-w-5xl mx-auto text-center">
-                        <span className="text-blue-400 font-bold uppercase tracking-wider text-sm mb-4 block">Von Investoren für Investoren</span>
                         <h2 className="text-3xl md:text-4xl font-bold mb-16">Alles was du brauchst in einer Plattform</h2>
 
                         <div className="grid md:grid-cols-3 gap-8 text-left">

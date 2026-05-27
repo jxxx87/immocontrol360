@@ -28,11 +28,6 @@ const Footer = ({ isLanding = false }) => {
                         <p className="text-neutral-500 mb-6">
                             Die Premium-Plattform für private und semi-professionelle Immobilieninvestoren. Skalieren ohne Chaos.
                         </p>
-                        <div className="flex gap-4">
-                            <a href="#" className="text-neutral-400 hover:text-blue-600 transition-colors"><Twitter size={20} /></a>
-                            <a href="#" className="text-neutral-400 hover:text-blue-600 transition-colors"><Linkedin size={20} /></a>
-                            <a href="#" className="text-neutral-400 hover:text-blue-600 transition-colors"><Instagram size={20} /></a>
-                        </div>
                     </div>
 
                     <div>
@@ -51,7 +46,6 @@ const Footer = ({ isLanding = false }) => {
                         <ul className="space-y-4 text-neutral-500">
                             <li><Link to="/impressum" className="hover:text-blue-600 transition-colors">Impressum</Link></li>
                             <li><Link to="/datenschutz" className="hover:text-blue-600 transition-colors">Datenschutz</Link></li>
-                            <li><Link to="/agb" className="hover:text-blue-600 transition-colors">AGB</Link></li>
                         </ul>
                     </div>
 
@@ -59,14 +53,12 @@ const Footer = ({ isLanding = false }) => {
                         <h4 className="font-semibold mb-6">Kontakt</h4>
                         <ul className="space-y-4 text-neutral-500">
                             <li className="flex items-center gap-3"><Mail size={18} /> support@immocontrolpro360.de</li>
-                            <li className="flex items-center gap-3"><MapPin size={18} /> Musterstadt, Deutschland</li>
                         </ul>
                     </div>
                 </div>
 
                 <div className="border-t border-neutral-200 pt-8 flex flex-col md:flex-row justify-between items-center gap-4 text-sm text-neutral-400">
                     <p>&copy; {new Date().getFullYear()} ImmoControlPro360. Alle Rechte vorbehalten.</p>
-                    <p>Made with ❤️ for Investors.</p>
                 </div>
             </div>
         </footer>
