@@ -21,6 +21,19 @@ const CloudExplorer = () => {
     const [isUploading, setIsUploading] = useState(false);
     const [fetchError, setFetchError] = useState(null);
     const fileInputRef = useRef(null);
+    
+    const getErrorMessage = async (err) => {
+        let msg = err.message || String(err);
+        if (err.context && typeof err.context.json === 'function') {
+            try {
+                const body = await err.context.clone().json();
+                if (body && body.error) {
+                    return body.error;
+                }
+            } catch (_) {}
+        }
+        return msg;
+    };
 
     useEffect(() => {
         const init = async () => {
@@ -216,7 +229,8 @@ const CloudExplorer = () => {
             setFiles(data.files || []);
         } catch (err) {
             console.error("Error fetching files:", err);
-            setFetchError(err.message || String(err));
+            const errMsg = await getErrorMessage(err);
+            setFetchError(errMsg);
             setFiles([]);
         } finally {
             setIsLoadingFiles(false);
@@ -281,7 +295,8 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Upload error:", err);
-            alert("Fehler beim Hochladen der Datei: " + (err.message || String(err)));
+            const errMsg = await getErrorMessage(err);
+            alert("Fehler beim Hochladen der Datei: " + errMsg);
         } finally {
             setIsUploading(true);
             setIsUploading(false);
@@ -308,7 +323,8 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Create folder error:", err);
-            alert("Fehler beim Erstellen des Ordners: " + (err.message || String(err)));
+            const errMsg = await getErrorMessage(err);
+            alert("Fehler beim Erstellen des Ordners: " + errMsg);
             setIsLoadingFiles(false);
         }
     };
@@ -330,7 +346,8 @@ const CloudExplorer = () => {
             fetchFiles(selectedProperty, currentPath);
         } catch (err) {
             console.error("Delete error:", err);
-            alert("Fehler beim Löschen: " + (err.message || String(err)));
+            const errMsg = await getErrorMessage(err);
+            alert("Fehler beim Löschen: " + errMsg);
             setIsLoadingFiles(false);
         }
     };
