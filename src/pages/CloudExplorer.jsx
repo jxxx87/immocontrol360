@@ -501,7 +501,7 @@ const CloudExplorer = () => {
                                         "Versicherungen",
                                         "Energieausweise"
                                     ];
-                                    const isProtected = file.isFolder && currentPath.length === 0 && PROTECTED_FOLDERS.includes(file.name);
+                                    const isProtected = (file.isFolder && currentPath.length === 0 && PROTECTED_FOLDERS.includes(file.name)) || isLoadingFiles;
                                     
                                     return (
                                         <div 
