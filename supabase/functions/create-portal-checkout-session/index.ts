@@ -113,7 +113,6 @@ serve(async (req: Request) => {
             "payment_method_types[0]": "card",
             "payment_method_types[1]": "sepa_debit",
             "payment_method_types[2]": "sofort",
-            "payment_method_types[3]": "paypal",
             "line_items[0][price_data][currency]": "eur",
             "line_items[0][price_data][product_data][name]": `Ausstehende Forderung #${claimId.substring(0, 8)}`,
             "line_items[0][price_data][unit_amount]": Math.round(openAmount * 100).toString(),
