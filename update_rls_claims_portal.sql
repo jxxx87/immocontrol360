@@ -647,43 +647,46 @@ BEGIN
   LIMIT 1;
 
   IF FOUND THEN
-    IF v_event.event_metadata->>'old_interest_start_date' IS NOT NULL THEN
-      UPDATE claims SET
-        interest_start_date = (v_event.event_metadata->>'old_interest_start_date')::date,
-        accumulated_unpaid_interest = (v_event.event_metadata->>'old_accumulated_unpaid_interest')::numeric,
-        status = CASE WHEN status = 'settled' THEN 'open' ELSE status END,
-        updated_at = now()
-      WHERE id = v_claim_id;
-    END IF;
+    -- Resilient claims update: always reset 'settled' status back to 'open', using metadata fallbacks
+    UPDATE claims SET
+      interest_start_date = COALESCE((v_event.event_metadata->>'old_interest_start_date')::date, interest_start_date),
+      accumulated_unpaid_interest = COALESCE((v_event.event_metadata->>'old_accumulated_unpaid_interest')::numeric, accumulated_unpaid_interest),
+      status = CASE WHEN status = 'settled' THEN 'open' ELSE status END,
+      updated_at = now()
+    WHERE id = v_claim_id;
 
     -- Reverse installments if applicable
     IF v_event.event_metadata->>'modified_installments' IS NOT NULL THEN
       FOR v_modified_inst IN SELECT * FROM jsonb_array_elements(v_event.event_metadata->'modified_installments')
       LOOP
         UPDATE payment_plan_installments SET
-          paid_amount = (v_modified_inst.value->>'old_paid_amount')::numeric,
-          status = (v_modified_inst.value->>'old_status')::text,
+          paid_amount = COALESCE((v_modified_inst.value->>'old_paid_amount')::numeric, 0),
+          status = COALESCE((v_modified_inst.value->>'old_status')::text, 'unpaid'),
           updated_at = now()
         WHERE id = (v_modified_inst.value->>'id')::uuid;
       END LOOP;
 
       -- Reverse plan status if it was completed
-      UPDATE payment_plans SET
-        status = (v_event.event_metadata->>'old_plan_status')::text,
-        updated_at = now()
-      WHERE id = (v_event.event_metadata->>'payment_plan_id')::uuid;
+      IF v_event.event_metadata->>'old_plan_status' IS NOT NULL THEN
+        UPDATE payment_plans SET
+          status = (v_event.event_metadata->>'old_plan_status')::text,
+          updated_at = now()
+        WHERE id = (v_event.event_metadata->>'payment_plan_id')::uuid;
+      END IF;
     ELSIF v_event.event_metadata->>'installment_id' IS NOT NULL THEN
       -- Fallback for older events before cascade
       UPDATE payment_plan_installments SET
-        paid_amount = (v_event.event_metadata->>'old_installment_paid_amount')::numeric,
-        status = (v_event.event_metadata->>'old_installment_status')::text,
+        paid_amount = COALESCE((v_event.event_metadata->>'old_installment_paid_amount')::numeric, 0),
+        status = COALESCE((v_event.event_metadata->>'old_installment_status')::text, 'unpaid'),
         updated_at = now()
       WHERE id = (v_event.event_metadata->>'installment_id')::uuid;
 
-      UPDATE payment_plans SET
-        status = (v_event.event_metadata->>'old_plan_status')::text,
-        updated_at = now()
-      WHERE id = (v_event.event_metadata->>'payment_plan_id')::uuid;
+      IF v_event.event_metadata->>'old_plan_status' IS NOT NULL THEN
+        UPDATE payment_plans SET
+          status = (v_event.event_metadata->>'old_plan_status')::text,
+          updated_at = now()
+        WHERE id = (v_event.event_metadata->>'payment_plan_id')::uuid;
+      END IF;
     END IF;
   ELSE
     -- If no event found, just change status back to open if it was settled
