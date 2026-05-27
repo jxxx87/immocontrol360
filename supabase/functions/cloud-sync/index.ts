@@ -89,8 +89,38 @@ serve(async (req) => {
             expires_at: newExpiresAt.toISOString()
           })
           .eq('id', connection.id)
+      } else if (provider === 'googledrive') {
+        const clientId = Deno.env.get('GOOGLE_CLIENT_ID');
+        const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET');
+
+        const res = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId!,
+            client_secret: clientSecret!,
+            refresh_token: connection.refresh_token,
+            grant_type: 'refresh_token',
+          }),
+        });
+
+        const tokenResponse = await res.json();
+        if (tokenResponse.error) throw new Error(`Google Refresh Error: ${tokenResponse.error_description || tokenResponse.error}`);
+
+        accessToken = tokenResponse.access_token;
+        const newExpiresAt = new Date();
+        newExpiresAt.setSeconds(newExpiresAt.getSeconds() + tokenResponse.expires_in);
+
+        await supabaseClient
+          .from('cloud_connections')
+          .update({
+            access_token: accessToken,
+            refresh_token: tokenResponse.refresh_token || connection.refresh_token,
+            expires_at: newExpiresAt.toISOString()
+          })
+          .eq('id', connection.id)
       } else {
-        throw new Error('Refresh not implemented for Google Drive yet')
+        throw new Error('Unsupported provider')
       }
     }
 
@@ -111,6 +141,31 @@ serve(async (req) => {
         if (res.status === 404) return null
         const err = await res.text()
         throw new Error(`Graph API Error (${res.status}): ${err}`)
+      }
+      return res.status === 204 ? null : await res.json()
+    }
+
+    // Google Drive API Helper
+    const googleDriveCall = async (endpoint: string, method: string = 'GET', body: any = null, queryParams: any = null) => {
+      let url = `https://www.googleapis.com/drive/v3${endpoint}`
+      if (queryParams) {
+        const params = new URLSearchParams(queryParams)
+        url += `?${params.toString()}`
+      }
+      const options: RequestInit = {
+        method,
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+      if (body) options.body = JSON.stringify(body)
+      const res = await fetch(url, options)
+      
+      if (!res.ok) {
+        if (res.status === 404) return null
+        const err = await res.text()
+        throw new Error(`Google Drive API Error (${res.status}): ${err}`)
       }
       return res.status === 204 ? null : await res.json()
     }
@@ -171,6 +226,98 @@ serve(async (req) => {
                name: sub,
                folder: {},
                "@microsoft.graph.conflictBehavior": "replace"
+             })
+          }
+          return subF
+        })
+
+        await Promise.all(subfolderPromises)
+        createdFolders.push(propFolder.id)
+      }
+
+      return new Response(JSON.stringify({ success: true, createdFolders }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }
+
+    if (provider === 'googledrive') {
+      const appFolderName = "ImmoControlpro360"
+      
+      if (action === 'check') {
+        const rootSearch = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
+          fields: 'files(id, name)'
+        })
+        const rootFolder = rootSearch?.files?.[0]
+        
+        if (!rootFolder) {
+           return new Response(JSON.stringify({ missingFolders: foldersToCreate }), {
+             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+             status: 200,
+           })
+        }
+        
+        const childrenSearch = await googleDriveCall('/files', 'GET', null, {
+          q: `'${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: 'files(id, name)'
+        })
+        const existingNames = (childrenSearch?.files || []).map((f: any) => f.name)
+        const missingFolders = foldersToCreate.filter((f: string) => !existingNames.includes(f))
+        
+        return new Response(JSON.stringify({ missingFolders }), {
+           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+           status: 200,
+        })
+      }
+
+      // Action 'create'
+      // 1. Ensure Root Folder exists
+      const rootSearch = await googleDriveCall('/files', 'GET', null, {
+        q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
+        fields: 'files(id, name)'
+      })
+      let rootFolder = rootSearch?.files?.[0]
+      
+      if (!rootFolder) {
+        rootFolder = await googleDriveCall('/files', 'POST', {
+          name: appFolderName,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: ['root']
+        })
+      }
+
+      const createdFolders = []
+      
+      for (const folderName of foldersToCreate) {
+        // Search if already exists
+        const propSearch = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${folderName.replace(/'/g, "\\'")}' and '${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: 'files(id, name)'
+        })
+        let propFolder = propSearch?.files?.[0]
+        
+        if (!propFolder) {
+          propFolder = await googleDriveCall('/files', 'POST', {
+            name: folderName,
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [rootFolder.id]
+          })
+        }
+        
+        // Create Default Subfolders inside the Property folder
+        const subfolderPromises = DEFAULT_SUBFOLDERS.map(async (sub) => {
+          const subSearch = await googleDriveCall('/files', 'GET', null, {
+            q: `name = '${sub}' and '${propFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+            fields: 'files(id, name)'
+          })
+          let subF = subSearch?.files?.[0]
+          
+          if (!subF) {
+             return googleDriveCall('/files', 'POST', {
+               name: sub,
+               mimeType: 'application/vnd.google-apps.folder',
+               parents: [propFolder.id]
              })
           }
           return subF

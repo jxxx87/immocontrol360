@@ -28,15 +28,33 @@ const CloudExplorer = () => {
             setStatus('loading');
             setStatusMessage('Überprüfe Cloud-Verbindung...');
             
-            // 1. Check for active cloud connection
+            // 1. Fetch active cloud connections
             const { data: connections, error: connError } = await supabase
                 .from('cloud_connections')
-                .select('id')
+                .select('id, provider, account_email')
                 .eq('user_id', user.id);
                 
             if (connError || !connections || connections.length === 0) {
                 setStatus('no_connection');
                 return;
+            }
+
+            // Create connections mapping and default fallback connection
+            const connectionMap = {};
+            connections.forEach(c => { connectionMap[c.id] = c; });
+            const defaultConnection = connections[0];
+
+            // Fetch portfolio connections
+            const { data: cloudLinks } = await supabase
+                .from('portfolio_cloud_links')
+                .select('portfolio_id, cloud_connection_id')
+                .eq('user_id', user.id);
+
+            const portfolioLinkMap = {};
+            if (cloudLinks) {
+                cloudLinks.forEach(link => {
+                    portfolioLinkMap[link.portfolio_id] = link.cloud_connection_id;
+                });
             }
 
             setStatusMessage('Lade Immobilien...');
@@ -48,6 +66,15 @@ const CloudExplorer = () => {
                 .order('street');
                 
             const safeProps = props || [];
+            
+            // Assign connections to properties
+            safeProps.forEach(p => {
+                const connId = portfolioLinkMap[p.portfolio_id];
+                const conn = connId ? connectionMap[connId] : defaultConnection;
+                p.cloud_connection = conn;
+                p.provider = conn ? conn.provider : null;
+            });
+
             setProperties(safeProps);
             
             // Group properties by economic_unit_id
@@ -71,9 +98,14 @@ const CloudExplorer = () => {
             });
             
             const finalGrouped = [...Object.values(groups), ...ungrouped];
-            // Calculate display folder names
+            
+            // Calculate display folder names and assign connection
             finalGrouped.forEach(item => {
+                let conn;
                 if (item.isGroup) {
+                    const firstMember = item.members[0];
+                    conn = firstMember ? firstMember.cloud_connection : defaultConnection;
+                    
                     const groupedByStreet = {};
                     item.members.forEach(m => {
                         if (!m.street) return;
@@ -93,8 +125,12 @@ const CloudExplorer = () => {
                     const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
                     item.displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`;
                 } else {
+                    conn = item.cloud_connection;
                     item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim();
                 }
+                
+                item.cloud_connection = conn;
+                item.provider = conn ? conn.provider : null;
             });
 
             setGroupedProperties(finalGrouped);
@@ -104,33 +140,53 @@ const CloudExplorer = () => {
                 setStatusMessage('Überprüfe Cloud-Ordnerstruktur...');
                 
                 try {
-                    const allExpectedFolders = finalGrouped.map(item => item.displayFolderName);
+                    // Group expected folders by provider so we sync separately
+                    const providerFoldersMap = {
+                        onedrive: [],
+                        googledrive: []
+                    };
                     
-                    // 3. Ask Edge Function which ones are actually missing in OneDrive
-                    const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
-                        body: { provider: 'onedrive', action: 'check', foldersToCreate: allExpectedFolders }
+                    finalGrouped.forEach(item => {
+                        const provider = item.provider;
+                        if (provider && providerFoldersMap[provider]) {
+                            providerFoldersMap[provider].push(item.displayFolderName);
+                        }
                     });
+
+                    let totalMissing = 0;
                     
-                    if (checkError) throw checkError;
-                    if (checkData && checkData.error) throw new Error(checkData.error);
-                    
-                    const missingFolders = checkData.missingFolders || [];
-                    
-                    if (missingFolders.length > 0) {
-                        setMissingCount(missingFolders.length);
-                        setStatus('creating');
-                        setStatusMessage(`${missingFolders.length} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in der Cloud...`);
+                    const syncForProvider = async (provider, folders) => {
+                        if (folders.length === 0) return;
                         
-                        const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
-                            body: { provider: 'onedrive', action: 'create', foldersToCreate: missingFolders }
+                        const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
+                            body: { provider, action: 'check', foldersToCreate: folders }
                         });
                         
-                        if (createError) throw createError;
-                        if (createData && createData.error) throw new Error(createData.error);
-                    }
+                        if (checkError) throw checkError;
+                        if (checkData && checkData.error) throw new Error(checkData.error);
+                        
+                        const missingFolders = checkData.missingFolders || [];
+                        
+                        if (missingFolders.length > 0) {
+                            totalMissing += missingFolders.length;
+                            setMissingCount(totalMissing);
+                            setStatus('creating');
+                            setStatusMessage(`${totalMissing} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in ${provider === 'onedrive' ? 'OneDrive' : 'Google Drive'}...`);
+                            
+                            const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
+                                body: { provider, action: 'create', foldersToCreate: missingFolders }
+                            });
+                            
+                            if (createError) throw createError;
+                            if (createData && createData.error) throw new Error(createData.error);
+                        }
+                    };
+
+                    await syncForProvider('onedrive', providerFoldersMap.onedrive);
+                    await syncForProvider('googledrive', providerFoldersMap.googledrive);
+                    
                 } catch (err) {
                     console.error("Cloud Sync Error:", err);
-                    // Fallback: wait a bit so user sees it tried, even if failed, we will just proceed
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
@@ -149,7 +205,7 @@ const CloudExplorer = () => {
             const fullPath = property.displayFolderName + (subPath ? '/' + subPath : '');
             
             const { data, error } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'list', provider: 'onedrive', path: fullPath }
+                body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
             });
             
             if (error) throw error;
@@ -206,7 +262,7 @@ const CloudExplorer = () => {
             
             const formData = new FormData();
             formData.append('action', 'upload');
-            formData.append('provider', 'onedrive');
+            formData.append('provider', selectedProperty.provider || 'onedrive');
             formData.append('path', fullPath);
             formData.append('file', file);
             
@@ -223,6 +279,7 @@ const CloudExplorer = () => {
             console.error("Upload error:", err);
             alert("Fehler beim Hochladen der Datei.");
         } finally {
+            setIsUploading(true);
             setIsUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
@@ -238,7 +295,7 @@ const CloudExplorer = () => {
             const fullPath = selectedProperty.displayFolderName + (subPath ? '/' + subPath : '');
             
             const { data, error } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'create_folder', provider: 'onedrive', path: fullPath, folderName: folderName.trim() }
+                body: { action: 'create_folder', provider: selectedProperty.provider || 'onedrive', path: fullPath, folderName: folderName.trim() }
             });
             
             if (error) throw error;
@@ -260,7 +317,7 @@ const CloudExplorer = () => {
         setIsLoadingFiles(true);
         try {
             const { data, error } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'delete', provider: 'onedrive', itemId: item.id }
+                body: { action: 'delete', provider: selectedProperty.provider || 'onedrive', itemId: item.id }
             });
             
             if (error) throw error;

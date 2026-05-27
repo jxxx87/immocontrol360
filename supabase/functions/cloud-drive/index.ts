@@ -97,6 +97,36 @@ serve(async (req) => {
                     expires_at: newExpiresAt.toISOString()
                 })
                 .eq('id', connection.id)
+        } else if (provider === 'googledrive') {
+            const clientId = Deno.env.get('GOOGLE_CLIENT_ID');
+            const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET');
+
+            const res = await fetch('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    client_id: clientId!,
+                    client_secret: clientSecret!,
+                    refresh_token: connection.refresh_token,
+                    grant_type: 'refresh_token',
+                }),
+            });
+
+            const tokenResponse = await res.json();
+            if (tokenResponse.error) throw new Error(`Google Refresh Error: ${tokenResponse.error_description || tokenResponse.error}`);
+
+            accessToken = tokenResponse.access_token;
+            const newExpiresAt = new Date();
+            newExpiresAt.setSeconds(newExpiresAt.getSeconds() + tokenResponse.expires_in);
+
+            await supabaseClient
+                .from('cloud_connections')
+                .update({
+                    access_token: accessToken,
+                    refresh_token: tokenResponse.refresh_token || connection.refresh_token,
+                    expires_at: newExpiresAt.toISOString()
+                })
+                .eq('id', connection.id)
         }
     }
 
@@ -126,6 +156,54 @@ serve(async (req) => {
         throw new Error(`Graph API Error (${res.status}): ${err}`)
       }
       return res.status === 204 ? { success: true } : await res.json()
+    }
+
+    // Google Drive API Helper
+    const googleDriveCall = async (endpoint: string, method: string = 'GET', body: any = null, queryParams: any = null, isBinary: boolean = false) => {
+      let url = `https://www.googleapis.com/drive/v3${endpoint}`
+      if (queryParams) {
+        const params = new URLSearchParams(queryParams)
+        url += `?${params.toString()}`
+      }
+      const options: RequestInit = {
+        method,
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        }
+      }
+      if (body) {
+        if (isBinary) {
+          options.body = body;
+        } else {
+          // @ts-ignore
+          options.headers['Content-Type'] = 'application/json';
+          options.body = JSON.stringify(body);
+        }
+      }
+      const res = await fetch(url, options)
+      
+      if (!res.ok) {
+        if (res.status === 404) return null;
+        const err = await res.text()
+        throw new Error(`Google Drive API Error (${res.status}): ${err}`)
+      }
+      return res.status === 204 ? { success: true } : await res.json()
+    }
+
+    const getGoogleFolderIdByPath = async (p: string) => {
+      const segments = p.split('/').filter(s => s.length > 0);
+      let currentParentId = 'root';
+      
+      for (const segment of segments) {
+        const search = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: 'files(id, name)'
+        });
+        const folder = search?.files?.[0];
+        if (!folder) return null;
+        currentParentId = folder.id;
+      }
+      return currentParentId;
     }
 
     if (provider === 'onedrive') {
@@ -184,6 +262,77 @@ serve(async (req) => {
             name: safeFolderName,
             folder: {},
             "@microsoft.graph.conflictBehavior": "rename"
+          });
+
+          return new Response(JSON.stringify({ success: true, folder: newFolder }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+      }
+    }
+
+    if (provider === 'googledrive') {
+      if (action === 'list') {
+        const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
+        const folderId = await getGoogleFolderIdByPath(cleanPath);
+        if (!folderId) return new Response(JSON.stringify({ files: [] }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+
+        const data = await googleDriveCall('/files', 'GET', null, {
+          q: `'${folderId}' in parents and trashed = false`,
+          fields: 'files(id, name, mimeType, webViewLink, size, modifiedTime)'
+        });
+
+        const files = (data.files || []).map((f: any) => ({
+            id: f.id,
+            name: f.name,
+            isFolder: f.mimeType === 'application/vnd.google-apps.folder',
+            url: f.webViewLink,
+            size: f.size ? parseInt(f.size) : 0,
+            updatedAt: f.modifiedTime
+        }));
+
+        return new Response(JSON.stringify({ files }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+      }
+
+      if (action === 'upload' && fileToUpload) {
+         // 1. Upload media binary
+         const resUpload = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=media', {
+           method: 'POST',
+           headers: {
+             'Authorization': `Bearer ${accessToken}`,
+             'Content-Type': fileToUpload.type
+           },
+           body: await fileToUpload.arrayBuffer()
+         });
+         const uploadedFile = await resUpload.json();
+         if (!uploadedFile.id) throw new Error(`Google Upload Failed: ${JSON.stringify(uploadedFile)}`);
+
+         // 2. Resolve parent folder
+         const parentId = await getGoogleFolderIdByPath(`ImmoControlpro360/${path}`);
+         if (!parentId) throw new Error('Parent folder not found in Google Drive');
+
+         // 3. Patch file metadata (name and move to parent)
+         const data = await googleDriveCall(`/files/${uploadedFile.id}`, 'PATCH', {
+           name: fileToUpload.name
+         }, {
+           addParents: parentId
+         });
+
+         return new Response(JSON.stringify({ success: true, file: data }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+      }
+
+      if (action === 'delete' && itemId) {
+         await googleDriveCall(`/files/${itemId}`, 'DELETE');
+         return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+      }
+
+      if (action === 'create_folder') {
+          if (!folderName) throw new Error('Missing folderName');
+          const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
+          const parentId = await getGoogleFolderIdByPath(cleanPath);
+          if (!parentId) throw new Error('Parent folder not found in Google Drive');
+
+          const newFolder = await googleDriveCall('/files', 'POST', {
+            name: folderName.trim(),
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [parentId]
           });
 
           return new Response(JSON.stringify({ success: true, folder: newFolder }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
