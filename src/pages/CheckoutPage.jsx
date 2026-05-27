@@ -78,7 +78,7 @@ const CheckoutPage = () => {
 
                         <p className="mt-6 text-center text-xs text-slate-400">
                             Du wirst zu unserer sicheren Anmeldeseite weitergeleitet.<br />
-                            Mit der Registrierung stimmst du unseren <Link to="/datenschutz" className="underline hover:text-blue-600">Datenschutzbestimmungen</Link> zu.
+                            Mit der Registrierung stimmst du unseren <Link to="/agb" className="underline hover:text-blue-600">AGB</Link> und <Link to="/datenschutz" className="underline hover:text-blue-600">Datenschutzbestimmungen</Link> zu.
                         </p>
                     </div>
                 </div>

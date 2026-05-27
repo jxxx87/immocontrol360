@@ -46,6 +46,7 @@ const Footer = ({ isLanding = false }) => {
                         <ul className="space-y-4 text-neutral-500">
                             <li><Link to="/impressum" className="hover:text-blue-600 transition-colors">Impressum</Link></li>
                             <li><Link to="/datenschutz" className="hover:text-blue-600 transition-colors">Datenschutz</Link></li>
+                            <li><Link to="/agb" className="hover:text-blue-600 transition-colors">AGB</Link></li>
                         </ul>
                     </div>
 
