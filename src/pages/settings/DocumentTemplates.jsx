@@ -545,7 +545,7 @@ export const DocumentTemplates = () => {
             setSelectedVariable(null);
             loadTemplate();
         }
-    }, [activeType, selectedPortfolioId, editor]);
+    }, [activeType, selectedPortfolioId, editor, user]);
 
     // Save template
     const handleSave = async () => {
