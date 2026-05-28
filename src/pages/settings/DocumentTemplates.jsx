@@ -1142,6 +1142,20 @@ export const DocumentTemplates = () => {
 
     return (
         <Card title="Schreibvorlagen verwalten" subtitle="Passe hier die automatischen Anschreiben, Mahnstufen, Verträge und Rechnungs-Texte nach deinen Vorstellungen an oder erstelle freie Briefe.">
+            <style>{`
+                .templates-layout-grid {
+                    display: grid;
+                    grid-template-columns: 320px 1fr;
+                    gap: 2rem;
+                    align-items: start;
+                }
+                @media (max-width: 1024px) {
+                    .templates-layout-grid {
+                        grid-template-columns: 1fr;
+                        gap: 1.5rem;
+                    }
+                }
+            `}</style>
             {/* Portfolio Selector & Add template button */}
             <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
