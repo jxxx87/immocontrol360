@@ -114,6 +114,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             navKey: 'mieterportal',
             subItems: [
                 { path: '/tenant-management', label: 'Mieter-Verwaltung' },
+                { path: '/tenant-management?tab=tenant-data', label: 'Mieterdaten' },
                 { path: '/ticket-board', label: 'Ticket-Board' },
                 { path: '/announcements', label: 'Aushänge' },
                 { path: '/investor-messages', label: 'Nachrichten' },
