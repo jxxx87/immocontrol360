@@ -12,16 +12,36 @@ Pop-Location
 Write-Host "Baue Web-App..." -ForegroundColor Cyan
 npm run build
 
-# 3. Temporäres Deployment-Verzeichnis vorbereiten
-Write-Host "Bereite Deployment-Ordner vor..." -ForegroundColor Cyan
+# 3. Temporäres Deployment-Verzeichnis vorbereiten (Klonen für inkrementellen Push)
+Write-Host "Bereite Deployment-Ordner vor (Klonen von production)..." -ForegroundColor Cyan
 $tempDir = "temp_deploy"
 if (Test-Path $tempDir) {
     Remove-Item -Path $tempDir -Recurse -Force
 }
-New-Item -ItemType Directory -Path $tempDir > $null
-New-Item -ItemType Directory -Path "$tempDir\app" > $null
+
+# Klonen nur des production-Branches (flach), um die Git-Historie zu erhalten
+git clone --branch production --depth 1 https://github.com/jxxx87/immocontrol360.git $tempDir
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Klonen fehlgeschlagen. Initialisiere leeres Repository..." -ForegroundColor Yellow
+    if (Test-Path $tempDir) {
+        Remove-Item -Path $tempDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $tempDir > $null
+    Push-Location $tempDir
+    git init
+    git remote add origin https://github.com/jxxx87/immocontrol360.git
+    git checkout -B production
+    Pop-Location
+} else {
+    # Alle vorhandenen Dateien löschen, außer dem .git-Ordner
+    Push-Location $tempDir
+    Get-ChildItem -Exclude .git | Remove-Item -Recurse -Force
+    Pop-Location
+}
 
 # 4. Dateien kopieren
+New-Item -ItemType Directory -Path "$tempDir\app" > $null
+
 Write-Host "Kopiere Marketingpage-Dateien (in Root)..." -ForegroundColor Cyan
 Copy-Item -Path "..\immowebsite\dist\*" -Destination $tempDir -Recurse -Force
 
@@ -33,18 +53,21 @@ Write-Host "Erstelle Hostinger-Dummy-package.json..." -ForegroundColor Cyan
 $dummyPkg = '{"name": "immocontrol360-combined", "version": "1.0.0", "scripts": {"build": "echo ''No build needed''"}}'
 Set-Content -Path "$tempDir\package.json" -Value $dummyPkg
 
-# 6. Git initialisieren und pushen
+# 6. Git Commit und Push (Inkrementell!)
 Write-Host "Pushe kombiniertes Build in den 'production'-Branch..." -ForegroundColor Cyan
 Push-Location $tempDir
 
-git init
 git config windows.appendAtomically false
 git config user.name "ImmoControl Admin"
 git config user.email "admin@immocontrol360.de"
-git remote add origin https://github.com/jxxx87/immocontrol360.git
-git checkout -B production
 
-git add .
+# Falls das Repository neu initialisiert werden musste
+if (!(git remote)) {
+    git remote add origin https://github.com/jxxx87/immocontrol360.git
+    git checkout -B production
+}
+
+git add -A
 git commit -m "Deploy Combined Build Artifacts"
 git push origin production --force
 

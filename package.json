@@ -33,6 +33,7 @@
     "@tiptap/suggestion": "^3.23.6",
     "dotenv": "^17.4.2",
     "html2canvas": "^1.4.1",
+    "jsdom": "^29.1.1",
     "jspdf": "^4.2.0",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.563.0",

@@ -214,19 +214,21 @@ const SYSTEM_TEMPLATES = [
     { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' }
 ];
 
-const LayoutDiv = Node.create({
-    name: 'layoutDiv',
+const createLayoutNode = (name, className, allowedContent) => Node.create({
+    name,
     group: 'block',
-    content: 'block+',
+    content: allowedContent,
     defining: true,
     addAttributes() {
         return {
             class: {
-                default: null,
-                parseHTML: element => element.getAttribute('class'),
+                default: className,
+                parseHTML: element => {
+                    const cls = element.getAttribute('class') || '';
+                    return cls.includes(className) ? className : null;
+                },
                 renderHTML: attributes => {
-                    if (!attributes.class) return {};
-                    return { class: attributes.class };
+                    return { class: `layout-div ${attributes.class || className}` };
                 }
             },
             style: {
@@ -243,14 +245,9 @@ const LayoutDiv = Node.create({
         return [
             {
                 tag: 'div',
-                getAttrs: node => {
-                    const classes = ['letter-page', 'letter-sender', 'letter-recipient', 'letter-date', 'letter-subject', 'letter-object', 'letter-body', 'letter-footer', 'letter-header-row', 'footer-col'];
-                    const hasMatchingClass = classes.some(c => node.classList.contains(c));
-                    if (!hasMatchingClass) return false;
-                    return {
-                        class: node.getAttribute('class'),
-                        style: node.getAttribute('style')
-                    };
+                getAttrs: node => node.classList.contains(className) && {
+                    class: node.getAttribute('class'),
+                    style: node.getAttribute('style')
                 }
             }
         ];
@@ -259,6 +256,17 @@ const LayoutDiv = Node.create({
         return ['div', HTMLAttributes, 0];
     }
 });
+
+const LetterPage = createLayoutNode('letterPage', 'letter-page', 'block+');
+const LetterSender = createLayoutNode('letterSender', 'letter-sender', 'inline*');
+const LetterHeaderRow = createLayoutNode('letterHeaderRow', 'letter-header-row', 'block+');
+const LetterRecipient = createLayoutNode('letterRecipient', 'letter-recipient', 'inline*');
+const LetterDate = createLayoutNode('letterDate', 'letter-date', 'inline*');
+const LetterSubject = createLayoutNode('letterSubject', 'letter-subject', 'inline*');
+const LetterObject = createLayoutNode('letterObject', 'letter-object', 'inline*');
+const LetterBody = createLayoutNode('letterBody', 'letter-body', 'block+');
+const LetterFooter = createLayoutNode('letterFooter', 'letter-footer', 'block+');
+const FooterCol = createLayoutNode('footerCol', 'footer-col', 'inline*');
 
 export const DocumentTemplates = () => {
     const { user } = useAuth();
@@ -292,7 +300,7 @@ export const DocumentTemplates = () => {
         if (editor) {
             let count = 0;
             editor.state.doc.descendants(node => {
-                if (node.type.name === 'layoutDiv' && node.attrs.class === 'letter-page') {
+                if (node.type.name === 'letterPage') {
                     count++;
                 }
             });
@@ -304,7 +312,7 @@ export const DocumentTemplates = () => {
         if (editor && !loading) {
             let count = 0;
             editor.state.doc.descendants(node => {
-                if (node.type.name === 'layoutDiv' && node.attrs.class === 'letter-page') {
+                if (node.type.name === 'letterPage') {
                     count++;
                 }
             });
@@ -328,7 +336,16 @@ export const DocumentTemplates = () => {
             StarterKit.configure({
                 horizontalRule: false,
             }),
-            LayoutDiv,
+            LetterPage,
+            LetterSender,
+            LetterHeaderRow,
+            LetterRecipient,
+            LetterDate,
+            LetterSubject,
+            LetterObject,
+            LetterBody,
+            LetterFooter,
+            FooterCol,
             Underline,
             TextAlign.configure({
                 types: ['heading', 'paragraph'],
@@ -367,7 +384,7 @@ export const DocumentTemplates = () => {
         onUpdate({ editor }) {
             let count = 0;
             editor.state.doc.descendants(node => {
-                if (node.type.name === 'layoutDiv' && node.attrs.class === 'letter-page') {
+                if (node.type.name === 'letterPage') {
                     count++;
                 }
             });
@@ -529,6 +546,10 @@ export const DocumentTemplates = () => {
             }
         } catch (error) {
             console.error('Error loading template:', error);
+            // Fallback to hardcoded defaults in case of DB or network error
+            const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
+            setSubject(defaultVal.subject || '');
+            editor?.commands.setContent(defaultVal.content_html || '');
         } finally {
             setLoading(false);
         }
@@ -545,7 +566,7 @@ export const DocumentTemplates = () => {
             setSelectedVariable(null);
             loadTemplate();
         }
-    }, [activeType, selectedPortfolioId, editor, user]);
+    }, [activeType, selectedPortfolioId, editor, user, customTemplates]);
 
     // Save template
     const handleSave = async () => {
@@ -724,77 +745,206 @@ export const DocumentTemplates = () => {
         boxSizing: 'border-box'
     };
 
-    const renderUtilityLayout = () => {
-        if (previewPage === 1) {
-            return (
-                <div style={sheetStyle}>
-                    {/* Small sender header */}
+    const renderUnifiedLayout = () => {
+        const isDunning = activeConfig.group === 'Mahnwesen';
+        const isUtility = activeConfig.group === 'Nebenkosten';
+        const isInvoice = activeConfig.group === 'FEWO-Rechnungen';
+        
+        return (
+            <div style={sheetStyle}>
+                {/* 1. Header (Absender) */}
+                {isUtility && (
                     <div style={{ fontSize: '8px', color: '#aaa', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '10px', textTransform: 'uppercase' }}>
                         {selectedPortfolioName} • {selectedPortfolioAddress}
                     </div>
-                    
-                    {/* Recipient Block & Date */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px' }}>
-                        <div style={{ fontSize: '11px', lineHeight: '1.5' }}>
-                            Herr/Frau Max Mustermann<br />
+                )}
+                {isDunning && (
+                    <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
+                        {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
+                    </div>
+                )}
+                {isInvoice && (
+                    <div style={{ fontSize: '7pt', textDecoration: 'underline', color: '#555', marginBottom: '15px' }}>
+                        {selectedPortfolioCompany || selectedPortfolioName} • {selectedPortfolioAddress}
+                    </div>
+                )}
+                {!isUtility && !isDunning && !isInvoice && (
+                    <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
+                        {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
+                    </div>
+                )}
+
+                {/* 2. Sub-Header (Empfänger & Datum / Info Block) */}
+                {isInvoice ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '30px' }}>
+                        <div style={{ fontSize: '11pt', lineHeight: '1.4' }}>
+                            <strong>Herrn / Frau</strong><br />
+                            <strong>Max Mustermann (Gast)</strong><br />
                             Musterweg 12<br />
                             12345 Musterstadt
                         </div>
-                        <div style={{ fontSize: '11px', textAlign: 'right' }}>
-                            {new Date().toLocaleDateString('de-DE')}
+                        <div style={{ fontSize: '10pt', backgroundColor: '#f8fafc', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                                <span style={{ color: '#555' }}>Nummer:</span>
+                                <span style={{ fontWeight: '600' }}>RE-2026-0001</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                                <span style={{ color: '#555' }}>Datum:</span>
+                                <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString('de-DE')}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                                <span style={{ color: '#555' }}>Zeitraum:</span>
+                                <span style={{ fontWeight: '600' }}>15.05.2026 - 18.05.2026</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: '#555' }}>Gäste:</span>
+                                <span style={{ fontWeight: '600' }}>2</span>
+                            </div>
                         </div>
                     </div>
-
-                    {/* Editor Content (the entire text template) */}
-                    <div style={{ flex: 1, minHeight: '300px' }}>
-                        <EditorContent editor={editor} />
+                ) : (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: isUtility ? '15px' : '35px' }}>
+                        <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
+                            Herrn/Frau<br />
+                            <strong>Max Mustermann</strong><br />
+                            Musterweg 12<br />
+                            12345 Musterstadt
+                        </div>
+                        <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
+                            {isDunning ? `Musterstadt, den ${new Date().toLocaleDateString('de-DE')}` : new Date().toLocaleDateString('de-DE')}
+                        </div>
                     </div>
+                )}
 
-                    {/* Ihre Daten Box (rendered as preview at the bottom) */}
-                    <div style={{ border: '1px solid var(--primary-color)', borderRadius: '3px', padding: '8px 10px', margin: '10px 0', position: 'relative' }}>
-                        <div style={{ position: 'absolute', top: '-8px', left: '8px', background: '#fff', padding: '0 5px', fontWeight: '600', color: 'var(--primary-color)', fontSize: '9px' }}>Vorschau: Ihre Daten</div>
-                        <table style={{ width: '100%', fontSize: '9px' }}>
-                            <tbody>
+                {/* 3. Subject / Headline */}
+                {isDunning && (
+                    <>
+                        <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>
+                            {subject || activeConfig.label}
+                        </div>
+                        <div style={{ fontSize: '11px', marginBottom: '25px' }}>
+                            Mietobjekt: Musterstraße 42, 12345 Musterstadt (Einheit: EG links)
+                        </div>
+                    </>
+                )}
+                {isInvoice && (
+                    <div style={{ fontSize: '14pt', fontWeight: 'bold', marginBottom: '20px', borderBottom: '1px solid #000', paddingBottom: '5px' }}>
+                        {activeType === 'fewo_credit_note' ? 'Gutschrift Nr. GS-2026-0001' : 'Rechnung Nr. RE-2026-0001'}
+                    </div>
+                )}
+                {!isUtility && !isDunning && !isInvoice && (
+                    <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '15px', borderBottom: '1px solid #f1f5f9', paddingBottom: '5px' }}>
+                        {subject || activeConfig.label}
+                    </div>
+                )}
+
+                {/* 4. Editor Content */}
+                <div style={{ flex: 1, minHeight: '350px' }}>
+                    <EditorContent editor={editor} />
+                </div>
+
+                {/* 5. Utility Layout Previews */}
+                {isUtility && (
+                    <>
+                        {/* Ihre Daten Box */}
+                        <div style={{ border: '1px solid var(--primary-color)', borderRadius: '3px', padding: '8px 10px', margin: '10px 0', position: 'relative' }}>
+                            <div style={{ position: 'absolute', top: '-8px', left: '8px', background: '#fff', padding: '0 5px', fontWeight: '600', color: 'var(--primary-color)', fontSize: '9px' }}>Vorschau: Ihre Daten</div>
+                            <table style={{ width: '100%', fontSize: '9px' }}>
+                                <tbody>
+                                    <tr>
+                                        <td style={{ width: '40%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Adresse</span><br /><b>Musterstraße 42<br />12345 Musterstadt</b></td>
+                                        <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Lage</span><br /><b>EG links</b></td>
+                                        <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Abrechnungszeitraum</span><br /><b style={{ color: 'var(--primary-color)' }}>01.01.2025 - 31.12.2025</b></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Summary Table */}
+                        <table style={{ width: '100%', fontSize: '10px', borderCollapse: 'collapse', marginBottom: '15px' }}>
+                            <thead>
                                 <tr>
-                                    <td style={{ width: '40%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Adresse</span><br /><b>Musterstraße 42<br />12345 Musterstadt</b></td>
-                                    <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Lage</span><br /><b>EG links</b></td>
-                                    <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Abrechnungszeitraum</span><br /><b style={{ color: 'var(--primary-color)' }}>01.01.2025 - 31.12.2025</b></td>
+                                    <th></th>
+                                    <th style={{ textAlign: 'right', fontWeight: '600', fontStyle: 'italic', paddingBottom: '3px' }}>Brutto</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr style={{ borderTop: '2px solid #1f2937' }}>
+                                    <td style={{ padding: '4px 0' }}>Ihre Gesamtkosten</td>
+                                    <td style={{ padding: '4px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
+                                </tr>
+                                <tr style={{ borderTop: '1px solid #e5e7eb' }}>
+                                    <td style={{ padding: '3px 0', color: '#555' }}>Ihre Betriebskosten-Vorauszahlung</td>
+                                    <td style={{ padding: '3px 0', textAlign: 'right' }}>400,00 €</td>
+                                </tr>
+                                <tr style={{ borderTop: '2px solid #1f2937' }}>
+                                    <td style={{ padding: '5px 0', fontWeight: '700', fontSize: '11px' }}>⬅ <b style={{ color: '#16a34a' }}>Ihre Gutschrift</b></td>
+                                    <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700', fontSize: '11px', color: '#16a34a' }}>50,00 €</td>
                                 </tr>
                             </tbody>
                         </table>
-                    </div>
+                    </>
+                )}
 
-                    {/* Summary Table */}
-                    <table style={{ width: '100%', fontSize: '10px', borderCollapse: 'collapse', marginBottom: '15px' }}>
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th style={{ textAlign: 'right', fontWeight: '600', fontStyle: 'italic', paddingBottom: '3px' }}>Brutto</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                <td style={{ padding: '4px 0' }}>Ihre Gesamtkosten</td>
-                                <td style={{ padding: '4px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
-                            </tr>
-                            <tr style={{ borderTop: '1px solid #e5e7eb' }}>
-                                <td style={{ padding: '3px 0', color: '#555' }}>Ihre Betriebskosten-Vorauszahlung</td>
-                                <td style={{ padding: '3px 0', textAlign: 'right' }}>400,00 €</td>
-                            </tr>
-                            <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                <td style={{ padding: '5px 0', fontWeight: '700', fontSize: '11px' }}>⬅ <b style={{ color: '#16a34a' }}>Ihre Gutschrift</b></td>
-                                <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700', fontSize: '11px', color: '#16a34a' }}>50,00 €</td>
-                            </tr>
-                        </tbody>
-                    </table>
-
-                    {/* Golden Page number footer */}
+                {/* 6. Footers */}
+                {isUtility && (
                     <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '10px', fontSize: '8px', color: '#e6a817', letterSpacing: '2px', fontWeight: '600' }}>
                         SEITE 1 / 2
                     </div>
-                </div>
-            );
-        } else {
+                )}
+                {isDunning && (
+                    <div style={{ borderTop: '1px solid #eee', marginTop: 'auto', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#969696' }}>
+                        <span>{activeConfig.label} - Stand {new Date().toLocaleDateString('de-DE')}</span>
+                        <span>Seite 1 von 2</span>
+                    </div>
+                )}
+                {isInvoice && (
+                    <div style={{ borderTop: '1px solid #ccc', marginTop: 'auto', paddingTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', fontSize: '7.5pt', color: '#444', lineHeight: '1.4' }}>
+                        <div>
+                            <strong>Anschrift</strong><br />
+                            {selectedPortfolioCompany || selectedPortfolioName}<br />
+                            {selectedPortfolioAddress}
+                        </div>
+                        <div>
+                            <strong>Kontakt</strong><br />
+                            Tel: {selectedPortfolioPhone}<br />
+                            Email: {selectedPortfolioEmail}
+                        </div>
+                        <div>
+                            <strong>Bankverbindung</strong><br />
+                            {selectedPortfolioBank}<br />
+                            IBAN: {selectedPortfolioIban}<br />
+                            BIC: {selectedPortfolioBic}<br />
+                            {selectedPortfolioTax && `St.-Nr.: ${selectedPortfolioTax}`}
+                        </div>
+                    </div>
+                )}
+                {!isUtility && !isDunning && !isInvoice && (
+                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', fontSize: '7.5px', color: '#64748b', lineHeight: '1.5', pointerEvents: 'none' }}>
+                        <div>
+                            <strong>Bankverbindung:</strong><br />
+                            Empfänger: {selectedPortfolioCompany || selectedPortfolioName}<br />
+                            Bank: {selectedPortfolioBank}<br />
+                            IBAN: {selectedPortfolioIban}<br />
+                            BIC: {selectedPortfolioBic}
+                        </div>
+                        <div>
+                            <strong>Steuerdaten & Kontakt:</strong><br />
+                            Steuernummer: {selectedPortfolioTax}<br />
+                            USt-IdNr.: {selectedPortfolioVat}<br />
+                            E-Mail: {selectedPortfolioEmail}
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderStaticPage2 = () => {
+        const isDunning = activeConfig.group === 'Mahnwesen';
+        const isUtility = activeConfig.group === 'Nebenkosten';
+        
+        if (isUtility) {
             return (
                 <div style={sheetStyle}>
                     <h3 style={{ fontSize: '12px', fontWeight: '700', margin: '0 0 10px' }}>Aufteilung der Gesamtkosten für Ihr Mietobjekt (01.01.2025 - 31.12.2025)</h3>
@@ -843,123 +993,8 @@ export const DocumentTemplates = () => {
                 </div>
             );
         }
-    };
 
-    const renderInvoiceLayout = () => {
-        const titleText = activeType === 'fewo_credit_note' ? 'Gutschrift Nr. GS-2026-0001' : 'Rechnung Nr. RE-2026-0001';
-        
-        return (
-            <div style={sheetStyle}>
-                {/* Sender small line */}
-                <div style={{ fontSize: '7pt', textDecoration: 'underline', color: '#555', marginBottom: '15px' }}>
-                    {selectedPortfolioCompany || selectedPortfolioName} • {selectedPortfolioAddress}
-                </div>
-
-                {/* Recipient & Info Block */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '30px' }}>
-                    <div style={{ fontSize: '11pt', lineHeight: '1.4' }}>
-                        <strong>Herrn / Frau</strong><br />
-                        <strong>Max Mustermann (Gast)</strong><br />
-                        Musterweg 12<br />
-                        12345 Musterstadt
-                    </div>
-                    <div style={{ fontSize: '10pt', backgroundColor: '#f8fafc', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                            <span style={{ color: '#555' }}>Nummer:</span>
-                            <span style={{ fontWeight: '600' }}>RE-2026-0001</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                            <span style={{ color: '#555' }}>Datum:</span>
-                            <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString('de-DE')}</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                            <span style={{ color: '#555' }}>Zeitraum:</span>
-                            <span style={{ fontWeight: '600' }}>15.05.2026 - 18.05.2026</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                            <span style={{ color: '#555' }}>Gäste:</span>
-                            <span style={{ fontWeight: '600' }}>2</span>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Headline */}
-                <div style={{ fontSize: '14pt', fontWeight: 'bold', marginBottom: '20px', borderBottom: '1px solid #000', paddingBottom: '5px' }}>
-                    {titleText}
-                </div>
-
-                {/* Editor Content */}
-                <div style={{ flex: 1, minHeight: '350px' }}>
-                    <EditorContent editor={editor} />
-                </div>
-
-                {/* DIN 5008 3-Column Footer */}
-                <div style={{ borderTop: '1px solid #ccc', marginTop: 'auto', paddingTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', fontSize: '7.5pt', color: '#444', lineHeight: '1.4' }}>
-                    <div>
-                        <strong>Anschrift</strong><br />
-                        {selectedPortfolioCompany || selectedPortfolioName}<br />
-                        {selectedPortfolioAddress}
-                    </div>
-                    <div>
-                        <strong>Kontakt</strong><br />
-                        Tel: {selectedPortfolioPhone}<br />
-                        Email: {selectedPortfolioEmail}
-                    </div>
-                    <div>
-                        <strong>Bankverbindung</strong><br />
-                        {selectedPortfolioBank}<br />
-                        IBAN: {selectedPortfolioIban}<br />
-                        BIC: {selectedPortfolioBic}<br />
-                        {selectedPortfolioTax && `St.-Nr.: ${selectedPortfolioTax}`}
-                    </div>
-                </div>
-            </div>
-        );
-    };
-
-    const renderDunningLayout = () => {
-        if (previewPage === 1) {
-            return (
-                <div style={sheetStyle}>
-                    {/* 1. Absenderzeile (DIN 5008 Typ B: y=45) */}
-                    <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
-                        {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
-                    </div>
-
-                    {/* 2. Empfängerblock & Date */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '35px' }}>
-                        <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
-                            Herrn/Frau<br />
-                            <strong>Max Mustermann</strong><br />
-                            Musterweg 12<br />
-                            12345 Musterstadt
-                        </div>
-                        <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
-                            Musterstadt, den {new Date().toLocaleDateString('de-DE')}
-                        </div>
-                    </div>
-
-                    {/* 3. Betreff & Mietobjekt */}
-                    <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>
-                        {subject || activeConfig.label}
-                    </div>
-                    <div style={{ fontSize: '11px', marginBottom: '25px' }}>
-                        Mietobjekt: Musterstraße 42, 12345 Musterstadt (Einheit: EG links)
-                    </div>
-
-                    {/* 4. Editor Content */}
-                    <div style={{ flex: 1 }}>
-                        <EditorContent editor={editor} />
-                    </div>
-
-                    {/* Footer */}
-                    <div style={{ borderTop: '1px solid #eee', marginTop: 'auto', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#969696' }}>
-                        <span>{activeConfig.label} - Stand {new Date().toLocaleDateString('de-DE')}</span>
-                        <span>Seite 1 von 2</span>
-                    </div>
-                </div>
-            );
-        } else {
+        if (isDunning) {
             return (
                 <div style={sheetStyle}>
                     {/* Header */}
@@ -1036,73 +1071,27 @@ export const DocumentTemplates = () => {
                 </div>
             );
         }
-    };
 
-    const renderDefaultDIN5008Layout = () => {
-        return (
-            <div style={sheetStyle}>
-                {/* Absenderzeile */}
-                <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
-                    {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
-                </div>
-
-                {/* Empfängerblock & Date */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '35px' }}>
-                    <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
-                        Herrn/Frau<br />
-                        <strong>Max Mustermann</strong><br />
-                        Musterweg 12<br />
-                        12345 Musterstadt
-                    </div>
-                    <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
-                        Musterstadt, den {new Date().toLocaleDateString('de-DE')}
-                    </div>
-                </div>
-
-                {/* Betreff */}
-                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '15px', borderBottom: '1px solid #f1f5f9', paddingBottom: '5px' }}>
-                    {subject || activeConfig.label}
-                </div>
-
-                {/* Editor Content */}
-                <div style={{ flex: 1 }}>
-                    <EditorContent editor={editor} />
-                </div>
-
-                {/* Footer */}
-                <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', fontSize: '7.5px', color: '#64748b', lineHeight: '1.5', pointerEvents: 'none' }}>
-                    <div>
-                        <strong>Bankverbindung:</strong><br />
-                        Empfänger: {selectedPortfolioCompany || selectedPortfolioName}<br />
-                        Bank: {selectedPortfolioBank}<br />
-                        IBAN: {selectedPortfolioIban}<br />
-                        BIC: {selectedPortfolioBic}
-                    </div>
-                    <div>
-                        <strong>Steuerdaten & Kontakt:</strong><br />
-                        Steuernummer: {selectedPortfolioTax}<br />
-                        USt-IdNr.: {selectedPortfolioVat}<br />
-                        E-Mail: {selectedPortfolioEmail}
-                    </div>
-                </div>
-            </div>
-        );
+        return null;
     };
 
     const renderDocumentLayout = () => {
-        const isDunning = activeConfig.group === 'Mahnwesen';
         const isUtility = activeConfig.group === 'Nebenkosten';
-        const isInvoice = activeConfig.group === 'FEWO-Rechnungen';
-        
-        if (isUtility) {
-            return renderUtilityLayout();
-        } else if (isInvoice) {
-            return renderInvoiceLayout();
-        } else if (isDunning) {
-            return renderDunningLayout();
-        } else {
-            return renderDefaultDIN5008Layout();
-        }
+        const isDunning = activeConfig.group === 'Mahnwesen';
+        const hasSecondPage = (isUtility || isDunning);
+
+        return (
+            <>
+                <div style={{ display: previewPage === 1 ? 'block' : 'none' }}>
+                    {renderUnifiedLayout()}
+                </div>
+                {hasSecondPage && (
+                    <div style={{ display: previewPage === 2 ? 'block' : 'none' }}>
+                        {renderStaticPage2()}
+                    </div>
+                )}
+            </>
+        );
     };
 
     const activePage = Math.min(previewPage, pageCount);
