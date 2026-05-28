@@ -300,32 +300,8 @@ export const DocumentTemplates = () => {
         dbDataFound: false,
         contentLength: 0
     });
-    
-    useEffect(() => {
-        setPreviewPage(1);
-        if (editor) {
-            let count = 0;
-            editor.state.doc.descendants(node => {
-                if (node.type.name === 'letterPage') {
-                    count++;
-                }
-            });
-            setPageCount(count > 0 ? count : 1);
-        }
-    }, [activeType]);
 
-    useEffect(() => {
-        if (editor && !loading) {
-            let count = 0;
-            editor.state.doc.descendants(node => {
-                if (node.type.name === 'letterPage') {
-                    count++;
-                }
-            });
-            setPageCount(count > 0 ? count : 1);
-            setPreviewPage(1);
-        }
-    }, [loading, editor]);
+
 
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
@@ -443,6 +419,32 @@ export const DocumentTemplates = () => {
             }
         }
     });
+
+    useEffect(() => {
+        setPreviewPage(1);
+        if (editor) {
+            let count = 0;
+            editor.state.doc.descendants(node => {
+                if (node.type.name === 'letterPage') {
+                    count++;
+                }
+            });
+            setPageCount(count > 0 ? count : 1);
+        }
+    }, [activeType]);
+
+    useEffect(() => {
+        if (editor && !loading) {
+            let count = 0;
+            editor.state.doc.descendants(node => {
+                if (node.type.name === 'letterPage') {
+                    count++;
+                }
+            });
+            setPageCount(count > 0 ? count : 1);
+            setPreviewPage(1);
+        }
+    }, [loading, editor]);
 
     // Combine system and custom templates
     const allTemplates = [
