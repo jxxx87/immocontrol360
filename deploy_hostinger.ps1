@@ -34,7 +34,10 @@ $dummyPkg = '{"name": "immocontrol360-app", "version": "1.0.0", "scripts": {"bui
 Set-Content -Path "dist\package.json" -Value $dummyPkg
 
 # Cleanup local temporary branch if it exists
-git branch -D production-local 2>$null
+$branchExists = git branch --list production-local
+if ($branchExists) {
+    git branch -D production-local
+}
 
 # Dist ordner temporär committen (ist normalerweise ignoriert)
 git add dist -f

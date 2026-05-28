@@ -5,6 +5,7 @@ import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Mention from '@tiptap/extension-mention';
 import Image from '@tiptap/extension-image';
+import HorizontalRule from '@tiptap/extension-horizontal-rule';
 import { TextAlign } from '@tiptap/extension-text-align';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
@@ -26,73 +27,73 @@ import {
 
 // Deutsche Variablen für globale Verwendung
 const GLOBAL_VARIABLES = [
-    { id: 'mieter_name', label: 'Mieter Name', icon: '👤' },
-    { id: 'mieter_anrede', label: 'Sehr geehrte/r ...', icon: '✉️' },
-    { id: 'mieter_adresse', label: 'Mieter Adresse', icon: '🏠' },
-    { id: 'objekt_name', label: 'Objektname', icon: '🏢' },
-    { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪' },
-    { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍' },
-    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤' },
-    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳' }
+    { id: 'mieter_name', label: 'Mieter Name', icon: '👤', description: 'Der vollständige Name des Hauptmieters.' },
+    { id: 'mieter_anrede', label: 'Sehr geehrte/r ...', icon: '✉️', description: 'Die Briefanrede (z.B. "Sehr geehrte Frau Müller" oder "Sehr geehrter Herr Schmidt"), die automatisch anhand des Geschlechts des Mieters generiert wird.' },
+    { id: 'mieter_adresse', label: 'Mieter Adresse', icon: '🏠', description: 'Die vollständige Anschrift des Mieters für das Adressfeld.' },
+    { id: 'objekt_name', label: 'Objektname', icon: '🏢', description: 'Der Name des Gebäudes oder Objekts.' },
+    { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪', description: 'Die Bezeichnung der Wohneinheit (z.B. "EG links" oder "Wohnung Nr. 5").' },
+    { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍', description: 'Die vollständige Adresse des Objekts.' },
+    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters (wird als Absender oder in der Grußformel genutzt).' },
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die hinterlegte IBAN und BIC des Vermieters für Zahlungsaufforderungen.' }
 ];
 
 // Deutsche Variablen für das Mahnwesen
 const DUNNING_VARIABLES = [
     ...GLOBAL_VARIABLES,
-    { id: 'offener_betrag', label: 'Offener Betrag', icon: '💰' },
-    { id: 'zahlungsfrist_datum', label: 'Fälligkeitsdatum', icon: '📅' },
-    { id: 'verzugstage', label: 'Verzugstage', icon: '⏱️' },
-    { id: 'mahnstufe', label: 'Mahnstufe', icon: '📈' },
-    { id: 'zinsbetrag', label: 'Verzugszinsen', icon: '💸' },
-    { id: 'forderungs_tabelle', label: 'Forderungstabelle', icon: '📊' }
+    { id: 'offener_betrag', label: 'Offener Betrag', icon: '💰', description: 'Der aktuell ausstehende Gesamtbetrag der Mahnung.' },
+    { id: 'zahlungsfrist_datum', label: 'Fälligkeitsdatum', icon: '📅', description: 'Das Datum, bis zu dem die Zahlung auf dem Konto eingegangen sein muss.' },
+    { id: 'verzugstage', label: 'Verzugstage', icon: '⏱️', description: 'Die Anzahl der Tage, die der Mieter bereits mit der Zahlung im Verzug ist.' },
+    { id: 'mahnstufe', label: 'Mahnstufe', icon: '📈', description: 'Die aktuelle Stufe des Mahnverfahrens (z.B. 1, 2 oder Letzte Mahnung).' },
+    { id: 'zinsbetrag', label: 'Verzugszinsen', icon: '💸', description: 'Der berechnete Verzugszinsbetrag basierend auf den Verzugstagen.' },
+    { id: 'forderungs_tabelle', label: 'Forderungstabelle', icon: '📊', description: 'Eine strukturierte Tabelle, die alle offenen Posten, Mieten und Mahngebühren auflistet.' }
 ];
 
 // Deutsche Variablen für Nebenkosten
 const UTILITY_VARIABLES = [
     ...GLOBAL_VARIABLES,
-    { id: 'abrechnungsjahr', label: 'Abrechnungsjahr', icon: '📅' },
-    { id: 'abrechnungszeitraum', label: 'Abrechnungszeitraum', icon: '📆' },
-    { id: 'nutzungszeitraum', label: 'Nutzungszeitraum', icon: '⏳' },
-    { id: 'gesamtkosten_mieter', label: 'Gesamtkosten Mieter', icon: '💰' },
-    { id: 'vorauszahlungs_betrag', label: 'Geleistete Vorauszahlung', icon: '📥' },
-    { id: 'saldo_betrag', label: 'Saldo (Ergebnis)', icon: '💵' },
-    { id: 'saldo_art', label: 'Saldo Art (Nachzahlung/Gutschrift)', icon: '📝' },
-    { id: 'nebenkosten_tabelle', label: 'Umlagetabelle', icon: '📊' }
+    { id: 'abrechnungsjahr', label: 'Abrechnungsjahr', icon: '📅', description: 'Das Jahr, für das diese Nebenkostenabrechnung erstellt wird.' },
+    { id: 'abrechnungszeitraum', label: 'Abrechnungszeitraum', icon: '📆', description: 'Der gesamte Zeitraum der Nebenkostenabrechnung (z.B. 01.01.2025 - 31.12.2025).' },
+    { id: 'nutzungszeitraum', label: 'Nutzungszeitraum', icon: '⏳', description: 'Der genaue Zeitraum, in dem der Mieter die Wohnung im Abrechnungsjahr genutzt hat.' },
+    { id: 'gesamtkosten_mieter', label: 'Gesamtkosten Mieter', icon: '💰', description: 'Die Summe aller Betriebskosten, die laut Verteilerschlüssel auf den Mieter entfallen.' },
+    { id: 'vorauszahlungs_betrag', label: 'Geleistete Vorauszahlung', icon: '📥', description: 'Die Summe der vom Mieter im Abrechnungszeitraum bereits gezahlten Nebenkostenabschläge.' },
+    { id: 'saldo_betrag', label: 'Saldo (Ergebnis)', icon: '💵', description: 'Der Differenzbetrag zwischen den Gesamtkosten und den Vorauszahlungen.' },
+    { id: 'saldo_art', label: 'Saldo Art (Nachzahlung/Gutschrift)', icon: '📝', description: 'Gibt an, ob der Saldo eine "Nachzahlung" (Mieter muss zahlen) oder eine "Gutschrift" (Mieter erhält Geld zurück) ist.' },
+    { id: 'nebenkosten_tabelle', label: 'Umlagetabelle', icon: '📊', description: 'Die detaillierte Umlagetabelle der Betriebskosten mit Kostenarten, Gesamtkosten, Umlageschlüsseln und Mieteranteil.' }
 ];
 
 // Deutsche Variablen für Fewo-Rechnungen
 const INVOICE_VARIABLES = [
-    { id: 'gast_name', label: 'Gast Name', icon: '👤' },
-    { id: 'gast_adresse', label: 'Gast Adresse', icon: '🏠' },
-    { id: 'buchungszeitraum', label: 'Leistungszeitraum', icon: '📅' },
-    { id: 'gaeste_anzahl', label: 'Anzahl Gäste', icon: '👥' },
-    { id: 'rechnungsnummer', label: 'Rechnungsnummer', icon: '🔢' },
-    { id: 'rechnungsdatum', label: 'Rechnungsdatum', icon: '📆' },
-    { id: 'netto_betrag', label: 'Netto-Betrag', icon: '💰' },
-    { id: 'mwst_betrag', label: 'MwSt-Betrag (7%)', icon: '💸' },
-    { id: 'brutto_betrag', label: 'Gesamtbetrag (Brutto)', icon: '💵' },
-    { id: 'original_rechnungsnummer', label: 'Ref-Rechnungsnummer', icon: '📎' },
-    { id: 'positions_tabelle', label: 'Rechnungspositionen-Tabelle', icon: '📊' },
-    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤' },
-    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳' },
-    { id: 'vermieter_steuernummer', label: 'Vermieter Steuernummer', icon: '📝' },
-    { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔' }
+    { id: 'gast_name', label: 'Gast Name', icon: '👤', description: 'Der Name des Ferienwohnungsgastes.' },
+    { id: 'gast_adresse', label: 'Gast Adresse', icon: '🏠', description: 'Die Rechnungsadresse des Gastes.' },
+    { id: 'buchungszeitraum', label: 'Leistungszeitraum', icon: '📅', description: 'Der Buchungszeitraum des Aufenthalts (Anreise- bis Abreisedatum).' },
+    { id: 'gaeste_anzahl', label: 'Anzahl Gäste', icon: '👥', description: 'Die Anzahl der Personen, die die Ferienwohnung gebucht haben.' },
+    { id: 'rechnungsnummer', label: 'Rechnungsnummer', icon: '🔢', description: 'Die fortlaufende, eindeutige Rechnungsnummer.' },
+    { id: 'rechnungsdatum', label: 'Rechnungsdatum', icon: '📆', description: 'Das Datum, an dem die Rechnung ausgestellt wurde.' },
+    { id: 'netto_betrag', label: 'Netto-Betrag', icon: '💰', description: 'Der Rechnungsbetrag vor Steuern.' },
+    { id: 'mwst_betrag', label: 'MwSt-Betrag (7%)', icon: '💸', description: 'Der berechnete Umsatzsteuerbetrag (7% für Beherbergung).' },
+    { id: 'brutto_betrag', label: 'Gesamtbetrag (Brutto)', icon: '💵', description: 'Der Endbetrag inklusive Umsatzsteuer.' },
+    { id: 'original_rechnungsnummer', label: 'Ref-Rechnungsnummer', icon: '📎', description: 'Bei einer Stornierung oder Korrektur die Nummer der Originalrechnung.' },
+    { id: 'positions_tabelle', label: 'Rechnungspositionen-Tabelle', icon: '📊', description: 'Eine Tabelle mit allen Rechnungspositionen wie Übernachtungskosten, Reinigung und Zusatzleistungen.' },
+    { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters.' },
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die IBAN und BIC des Vermieters für die Überweisung.' },
+    { id: 'vermieter_steuernummer', label: 'Vermieter Steuernummer', icon: '📝', description: 'Die Steuernummer des Vermieters für steuerliche Zwecke.' },
+    { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔', description: 'Die Umsatzsteuer-Identifikationsnummer des Vermieters.' }
 ];
 
 // Deutsche Variablen für Mieterhöhungen
 const RENT_INCREASE_VARIABLES = [
     ...GLOBAL_VARIABLES,
-    { id: 'aktuelle_miete', label: 'Aktuelle Miete', icon: '💵' },
-    { id: 'neue_miete', label: 'Neue Miete', icon: '📈' },
-    { id: 'erhoehungs_betrag', label: 'Erhöhungsbetrag', icon: '💰' },
-    { id: 'erhoehungs_datum', label: 'Wirksamkeitsdatum', icon: '📅' },
-    { id: 'zustimmungs_frist', label: 'Zustimmungsfrist', icon: '⏱️' }
+    { id: 'aktuelle_miete', label: 'Aktuelle Miete', icon: '💵', description: 'Der aktuelle monatliche Nettokaltmietpreis.' },
+    { id: 'neue_miete', label: 'Neue Miete', icon: '📈', description: 'Der vorgeschlagene neue monatliche Nettokaltmietpreis.' },
+    { id: 'erhoehungs_betrag', label: 'Erhöhungsbetrag', icon: '💰', description: 'Der monatliche Differenzbetrag der Mieterhöhung.' },
+    { id: 'erhoehungs_datum', label: 'Wirksamkeitsdatum', icon: '📅', description: 'Das Datum, ab dem die neue Miete gelten soll.' },
+    { id: 'zustimmungs_frist', label: 'Zustimmungsfrist', icon: '⏱️', description: 'Das Datum, bis zu dem der Mieter der Erhöhung zustimmen muss.' }
 ];
 
 // Deutsche Variablen für sonstige Bescheinigungen
 const CERTIFICATE_VARIABLES = [
     ...GLOBAL_VARIABLES,
-    { id: 'einzug_datum', label: 'Einzugsdatum', icon: '📅' }
+    { id: 'einzug_datum', label: 'Einzugsdatum', icon: '📅', description: 'Das Einzugsdatum des Mieters laut Wohnungsgeberbestätigung.' }
 ];
 
 const DEFAULT_TEMPLATES = {
@@ -284,6 +285,7 @@ export const DocumentTemplates = () => {
     const [subject, setSubject] = useState('');
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [selectedVariable, setSelectedVariable] = useState(null);
     
     useEffect(() => {
         setPreviewPage(1);
@@ -323,7 +325,9 @@ export const DocumentTemplates = () => {
     // TipTap Editor initialization
     const editor = useEditor({
         extensions: [
-            StarterKit,
+            StarterKit.configure({
+                horizontalRule: false,
+            }),
             LayoutDiv,
             Underline,
             TextAlign.configure({
@@ -332,13 +336,24 @@ export const DocumentTemplates = () => {
             }),
             TextStyle,
             Color,
-            Mention.configure({
+            Mention.extend({
+                draggable: true,
+            }).configure({
                 HTMLAttributes: {
                     class: 'variable-chip',
+                    contenteditable: 'false',
                 },
                 renderLabel({ node }) {
                     return `${node.attrs.label ?? node.attrs.id}`;
                 },
+            }),
+            HorizontalRule.extend({
+                draggable: true,
+                selectable: true,
+            }).configure({
+                HTMLAttributes: {
+                    class: 'editor-hr',
+                }
             }),
             Image.configure({
                 inline: true,
@@ -527,6 +542,7 @@ export const DocumentTemplates = () => {
 
     useEffect(() => {
         if (editor) {
+            setSelectedVariable(null);
             loadTemplate();
         }
     }, [activeType, selectedPortfolioId, editor]);
@@ -650,6 +666,7 @@ export const DocumentTemplates = () => {
 
     // Insert variable chip into editor
     const insertVariable = (variable) => {
+        setSelectedVariable(variable);
         if (!editor) return;
         
         editor.chain().focus().insertContent({
@@ -1127,7 +1144,7 @@ export const DocumentTemplates = () => {
                 </Button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '1.5rem', alignItems: 'stretch' }}>
+            <div className="templates-layout-grid">
                 {/* Left side: Navigation of templates & Variable Library */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                     
@@ -1211,26 +1228,27 @@ export const DocumentTemplates = () => {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '12px', backgroundColor: 'var(--background-color)', flex: 1 }}>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: '0' }}>Platzhalter</h4>
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Klicke oder ziehe den Platzhalter in das Dokument.</span>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Ziehe den Platzhalter in das Dokument oder füge ihn per Klick hinzu.</span>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflowY: 'auto', maxHeight: '300px', paddingRight: '4px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflowY: 'auto', maxHeight: '230px', paddingRight: '4px' }}>
                             {activeConfig.variables?.map(v => (
                                 <button
                                     key={v.id}
-                                    onClick={() => insertVariable(v)}
+                                    onClick={() => setSelectedVariable(v)}
                                     draggable="true"
                                     onDragStart={(e) => {
                                         e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'mention', id: v.id, label: v.label }));
                                     }}
-                                    title={`Ziehe oder klicke, um ${v.label} einzufügen`}
+                                    title={`Ziehe, um ${v.label} einzufügen. Klicke für Details.`}
                                     style={{
                                         display: 'flex',
                                         alignItems: 'center',
                                         gap: '6px',
                                         padding: '6px 8px',
                                         borderRadius: '6px',
-                                        border: '1px solid var(--border-color)',
-                                        backgroundColor: 'var(--surface-color)',
+                                        border: '1px solid',
+                                        borderColor: selectedVariable?.id === v.id ? 'var(--primary-color)' : 'var(--border-color)',
+                                        backgroundColor: selectedVariable?.id === v.id ? '#f0f9ff' : 'var(--surface-color)',
                                         cursor: 'grab',
                                         fontSize: '0.75rem',
                                         fontWeight: 500,
@@ -1238,48 +1256,112 @@ export const DocumentTemplates = () => {
                                         textAlign: 'left',
                                         transition: 'all 0.15s ease'
                                     }}
-                                    onMouseEnter={e => {
-                                        e.currentTarget.style.borderColor = 'var(--primary-color)';
-                                        e.currentTarget.style.backgroundColor = '#f0f9ff';
-                                    }}
-                                    onMouseLeave={e => {
-                                        e.currentTarget.style.borderColor = 'var(--border-color)';
-                                        e.currentTarget.style.backgroundColor = 'var(--surface-color)';
-                                    }}
                                 >
                                     <span>{v.icon}</span>
                                     <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{v.label}</span>
+                                    <span 
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            insertVariable(v);
+                                        }}
+                                        title="In Dokument einfügen"
+                                        style={{
+                                            cursor: 'pointer',
+                                            padding: '2px',
+                                            borderRadius: '4px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                            color: 'var(--primary-color)'
+                                        }}
+                                        onMouseEnter={e => {
+                                            e.currentTarget.style.backgroundColor = 'var(--primary-color)';
+                                            e.currentTarget.style.color = '#ffffff';
+                                        }}
+                                        onMouseLeave={e => {
+                                            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+                                            e.currentTarget.style.color = 'var(--primary-color)';
+                                        }}
+                                    >
+                                        <Plus size={12} />
+                                    </span>
                                 </button>
                             ))}
                         </div>
 
-                        {/* Info explanation card for mieter_anrede placeholder */}
-                        <div style={{ 
-                            marginTop: '12px', 
-                            padding: '10px', 
-                            borderRadius: '6px', 
-                            backgroundColor: '#eff6ff', 
-                            border: '1px solid #bfdbfe',
-                            fontSize: '0.74rem',
-                            color: '#1e3a8a',
-                            lineHeight: '1.4',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '4px'
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
-                                <HelpCircle size={14} color="#3b82f6" />
-                                <span>Platzhalter „Sehr geehrte/r ...“</span>
+                        {/* Dynamic Info explanation card */}
+                        {selectedVariable ? (
+                            <div style={{ 
+                                marginTop: '12px', 
+                                padding: '10px', 
+                                borderRadius: '6px', 
+                                backgroundColor: '#eff6ff', 
+                                border: '1px solid #bfdbfe',
+                                fontSize: '0.74rem',
+                                color: '#1e3a8a',
+                                lineHeight: '1.4',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '4px'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
+                                    <span>{selectedVariable.icon}</span>
+                                    <span>{selectedVariable.label}</span>
+                                </div>
+                                <p style={{ margin: 0 }}>
+                                    {selectedVariable.description || 'Keine Beschreibung verfügbar.'}
+                                </p>
+                                {selectedVariable.id === 'mieter_anrede' && (
+                                    <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px', listStyleType: 'disc', color: '#1e3a8a' }}>
+                                        <li>Frau: <em>„Sehr geehrte Frau [Nachname]“</em></li>
+                                        <li>Herr: <em>„Sehr geehrter Herr [Nachname]“</em></li>
+                                        <li>Mehrere/Sonstige: <em>„Sehr geehrte Damen und Herren“</em></li>
+                                    </ul>
+                                )}
+                                <div style={{ fontSize: '0.7rem', color: '#4b5563', marginTop: '4px', fontFamily: 'monospace', backgroundColor: '#e2e8f0', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start' }}>
+                                    {`{${selectedVariable.id}}`}
+                                </div>
+                                <button
+                                    onClick={() => insertVariable(selectedVariable)}
+                                    style={{
+                                        marginTop: '6px',
+                                        padding: '5px 8px',
+                                        borderRadius: '4px',
+                                        border: 'none',
+                                        backgroundColor: 'var(--primary-color)',
+                                        color: '#ffffff',
+                                        cursor: 'pointer',
+                                        fontSize: '0.7rem',
+                                        fontWeight: 500,
+                                        textAlign: 'center',
+                                        width: '100%',
+                                        transition: 'opacity 0.15s ease'
+                                    }}
+                                    onMouseEnter={e => {
+                                        e.currentTarget.style.opacity = '0.9';
+                                    }}
+                                    onMouseLeave={e => {
+                                        e.currentTarget.style.opacity = '1';
+                                    }}
+                                >
+                                    In Dokument einfügen
+                                </button>
                             </div>
-                            <p style={{ margin: 0 }}>
-                                Der Platzhalter <strong>mieter_anrede</strong> generiert automatisch die passende Anrede basierend auf den Mieterdaten:
-                            </p>
-                            <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px', listStyleType: 'disc' }}>
-                                <li>Frau: <em>„Sehr geehrte Frau [Nachname]“</em></li>
-                                <li>Herr: <em>„Sehr geehrter Herr [Nachname]“</em></li>
-                                <li>Mehrere/Sonstige: <em>„Sehr geehrte Damen und Herren“</em></li>
-                            </ul>
-                        </div>
+                        ) : (
+                            <div style={{ 
+                                marginTop: '12px', 
+                                padding: '10px', 
+                                borderRadius: '6px', 
+                                backgroundColor: 'var(--background-color)', 
+                                border: '1px dashed var(--border-color)',
+                                fontSize: '0.74rem',
+                                color: 'var(--text-secondary)',
+                                textAlign: 'center'
+                            }}>
+                                Klicke auf einen Platzhalter, um die Erklärung anzuzeigen.
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -1293,37 +1375,7 @@ export const DocumentTemplates = () => {
                         <>
                             {/* Editor Toolbar & Canvas */}
                             <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)' }}>
-                                {/* Subject Line (if applicable) - Ganz oben über der Tool-Leiste */}
-                                {activeConfig.hasSubject && (
-                                    <div style={{ 
-                                        padding: '12px 16px', 
-                                        borderBottom: '1px solid var(--border-color)', 
-                                        backgroundColor: '#f8fafc',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '12px',
-                                        animation: 'fadeIn 0.2s ease-out'
-                                    }}>
-                                        <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', minWidth: '70px' }}>Betreff:</span>
-                                        <input
-                                            type="text"
-                                            placeholder="z.B. Mieterhöhung für Ihr Mietobjekt"
-                                            value={subject}
-                                            onChange={e => setSubject(e.target.value)}
-                                            style={{ 
-                                                flex: 1, 
-                                                border: '1px solid var(--border-color)', 
-                                                borderRadius: '4px', 
-                                                padding: '6px 10px', 
-                                                fontSize: '0.875rem',
-                                                fontWeight: 600,
-                                                color: 'var(--text-primary)',
-                                                backgroundColor: '#ffffff',
-                                                outline: 'none'
-                                            }}
-                                        />
-                                    </div>
-                                )}
+
 
                                 {/* Toolbar */}
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '8px', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', alignItems: 'center' }}>
@@ -1534,6 +1586,19 @@ export const DocumentTemplates = () => {
 
                                     <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
 
+                                    {/* Trennlinie einfügen */}
+                                    <button 
+                                        type="button"
+                                        onClick={() => editor?.chain().focus().setHorizontalRule().run()} 
+                                        disabled={!editor}
+                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                        title="Trennlinie einfügen"
+                                    >
+                                        <Minus size={16} />
+                                    </button>
+
+                                    <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
                                     {/* Image / Signature Upload Button */}
                                     <button 
                                         type="button"
@@ -1586,17 +1651,7 @@ export const DocumentTemplates = () => {
                                 </div>
 
                                 {/* Editor Content Area (Word-like white sheet with DIN 5008 formatting) */}
-                                 <div style={{ 
-                                     padding: '2.5rem', 
-                                     backgroundColor: '#f8fafc', 
-                                     display: 'flex', 
-                                     flexDirection: 'column',
-                                     alignItems: 'center',
-                                     gap: '1.5rem',
-                                     overflowY: 'auto',
-                                     maxHeight: '750px',
-                                     width: '100%'
-                                 }}>
+                                 <div className="editor-canvas-container">
                                      {/* Horizontal Pagination Controls */}
                                      {pageCount > 1 && (
                                          <div style={{ 
@@ -1658,64 +1713,6 @@ export const DocumentTemplates = () => {
                                              </button>
                                          </div>
                                      )}
-
-                                     {/* CSS styling for Tiptap editor */}
-                                     <style>{`
-                                         .ProseMirror {
-                                             outline: none;
-                                             min-height: 250px;
-                                             font-family: 'Segoe UI', Arial, sans-serif;
-                                             font-size: 14px;
-                                             line-height: 1.6;
-                                             color: #1e293b;
-                                             width: 100%;
-                                         }
-                                         .ProseMirror > .letter-page {
-                                             display: none !important;
-                                         }
-                                         .ProseMirror > .letter-page:nth-of-type(${activePage}) {
-                                             display: flex !important;
-                                         }
-                                         .ProseMirror p {
-                                             margin-top: 0;
-                                             margin-bottom: 0.75rem;
-                                         }
-                                         .ProseMirror ul, .ProseMirror ol {
-                                             padding-left: 1.5rem;
-                                             margin-top: 0;
-                                             margin-bottom: 0.75rem;
-                                         }
-                                         .variable-chip {
-                                             background-color: #e0f2fe !important;
-                                             color: #0369a1 !important;
-                                             border: 1px solid #bae6fd !important;
-                                             border-radius: 4px !important;
-                                             padding: 2px 6px !important;
-                                             font-weight: 500 !important;
-                                             display: inline-flex !important;
-                                             align-items: center !important;
-                                             margin: 0 2px !important;
-                                             user-select: none !important;
-                                             cursor: pointer !important;
-                                             box-decoration-break: clone;
-                                             font-size: 0.85em;
-                                         }
-                                         .table-placeholder-chip {
-                                              background-color: #fef08a !important;
-                                              color: #a16207 !important;
-                                              border: 1px dashed #ca8a04 !important;
-                                          }
-                                          .editor-image {
-                                             max-width: 100%;
-                                             height: auto;
-                                             max-height: 120px;
-                                             border: 1px dashed #cbd5e1;
-                                             border-radius: 4px;
-                                             padding: 4px;
-                                             display: block;
-                                             margin: 10px 0;
-                                         }
-                                     `}</style>
                                      <EditorContent editor={editor} />
                                  </div>
                             </div>
