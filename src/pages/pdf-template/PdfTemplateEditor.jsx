@@ -126,6 +126,7 @@ const PdfTemplateEditor = () => {
         for (const other of allElements) {
             if (other.id === el.id || !other.visible) continue;
             if (other.zone !== el.zone) continue;
+            if (el.type === EL_TYPES.LOGO || other.type === EL_TYPES.LOGO) continue;
             const ax1 = el.x, ay1 = el.y, ax2 = el.x + el.w, ay2 = el.y + (el.h || 0.5);
             const bx1 = other.x, by1 = other.y, bx2 = other.x + other.w, by2 = other.y + (other.h || 0.5);
             if (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1) return true;
@@ -204,9 +205,6 @@ const PdfTemplateEditor = () => {
     // ─── Remove element ────────────────────────
     const removeElement = useCallback((id) => {
         setElements(prev => {
-            const el = prev.find(e => e.id === id);
-            // Don't allow removing core elements
-            if (el && [EL_TYPES.TITLE, EL_TYPES.PAGE_NUMBER].includes(el.type)) return prev;
             const newEls = prev.filter(e => e.id !== id);
             pushHistory(newEls);
             setDirty(true);
@@ -249,6 +247,7 @@ const PdfTemplateEditor = () => {
         for (const el of newEls) {
             for (const other of newEls) {
                 if (other.id === el.id || !other.visible || other.zone !== el.zone) continue;
+                if (el.type === EL_TYPES.LOGO || other.type === EL_TYPES.LOGO) continue;
                 if (el.x < other.x + other.w && el.x + el.w > other.x && el.y < other.y + (other.h || 0.5) && el.y + (el.h || 0.5) > other.y) {
                     hasCollision = true; break;
                 }
@@ -549,7 +548,7 @@ ${footerEls.map(renderEl).join('')}
             borderRadius: '1px',
             opacity: inActiveZone ? 1 : 0.4,
             userSelect: 'none', touchAction: 'none',
-            zIndex: isSelected ? 10 : 1,
+            zIndex: isSelected ? 100 + (el.zIndex || 1) : (el.zIndex || 1),
             boxSizing: 'border-box',
             overflow: 'hidden',
         };
@@ -663,12 +662,12 @@ ${footerEls.map(renderEl).join('')}
             <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                 <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     {labelForType(selectedEl.type)}
-                    {![EL_TYPES.TITLE, EL_TYPES.PAGE_NUMBER].includes(selectedEl.type) && (
-                        <button onClick={() => removeElement(selectedEl.id)}
-                            style={{ ...iconBtnStyle, width: '24px', height: '24px', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)' }}>
-                            <Trash2 size={12} />
-                        </button>
-                    )}
+                    <button onClick={() => removeElement(selectedEl.id)}
+                        style={{ ...iconBtnStyle, width: '24px', height: '24px', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)' }}
+                        title="Element löschen"
+                    >
+                        <Trash2 size={12} />
+                    </button>
                 </div>
 
                 {/* Position */}
@@ -701,6 +700,50 @@ ${footerEls.map(renderEl).join('')}
                             />
                         </>
                     )}
+                </div>
+
+                {/* Ebene (Layer) */}
+                <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '8px', marginBottom: '4px' }}>Ebene (Layer)</div>
+                <div style={inputRow}>
+                    <span style={labelSt}>Ebene</span>
+                    <span style={{ fontSize: '0.82rem', fontWeight: 600, marginRight: '12px', minWidth: '20px', display: 'inline-block', textAlign: 'center' }}>
+                        {selectedEl.zIndex || 1}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => updateElement(selectedEl.id, { zIndex: Math.max(1, (selectedEl.zIndex || 1) - 1) })}
+                        style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid var(--border-color)',
+                            background: 'var(--surface-color)',
+                            color: 'var(--text-primary)',
+                            cursor: 'pointer',
+                            fontSize: '0.72rem',
+                            fontWeight: 500,
+                            marginRight: '4px'
+                        }}
+                        title="Ebene runter"
+                    >
+                        Ebene runter
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => updateElement(selectedEl.id, { zIndex: (selectedEl.zIndex || 1) + 1 })}
+                        style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid var(--border-color)',
+                            background: 'var(--surface-color)',
+                            color: 'var(--text-primary)',
+                            cursor: 'pointer',
+                            fontSize: '0.72rem',
+                            fontWeight: 500
+                        }}
+                        title="Ebene darüber"
+                    >
+                        Ebene darüber
+                    </button>
                 </div>
 
                 {/* Typography (not for logo/line) */}
@@ -804,24 +847,45 @@ ${footerEls.map(renderEl).join('')}
             </div>
         );
 
-        const logoEl = elements.find(e => e.type === EL_TYPES.LOGO);
-        const titleEl = elements.find(e => e.type === EL_TYPES.TITLE);
-        const subtitleEl = elements.find(e => e.type === EL_TYPES.SUBTITLE);
-        const portfolioNameEl = elements.find(e => e.type === EL_TYPES.PORTFOLIO_NAME);
-        const dateEls = elements.filter(e => e.type === EL_TYPES.DATE);
-        const pageNumEl = elements.find(e => e.type === EL_TYPES.PAGE_NUMBER);
+        const renderStandardRow = (type, label) => {
+            const el = elements.find(e => e.type === type);
+            if (el) {
+                return checkRow(el, label);
+            }
+            return (
+                <div key={type} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border-color)' }}>
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{label}</span>
+                    <button
+                        onClick={() => addElement(type)}
+                        style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            border: '1px dashed var(--border-color)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontSize: '0.72rem',
+                            color: accentColor,
+                            fontWeight: 600
+                        }}
+                    >
+                        + Hinzufügen
+                    </button>
+                </div>
+            );
+        };
+
         const lineEls = elements.filter(e => e.type === EL_TYPES.LINE);
         const freetextEls = elements.filter(e => e.type === EL_TYPES.FREETEXT);
 
         return (
             <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '6px' }}>Standard-Elemente</div>
-                {logoEl && checkRow(logoEl, 'Logo')}
-                {titleEl && checkRow(titleEl, 'Reporttitel (auto)')}
-                {subtitleEl && checkRow(subtitleEl, 'Subtitel (pro Typ)')}
-                {portfolioNameEl && checkRow(portfolioNameEl, 'Portfolio-Name')}
-                {dateEls.map((d, i) => checkRow(d, `Datum ${d.zone === 'footer' ? '(Footer)' : '(Header)'}`))}
-                {pageNumEl && checkRow(pageNumEl, 'Seitenzahl')}
+                {renderStandardRow(EL_TYPES.LOGO, 'Logo')}
+                {renderStandardRow(EL_TYPES.TITLE, 'Reporttitel (auto)')}
+                {renderStandardRow(EL_TYPES.SUBTITLE, 'Subtitel (pro Typ)')}
+                {renderStandardRow(EL_TYPES.PORTFOLIO_NAME, 'Portfolio-Name')}
+                {renderStandardRow(EL_TYPES.DATE, 'Datum')}
+                {renderStandardRow(EL_TYPES.PAGE_NUMBER, 'Seitenzahl')}
 
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '12px', marginBottom: '6px' }}>Linien ({lineCount}/{MAX_LINES})</div>
                 {lineEls.map((l, i) => checkRow(l, `Linie ${i + 1}`))}
@@ -973,8 +1037,8 @@ ${footerEls.map(renderEl).join('')}
                             pointerEvents: 'none',
                         }} />
 
-                        {/* Render elements */}
-                        {elements.map(renderElement)}
+                        {/* Render elements sorted by zIndex */}
+                        {[...elements].sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1)).map(renderElement)}
                     </div>
                 </div>
 

@@ -15,7 +15,7 @@ function renderTemplateElement(el, { title, subtitle, portfolioName, propertyNam
     const top = (el.y - yOffset) * MM_TO_PX;
     const width = el.w * MM_TO_PX;
     const height = (el.h || 5) * MM_TO_PX;
-    const base = `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;font-family:'Inter',sans-serif;overflow:hidden;`;
+    const base = `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;font-family:'Inter',sans-serif;overflow:hidden;z-index:${el.zIndex || 1};`;
 
     switch (el.type) {
         case 'title':
@@ -396,8 +396,8 @@ function buildHtml({
 
     if (hasTemplate) {
         // Use positioned elements from the saved template
-        const headerEls = templateElements.filter(e => e.zone === 'header' && e.visible);
-        const footerEls = templateElements.filter(e => e.zone === 'footer' && e.visible);
+        const headerEls = templateElements.filter(e => e.zone === 'header' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
+        const footerEls = templateElements.filter(e => e.zone === 'footer' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
         // Footer elements have Y coords relative to the full page, but the
         // .footer container starts at (pageH - footerH). Subtract that offset.
         const footerYOffset = pageH - footerH;

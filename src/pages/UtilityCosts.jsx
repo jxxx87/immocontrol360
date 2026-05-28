@@ -595,14 +595,11 @@ const UtilityCosts = () => {
 
     // ===== SETTLEMENT HTML GENERATION =====
     const generateSettlementHTML = (settlement, singleUnitId = null, targetTenantId = null, templateOverride = null, writingTemplates = null) => {
-        const tpl = templateOverride || pdfTemplate;
         const prop = getPropertyFull(settlement.property_id);
         const data = settlement.data || {};
         const sUnits = data.selectedUnitIds || [];
         const sCosts = data.unitCosts || {};
         const sCostItems = data.costItems || [];
-        const logoUrl = tpl.logoUrl || null;
-        const accentColor = tpl.accentColor || '#0ea5e9';
 
         const propAddress = prop ? `${prop.street} ${prop.house_number}` : '–';
         const propCity = prop ? `${prop.zip} ${prop.city}` : '';
@@ -612,25 +609,21 @@ const UtilityCosts = () => {
             ? units.filter(u => u.property?.economic_unit_id === settlement.economic_unit_id)
             : units.filter(u => u.property_id === settlement.property_id);
 
-        // Totals for distribution keys (calculated from current property state)
+        // Totals for distribution keys
         const totalArea = allPropertyUnits.reduce((s, u) => s + (u.sqm || 1), 0);
         const totalUnitCount = allPropertyUnits.length;
-        // Helper to get active lease occupants - strictly this should use settlement period but approximation from current state/leases is standard fallback
         const getOccHelper = (u) => {
             const l = leases.find(l => l.unit_id === u.id && l.status === 'active');
             return l?.tenant?.occupants || 1;
         };
         const totalPersons = allPropertyUnits.reduce((s, u) => s + getOccHelper(u), 0);
 
-        // Calculate settlement duration in months
         const pStart = new Date(settlement.period_start);
         const pEnd = new Date(settlement.period_end);
-        // Approx months (inclusive)
         const settlementMonths = Math.max(1, (pEnd.getFullYear() - pStart.getFullYear()) * 12 + (pEnd.getMonth() - pStart.getMonth()) + 1);
         const fmt = (n) => n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const keyLabels = { wohnflaeche: 'Wohnfläche', personenanzahl: 'Personen', einheit: 'Einheit', anteil: 'Anteil' };
 
-        // 1. Collect all "pages" (tenant periods) to render
         let allPages = [];
 
         unitsToProcess.forEach(uid => {
@@ -651,7 +644,6 @@ const UtilityCosts = () => {
                         periodText: `${formatDate(p.effectiveStart)} - ${formatDate(p.effectiveEnd)}`,
                         ratio: p.ratio,
                         lease: p.lease,
-                        // Recalculate occupants for this specific lease
                         occupants: p.tenant?.occupants || 1,
                         sqm: unit.sqm || 1
                     });
@@ -663,7 +655,6 @@ const UtilityCosts = () => {
         allPages.forEach((page, idx) => {
             const unitCostsList = sCosts[page.unitId] || [];
 
-            // Calculate Costs & Prepayment
             const tenantTotal = unitCostsList.reduce((sum, item) => {
                 const sourceItem = sCostItems.find(i => i.category_name === item.label);
                 const key = sourceItem ? sourceItem.distribution_key : 'anteil';
@@ -676,8 +667,6 @@ const UtilityCosts = () => {
             const monthlyHeat = page.lease ? parseFloat(page.lease.heating_cost || 0) : 0;
             const monthlyPrepay = monthlySvc + monthlyHeat;
 
-            // Prepayment for the effective period
-            // Logic: Monthly Prepayment * Settlement Months * Ratio (Effective Duration Fraction)
             const tenantPrepay = monthlyPrepay * settlementMonths * page.ratio;
             const tenantSvcPrepay = monthlySvc * settlementMonths * page.ratio;
             const tenantHeatPrepay = monthlyHeat * settlementMonths * page.ratio;
@@ -690,105 +679,41 @@ const UtilityCosts = () => {
                 ? `Inhaber: ${landlordPortfolio?.company_name || landlordPortfolio?.name}, Bank: ${landlordPortfolio.bank_name}, IBAN: ${landlordPortfolio.iban}, BIC: ${landlordPortfolio.bic}`
                 : '';
 
-            const localVars = {
-                mieter_name: page.tenantName,
-                mieter_anrede: `Sehr geehrte/r ${page.tenantName}`,
-                objekt_adresse: `${propAddress}, ${propCity}`,
-                einheit_name: page.unitName,
-                abrechnungsjahr: settlement.year || '',
-                abrechnungszeitraum: `${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}`,
-                nutzungszeitraum: page.periodText,
-                gesamtkosten_mieter: `${fmt(tenantTotal)} €`,
-                vorauszahlungs_betrag: `${fmt(tenantPrepay)} €`,
-                saldo_betrag: `${fmt(Math.abs(balance))} €`,
-                saldo_art: balance > 0 ? 'Nachzahlung' : 'Gutschrift',
-                vermieter_name: landlordName,
-                vermieter_bankverbindung: bankDetailsStr
-            };
-
-            const replaceHTMLVariables = (htmlStr, vars) => {
-                if (!htmlStr) return '';
-                let result = htmlStr;
-                for (const [key, value] of Object.entries(vars)) {
-                    const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
-                    result = result.replace(regex, value);
-                }
-                return result;
-            };
-
-            const defaultIntro = `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-id="objekt_adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-id="abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`;
-            const defaultOutro = `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`;
-
-            const introHtml = replaceHTMLVariables(writingTemplates?.utility_intro || defaultIntro, localVars);
-            const outroHtml = replaceHTMLVariables(writingTemplates?.utility_outro || defaultOutro, localVars);
-
-            // Generate Page 1
-            pagesHTML += `
-            <div style="page-break-before:${idx > 0 ? 'always' : 'auto'};min-height:250mm;position:relative;background:#fff;font-family:'Segoe UI', Arial, sans-serif;font-size:11px;color:#1f2937">
-                ${logoUrl ? `<div style="text-align:right;margin-bottom:25px"><img src="${logoUrl}" style="max-height:50px;max-width:200px;object-fit:contain" alt="Logo" /></div>` : ''}
-                <div style="margin-bottom:16px">
-                    <div style="font-size:8px;color:#aaa;border-bottom:1px solid #ddd;display:inline-block;padding-bottom:1px;margin-bottom:3px">${(() => { const pf = portfolios.find(p => p.id === prop?.portfolio_id); return pf?.name || ''; })()}, ${propAddress}, ${propCity}</div>
-                    <div style="font-size:11px;line-height:1.5">${page.tenantName}<br>${propAddress}<br>${propCity}</div>
-                </div>
-                <div style="text-align:right;font-size:11px;margin:10px 0">${formatDate(settlement.created_at)}</div>
-                
-                <!-- Dynamic Intro Anschreiben -->
-                <div style="margin-bottom:15px;line-height:1.5;font-size:11px">${introHtml}</div>
-                
-                <div style="border:1px solid ${accentColor};border-radius:3px;padding:10px 12px;margin-bottom:18px;position:relative">
-                    <div style="position:absolute;top:-8px;left:8px;background:#fff;padding:0 5px;font-weight:600;color:${accentColor};font-size:11px">Ihre Daten</div>
-                    <table style="width:100%;font-size:10px;margin-top:2px">
-                        <tr>
-                            <td style="width:40%;padding:1px 0"><span style="color:#aaa;font-size:9px">Adresse</span><br><b>${propAddress}<br>${propCity}</b></td>
-                            <td style="width:30%;padding:1px 0"><span style="color:#aaa;font-size:9px">Lage</span><br><b>${page.unitName}</b></td>
-                            <td style="width:30%;padding:1px 0"><span style="color:#aaa;font-size:9px">Abrechnungszeitraum</span><br><b style="color:${accentColor}">${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}</b></td>
-                        </tr>
-                        <tr>
-                            <td style="padding:5px 0 1px"><span style="color:#aaa;font-size:9px">Erstellungsdatum</span><br><b>${formatDate(settlement.created_at)}</b></td>
-                            <td style="padding:5px 0 1px"><span style="color:#aaa;font-size:9px">Ihre Personen</span><br><b>${page.occupants}</b></td>
-                            <td style="padding:5px 0 1px"><span style="color:#aaa;font-size:9px">Ihre Wohneinheiten</span><br><b>1</b></td>
-                        </tr>
-                        <tr><td style="padding:5px 0 1px" colspan="3"><span style="color:#aaa;font-size:9px">Ihr Nutzungszeitraum:</span><br><b>${page.periodText}</b></td></tr>
-                    </table>
-                </div>
-                <h3 style="font-size:13px;font-weight:700;margin:0 0 8px">1. Aufstellung der Gesamtkosten</h3>
-                <table style="width:100%;font-size:11px;border-collapse:collapse">
-                    <tr><td></td><td style="text-align:right;font-weight:600;font-style:italic;padding:2px 0">Brutto</td></tr>
-                    <tr style="border-top:2px solid #1f2937"><td style="padding:5px 0">Ihre Gesamtkosten</td><td style="padding:5px 0;text-align:right;font-weight:700">${fmt(tenantTotal)} €</td></tr>
-                    <tr style="border-top:1px solid #e5e7eb"><td style="padding:4px 0;color:#555">Ihre Betriebskosten-Vorauszahlung</td><td style="padding:4px 0;text-align:right">${fmt(tenantSvcPrepay)} €</td></tr>
-                    <tr><td style="padding:4px 0;color:#555">Ihre Heizkosten-Vorauszahlung</td><td style="padding:4px 0;text-align:right">${fmt(tenantHeatPrepay)} €</td></tr>
-                    <tr style="border-top:2px solid #1f2937">
-                        <td style="padding:6px 0;font-weight:700;font-size:12px">${balance > 0 ? '➡' : '⬅'} <b style="color:${balance > 0 ? '#dc2626' : '#16a34a'}">Ihre ${balance > 0 ? 'Nachzahlung' : 'Gutschrift'}</b></td>
-                        <td style="padding:6px 0;text-align:right;font-weight:700;font-size:12px;color:${balance > 0 ? '#dc2626' : '#16a34a'}">${fmt(Math.abs(balance))} €</td>
+            // Generate Summary Table
+            const summaryTableHtml = `
+            <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 10pt;">
+                <thead>
+                    <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                        <th style="padding: 6px; text-align: left;">Kostenart / Position</th>
+                        <th style="padding: 6px; text-align: right; width: 30%;">Betrag</th>
                     </tr>
-                </table>
-                
-                <!-- Dynamic Outro Anschreiben -->
-                <div style="margin-top:15px;font-size:11px;line-height:1.5">${outroHtml}</div>
-                
-                <div style="position:absolute;bottom:-12mm;left:0;font-size:8px;color:#e6a817;letter-spacing:2px;font-weight:600">SEITE ${idx * 2 + 1} / ${allPages.length * 2}</div>
-            </div>
-            <div style="page-break-before:always;min-height:250mm;position:relative;background:#fff;padding-top:35px">
-                <h3 style="font-size:11px;font-weight:700;margin:0 0 8px">Aufteilung der Gesamtkosten für Ihr Mietobjekt (${page.periodText})</h3>
-                <table style="width:100%;border-collapse:collapse;font-size:8.5px;table-layout:fixed">
-                    <colgroup><col style="width:19%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:12%"><col style="width:17%"></colgroup>
-                    <thead><tr style="border-bottom:2px solid #1f2937">
-                        <th style="text-align:left;padding:3px 2px;font-weight:700;font-size:7.5px">Kostenart</th>
-                        <th style="text-align:left;padding:3px 2px;font-weight:700;font-size:7.5px">Verteiler-<br>schlüssel</th>
-                        <th style="text-align:right;padding:3px 2px;font-weight:700;font-size:7.5px">Gesamt-<br>kosten</th>
-                        <th style="text-align:right;padding:3px 2px;font-weight:700;font-size:7.5px">Gesamt-<br>einheiten</th>
-                        <th style="text-align:right;padding:3px 2px;font-weight:700;font-size:7.5px">Kosten /<br>Einheit</th>
-                        <th style="text-align:right;padding:3px 2px;font-weight:700;font-size:7.5px">Ihre<br>Einheiten</th>
-                        <th style="text-align:right;padding:3px 2px;font-weight:700;font-size:7.5px">Ihr Kostenanteil<br>(zeitanteilig)</th>
-                    </tr></thead>
-                    <tbody>
-                    ${unitCostsList.map(item => {
-                // Find matching total cost item
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">Ihre Gesamtkosten (Brutto):</td>
+                        <td style="padding: 6px; text-align: right; font-weight: bold; border-bottom: 1px solid #cbd5e1;">${fmt(tenantTotal)} €</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">Ihre Betriebskosten-Vorauszahlung:</td>
+                        <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${fmt(tenantSvcPrepay)} €</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">Ihre Heizkosten-Vorauszahlung:</td>
+                        <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${fmt(tenantHeatPrepay)} €</td>
+                    </tr>
+                    <tr style="border-top: 2px solid #000; border-bottom: 2px double #000; background-color: #f8fafc;">
+                        <td style="padding: 8px; font-weight: bold; font-size: 11pt;">Ihre ${balance > 0 ? 'Nachzahlung' : 'Gutschrift'} (Brutto):</td>
+                        <td style="padding: 8px; text-align: right; font-weight: bold; font-size: 11pt; color: ${balance > 0 ? '#dc2626' : '#16a34a'};">${fmt(Math.abs(balance))} €</td>
+                    </tr>
+                </tbody>
+            </table>`;
+
+            // Generate Detail Table
+            const detailRows = unitCostsList.map(item => {
                 const sourceItem = sCostItems.find(i => i.category_name === item.label);
                 const totalCost = sourceItem ? sourceItem.amount : 0;
                 const key = sourceItem ? sourceItem.distribution_key : 'anteil';
 
-                // Resolve key: check distributionKeys first, then legacy strings
                 const dkObj = distributionKeys.find(k => k.id === key);
                 const resolvedType = dkObj ? dkObj.calculation_type : (key === 'wohnflaeche' ? 'area' : key === 'personenanzahl' ? 'persons' : key === 'einheit' ? 'units' : key === 'anteil' ? 'equal' : 'area');
                 const resolvedName = dkObj ? dkObj.name : (keyLabels[key] || key);
@@ -806,7 +731,6 @@ const UtilityCosts = () => {
                     myUnits = page.occupants;
                     unitLabel = 'P.';
                 } else {
-                    // Default or 'units'/'equal'
                     totalUnits = totalUnitCount;
                     myUnits = 1;
                     unitLabel = 'Einh.';
@@ -820,44 +744,188 @@ const UtilityCosts = () => {
                 const itemShare = (item.amount || 0) * factor;
 
                 return `
-                        <tr style="border-bottom:1px solid #eee">
-                            <td style="padding:3px 2px;font-weight:700">${item.label}</td>
-                            <td style="padding:3px 2px">${resolvedName}</td>
-                            <td style="padding:3px 2px;text-align:right">${totalCost > 0 ? fmt(totalCost) + ' €' : '--'}</td>
-                            <td style="padding:3px 2px;text-align:right">${totalUnits > 0 ? fmt(totalUnits) + ' ' + unitLabel : '--'}</td>
-                            <td style="padding:3px 2px;text-align:right">${costPerUnit > 0 ? fmt(costPerUnit) + ' €' : '--'}</td>
-                            <td style="padding:3px 2px;text-align:right">${myUnits > 0 ? fmt(myUnits) + ' ' + unitLabel : '--'}</td>
-                            <td style="padding:3px 2px;text-align:right;font-weight:700">${fmt(itemShare)} €</td>
-                        </tr>`;
-            }).join('')}
-                    <tr style="border-top:2px solid #1f2937">
-                        <td colspan="6" style="padding:4px 0;font-weight:700">Gesamtsumme (zeitanteilig)</td>
-                        <td style="padding:4px 0;text-align:right;font-weight:700">${fmt(tenantTotal)} €</td>
+                <tr>
+                    <td style="padding: 6px; border-bottom: 1px solid #cbd5e1; font-weight: bold;">${item.label}</td>
+                    <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">${resolvedName}</td>
+                    <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${totalCost > 0 ? fmt(totalCost) + ' €' : '--'}</td>
+                    <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${totalUnits > 0 ? fmt(totalUnits) + ' ' + unitLabel : '--'}</td>
+                    <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${costPerUnit > 0 ? fmt(costPerUnit) + ' €' : '--'}</td>
+                    <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${myUnits > 0 ? fmt(myUnits) + ' ' + unitLabel : '--'}</td>
+                    <td style="padding: 6px; text-align: right; font-weight: bold; border-bottom: 1px solid #cbd5e1;">${fmt(itemShare)} €</td>
+                </tr>`;
+            }).join('');
+
+            const detailTableHtml = `
+            <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 8.5pt;">
+                <thead>
+                    <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                        <th style="padding: 6px; text-align: left; width: 22%;">Kostenart</th>
+                        <th style="padding: 6px; text-align: left; width: 15%;">Schlüssel</th>
+                        <th style="padding: 6px; text-align: right; width: 12%;">Gesamtkosten</th>
+                        <th style="padding: 6px; text-align: right; width: 12%;">Gesamt-Einheit</th>
+                        <th style="padding: 6px; text-align: right; width: 12%;">Kosten/Einheit</th>
+                        <th style="padding: 6px; text-align: right; width: 12%;">Ihre Einheit</th>
+                        <th style="padding: 6px; text-align: right; width: 15%; font-weight: bold;">Ihr Anteil</th>
                     </tr>
-                    </tbody>
-                </table>
-                <div style="position:absolute;bottom:-12mm;left:0;font-size:8px;color:#e6a817;letter-spacing:2px;font-weight:600">SEITE ${idx * 2 + 2} / ${allPages.length * 2}</div>
-            </div>`;
+                </thead>
+                <tbody>
+                    ${detailRows}
+                    <tr style="border-top: 2px solid #000; font-weight: bold; background-color: #f8fafc;">
+                        <td colspan="6" style="padding: 8px;">Gesamtsumme (zeitanteilig):</td>
+                        <td style="padding: 8px; text-align: right;">${fmt(tenantTotal)} €</td>
+                    </tr>
+                </tbody>
+            </table>`;
+
+            const localVars = {
+                mieter_name: page.tenantName,
+                mieter_anrede: `Sehr geehrte/r ${page.tenantName}`,
+                objekt_adresse: `${propAddress}, ${propCity}`,
+                einheit_name: page.unitName,
+                abrechnungsjahr: settlement.year || '',
+                abrechnungszeitraum: `${formatDate(settlement.period_start)} - ${formatDate(settlement.period_end)}`,
+                nutzungszeitraum: page.periodText,
+                gesamtkosten_mieter: `${fmt(tenantTotal)} €`,
+                vorauszahlungs_betrag: `${fmt(tenantPrepay)} €`,
+                saldo_betrag: `${fmt(Math.abs(balance))} €`,
+                saldo_art: balance > 0 ? 'Nachzahlung' : 'Gutschrift',
+                vermieter_name: landlordName,
+                vermieter_bankverbindung: bankDetailsStr,
+                erstellungsdatum: formatDate(settlement.created_at),
+                nebenkosten_tabelle: summaryTableHtml,
+                nebenkosten_detail_tabelle: detailTableHtml
+            };
+
+            const replaceHTMLVariables = (htmlStr, vars) => {
+                if (!htmlStr) return '';
+                let result = htmlStr;
+                for (const [key, value] of Object.entries(vars)) {
+                    const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
+                    result = result.replace(regex, value);
+                }
+                return result;
+            };
+
+            const DEFAULT_UTILITY_COSTS = `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter-Name">Mieter-Name</span></strong><br><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Datum: <strong><span data-type="mention" data-id="erstellungsdatum" data-label="Erstellungsdatum">Erstellungsdatum</span></strong><br>Abrechnungsjahr: <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong><br>Nutzungszeitraum: <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong></div></div><div class="letter-subject">Betriebskostenabrechnung <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-body"><p>Sehr geehrte(r) <span data-type="mention" data-id="mieter_name" data-label="Mieter-Name">Mieter-Name</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span>. Die Gesamtkosten und Ihr Abrechnungsergebnis stellen sich wie folgt dar:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Nebenkosten-Tabelle">Nebenkosten-Tabelle</span></p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen entnehmen Sie bitte der Folgeseite.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter-Name">Mieter-Name</span></strong><br><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Datum: <strong><span data-type="mention" data-id="erstellungsdatum" data-label="Erstellungsdatum">Erstellungsdatum</span></strong><br>Abrechnungsjahr: <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong><br>Nutzungszeitraum: <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong></div></div><div class="letter-subject">Detaillierte Aufstellung der Umlagen</div><div class="letter-body"><p>Nachfolgend finden Sie die Einzelpositionen und deren Berechnungsgrundlage:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Nebenkosten-Detailtabelle">Nebenkosten-Detailtabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`;
+
+            let templateHtml = writingTemplates?.full_template || DEFAULT_UTILITY_COSTS;
+            const renderedContent = replaceHTMLVariables(templateHtml, localVars);
+
+            pagesHTML += renderedContent;
         });
 
         return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><title>Nebenkostenabrechnung ${settlement.year || ''}</title>
         <style>
-            @page { size: A4; margin: 14mm 16mm; }
-            * { box-sizing: border-box; background-color: transparent; }
-            html { background: #fff !important; }
-            body { font-family: 'Segoe UI', Arial, sans-serif; color: #1f2937; line-height: 1.4; max-width: 210mm; margin: 0 auto; padding: 14mm 16mm; background: #fff !important; font-size: 11px; }
-            div, table, tr, td, th, thead, tbody, tfoot { background-color: #fff !important; }
-            @media print { body { padding: 0; background: #fff !important; } html, div, table, tr, td, th { background: #fff !important; } }
+            @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
+            @page { size: A4; margin: 0; }
+            * { box-sizing: border-box; }
+            body { margin: 0; padding: 0; background: #fff; font-family: 'Open Sans', Arial, sans-serif; font-size: 11pt; color: #000; }
+            .letter-page {
+                width: 210mm;
+                height: 297mm;
+                padding: 20mm 20mm 20mm 25mm;
+                margin: 0 auto;
+                background: #ffffff;
+                color: #000000;
+                box-sizing: border-box;
+                position: relative;
+                display: flex;
+                flex-direction: column;
+                text-align: left;
+                page-break-after: always;
+                page-break-inside: avoid;
+            }
+            .letter-sender {
+                font-size: 8pt;
+                color: #555555;
+                border-bottom: 1px solid #cccccc;
+                padding-bottom: 2mm;
+                margin-bottom: 5mm;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            .letter-header-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                margin-bottom: 10mm;
+            }
+            .letter-recipient {
+                width: 85mm;
+                font-size: 10pt;
+                line-height: 1.4;
+                color: #111111;
+                text-align: left;
+            }
+            .letter-date {
+                font-size: 10pt;
+                color: #333333;
+                text-align: right;
+            }
+            .letter-subject {
+                font-size: 13pt;
+                font-weight: bold;
+                margin-bottom: 4mm;
+                color: #000000;
+                text-align: left;
+            }
+            .letter-object {
+                font-size: 10pt;
+                color: #444444;
+                margin-bottom: 8mm;
+                padding-bottom: 2mm;
+                border-bottom: 1px dotted #e2e8f0;
+                text-align: left;
+            }
+            .letter-body {
+                flex-grow: 1;
+                font-size: 11pt;
+                line-height: 1.6;
+                text-align: left;
+            }
+            .letter-body p {
+                margin-bottom: 1em !important;
+            }
+            .letter-footer {
+                display: flex;
+                justify-content: space-between;
+                border-top: 1px solid #dddddd;
+                padding-top: 5mm;
+                margin-top: 10mm;
+                font-size: 8pt;
+                color: #666666;
+                line-height: 1.4;
+                text-align: left;
+            }
+            .footer-col {
+                width: 30%;
+            }
+            @media print {
+                body {
+                    margin: 0;
+                    padding: 0;
+                    background: #fff;
+                }
+                .letter-page {
+                    margin: 0 !important;
+                    border: none !important;
+                    box-shadow: none !important;
+                    page-break-after: always !important;
+                    page-break-inside: avoid !important;
+                    width: 210mm !important;
+                    height: 297mm !important;
+                }
+            }
         </style></head><body style="background:#fff">
         ${pagesHTML}
         </body></html>`;
     };
 
-
     const fetchWritingTemplates = async (portfolioId) => {
         const results = {
             utility_intro: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-id="objekt_adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-id="abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`,
-            utility_outro: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+            utility_outro: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`,
+            full_template: null
         };
 
         if (!user) return results;
@@ -893,6 +961,7 @@ const UtilityCosts = () => {
             }
 
             if (data?.content_html) {
+                results.full_template = data.content_html;
                 // Split by 'nebenkosten_tabelle' placeholder
                 const content = data.content_html;
                 // Search for placeholder span or curly braces fallback
@@ -947,10 +1016,32 @@ const UtilityCosts = () => {
             : pdfTemplate;
         const writingTemplates = await fetchWritingTemplates(prop?.portfolio_id);
         const html = generateSettlementHTML(settlement, unitId, tenantId, tpl, writingTemplates);
+
+        let suffix = '';
+        if (unitId && tenantId) {
+            const periods = getTenantsForUnitInPeriod(unitId, settlement.period_start, settlement.period_end);
+            const p = periods.find(p => p.tenant && p.tenant.id === tenantId);
+            if (p && p.tenant) suffix = `_${p.tenant.last_name}`;
+        }
+        const filename = `Nebenkostenabrechnung_${settlement.year || ''}_${prop ? prop.street.replace(/\s/g, '_') : 'Objekt'}${suffix}`;
+
         const win = window.open('', '_blank');
+        if (!win) {
+            alert('Bitte Popups erlauben.');
+            return;
+        }
+        win.document.open();
         win.document.write(html);
+
+        const script = win.document.createElement('script');
+        script.textContent = `document.title = "${filename}";`;
+        win.document.head.appendChild(script);
+
         win.document.close();
-        setTimeout(() => win.print(), 500);
+        setTimeout(() => {
+            win.focus();
+            win.print();
+        }, 800);
     };
 
     const downloadSettlement = async (settlement, unitId = null, tenantId = null) => {

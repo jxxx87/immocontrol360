@@ -26,12 +26,19 @@ const Loans = () => {
 
     // Grouped Data State
     const [groupedLoans, setGroupedLoans] = useState({}); // { [propertyId]: { property: {}, loans: [], totals: {} } }
-    const [expandedGroups, setExpandedGroups] = useState({});
+    const [expandedGroups, setExpandedGroups] = useState(() => {
+        const params = new URLSearchParams(window.location.search);
+        const urlPropertyId = params.get('propertyId');
+        return urlPropertyId ? { [urlPropertyId]: true } : {};
+    });
 
     // Filters
-    const [filters, setFilters] = useState({
-        search: '',
-        propertyId: ''
+    const [filters, setFilters] = useState(() => {
+        const params = new URLSearchParams(window.location.search);
+        return {
+            search: '',
+            propertyId: params.get('propertyId') || ''
+        };
     });
 
     // Add/Edit Modal
@@ -90,6 +97,7 @@ const Loans = () => {
             }
             const { data: loanData, error: loanError } = await loanQuery;
             if (loanError) throw loanError;
+            setLoans(loanData || []);
             // Fetch Economic Units
             const { data: weData, error: weError } = await supabase.from('economic_units').select('*');
             if (weError) throw weError;
@@ -142,9 +150,13 @@ const Loans = () => {
         Object.values(propGroups).forEach(g => {
             const weRow = rawWEs.find(we => we.id === g.id);
             if (g.isGroup && g.properties.length > 0) {
-                const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
-                g.street = weRow?.name || `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
-                g.house_number = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                const propLabels = g.properties.map(pr => `${pr.street} ${pr.house_number}`.trim()).filter(Boolean);
+                if (weRow?.name) {
+                    g.street = `${weRow.name} (${propLabels.join(', ')})`;
+                } else {
+                    g.street = `Wirtschaftseinheit: ${propLabels.join(', ')}`;
+                }
+                g.house_number = ''; // Reset since streets and house numbers are already formatted in street field
                 const cities = Array.from(new Set(g.properties.map(pr => pr.city).filter(Boolean)));
                 g.city = cities.join(', ');
             } else {
@@ -213,12 +225,8 @@ const Loans = () => {
     }, [user, selectedPortfolioID]);
 
     useEffect(() => {
-        // Re-process when filters change, but we need the raw data. 
-        // For simplicity, we'll re-fetch or store raw data. Storing raw data in state 'loans'
-        // Actually, let's just refetch or keep simple. 
-        // Better: Process existing 'loans' state.
-        // I need to store raw loans in state 'loans'.
-    }, [filters]);
+        processLoans(loans, properties, economicUnits);
+    }, [filters, loans, properties, economicUnits]);
 
     // Using a separate effect to re-process is cleaner if we have raw data
     // Let's modify fetchData to setLoans(rawLoans) and then call a useEffect to process.

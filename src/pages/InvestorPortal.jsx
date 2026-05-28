@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
     Calculator,
+    Calendar,
     TrendingUp,
     Wallet,
     Info,
@@ -81,8 +82,26 @@ const InvestorPortal = () => {
         ltv: 0,
         rentPotential: 0,
         totalMarketValue: 0,
-        totalDebt: 0
+        totalDebt: 0,
+        totalMonthlyIncome: 0,
+        totalMonthlyInterest: 0,
+        totalMonthlyRepayment: 0,
+        totalMonthlyAnnuity: 0,
+        totalEquity: 0,
+        totalInvestment: 0,
+        wacd: 0,
+        dscr: 0,
+        coc: 0,
+        netYield: 0,
+        tilgungseffekt: 0,
+        totalTargetRent: 0,
+        debtYield: 0
     });
+
+    // Enhanced Cockpit UI States
+    const [waterfallPeriod, setWaterfallPeriod] = useState('monthly');
+    const [selectedKpi, setSelectedKpi] = useState(null);
+    const [showCashflowDetailsModal, setShowCashflowDetailsModal] = useState(false);
 
     // Renovation Stats (for cockpit card)
     // eslint-disable-next-line no-unused-vars
@@ -91,6 +110,7 @@ const InvestorPortal = () => {
     // Rent increase tracking
     const [pendingIncreases, setPendingIncreases] = useState([]);
     const [showIncreasesModal, setShowIncreasesModal] = useState(false);
+    const [showThresholdModal, setShowThresholdModal] = useState(false);
 
     // Deals State
     const [deals, setDeals] = useState([]);
@@ -265,23 +285,31 @@ const InvestorPortal = () => {
 
     const calculateCockpitStats = (props, lns, WEs = economicUnits) => {
         let totalMonthlyIncome = 0;
+        let totalTargetRent = 0;
         let totalDebt = 0;
         let totalMarketValue = 0;
-        let totalTargetRent = 0;
-        let totalMonthlyDebtService = 0;
+        let totalMonthlyAnnuity = 0;
+        let totalMonthlyInterest = 0;
+        let totalMonthlyRepayment = 0;
 
         // Group properties to sum market value taking WEs into account
         const groups = {};
         let ungroupedMarketValue = 0;
+        let ungroupedEquity = 0;
+        let ungroupedInvestment = 0;
 
         props.forEach(p => {
             if (p.economic_unit_id) {
                 if (!groups[p.economic_unit_id]) {
-                    groups[p.economic_unit_id] = { sum: 0 };
+                    groups[p.economic_unit_id] = { sumMarketValue: 0, sumEquity: 0, sumInvestment: 0 };
                 }
-                groups[p.economic_unit_id].sum += parseFloat(p.market_value_total) || 0;
+                groups[p.economic_unit_id].sumMarketValue += parseFloat(p.market_value_total) || 0;
+                groups[p.economic_unit_id].sumEquity += parseFloat(p.equity_invested) || 0;
+                groups[p.economic_unit_id].sumInvestment += parseFloat(p.total_investment_cost) || 0;
             } else {
                 ungroupedMarketValue += parseFloat(p.market_value_total) || 0;
+                ungroupedEquity += parseFloat(p.equity_invested) || 0;
+                ungroupedInvestment += parseFloat(p.total_investment_cost) || 0;
             }
 
             (p.units || []).forEach(u => {
@@ -299,32 +327,78 @@ const InvestorPortal = () => {
 
         // Sum up groups, using WE-level override if present
         let groupedMarketValue = 0;
+        let groupedEquity = 0;
+        let groupedInvestment = 0;
         Object.entries(groups).forEach(([weId, g]) => {
             const weRow = WEs.find(eu => eu.id === weId);
-            if (weRow && parseFloat(weRow.market_value_total) > 0) {
-                groupedMarketValue += parseFloat(weRow.market_value_total);
+            if (weRow) {
+                groupedMarketValue += parseFloat(weRow.market_value_total) > 0 ? parseFloat(weRow.market_value_total) : g.sumMarketValue;
+                groupedEquity += parseFloat(weRow.equity_invested) > 0 ? parseFloat(weRow.equity_invested) : g.sumEquity;
+                groupedInvestment += parseFloat(weRow.total_investment_cost) > 0 ? parseFloat(weRow.total_investment_cost) : g.sumInvestment;
             } else {
-                groupedMarketValue += g.sum;
+                groupedMarketValue += g.sumMarketValue;
+                groupedEquity += g.sumEquity;
+                groupedInvestment += g.sumInvestment;
             }
         });
 
         totalMarketValue = ungroupedMarketValue + groupedMarketValue;
+        const totalEquity = ungroupedEquity + groupedEquity;
+        const totalInvestment = ungroupedInvestment + groupedInvestment;
+
+        let weightedInterestSum = 0;
+        let totalCurrentDebt = 0;
 
         lns.forEach(loan => {
-            totalDebt += calculateCurrentDebt(loan);
+            const debt = calculateCurrentDebt(loan);
+            totalDebt += debt;
+
             const amount = parseFloat(loan.loan_amount) || 0;
             const interestRate = (parseFloat(loan.interest_rate) || 0) / 100;
             const repaymentRate = (parseFloat(loan.initial_repayment_rate) || 0) / 100;
-            if (loan.fixed_annuity) totalMonthlyDebtService += parseFloat(loan.fixed_annuity);
-            else totalMonthlyDebtService += (amount * (interestRate + repaymentRate)) / 12;
+
+            let monthlyPayment = 0;
+            if (loan.fixed_annuity) {
+                monthlyPayment = parseFloat(loan.fixed_annuity);
+            } else {
+                monthlyPayment = (amount * (interestRate + repaymentRate)) / 12;
+            }
+
+            const monthlyInterest = debt * interestRate / 12;
+            const monthlyRepayment = Math.max(0, monthlyPayment - monthlyInterest);
+
+            totalMonthlyAnnuity += monthlyPayment;
+            totalMonthlyInterest += monthlyInterest;
+            totalMonthlyRepayment += monthlyRepayment;
+
+            weightedInterestSum += debt * interestRate;
+            totalCurrentDebt += debt;
         });
 
+        const wacd = totalCurrentDebt > 0 ? (weightedInterestSum / totalCurrentDebt) * 100 : 0;
+        const coc = totalEquity > 0 ? ((totalTargetRent - totalMonthlyAnnuity) * 12 / totalEquity) * 100 : 0;
+        const netYield = totalInvestment > 0 ? ((totalTargetRent * 12) / totalInvestment) * 100 : 0;
+        const debtYield = totalDebt > 0 ? ((totalTargetRent * 12) / totalDebt) * 100 : 0;
+
         setStats({
-            netCashflow: totalMonthlyIncome - totalMonthlyDebtService,
+            netCashflow: totalMonthlyIncome - totalMonthlyAnnuity,
             ltv: totalMarketValue > 0 ? (totalDebt / totalMarketValue) * 100 : 0,
             rentPotential: totalTargetRent - totalMonthlyIncome,
             totalMarketValue,
-            totalDebt
+            totalDebt,
+            totalMonthlyIncome,
+            totalMonthlyInterest,
+            totalMonthlyRepayment,
+            totalMonthlyAnnuity,
+            totalEquity,
+            totalInvestment,
+            wacd,
+            dscr: totalMonthlyAnnuity > 0 ? totalTargetRent / totalMonthlyAnnuity : 0,
+            coc,
+            netYield,
+            tilgungseffekt: totalMonthlyRepayment * 12,
+            totalTargetRent,
+            debtYield
         });
     };
 
@@ -415,6 +489,134 @@ const InvestorPortal = () => {
         const vacant = units.filter(u => !u.is_vacation_rental && !u.leases?.some(l => l.status === 'active')).length;
         return `${vacant} / ${total}`;
     };
+
+    const rentOptimizations = React.useMemo(() => {
+        const optims = [];
+        const now = new Date();
+
+        properties.forEach(p => {
+            const addr = `${p.street} ${p.house_number || ''}`.trim();
+            (p.units || []).forEach(u => {
+                if (u.is_vacation_rental) return;
+
+                const activeLease = u.leases?.find(l => l.status === 'active');
+                const targetRent = parseFloat(u.target_rent) || 0;
+                const sqm = parseFloat(u.sqm) || 0;
+
+                if (!activeLease) {
+                    if (targetRent > 0) {
+                        optims.push({
+                            id: `vacant_${u.id}`,
+                            unitId: u.id,
+                            type: 'new_lease',
+                            property: addr,
+                            unit: u.unit_name || '–',
+                            currentRent: 0,
+                            targetRent: targetRent,
+                            potential: targetRent,
+                            reason: 'Einheit steht leer. Neuvermietungspotenzial.',
+                            actionLabel: 'Neu vermieten'
+                        });
+                    }
+                    return;
+                }
+
+                const currentRent = parseFloat(activeLease.cold_rent) || 0;
+                const lastIncreaseStr = activeLease.last_rent_increase || activeLease.start_date;
+                const baseDate = lastIncreaseStr ? new Date(lastIncreaseStr) : null;
+
+                const monthsSinceLastIncrease = baseDate
+                    ? (now.getFullYear() - baseDate.getFullYear()) * 12 + (now.getMonth() - baseDate.getMonth())
+                    : 999;
+
+                if (targetRent > currentRent) {
+                    const diff = targetRent - currentRent;
+                    const maxIncrease = Math.min(diff, currentRent * 0.20);
+
+                    if (monthsSinceLastIncrease >= 15) {
+                        const leaseType = activeLease.lease_type || 'normal';
+                        let reason = '';
+                        let actionLabel = 'Brief erstellen';
+
+                        if (leaseType === 'index') {
+                            reason = `Indexmiete anpassbar. Verbraucherpreisindex gestiegen.`;
+                        } else if (leaseType === 'staffel') {
+                            reason = `Staffelerhöhung steht laut Vertrag an.`;
+                            actionLabel = 'Staffel prüfen';
+                        } else {
+                            const curPerSqm = sqm > 0 ? (currentRent / sqm).toFixed(2) : '–';
+                            const targetPerSqm = sqm > 0 ? (targetRent / sqm).toFixed(2) : '–';
+                            reason = `Seit ${monthsSinceLastIncrease} Mon. unverändert & unter Soll-Miete (Ist: ${curPerSqm} €/m² vs. Soll: ${targetPerSqm} €/m²).`;
+                        }
+
+                        optims.push({
+                            id: `increase_${u.id}`,
+                            unitId: u.id,
+                            type: 'increase',
+                            property: addr,
+                            unit: u.unit_name || '–',
+                            currentRent: currentRent,
+                            targetRent: targetRent,
+                            potential: maxIncrease,
+                            reason: reason,
+                            actionLabel: actionLabel
+                        });
+                    }
+                }
+            });
+        });
+
+        return optims;
+    }, [properties]);
+
+    const thresholdUnits = React.useMemo(() => {
+        const list = [];
+        properties.forEach(p => {
+            const addr = `${p.street} ${p.house_number || ''}`.trim();
+            (p.units || []).forEach(u => {
+                if (u.is_vacation_rental) return;
+                const activeLease = u.leases?.find(l => l.status === 'active');
+                if (!activeLease) return;
+                const currentRent = parseFloat(activeLease.cold_rent) || 0;
+                const targetRent = parseFloat(u.target_rent) || 0;
+                if (currentRent > 0 && (targetRent - currentRent) / currentRent > 0.15) {
+                    const pct = ((targetRent - currentRent) / currentRent) * 100;
+                    list.push({
+                        unitId: u.id,
+                        property: addr,
+                        unit: u.unit_name || '–',
+                        currentRent,
+                        targetRent,
+                        diff: targetRent - currentRent,
+                        pct,
+                        lastRentIncrease: activeLease.last_rent_increase,
+                        startDate: activeLease.start_date,
+                        leaseType: activeLease.lease_type
+                    });
+                }
+            });
+        });
+        return list;
+    }, [properties]);
+
+    const nextLoanReset = React.useMemo(() => {
+        let nearest = null;
+        let nearestDiff = Infinity;
+        const now = new Date();
+
+        loans.forEach(l => {
+            if (!l.end_date) return;
+            const resetDate = new Date(l.end_date);
+            if (resetDate <= now) return;
+            const diff = resetDate - now;
+            if (diff < nearestDiff) {
+                nearestDiff = diff;
+                nearest = { loan: l, date: resetDate };
+            }
+        });
+
+        return nearest;
+    }, [loans]);
 
     // Group Properties by Economic Unit
     const groupedProperties = React.useMemo(() => {
@@ -825,93 +1027,886 @@ const InvestorPortal = () => {
     );
 
     // ─── RENDER: COCKPIT ───────────────────────────────────────────
-    const renderCockpit = () => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
-            {/* KPI Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--spacing-lg)' }}>
-                <Card title="Netto-Cashflow" icon={Wallet} color="#10B981">
-                    <h3 style={{ fontSize: '1.5rem', fontWeight: 700, color: cashflowColor(stats.netCashflow) }}>{formatCurrency(stats.netCashflow)}</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Nach Zins & Tilgung (Ist)</p>
-                </Card>
-                <Card title="Portfolio LTV" icon={TrendingUp} color="#3B82F6">
-                    <h3 style={{ fontSize: '1.5rem', fontWeight: 700 }}>{stats.ltv.toFixed(1)} %</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Gesamte Portfoliokredite</p>
-                </Card>
-                <Card title="Mietpotential" icon={ArrowUpRight} color="#F59E0B">
-                    <h3 style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(stats.rentPotential)}</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>IST vs. SOLL Kaltmiete</p>
-                </Card>
-                <Card title="Mieterhöhungen" icon={TrendingUp} color="#EC4899">
-                    <div
-                        onClick={() => pendingIncreases.length > 0 && setShowIncreasesModal(true)}
-                        style={{ cursor: pendingIncreases.length > 0 ? 'pointer' : 'default' }}
-                    >
-                        <h3 style={{ fontSize: '1.5rem', fontWeight: 700, color: pendingIncreases.length > 0 ? '#EC4899' : 'inherit' }}>{pendingIncreases.length}</h3>
-                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                            {pendingIncreases.length === 1 ? 'Erhöhung möglich' : 'Erhöhungen möglich'}
-                        </p>
-                        {pendingIncreases.length > 0 && (
-                            <p style={{ fontSize: '0.7rem', color: 'var(--primary-color)', marginTop: '4px', fontWeight: 600 }}>Klicken für Details →</p>
-                        )}
-                    </div>
-                </Card>
-                <Card title="Marktwert Portfolio" icon={Building2} color="#8B5CF6">
-                    <h3 style={{ fontSize: '1.5rem', fontWeight: 700 }}>{formatCurrency(stats.totalMarketValue)}</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Summe Objektwerte</p>
-                </Card>
-            </div>
-
-            {/* Portfolio Table */}
-            <Card title="Portfolio Management & Objekt-Sicht">
-                {/* Desktop View */}
-                <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
-                    <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1100px' }}>
+    // ─── RENDER: CASHFLOW DETAILS MODAL ───────────────────────────
+    const renderCashflowDetailsModal = () => {
+        if (!showCashflowDetailsModal) return null;
+        return (
+            <Modal
+                isOpen={showCashflowDetailsModal}
+                onClose={() => setShowCashflowDetailsModal(false)}
+                title="Cashflow-Details je Objekt (monatlich)"
+                maxWidth="850px"
+                footer={<Button variant="secondary" onClick={() => setShowCashflowDetailsModal(false)}>Schließen</Button>}
+            >
+                <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                         <thead>
-                            <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-                                <th style={{ width: '40px', padding: '12px 0 12px 16px' }}></th>
-                                <th style={{ textAlign: 'left', padding: '12px 16px' }}>Immobilie</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Gesamtinvest</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Eigenkapital</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Miete IST p.a.</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Miete SOLL p.a.</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Marktwert</th>
-                                <th style={{ textAlign: 'right', padding: '12px 16px' }}>Restschuld</th>
-                                <th style={{ textAlign: 'center', padding: '12px 16px', width: '60px' }}></th>
+                            <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)' }}>
+                                <th style={{ textAlign: 'left', padding: '10px 12px' }}>Immobilie</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px' }}>Miete IST</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px' }}>Bankrate (Annuität)</th>
+                                <th style={{ textAlign: 'right', padding: '10px 12px' }}>Netto-Cashflow</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {groupedProperties.map(pOrGroup => {
-                                const renderRow = (p, isSubRow = false) => {
-                                    const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
-                                    const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
-                                    const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
-                                    const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
-                                    const marketValue = parseFloat(p.market_value_total) || 0;
+                            {groupedProperties.map(p => {
+                                const rentIst = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                                const bankrate = getGroupOrPropertyLoanPayment(p);
+                                const cf = rentIst - bankrate;
+                                const addr = p.isGroup ? (() => {
+                                    const streets = Array.from(new Set(p.properties.map(pr => pr.street).filter(Boolean)));
+                                    return (p.name || `Wirtschaftseinheit: ${streets.join(', ')}`);
+                                })() : `${p.street} ${p.house_number || ''}`.trim();
+                                
+                                return (
+                                    <tr key={p.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                        <td style={{ padding: '12px 10px', fontWeight: 600 }}>{addr}</td>
+                                        <td style={{ padding: '12px 10px', textAlign: 'right', color: '#10B981' }}>{formatCurrency(rentIst)}</td>
+                                        <td style={{ padding: '12px 10px', textAlign: 'right', color: 'var(--text-secondary)' }}>{formatCurrency(bankrate)}</td>
+                                        <td style={{ padding: '12px 10px', textAlign: 'right', fontWeight: 700, color: cashflowColor(cf) }}>
+                                            {formatCurrency(cf)}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            </Modal>
+        );
+    };
+
+    // ─── RENDER: KPI EXPLANATION MODAL ─────────────────────────────
+    const renderKpiExplanationModal = () => {
+        if (!selectedKpi) return null;
+
+        const KPI_DETAILS = {
+            ltv: {
+                name: 'LTV (Loan-to-Value)',
+                value: `${stats.ltv.toFixed(1)} %`,
+                definition: 'Der Beleihungsauslauf (LTV) beschreibt das Verhältnis der Summe aller ausstehenden Kredite zum aktuellen Gesamtmarktwert deines Immobilienportfolios.',
+                bankRelevance: 'Banken nutzen den LTV zur Risikobewertung. Ein LTV unter 60% gilt als sehr gut (günstige Zinsen), während ein LTV über 80% kritischer eingestuft wird.',
+                formula: 'Restschuld gesamt / Marktwert gesamt * 100',
+                calculation: `${formatCurrency(stats.totalDebt)} / ${formatCurrency(stats.totalMarketValue)} * 100`,
+                rating: stats.ltv < 60 ? 'Sehr gut (Sehr geringes Risiko)' : stats.ltv <= 80 ? 'Gut (Mäßiges Risiko)' : 'Kritisch (Erhöhtes Zinsrisiko)',
+                ratingColor: stats.ltv < 60 ? '#10B981' : stats.ltv <= 80 ? '#F59E0B' : '#EF4444'
+            },
+            dscr: {
+                name: 'DSCR (Debt Service Coverage Ratio) - Soll',
+                value: stats.dscr.toFixed(2),
+                definition: 'Die Kapitaldienstdeckungsquote (DSCR) misst das Verhältnis von Mieteinnahmen (Soll) zur Bankrate (Zins + Tilgung). Sie zeigt, wie sicher der Schuldendienst bei Vollvermietung bzw. Soll-Miete gedeckt ist.',
+                bankRelevance: 'Für Banken ist ein DSCR von mindestens 1,10 (110% Deckung) meist die Mindestanforderung. Werte ab 1,30 gelten als sehr gut.',
+                formula: 'Mieterträge Soll (mtl.) / Bankrate (mtl.)',
+                calculation: `${formatCurrency(stats.totalTargetRent)} / ${formatCurrency(stats.totalMonthlyAnnuity)}`,
+                rating: stats.dscr >= 1.3 ? 'Sehr gut (Sicherer Schuldendienst)' : stats.dscr >= 1.1 ? 'Gut (Ausreichende Deckung)' : 'Kritisch (Unterdeckung droht)',
+                ratingColor: stats.dscr >= 1.3 ? '#10B981' : stats.dscr >= 1.1 ? '#F59E0B' : '#EF4444'
+            },
+            wacd: {
+                name: 'Mischzins (WACD)',
+                value: `${stats.wacd.toFixed(2)} %`,
+                definition: 'Der gewichtete Durchschnittszins (Weighted Average Cost of Debt) gibt den durchschnittlichen Zinssatz deines Fremdkapitals an, gewichtet nach der Höhe der jeweiligen Restschulden.',
+                bankRelevance: 'Zeigt die finanzielle Belastung des Portfolios. Ein niedriger Mischzins erhöht den Netto-Cashflow.',
+                formula: 'Summe(Restschuld_i * Zins_i) / Restschuld gesamt',
+                calculation: `Gewichtete Summe der Kredite / ${formatCurrency(stats.totalDebt)}`,
+                rating: stats.wacd < 2.5 ? 'Sehr gut (Günstige Finanzierung)' : stats.wacd <= 4.0 ? 'Gut (Marktüblich)' : 'Erhöht (Teures Fremdkapital)',
+                ratingColor: stats.wacd < 2.5 ? '#10B981' : stats.wacd <= 4.0 ? '#F59E0B' : '#EF4444'
+            },
+            coc: {
+                name: 'Eigenkapitalrendite (CoC) - Soll',
+                value: `${stats.coc.toFixed(2)} %`,
+                definition: 'Die Cash-on-Cash-Rendite (Soll) setzt den jährlichen Netto-Cashflow (Soll) ins Verhältnis zum eingesetzten Eigenkapital. Sie zeigt die Verzinsung deines tatsächlich investierten Kapitals bei Erreichen der Soll-Mieten.',
+                bankRelevance: 'Wichtige Kennzahl für Investoren zur Beurteilung der Effizienz des eingesetzten Kapitals.',
+                formula: 'Netto-Cashflow Soll p.a. / Eigenkapital gesamt * 100',
+                calculation: `${formatCurrency((stats.totalTargetRent - stats.totalMonthlyAnnuity) * 12)} / ${formatCurrency(stats.totalEquity)} * 100`,
+                rating: stats.coc >= 8 ? 'Sehr gut (Hohe Rentabilität)' : stats.coc >= 4 ? 'Gut (Solide Verzinsung)' : 'Gering (Optimierung empfohlen)',
+                ratingColor: stats.coc >= 8 ? '#10B981' : stats.coc >= 4 ? '#F59E0B' : '#EF4444'
+            },
+            netYield: {
+                name: 'Nettorendite (Soll)',
+                value: `${stats.netYield.toFixed(2)} %`,
+                definition: 'Die Nettomietrendite (Soll) setzt die jährlichen Soll-Mieteinnahmen ins Verhältnis zu den Gesamtinvestitionskosten (inkl. Nebenkosten). Sie ist die Standard-Kennzahl zum Objektvergleich auf Basis des vollen Potenzials.',
+                bankRelevance: 'Dient der Beurteilung der grundlegenden Ertragskraft der Immobilien.',
+                formula: 'Mieteinnahmen Soll p.a. / Gesamtinvestitionskosten * 100',
+                calculation: `${formatCurrency(stats.totalTargetRent * 12)} / ${formatCurrency(stats.totalInvestment)} * 100`,
+                rating: stats.netYield >= 5.5 ? 'Sehr gut (Hohe Rendite)' : stats.netYield >= 4.0 ? 'Gut (Standard)' : 'Niedrig (Wenig Mietertrag)',
+                ratingColor: stats.netYield >= 5.5 ? '#10B981' : stats.netYield >= 4.0 ? '#F59E0B' : '#EF4444'
+            },
+            tilgungseffekt: {
+                name: 'Tilgungseffekt (Eigenkapitalaufbau)',
+                value: `${formatCurrency(stats.tilgungseffekt)} p.a.`,
+                definition: 'Der Tilgungseffekt stellt den Vermögenszuwachs dar, der dadurch entsteht, dass die Mieter deine Kredite abbezahlen. Jede Tilgung erhöht deinen Netto-Vermögenswert.',
+                bankRelevance: 'Zeigt das Tempo des Risikoabbaus und den Anstieg freier Sicherheiten im Portfolio.',
+                formula: 'Tilgung mtl. * 12',
+                calculation: `${formatCurrency(stats.totalMonthlyRepayment)} * 12`,
+                rating: stats.tilgungseffekt > 0 ? 'Positiver Vermögensaufbau' : 'Keine Tilgung',
+                ratingColor: stats.tilgungseffekt > 0 ? '#10B981' : '#EF4444'
+            },
+            netWorth: {
+                name: 'Net-Worth (Reinvermögen)',
+                value: formatCurrency(Math.max(0, stats.totalMarketValue - stats.totalDebt)),
+                definition: 'Das Reinvermögen (Net-Worth) beschreibt das im Immobilienbestand gebundene Eigenkapital nach Abzug aller ausstehenden Kredite (Restschuld) vom aktuellen Gesamt-Marktwert.',
+                bankRelevance: 'Das Reinvermögen zeigt deine echte wirtschaftliche Bonität und die stille Reserve in deinem Portfolio. Es dient Banken als zusätzliche Sicherheit für künftige Finanzierungen.',
+                formula: 'Marktwert gesamt - Restschuld gesamt',
+                calculation: `${formatCurrency(stats.totalMarketValue)} - ${formatCurrency(stats.totalDebt)}`,
+                rating: (stats.totalMarketValue - stats.totalDebt) > 0 ? 'Positiver Net-Worth (Eigenkapital vorhanden)' : 'Kein positives Reinvermögen',
+                ratingColor: (stats.totalMarketValue - stats.totalDebt) > 0 ? '#10B981' : '#EF4444'
+            },
+            debtYield: {
+                name: 'Rendite auf Restschuld (Debt Yield)',
+                value: `${stats.debtYield ? stats.debtYield.toFixed(2) : '0.00'} %`,
+                definition: 'Die Rendite auf die Restschuld (auch Debt Yield genannt) beschreibt das Verhältnis der jährlichen Soll-Mieteinnahmen zur verbleibenden Restschuld der Bankkredite. Sie zeigt die Verzinsung bzw. Ertragskraft bezogen auf das ausstehende Fremdkapital.',
+                bankRelevance: 'Banken und Kreditgeber nutzen diese Kennzahl zur Risikobewertung. Ein höherer Debt Yield bedeutet ein geringeres Risiko für den Kreditgeber, da die Mieteinnahmen die ausstehende Schuld besser tragen können.',
+                formula: 'Mieteinnahmen Soll p.a. / Gesamtrestschuld * 100',
+                calculation: `${formatCurrency(stats.totalTargetRent * 12)} / ${formatCurrency(stats.totalDebt)} * 100`,
+                rating: stats.debtYield >= 8 ? 'Sehr gut (Hoher Cashflow relativ zur Schuld)' : stats.debtYield >= 5 ? 'Gut (Ausgewogenes Verhältnis)' : 'Niedrig (Erhöhtes Risiko)',
+                ratingColor: stats.debtYield >= 8 ? '#10B981' : stats.debtYield >= 5 ? '#F59E0B' : '#EF4444'
+            }
+        };
+
+        const kpi = KPI_DETAILS[selectedKpi];
+        if (!kpi) return null;
+
+        return (
+            <Modal
+                isOpen={!!selectedKpi}
+                onClose={() => setSelectedKpi(null)}
+                title={kpi.name}
+                footer={<Button onClick={() => setSelectedKpi(null)}>Schließen</Button>}
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', lineHeight: 1.5 }}>
+                    <div>
+                        <strong style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Definition:</strong>
+                        <p style={{ marginTop: '4px', fontSize: '0.9rem' }}>{kpi.definition}</p>
+                    </div>
+                    <div>
+                        <strong style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Relevanz für Banken:</strong>
+                        <p style={{ marginTop: '4px', fontSize: '0.9rem' }}>{kpi.bankRelevance}</p>
+                    </div>
+                    <div style={{ backgroundColor: 'var(--background-color)', padding: '12px 16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Formel:</div>
+                        <div style={{ fontFamily: 'monospace', fontSize: '0.9rem', marginTop: '4px', color: 'var(--primary-color)' }}>{kpi.formula}</div>
+                    </div>
+                    <div style={{ backgroundColor: 'var(--background-color)', padding: '12px 16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Deine Berechnung:</div>
+                        <div style={{ fontFamily: 'monospace', fontSize: '0.95rem', marginTop: '4px', fontWeight: 600 }}>{kpi.calculation}</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 700, marginTop: '8px', color: kpi.ratingColor }}>= {kpi.value}</div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <strong style={{ fontSize: '0.9rem' }}>Bewertung:</strong>
+                        <span style={{
+                            padding: '4px 12px', borderRadius: '12px', fontSize: '0.8rem', fontWeight: 700,
+                            backgroundColor: `${kpi.ratingColor}15`, color: kpi.ratingColor
+                        }}>
+                            {kpi.rating}
+                        </span>
+                    </div>
+                </div>
+            </Modal>
+        );
+    };
+
+    // ─── RENDER: COCKPIT ───────────────────────────────────────────
+    const renderCockpit = () => {
+        const isAnnual = waterfallPeriod === 'annual';
+        const multiplier = isAnnual ? 12 : 1;
+        const factorLabel = isAnnual ? 'p.a.' : 'mtl.';
+
+        const incomeVal = stats.totalMonthlyIncome * multiplier;
+        const interestVal = stats.totalMonthlyInterest * multiplier;
+        const repaymentVal = stats.totalMonthlyRepayment * multiplier;
+        const annuityVal = stats.totalMonthlyAnnuity * multiplier;
+        const cashflowVal = stats.netCashflow * multiplier;
+
+        const steps = [
+            { label: 'Einnahmen (Miete Ist)', value: incomeVal, type: 'plus', color: '#10B981', desc: 'Summe aller Mieteinnahmen der vermieteten Einheiten und Ferienwohnungen.' },
+            { label: 'Zinsaufwand', value: interestVal, type: 'minus', color: '#EF4444', desc: 'Zinszahlungen für die Darlehen im ausgewählten Zeitraum.' },
+            { label: 'Tilgung (EK-Aufbau)', value: repaymentVal, type: 'minus', color: '#F97316', desc: 'Tilgungsanteil der Kreditraten (Wertzuwachs/Vermögensaufbau).' },
+            { label: 'Netto-Cashflow', value: cashflowVal, type: 'total', color: cashflowVal >= 0 ? '#10B981' : '#EF4444', desc: 'Verbleibender freier Cashflow nach Zins und Tilgung.' }
+        ];
+
+        // Next refinance countdown / details
+        let nextRefinancePropName = '';
+        if (nextLoanReset) {
+            if (nextLoanReset.loan.economic_unit_id) {
+                const we = economicUnits.find(eu => eu.id === nextLoanReset.loan.economic_unit_id);
+                const weProps = properties.filter(p => p.economic_unit_id === nextLoanReset.loan.economic_unit_id);
+                const streets = Array.from(new Set(weProps.map(p => p.street).filter(Boolean)));
+                const streetsStr = streets.join(', ');
+                nextRefinancePropName = we 
+                    ? (streetsStr ? `${we.name} (${streetsStr})` : we.name)
+                    : `WE: ${streetsStr || 'Unbekannt'}`;
+            } else if (nextLoanReset.loan.property_id) {
+                const prop = properties.find(p => p.id === nextLoanReset.loan.property_id);
+                nextRefinancePropName = prop ? `${prop.street} ${prop.house_number}` : 'Immobilie';
+            }
+        }
+
+        const nextRefinanceText = nextLoanReset
+            ? `${new Date(nextLoanReset.date).toLocaleDateString('de-DE')} - ${nextRefinancePropName} (${nextLoanReset.loan.bank_name || 'Bank'}, ${formatCurrency(calculateCurrentDebt(nextLoanReset.loan))})`
+            : 'Keine ausstehenden Fristen';
+
+        // Leerstandsquote matching Dashboard logic
+        let totalResUnits = 0;
+        let vacantResUnits = 0;
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        properties.forEach(p => {
+            (p.units || []).forEach(u => {
+                totalResUnits++;
+                const hasActive = (u.leases || []).some(l => 
+                    l.status === 'active' &&
+                    (!l.start_date || l.start_date <= todayStr) &&
+                    (!l.end_date || l.end_date >= todayStr)
+                );
+                if (!u.is_vacation_rental && !hasActive) {
+                    vacantResUnits++;
+                }
+            });
+        });
+        const vacancyRate = totalResUnits > 0 ? (vacantResUnits / totalResUnits) * 100 : 0;
+
+        // Kappungsgrenzen / 15% thresholds
+        let unitsAboveThreshold = 0;
+        properties.forEach(p => {
+            (p.units || []).forEach(u => {
+                if (u.is_vacation_rental) return;
+                const activeLease = u.leases?.find(l => l.status === 'active');
+                if (!activeLease) return;
+                const currentRent = parseFloat(activeLease.cold_rent) || 0;
+                const targetRent = parseFloat(u.target_rent) || 0;
+                if (currentRent > 0 && (targetRent - currentRent) / currentRent > 0.15) {
+                    unitsAboveThreshold++;
+                }
+            });
+        });
+
+        // Top 3 Rent Optimizations
+        const topOptimizations = rentOptimizations
+            .sort((a, b) => b.potential - a.potential)
+            .slice(0, 3);
+
+        const totalPotentialSum = rentOptimizations.reduce((sum, o) => sum + o.potential, 0);
+
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
+                {/* Waterfall Visualizer */}
+                <div style={{
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)',
+                    backdropFilter: 'blur(10px)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '16px',
+                    padding: '24px',
+                    boxShadow: 'var(--shadow-md)',
+                    position: 'relative',
+                    overflow: 'hidden'
+                }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                        <div>
+                            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Coins size={20} color="var(--primary-color)" /> Cashflow-Wasserlauf
+                            </h3>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>Visualisierung des Geldflusses im gesamten Portfolio</p>
+                        </div>
+                        <div style={{ display: 'flex', backgroundColor: 'var(--background-color)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                            <button 
+                                onClick={() => setWaterfallPeriod('monthly')}
+                                style={{
+                                    padding: '6px 12px', fontSize: '0.75rem', fontWeight: 600, border: 'none', borderRadius: '6px',
+                                    backgroundColor: waterfallPeriod === 'monthly' ? 'var(--surface-color)' : 'transparent',
+                                    color: waterfallPeriod === 'monthly' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                    cursor: 'pointer', transition: 'all 0.2s', boxShadow: waterfallPeriod === 'monthly' ? 'var(--shadow-sm)' : 'none'
+                                }}
+                            >
+                                Monatlich
+                            </button>
+                            <button 
+                                onClick={() => setWaterfallPeriod('annual')}
+                                style={{
+                                    padding: '6px 12px', fontSize: '0.75rem', fontWeight: 600, border: 'none', borderRadius: '6px',
+                                    backgroundColor: waterfallPeriod === 'annual' ? 'var(--surface-color)' : 'transparent',
+                                    color: waterfallPeriod === 'annual' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                    cursor: 'pointer', transition: 'all 0.2s', boxShadow: waterfallPeriod === 'annual' ? 'var(--shadow-sm)' : 'none'
+                                }}
+                            >
+                                Jährlich (p.a.)
+                            </button>
+                        </div>
+                    </div>
+
+                    <style>{`
+                        @keyframes waterfallGrowVertical {
+                            from { transform: scaleY(0); }
+                            to { transform: scaleY(1); }
+                        }
+                        @keyframes waterfallGrowHorizontal {
+                            from { transform: scaleX(0); }
+                            to { transform: scaleX(1); }
+                        }
+                        .waterfall-bar-vertical {
+                            animation: waterfallGrowVertical 1s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+                            transform-origin: bottom;
+                        }
+                        .waterfall-bar-horizontal {
+                            animation: waterfallGrowHorizontal 1s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+                            transform-origin: left;
+                        }
+                    `}</style>
+
+                    <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: '20px', alignItems: 'stretch', justifyContent: 'space-between', marginTop: '10px' }}>
+                        {steps.map((step, idx) => {
+                            const maxVal = Math.max(incomeVal, 1);
+                            const percent = Math.min(100, Math.max(5, (step.value / maxVal) * 100));
+                            
+                            return (
+                                <div key={idx} style={{ 
+                                    flex: 1, 
+                                    display: 'flex', 
+                                    flexDirection: isMobile ? 'row' : 'column', 
+                                    alignItems: isMobile ? 'center' : 'stretch',
+                                    gap: '12px',
+                                    padding: '16px',
+                                    borderRadius: '12px',
+                                    backgroundColor: 'rgba(255,255,255,0.02)',
+                                    border: '1px solid rgba(255,255,255,0.03)',
+                                    position: 'relative'
+                                }}
+                                title={step.desc}
+                                >
+                                    <div style={{ flexShrink: 0, minWidth: '130px' }}>
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>{step.label}</div>
+                                        <div style={{ fontSize: '1.1rem', fontWeight: 800, color: step.color, marginTop: '4px' }}>
+                                            {step.type === 'minus' ? '-' : ''}{formatCurrency(step.value)}
+                                        </div>
+                                    </div>
                                     
+                                    <div style={{ 
+                                        flex: 1, 
+                                        height: isMobile ? '12px' : '45px', 
+                                        backgroundColor: 'rgba(0,0,0,0.15)', 
+                                        borderRadius: '6px', 
+                                        position: 'relative',
+                                        display: 'flex',
+                                        alignItems: isMobile ? 'center' : 'flex-end',
+                                        overflow: 'hidden'
+                                    }}>
+                                        <div 
+                                            className={isMobile ? 'waterfall-bar-horizontal' : 'waterfall-bar-vertical'}
+                                            style={{
+                                                width: isMobile ? `${percent}%` : '100%',
+                                                height: isMobile ? '100%' : `${percent}%`,
+                                                backgroundColor: step.color,
+                                                borderRadius: '6px',
+                                                opacity: 0.85,
+                                                boxShadow: `0 0 10px ${step.color}33`,
+                                                animationDelay: `${idx * 0.25}s`,
+                                                animationFillMode: 'both'
+                                            }}
+                                        ></div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* 5-Card Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 'var(--spacing-lg)' }}>
+                    {/* Card 1: Cashflow */}
+                    <Card title="Netto-Cashflow" icon={Wallet} color="#10B981">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Netto-Cashflow (mtl.)</span>
+                                <h3 style={{ fontSize: '1.4rem', fontWeight: 800, color: cashflowColor(stats.netCashflow), margin: 0 }}>
+                                    {formatCurrency(stats.netCashflow)}
+                                </h3>
+                            </div>
+                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '6px', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Miete Ist:</span>
+                                    <span style={{ fontWeight: 600, color: '#10B981' }}>{formatCurrency(stats.totalMonthlyIncome)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Zinsen (mtl.):</span>
+                                    <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>-{formatCurrency(stats.totalMonthlyInterest)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Tilgung (mtl.):</span>
+                                    <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>-{formatCurrency(stats.totalMonthlyRepayment)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Annuität (mtl.):</span>
+                                    <span>-{formatCurrency(stats.totalMonthlyAnnuity)}</span>
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', fontSize: '0.75rem', backgroundColor: 'rgba(245,158,11,0.08)', padding: '6px 10px', borderRadius: '6px' }}>
+                                <span style={{ color: '#F59E0B', fontWeight: 600 }}>Mietpotenzial:</span>
+                                <span style={{ color: '#F59E0B', fontWeight: 700 }}>+{formatCurrency(stats.rentPotential)} / Mon.</span>
+                            </div>
+                            <Button 
+                                variant="secondary" 
+                                size="sm" 
+                                style={{ width: '100%', marginTop: '6px', fontSize: '0.75rem', fontWeight: 600 }}
+                                onClick={() => setShowCashflowDetailsModal(true)}
+                            >
+                                Details je Objekt
+                            </Button>
+                        </div>
+                    </Card>
+
+                    {/* Card 2: Portfolio KPIs */}
+                    <Card title="Portfolio KPIs" icon={Gauge} color="#3B82F6">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.825rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('ltv')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>LTV (Beleihung):</span>
+                                <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>{stats.ltv.toFixed(1)} %</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('dscr')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>DSCR (Schuldendienst):</span>
+                                <span style={{ fontWeight: 700, color: stats.dscr >= 1.1 ? '#10B981' : '#EF4444' }}>{stats.dscr.toFixed(2)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('wacd')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Mischzins (WACD):</span>
+                                <span style={{ fontWeight: 700 }}>{stats.wacd.toFixed(2)} %</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('coc')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Eigenkapitalrendite (CoC):</span>
+                                <span style={{ fontWeight: 700 }}>{stats.coc.toFixed(2)} %</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('netYield')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Nettorendite (Soll):</span>
+                                <span style={{ fontWeight: 700 }}>{stats.netYield.toFixed(2)} %</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('debtYield')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Rendite auf Restschuld:</span>
+                                <span style={{ fontWeight: 700 }}>{stats.debtYield ? stats.debtYield.toFixed(2) : '0.00'} %</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('tilgungseffekt')}>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Tilgungseffekt (p.a.):</span>
+                                <span style={{ fontWeight: 700, color: '#10B981' }}>{formatCurrency(stats.tilgungseffekt)}</span>
+                            </div>
+                        </div>
+                    </Card>
+
+                    {/* Card 3: Risikomanagement */}
+                    <Card title="Risikomanagement" icon={ShieldCheck} color="#EF4444">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem' }}>
+                            <div>
+                                <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Leerstands-Quote (Wohnen):</div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '3px' }}>
+                                    <div style={{ flex: 1, height: '6px', backgroundColor: 'var(--border-color)', borderRadius: '3px', overflow: 'hidden' }}>
+                                        <div style={{ width: `${vacancyRate}%`, height: '100%', backgroundColor: vacancyRate > 10 ? '#EF4444' : '#10B981' }}></div>
+                                    </div>
+                                    <span style={{ fontWeight: 700, color: vacancyRate > 10 ? '#EF4444' : '#10B981' }}>
+                                        {vacancyRate.toFixed(1)} % ({vacantResUnits} / {totalResUnits} WE)
+                                    </span>
+                                </div>
+                            </div>
+                            <div>
+                                <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Zinsänderungsrisiko (Zinsbindungen):</div>
+                                <div 
+                                    style={{ 
+                                        display: 'flex', 
+                                        alignItems: 'flex-start', 
+                                        gap: '6px', 
+                                        marginTop: '4px', 
+                                        fontSize: '0.75rem', 
+                                        lineHeight: 1.3,
+                                        cursor: nextLoanReset ? 'pointer' : 'default',
+                                        padding: '6px 8px',
+                                        borderRadius: '6px',
+                                        backgroundColor: nextLoanReset ? 'rgba(59, 130, 246, 0.05)' : 'transparent',
+                                        border: nextLoanReset ? '1px dashed rgba(59, 130, 246, 0.3)' : 'none',
+                                        transition: 'all 0.2s ease'
+                                    }}
+                                    onClick={() => {
+                                        if (nextLoanReset) {
+                                            const pid = nextLoanReset.loan.economic_unit_id 
+                                                ? 'we_' + nextLoanReset.loan.economic_unit_id 
+                                                : nextLoanReset.loan.property_id;
+                                            navigate(`/loans?propertyId=${pid}`);
+                                        }
+                                    }}
+                                    title={nextLoanReset ? 'Klicken, um die Finanzierungsdetails anzuzeigen' : ''}
+                                >
+                                    <Calendar size={14} style={{ color: 'var(--primary-color)', flexShrink: 0, marginTop: '2px' }} />
+                                    <div>
+                                        <div style={{ fontWeight: 600 }}>Nächste Zinsbindung endet:</div>
+                                        <div style={{ color: 'var(--text-secondary)' }}>{nextRefinanceText}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
+
+                    {/* Card 4: Mieterhöhungen & Optimierung */}
+                    <Card title="Mieterhöhungen" icon={ArrowUpRight} color="#EC4899">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.8rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Gesamtpotenzial:</span>
+                                <span style={{ fontWeight: 700, color: '#EC4899' }}>+{formatCurrency(totalPotentialSum)} / Monat</span>
+                            </div>
+                            <div 
+                                style={{ 
+                                    display: 'flex', 
+                                    justifyContent: 'space-between', 
+                                    alignItems: 'center',
+                                    cursor: unitsAboveThreshold > 0 ? 'pointer' : 'default',
+                                    padding: '4px 0',
+                                    borderRadius: '4px',
+                                    transition: 'background-color 0.2s'
+                                }}
+                                onClick={() => {
+                                    if (unitsAboveThreshold > 0) {
+                                        setShowThresholdModal(true);
+                                    }
+                                }}
+                                onMouseEnter={e => {
+                                    if (unitsAboveThreshold > 0) {
+                                        e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)';
+                                    }
+                                }}
+                                onMouseLeave={e => {
+                                    e.currentTarget.style.backgroundColor = 'transparent';
+                                }}
+                            >
+                                <span style={{ color: 'var(--text-secondary)', fontWeight: 600, borderBottom: unitsAboveThreshold > 0 ? '1px dashed var(--text-secondary)' : 'none' }}>
+                                    Über Kappungsgrenze (&gt;15%):
+                                </span>
+                                <span style={{ fontWeight: 700, color: unitsAboveThreshold > 0 ? '#F59E0B' : 'var(--text-primary)' }}>
+                                    {unitsAboveThreshold} {unitsAboveThreshold === 1 ? 'Einheit' : 'Einheiten'}
+                                </span>
+                            </div>
+                            
+                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Top 3 Vorschläge:</div>
+                                {topOptimizations.map((o, idx) => (
+                                    <div key={o.id} style={{ display: 'flex', flexDirection: 'column', gap: '2px', backgroundColor: 'rgba(255,255,255,0.01)', padding: '6px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
+                                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '170px' }}>{o.property} ({o.unit})</span>
+                                            <span style={{ color: '#10B981' }}>+{formatCurrency(o.potential)}/M</span>
+                                        </div>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: 1.2 }}>{o.reason}</div>
+                                    </div>
+                                ))}
+                                {topOptimizations.length === 0 && (
+                                    <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '8px 0' }}>Aktuell keine Optimierungen anstehend.</div>
+                                )}
+                            </div>
+                            
+                            <Button 
+                                variant="primary" 
+                                size="sm" 
+                                style={{ width: '100%', marginTop: '4px', fontSize: '0.75rem', fontWeight: 600 }}
+                                onClick={() => navigate('/settings', { state: { activeTab: 'document-templates' } })}
+                            >
+                                Schreiben erstellen
+                            </Button>
+                        </div>
+                    </Card>
+
+                    {/* Card 5: Marktwert Portfolio */}
+                    <Card title="Marktwert Portfolio" icon={Building2} color="#8B5CF6">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.825rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                                <span style={{ color: 'var(--text-secondary)' }}>Gesamt-Marktwert:</span>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--accent-color)' }}>{formatCurrency(stats.totalMarketValue)}</span>
+                            </div>
+                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('netWorth')}>
+                                    <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Net-Worth (EK Marktwert):</span>
+                                    <span style={{ fontWeight: 700, color: '#10B981' }}>{formatCurrency(Math.max(0, stats.totalMarketValue - stats.totalDebt))}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Gesamtrestschuld:</span>
+                                    <span style={{ fontWeight: 600 }}>{formatCurrency(stats.totalDebt)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Investiertes Eigenkapital:</span>
+                                    <span style={{ fontWeight: 600 }}>{formatCurrency(stats.totalEquity)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Gesamtinvest (Kaufpreise):</span>
+                                    <span style={{ fontWeight: 600 }}>{formatCurrency(stats.totalInvestment)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Gesamtmiete (Ist p.a.):</span>
+                                    <span style={{ fontWeight: 600, color: '#10B981' }}>{formatCurrency(stats.totalMonthlyIncome * 12)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Gesamtmiete (Soll p.a.):</span>
+                                    <span style={{ fontWeight: 600, color: '#10B981' }}>{formatCurrency(stats.totalTargetRent * 12)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
+                </div>
+
+                {/* Modals for Details and Explanations */}
+                {renderCashflowDetailsModal()}
+                {renderKpiExplanationModal()}
+
+                {/* Portfolio Table */}
+                <Card title="Portfolio Management & Objekt-Sicht">
+                    {/* Desktop View */}
+                    <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1300px' }}>
+                            <thead>
+                                <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+                                    <th style={{ width: '40px', padding: '12px 0 12px 16px' }}></th>
+                                    <th style={{ textAlign: 'left', padding: '12px 16px' }}>Immobilie</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Gesamtinvest</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Eigenkapital</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Miete IST p.a.</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Miete SOLL p.a.</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Annuität p.a.</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>CF p.a.</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Marktwert</th>
+                                    <th style={{ textAlign: 'right', padding: '12px 16px' }}>Restschuld</th>
+                                    <th style={{ textAlign: 'center', padding: '12px 16px', width: '60px' }}></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {groupedProperties.map(pOrGroup => {
+                                    const renderRow = (p, isSubRow = false) => {
+                                        const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+                                        const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                                        const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
+                                        const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
+                                        const marketValue = parseFloat(p.market_value_total) || 0;
+                                        
+                                        const monthlyRate = getGroupOrPropertyLoanPayment(p);
+                                        const ratePa = monthlyRate * 12;
+                                        const rentIstPa = rentIstMo * 12;
+                                        const cfPa = rentIstPa - ratePa;
+                                        
+                                        return (
+                                            <React.Fragment key={p.id}>
+                                                <tr style={{ 
+                                                        borderBottom: (p.isGroup && expandedWEId === p.id) ? 'none' : '1px solid var(--border-color)', 
+                                                        transition: 'background 0.15s',
+                                                        backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')
+                                                    }}
+                                                    onMouseEnter={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.05)' : 'rgba(59,130,246,0.03)'}
+                                                    onMouseLeave={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')}
+                                                    onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
+                                                >
+                                                    <td style={{ padding: '14px 0 14px 16px', cursor: p.isGroup ? 'pointer' : 'default', paddingLeft: isSubRow ? '40px' : '16px' }}>
+                                                        {p.isGroup && (
+                                                            <span style={{ color: 'var(--text-secondary)' }}>
+                                                                {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                            </span>
+                                                        )}
+                                                    </td>
+                                                    <td style={{ padding: '14px 16px' }}>
+                                                        <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '0.9rem', color: p.isGroup ? 'var(--accent-color)' : 'inherit' }}>{p.street} {p.house_number}</div>
+                                                        {!p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                        {p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.properties.length} Gebäude verknüpft</div>}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
+                                                            p.isGroup ? (
+                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
+                                                                    {formatCurrency(p.total_investment_cost)}
+                                                                </span>
+                                                            ) : (
+                                                                formatCurrency(p.total_investment_cost)
+                                                            )
+                                                        ) : (
+                                                            <button
+                                                                onClick={(e) => { 
+                                                                    e.stopPropagation(); 
+                                                                    if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
+                                                                    else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                                }}
+                                                                style={{
+                                                                    background: 'none', border: '1px dashed var(--primary-color)',
+                                                                    color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                    padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                                }}
+                                                                title="Gesamtinvestition eintragen"
+                                                            >
+                                                                +
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {(parseFloat(p.equity_invested) || 0) > 0 ? (
+                                                            p.isGroup ? (
+                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
+                                                                    {formatCurrency(p.equity_invested)}
+                                                                </span>
+                                                            ) : (
+                                                                formatCurrency(p.equity_invested)
+                                                            )
+                                                        ) : (
+                                                            <button
+                                                                onClick={(e) => { 
+                                                                    e.stopPropagation(); 
+                                                                    if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
+                                                                    else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                                }}
+                                                                style={{
+                                                                    background: 'none', border: '1px dashed var(--primary-color)',
+                                                                    color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                    padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                                }}
+                                                                title="Eigenkapital eintragen"
+                                                            >
+                                                                +
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {formatCurrency(rentIstPa)}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {formatCurrency(rentSollMo * 12)}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500, color: 'var(--text-secondary)' }}>
+                                                        {formatCurrency(ratePa)}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 700 : 600, color: cashflowColor(cfPa) }}>
+                                                        {formatCurrency(cfPa)}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {marketValue > 0 ? (
+                                                            p.isGroup ? (
+                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
+                                                                    {formatCurrency(marketValue)}
+                                                                </span>
+                                                            ) : (
+                                                                formatCurrency(marketValue)
+                                                            )
+                                                        ) : (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    if (p.isGroup) {
+                                                                        setWeEditModal({ ...p, field: 'market_value_total' });
+                                                                    } else {
+                                                                        setDetailProperty(p);
+                                                                        setIsDetailOpen(true);
+                                                                    }
+                                                                }}
+                                                                style={{
+                                                                    background: 'none', border: '1px dashed var(--primary-color)',
+                                                                    color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
+                                                                    padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
+                                                                }}
+                                                                title="Marktwert eintragen"
+                                                            >
+                                                                +
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                    <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                        {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                                    </td>
+                                                    <td style={{ textAlign: 'center', padding: '14px 16px' }}>
+                                                        {!p.isGroup && (
+                                                        <div style={{ position: 'relative' }}>
+                                                            <button
+                                                                onClick={e => {
+                                                                    e.stopPropagation();
+                                                                    if (openMenuId === p.id) { setOpenMenuId(null); return; }
+                                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                                    setMenuPos({ top: rect.bottom + 4, left: rect.right });
+                                                                    setOpenMenuId(p.id);
+                                                                }}
+                                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
+                                                            >
+                                                                <MoreVertical size={18} />
+                                                            </button>
+                                                        </div>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                                {auditPropertyId === p.id && !p.isGroup && (
+                                                    <tr>
+                                                        <td colSpan="11" style={{ padding: '0 16px 20px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                                                            <div ref={auditRef}>
+                                                                {renderInlineAudit(p)}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        );
+                                    };
+
                                     return (
-                                        <React.Fragment key={p.id}>
-                                            <tr style={{ 
-                                                    borderBottom: (p.isGroup && expandedWEId === p.id) ? 'none' : '1px solid var(--border-color)', 
-                                                    transition: 'background 0.15s',
-                                                    backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')
-                                                }}
-                                                onMouseEnter={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.05)' : 'rgba(59,130,246,0.03)'}
-                                                onMouseLeave={e => e.currentTarget.style.backgroundColor = p.isGroup ? 'rgba(139, 92, 246, 0.02)' : (isSubRow ? 'rgba(0,0,0,0.01)' : 'transparent')}
-                                                onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
-                                            >
-                                                <td style={{ padding: '14px 0 14px 16px', cursor: p.isGroup ? 'pointer' : 'default', paddingLeft: isSubRow ? '40px' : '16px' }}>
-                                                    {p.isGroup && (
-                                                        <span style={{ color: 'var(--text-secondary)' }}>
-                                                            {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                                                        </span>
-                                                    )}
-                                                </td>
-                                                <td style={{ padding: '14px 16px' }}>
-                                                    <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '0.9rem', color: p.isGroup ? 'var(--accent-color)' : 'inherit' }}>{p.street} {p.house_number}</div>
-                                                    {!p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
-                                                    {p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.properties.length} Gebäude verknüpft</div>}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                        <React.Fragment key={pOrGroup.id}>
+                                            {renderRow(pOrGroup)}
+                                            {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderRow(subProp, true))}
+                                        </React.Fragment>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Mobile View: Cards */}
+                    <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                        {groupedProperties.map(pOrGroup => {
+                            const renderMobileCard = (p, isSubCard = false) => {
+                                const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+                                const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                                const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
+                                const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
+                                const marketValue = parseFloat(p.market_value_total) || 0;
+
+                                const monthlyRate = getGroupOrPropertyLoanPayment(p);
+                                const ratePa = monthlyRate * 12;
+                                const rentIstPa = rentIstMo * 12;
+                                const cfPa = rentIstPa - ratePa;
+
+                                return (
+                                    <div key={p.id} style={{
+                                        border: p.isGroup ? '2px solid var(--accent-color, #8B5CF6)' : '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: 'var(--spacing-md)',
+                                        backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.03)' : 'var(--surface-color)',
+                                        display: 'flex', flexDirection: 'column', gap: '12px',
+                                        marginLeft: isSubCard ? '16px' : 0
+                                    }}>
+                                        {/* Header */}
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
+                                            onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                {p.isGroup && (
+                                                    <span style={{ color: 'var(--text-secondary)' }}>
+                                                        {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                    </span>
+                                                )}
+                                                <div>
+                                                    <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '1rem', color: p.isGroup ? 'var(--accent-color, #8B5CF6)' : 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
+                                                    {!p.isGroup && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                    {p.isGroup && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.properties.length} Gebäude verknüpft</div>}
+                                                </div>
+                                            </div>
+
+                                            {!p.isGroup && (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setDetailProperty(p);
+                                                        setIsDetailOpen(true);
+                                                    }}
+                                                    style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer' }}
+                                                >
+                                                    <Eye size={20} />
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+
+                                        {/* Key Stats Grid */}
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
                                                         p.isGroup ? (
                                                             <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
@@ -922,10 +1917,10 @@ const InvestorPortal = () => {
                                                         )
                                                     ) : (
                                                         <button
-                                                            onClick={(e) => { 
-                                                                e.stopPropagation(); 
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
                                                                 if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
-                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                             }}
                                                             style={{
                                                                 background: 'none', border: '1px dashed var(--primary-color)',
@@ -937,8 +1932,11 @@ const InvestorPortal = () => {
                                                             +
                                                         </button>
                                                     )}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.equity_invested) || 0) > 0 ? (
                                                         p.isGroup ? (
                                                             <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
@@ -949,10 +1947,10 @@ const InvestorPortal = () => {
                                                         )
                                                     ) : (
                                                         <button
-                                                            onClick={(e) => { 
-                                                                e.stopPropagation(); 
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
                                                                 if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
-                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
+                                                                else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                             }}
                                                             style={{
                                                                 background: 'none', border: '1px dashed var(--primary-color)',
@@ -964,14 +1962,27 @@ const InvestorPortal = () => {
                                                             +
                                                         </button>
                                                     )}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
-                                                    {formatCurrency(rentIstMo * 12)}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
-                                                    {formatCurrency(rentSollMo * 12)}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST (p.a.)</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentIstPa)}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL (p.a.)</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentSollMo * 12)}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Annuität (p.a.)</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500, color: 'var(--text-secondary)' }}>{formatCurrency(ratePa)}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Cashflow (p.a.)</div>
+                                                <div style={{ fontWeight: p.isGroup ? 700 : 600, color: cashflowColor(cfPa) }}>{formatCurrency(cfPa)}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {marketValue > 0 ? (
                                                         p.isGroup ? (
                                                             <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
@@ -1001,257 +2012,56 @@ const InvestorPortal = () => {
                                                             +
                                                         </button>
                                                     )}
-                                                </td>
-                                                <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
-                                                    {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
-                                                </td>
-                                                <td style={{ textAlign: 'center', padding: '14px 16px' }}>
-                                                    {!p.isGroup && (
-                                                    <div style={{ position: 'relative' }}>
-                                                        <button
-                                                            onClick={e => {
-                                                                e.stopPropagation();
-                                                                if (openMenuId === p.id) { setOpenMenuId(null); return; }
-                                                                const rect = e.currentTarget.getBoundingClientRect();
-                                                                setMenuPos({ top: rect.bottom + 4, left: rect.right });
-                                                                setOpenMenuId(p.id);
-                                                            }}
-                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }}
-                                                        >
-                                                            <MoreVertical size={18} />
-                                                        </button>
-                                                    </div>
-                                                    )}
-                                                </td>
-                                            </tr>
-                                            {auditPropertyId === p.id && !p.isGroup && (
-                                                <tr>
-                                                    <td colSpan="9" style={{ padding: '0 16px 20px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                                                        <div ref={auditRef}>
-                                                            {renderInlineAudit(p)}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </React.Fragment>
-                                    );
-                                };
-
-                                return (
-                                    <React.Fragment key={pOrGroup.id}>
-                                        {renderRow(pOrGroup)}
-                                        {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderRow(subProp, true))}
-                                    </React.Fragment>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-
-                {/* Mobile View: Cards */}
-                <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                    {groupedProperties.map(pOrGroup => {
-                        const renderMobileCard = (p, isSubCard = false) => {
-                            const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
-                            const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
-                            const rentSollMo = p.isGroup ? p._rentSoll : getPropertyRentSoll(p);
-                            const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
-                            const marketValue = parseFloat(p.market_value_total) || 0;
-
-                            return (
-                                <div key={p.id} style={{
-                                    border: p.isGroup ? '2px solid var(--accent-color, #8B5CF6)' : '1px solid var(--border-color)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 'var(--spacing-md)',
-                                    backgroundColor: p.isGroup ? 'rgba(139, 92, 246, 0.03)' : 'var(--surface-color)',
-                                    display: 'flex', flexDirection: 'column', gap: '12px',
-                                    marginLeft: isSubCard ? '16px' : 0
-                                }}>
-                                    {/* Header */}
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
-                                        onClick={() => { if (p.isGroup) setExpandedWEId(expandedWEId === p.id ? null : p.id); }}
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            {p.isGroup && (
-                                                <span style={{ color: 'var(--text-secondary)' }}>
-                                                    {expandedWEId === p.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                                                </span>
-                                            )}
+                                                </div>
+                                            </div>
                                             <div>
-                                                <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '1rem', color: p.isGroup ? 'var(--accent-color, #8B5CF6)' : 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
-                                                {!p.isGroup && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
-                                                {p.isGroup && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.properties.length} Gebäude verknüpft</div>}
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Restschuld</div>
+                                                <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
+                                                    {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
+                                                </div>
                                             </div>
                                         </div>
 
                                         {!p.isGroup && (
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setDetailProperty(p);
-                                                    setIsDetailOpen(true);
-                                                }}
-                                                style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer' }}
-                                            >
-                                                <Eye size={20} />
-                                            </button>
+                                            <>
+                                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
+                                                {/* Action Buttons */}
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <Button size="sm" variant="secondary" onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)} style={{ flex: 1 }}>
+                                                        <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                                    </Button>
+                                                    {!window.Capacitor?.isNativePlatform?.() && (
+                                                        <Button size="sm" variant="secondary" onClick={() => {
+                                                            if (auditPropertyId === p.id) setAuditPropertyId(null);
+                                                            else setAuditPropertyId(p.id);
+                                                        }} style={{ flex: 1, borderColor: auditPropertyId === p.id ? 'var(--primary-color)' : 'var(--border-color)' }}>
+                                                            <ShieldCheck size={14} style={{ marginRight: '6px' }} /> Zustand
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                                {!window.Capacitor?.isNativePlatform?.() && auditPropertyId === p.id && (
+                                                    <div ref={auditRef} style={{ marginTop: '8px' }}>
+                                                        {renderInlineAudit(p)}
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
+                                );
+                            };
 
-                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
-
-                                    {/* Key Stats Grid */}
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
-                                                    p.isGroup ? (
-                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
-                                                            {formatCurrency(p.total_investment_cost)}
-                                                        </span>
-                                                    ) : (
-                                                        formatCurrency(p.total_investment_cost)
-                                                    )
-                                                ) : (
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
-                                                            else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
-                                                        }}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Gesamtinvestition eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {(parseFloat(p.equity_invested) || 0) > 0 ? (
-                                                    p.isGroup ? (
-                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
-                                                            {formatCurrency(p.equity_invested)}
-                                                        </span>
-                                                    ) : (
-                                                        formatCurrency(p.equity_invested)
-                                                    )
-                                                ) : (
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
-                                                            else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
-                                                        }}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Eigenkapital eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete IST (p.a.)</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentIstMo * 12)}</div>
-                                        </div>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Miete SOLL (p.a.)</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>{formatCurrency(rentSollMo * 12)}</div>
-                                        </div>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {marketValue > 0 ? (
-                                                    p.isGroup ? (
-                                                        <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
-                                                            {formatCurrency(marketValue)}
-                                                        </span>
-                                                    ) : (
-                                                        formatCurrency(marketValue)
-                                                    )
-                                                ) : (
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (p.isGroup) {
-                                                                setWeEditModal({ ...p, field: 'market_value_total' });
-                                                            } else {
-                                                                setDetailProperty(p);
-                                                                setIsDetailOpen(true);
-                                                            }
-                                                        }}
-                                                        style={{
-                                                            background: 'none', border: '1px dashed var(--primary-color)',
-                                                            color: 'var(--primary-color)', cursor: 'pointer', borderRadius: '6px',
-                                                            padding: '2px 10px', fontWeight: 700, fontSize: '1rem'
-                                                        }}
-                                                        title="Marktwert eintragen"
-                                                    >
-                                                        +
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Restschuld</div>
-                                            <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
-                                                {debt > 0 ? formatCurrency(debt) : <span style={{ color: 'var(--text-secondary)' }}>—</span>}
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {!p.isGroup && (
-                                        <>
-                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)' }}></div>
-                                            {/* Action Buttons */}
-                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                <Button size="sm" variant="secondary" onClick={() => navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`)} style={{ flex: 1 }}>
-                                                    <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
-                                                </Button>
-                                                {!window.Capacitor?.isNativePlatform?.() && (
-                                                    <Button size="sm" variant="secondary" onClick={() => {
-                                                        if (auditPropertyId === p.id) setAuditPropertyId(null);
-                                                        else setAuditPropertyId(p.id);
-                                                    }} style={{ flex: 1, borderColor: auditPropertyId === p.id ? 'var(--primary-color)' : 'var(--border-color)' }}>
-                                                        <ShieldCheck size={14} style={{ marginRight: '6px' }} /> Zustand
-                                                    </Button>
-                                                )}
-                                            </div>
-                                            {!window.Capacitor?.isNativePlatform?.() && auditPropertyId === p.id && (
-                                                <div ref={auditRef} style={{ marginTop: '8px' }}>
-                                                    {renderInlineAudit(p)}
-                                                </div>
-                                            )}
-                                        </>
-                                    )}
-                                </div>
+                            return (
+                                <React.Fragment key={pOrGroup.id}>
+                                    {renderMobileCard(pOrGroup)}
+                                    {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderMobileCard(subProp, true))}
+                                </React.Fragment>
                             );
-                        };
-
-                        return (
-                            <React.Fragment key={pOrGroup.id}>
-                                {renderMobileCard(pOrGroup)}
-                                {pOrGroup.isGroup && expandedWEId === pOrGroup.id && pOrGroup.properties.map(subProp => renderMobileCard(subProp, true))}
-                            </React.Fragment>
-                        );
-                    })}
-                    {groupedProperties.length === 0 && (
-                        <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)' }}>Keine Immobilien gefunden.</div>
-                    )}
-                </div>
-            </Card>
+                        })}
+                        {groupedProperties.length === 0 && (
+                            <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)' }}>Keine Immobilien gefunden.</div>
+                        )}
+                    </div>
+                </Card>
 
             {/* Floating Action Menu */}
             {openMenuId && (
@@ -1326,6 +2136,7 @@ const InvestorPortal = () => {
             )}
         </div>
     );
+};
 
     const menuItemStyle = {
         textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none',
@@ -2243,6 +3054,83 @@ const InvestorPortal = () => {
                                 </div>
                                 <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
                                     {item.leaseType}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </Modal>
+
+            {/* Kappungsgrenzen / Erhöhungspotenzial Detail Modal */}
+            <Modal
+                isOpen={showThresholdModal}
+                onClose={() => setShowThresholdModal(false)}
+                title="Einheiten mit Mieterhöhungspotenzial (>15%)"
+                footer={<Button variant="secondary" onClick={() => setShowThresholdModal(false)}>Schließen</Button>}
+                size="lg"
+            >
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+                    Folgende Mietverhältnisse weisen ein Erhöhungspotenzial von über 15% zur Soll-Miete auf:
+                </p>
+                {thresholdUnits.length === 0 ? (
+                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)' }}>Keine Einheiten gefunden.</div>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '60vh', overflowY: 'auto', paddingRight: '4px' }}>
+                        {thresholdUnits.map((item, i) => (
+                            <div key={i} style={{
+                                padding: '16px',
+                                borderRadius: 'var(--radius-md)',
+                                border: '1px solid var(--border-color)',
+                                backgroundColor: 'var(--surface-color)',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: '16px',
+                                flexWrap: 'wrap'
+                            }}>
+                                <div style={{ flex: '1 1 250px' }}>
+                                    <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                                        {item.property}
+                                    </div>
+                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                        Einheit: <strong>{item.unit}</strong> | Typ: {item.leaseType === 'index' ? 'Indexmiete' : item.leaseType === 'staffel' ? 'Staffelmiete' : 'Normaler Mietvertrag'}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '16px', marginTop: '8px', fontSize: '0.8rem', flexWrap: 'wrap' }}>
+                                        <div>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Ist-Miete: </span>
+                                            <strong style={{ color: 'var(--text-primary)' }}>{formatCurrency(item.currentRent)}</strong>
+                                        </div>
+                                        <div>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Soll-Miete: </span>
+                                            <strong style={{ color: 'var(--text-primary)' }}>{formatCurrency(item.targetRent)}</strong>
+                                        </div>
+                                        <div>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Potenzial: </span>
+                                            <strong style={{ color: '#10B981' }}>+{formatCurrency(item.diff)} (+{item.pct.toFixed(1)}%)</strong>
+                                        </div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '16px', marginTop: '4px', fontSize: '0.8rem', flexWrap: 'wrap', color: 'var(--text-secondary)' }}>
+                                        <div>
+                                            <span>Mietbeginn: </span>
+                                            <strong>{item.startDate ? new Date(item.startDate).toLocaleDateString('de-DE') : '–'}</strong>
+                                        </div>
+                                        <div>
+                                            <span>Letzte Erhöhung: </span>
+                                            <strong>{item.lastRentIncrease ? new Date(item.lastRentIncrease).toLocaleDateString('de-DE') : 'Nie / Mietbeginn'}</strong>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div style={{ flex: '0 0 auto' }}>
+                                    <Button 
+                                        variant="secondary" 
+                                        size="sm"
+                                        onClick={() => {
+                                            setShowThresholdModal(false);
+                                            navigate(`/tenants?unitId=${item.unitId}`);
+                                        }}
+                                    >
+                                        Mietverhältnis öffnen
+                                    </Button>
                                 </div>
                             </div>
                         ))}

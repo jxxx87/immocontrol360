@@ -753,3 +753,206 @@ tr:last-child td {
 input.padded-left-icon {
   padding-left: 35px !important;
 }
+
+/* ── TIPTAP & LETTER TEMPLATE WRAPPER STYLING ────────────────── */
+.tiptap {
+  min-height: 297mm;
+  outline: none;
+  background: white;
+  padding: 10px;
+}
+
+/* DIN 5008 A4 Page Style */
+.letter-page {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 20mm 20mm 20mm 25mm;
+  margin: 0 auto;
+  background: #ffffff !important;
+  color: #000000 !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+  font-family: 'Arial', 'Helvetica', sans-serif;
+  font-size: 11pt;
+  line-height: 1.5;
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+
+/* Dark mode compatibility for letter page sheet - keep white background for letter-page always so print view matches editor! */
+[data-theme="dark"] .letter-page {
+  background: #ffffff !important;
+  color: #000000 !important;
+}
+
+/* Sender line (Rücksendeangabe) */
+.letter-sender {
+  font-size: 8pt;
+  color: #555555;
+  border-bottom: 1px solid #cccccc;
+  padding-bottom: 2mm;
+  margin-bottom: 5mm;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Header Row for Recipient & Date/Metadata */
+.letter-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10mm;
+}
+
+.letter-recipient {
+  width: 85mm;
+  font-size: 10pt;
+  line-height: 1.4;
+  color: #111111;
+  text-align: left;
+}
+
+.letter-date {
+  font-size: 10pt;
+  color: #333333;
+  text-align: right;
+}
+
+/* Subject & Object */
+.letter-subject {
+  font-size: 13pt;
+  font-weight: bold;
+  margin-bottom: 4mm;
+  color: #000000;
+  text-align: left;
+}
+
+.letter-object {
+  font-size: 10pt;
+  color: #444444;
+  margin-bottom: 8mm;
+  padding-bottom: 2mm;
+  border-bottom: 1px dotted #e2e8f0;
+  text-align: left;
+}
+
+/* Body Area */
+.letter-body {
+  flex-grow: 1;
+  font-size: 11pt;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.letter-body p {
+  margin-bottom: 1em !important;
+}
+
+/* Footer Section */
+.letter-footer {
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid #dddddd;
+  padding-top: 5mm;
+  margin-top: 10mm;
+  font-size: 8pt;
+  color: #666666;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.footer-col {
+  width: 30%;
+}
+
+/* Variable Chip Style */
+.variable-chip {
+  background-color: #e0f2fe !important;
+  color: #0369a1 !important;
+  border: 1px solid #bae6fd !important;
+  border-radius: 4px !important;
+  padding: 1px 6px !important;
+  font-weight: 600 !important;
+  font-size: 90% !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 2px !important;
+  cursor: default !important;
+}
+
+[data-theme="dark"] .variable-chip {
+  background-color: #e0f2fe !important;
+  color: #0369a1 !important;
+}
+
+/* TipTap Editor Elements styling */
+.tiptap p {
+  margin-bottom: 1em;
+}
+
+.tiptap table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 15px 0;
+  background-color: transparent !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+
+.tiptap th {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  font-weight: bold;
+  border: 1px solid #cbd5e1 !important;
+  padding: 8px 12px !important;
+}
+
+.tiptap td {
+  border: 1px solid #cbd5e1 !important;
+  padding: 8px 12px !important;
+  color: #334155 !important;
+  background-color: transparent !important;
+}
+
+/* LayoutDiv Container Border in Editor to make sections visually editable */
+.tiptap .layout-div {
+  border: 1px dashed #cbd5e1;
+  padding: 8px;
+  margin: 8px 0;
+  border-radius: 4px;
+  position: relative;
+  transition: border-color 0.2s;
+}
+
+.tiptap .layout-div:hover {
+  border-color: #0ea5e9;
+}
+
+.tiptap .layout-div::before {
+  position: absolute;
+  top: -8px;
+  left: 8px;
+  background-color: #0ea5e9;
+  color: white;
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-family: monospace;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.tiptap .layout-div.letter-sender::before { content: "Absenderzeile"; }
+.tiptap .layout-div.letter-recipient::before { content: "Empfängeradresse"; }
+.tiptap .layout-div.letter-date::before { content: "Ort / Datum"; }
+.tiptap .layout-div.letter-subject::before { content: "Betreffzeile"; }
+.tiptap .layout-div.letter-object::before { content: "Objekt / Details"; }
+.tiptap .layout-div.letter-body::before { content: "Brieftext / Inhalt"; }
+.tiptap .layout-div.letter-footer::before { content: "Fußzeile"; }
+.tiptap .layout-div.footer-col::before { content: "Spalte Fußzeile"; }
+.tiptap .layout-div.letter-page::before { content: "DIN A4 Seite"; }
+.tiptap .layout-div.letter-header-row::before { content: "Kopfzeile-Spalten"; }

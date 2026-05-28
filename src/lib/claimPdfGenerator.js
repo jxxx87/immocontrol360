@@ -1,5 +1,3 @@
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import { supabase } from './supabase';
 import QRCode from 'qrcode';
 
@@ -15,73 +13,24 @@ const formatDate = (dateString) => {
 const DEFAULT_DUNNING_TEMPLATES = {
     payment_reminder: {
         subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-id="nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-id="forderungs_tabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-id="zahlungsfrist_datum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-id="vermieter_bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_1: {
         subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-id="nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-id="forderungs_tabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-id="zahlungsfrist_datum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-id="vermieter_bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_2: {
         subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-id="nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-id="forderungs_tabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-id="zahlungsfrist_datum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-id="vermieter_bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_final: {
         subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-id="nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-id="forderungs_tabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-id="zahlungsfrist_datum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-id="vermieter_bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     }
-};
-
-const drawDunningText = (doc, htmlText, variables, margin, usableWidth, pageHeight, yPos) => {
-    let text = htmlText;
-    
-    for (const [key, value] of Object.entries(variables)) {
-        const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
-        text = text.replace(regex, value);
-    }
-
-    let cleanText = text
-        .replace(/<p>/g, '')
-        .replace(/<\/p>/g, '\n\n')
-        .replace(/<br\s*\/?>/g, '\n')
-        .replace(/<[^>]+>/g, '')
-        .trim();
-
-    const paragraphs = cleanText.split('\n\n');
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-
-    for (const p of paragraphs) {
-        if (!p.trim()) continue;
-
-        if (p.includes('fristlosen Kündigung') || p.includes('Kontoinhaber:') || p.includes('Zahlungsfrist:')) {
-            doc.setFont('helvetica', 'bold');
-        } else {
-            doc.setFont('helvetica', 'normal');
-        }
-
-        const splitP = doc.splitTextToSize(p.trim(), usableWidth);
-        
-        if (yPos + splitP.length * 5 > pageHeight - margin) {
-            doc.addPage();
-            yPos = margin;
-        }
-
-        doc.text(splitP, margin, yPos);
-        yPos += splitP.length * 5 + 6;
-    }
-
-    return yPos;
 };
 
 export const generateClaimPdf = async (claim, totals, items, documentType, deadlineDays, internalNote, targetItemId, portalLinkData) => {
-    const doc = new jsPDF('p', 'mm', 'a4');
-    const margin = 20;
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const usableWidth = pageWidth - (margin * 2);
-    let yPos = margin;
-
-    // Fetch Sender Data
+    // 1. Fetch Sender Profile Data
     const { data: profile } = await supabase
         .from('profiles')
         .select('first_name, last_name, company, street, house_number, zip, city, bank_name, iban, bic')
@@ -93,37 +42,14 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const senderCity = `${profile?.zip || ''} ${profile?.city || ''}`.trim();
     const senderLine = `${senderName} · ${senderStreet} · ${senderCity}`;
 
-    // Tenant Data
+    // 2. Fetch Tenant Data
     const tenant = claim.tenants || {};
     const tenantName = `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim();
-    // Fallback tenant address to property address
     const prop = claim.leases?.units?.properties || {};
     const tenantStreet = `${prop.street || ''} ${prop.house_number || ''}`.trim();
     const tenantCity = `${prop.zip || ''} ${prop.city || ''}`.trim();
 
-    // Setup Fonts
-    doc.setFont('helvetica');
-
-    // 1. Absenderzeile (DIN 5008 Typ B: y=45)
-    yPos = 45;
-    doc.setFontSize(6); // Max 2mm height
-    doc.setTextColor(0, 0, 0);
-    doc.text(senderLine, margin, yPos);
-    
-    // Zone 2 is a 20mm blank space for Sendungskennzeichnung
-    yPos += 20;
-
-    // 2. Empfängerblock (Zone 3 starts at Y=65)
-    doc.setFontSize(9); // Min 9pt for 5 lines
-    doc.text('Herrn/Frau', margin, yPos);
-    yPos += 5;
-    doc.text(tenantName, margin, yPos);
-    yPos += 5;
-    doc.text(tenantStreet, margin, yPos);
-    yPos += 5;
-    doc.text(tenantCity, margin, yPos);
-
-    // Fetch Portfolio Bank Data (if available)
+    // 3. Fetch Portfolio Bank Data (if available)
     const portfolioId = claim.leases?.units?.properties?.portfolio_id;
     let portfolio = null;
     if (portfolioId) {
@@ -135,7 +61,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         portfolio = pData;
     }
 
-    // Load Template from DB
+    // 4. Resolve Template Type
     let templateType = 'payment_reminder';
     if (documentType === 'Mahnung') templateType = 'dunning_1';
     else if (documentType === 'Abmahnung') templateType = 'dunning_2';
@@ -148,6 +74,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         else templateType = 'dunning_1';
     }
 
+    // 5. Load Template from Supabase
     let template = DEFAULT_DUNNING_TEMPLATES[templateType];
     try {
         let query = supabase
@@ -179,43 +106,17 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         console.error('Error fetching template for dunning PDF:', e);
     }
 
-    // 3. Ort, Datum rechts (DIN 5008: below fold 1, roughly y=105)
-    yPos = 105;
-    doc.setFontSize(11);
     const docDate = new Date();
     const dateStr = docDate.toLocaleDateString('de-DE');
-    const placeDate = `${profile?.city || 'Ort'}, den ${dateStr}`;
-    doc.text(placeDate, pageWidth - margin - doc.getTextWidth(placeDate), yPos);
-    yPos += 15;
 
-    // 5. Betreff
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    const subject = template.subject || DEFAULT_DUNNING_TEMPLATES[templateType].subject;
-    doc.text(subject, margin, yPos);
-    yPos += 8;
-
-    // Mietobjekt
-    doc.setFont('helvetica', 'normal');
-    const unitName = claim.leases?.units?.unit_name ? ` (Einheit: ${claim.leases?.units?.unit_name})` : '';
-    const objStr = `Mietobjekt: ${prop.street || ''} ${prop.house_number || ''}, ${prop.zip || ''} ${prop.city || ''}${unitName}`;
-    doc.text(objStr, margin, yPos);
-    yPos += 15;
-
-    // Haupttext
-    doc.text(`Sehr geehrte/r ${tenantName},`, margin, yPos);
-    yPos += 10;
-    
+    // 6. Interest rate calculation
     const endDate = new Date();
     const interestRate = claim.interest_rate || 5.0;
     
-    // Check if single item
     let activeItems = JSON.parse(JSON.stringify(items));
     let isSingleItem = false;
     let activeTotals = { ...totals };
     
-    // DYNAMIC INTEREST CALCULATION & BREAKDOWN
-    let totalCalculatedInterest = 0;
     for (let i = 0; i < activeItems.length; i++) {
         let item = activeItems[i];
         if (Number(item.open_amount) <= 0) continue;
@@ -311,11 +212,9 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         };
     }
 
-    // Prepare variables for text replacement
+    // 7. Prep details for templates
     const deadlineDate = new Date();
     deadlineDate.setDate(deadlineDate.getDate() + parseInt(deadlineDays));
-    const nextDay = new Date(deadlineDate);
-    nextDay.setDate(nextDay.getDate() + 1);
     
     const bankName = portfolio?.bank_name || profile?.bank_name;
     const iban = portfolio?.iban || profile?.iban;
@@ -323,12 +222,197 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const vwz = `Mietrückstand ${prop.street || ''}`;
     
     const bankDetailsStr = (iban && iban.trim() !== '')
-        ? `Kontoinhaber: ${senderName}, ${bankName ? 'Bank: ' + bankName + ', ' : ''}IBAN: ${iban}${bic ? ', BIC: ' + bic : ''}, Verwendungszweck: ${vwz}`
+        ? `Inhaber: ${senderName}, ${bankName ? 'Bank: ' + bankName + ', ' : ''}IBAN: ${iban}${bic ? ', BIC: ' + bic : ''}, Verwendungszweck: ${vwz}`
         : 'das Ihnen bekannte Bankkonto';
 
     const leaseStart = claim.leases?.start_date ? formatDate(claim.leases.start_date) : 'Mietbeginn';
+
+    // 8. Generate Table HTMLs
+    const summaryTableHtml = `
+    <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 10pt;">
+        <thead>
+            <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                <th style="padding: 6px; text-align: left;">Forderungsposition</th>
+                <th style="padding: 6px; text-align: right; width: 30%;">Betrag</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">${isSingleItem ? (activeItems[0].claim_items?.description || 'Hauptforderung') : 'Offene Hauptforderungen (Miete/Nebenkosten etc.)'}</td>
+                <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${formatCurrency(activeTotals.current_principal_open)}</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">Verzugszinsen bis einschließlich ${dateStr}</td>
+                <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${formatCurrency(activeTotals.total_interest_open)}</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px; border-bottom: 1px solid #cbd5e1;">Mahnauslagen für dieses Schreiben</td>
+                <td style="padding: 6px; text-align: right; border-bottom: 1px solid #cbd5e1;">${formatCurrency(activeTotals.total_fees_open)}</td>
+            </tr>
+            <tr style="border-top: 2px solid #000; border-bottom: 2px double #000; background-color: #f8fafc;">
+                <td style="padding: 8px; font-weight: bold; font-size: 11pt;">Gesamtforderung zum ${dateStr}:</td>
+                <td style="padding: 8px; text-align: right; font-weight: bold; font-size: 11pt; color: #dc2626;">${formatCurrency(activeTotals.total_due)}</td>
+            </tr>
+        </tbody>
+    </table>`;
+
+    const interestBodyRows = [];
+    let totalCalculatedInterestRef = 0;
     
-    const variables = {
+    activeItems.filter(item => Number(item.open_amount) > 0).forEach(item => {
+        if (item.claim_items?.interest_breakdown) {
+            item.claim_items.interest_breakdown.forEach(b => {
+                totalCalculatedInterestRef += b.interest;
+                interestBodyRows.push([
+                    b.description,
+                    formatCurrency(b.amount),
+                    `${new Date(b.fM).toLocaleDateString('de-DE')} - ${endDate.toLocaleDateString('de-DE')}`,
+                    b.diffDays.toString(),
+                    formatCurrency(b.interest)
+                ]);
+            });
+        }
+    });
+
+    if (interestBodyRows.length === 0) {
+        interestBodyRows.push(['Keine offenen Beträge für Zinsberechnung', '', '', '', '0,00 €']);
+    }
+
+    const detailTableHtml = `
+    <div>
+        <h3 style="font-size: 11pt; font-weight: bold; margin-top: 10px; margin-bottom: 8px; border-bottom: 1px solid #000; padding-bottom: 2px;">Anlage 1: Forderungsaufstellung</h3>
+        <table style="width: 100%; border-collapse: collapse; font-size: 9pt; margin-bottom: 20px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                    <th style="padding: 5px; text-align: left;">Position</th>
+                    <th style="padding: 5px; text-align: right; width: 22%;">Forderungsbetrag</th>
+                    <th style="padding: 5px; text-align: right; width: 22%;">Zahlung / Anrechnung</th>
+                    <th style="padding: 5px; text-align: right; width: 22%; font-weight: bold;">Offener Betrag</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${activeItems.map(item => `
+                    <tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 5px; text-align: left;">${item.claim_items?.description || item.claim_items?.item_type || 'Forderung'}</td>
+                        <td style="padding: 5px; text-align: right;">${formatCurrency(item.original_amount)}</td>
+                        <td style="padding: 5px; text-align: right;">${item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '0,00 €'}</td>
+                        <td style="padding: 5px; text-align: right; font-weight: bold;">${formatCurrency(item.open_amount)}</td>
+                    </tr>
+                `).join('')}
+                <tr style="border-top: 2px solid #000; font-weight: bold; background-color: #f8fafc;">
+                    <td style="padding: 6px;">Summe offener Hauptforderungen:</td>
+                    <td></td>
+                    <td></td>
+                    <td style="padding: 6px; text-align: right;">${formatCurrency(activeTotals.current_principal_open)}</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3 style="font-size: 11pt; font-weight: bold; margin-top: 15px; margin-bottom: 4px; border-bottom: 1px solid #000; padding-bottom: 2px;">Anlage 2: Zinsberechnung</h3>
+        <p style="font-size: 8.5pt; color: #475569; margin-bottom: 8px;">
+            Berechnet werden dürfen Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz.
+            Für die Berechnung wurde aus Kulanz lediglich ein Zinssatz von ${Number(claim.interest_rate || 5.00).toFixed(2)}% p.a. verwendet.
+        </p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 8.5pt; margin-bottom: 20px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                    <th style="padding: 5px; text-align: left;">Position</th>
+                    <th style="padding: 5px; text-align: right; width: 20%;">Verzinslicher Betrag</th>
+                    <th style="padding: 5px; text-align: left; width: 25%;">Zeitraum</th>
+                    <th style="padding: 5px; text-align: right; width: 12%;">Tage</th>
+                    <th style="padding: 5px; text-align: right; width: 18%; font-weight: bold;">Zinsen</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${interestBodyRows.map(row => `
+                    <tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 5px; text-align: left;">${row[0]}</td>
+                        <td style="padding: 5px; text-align: right;">${row[1]}</td>
+                        <td style="padding: 5px; text-align: left;">${row[2]}</td>
+                        <td style="padding: 5px; text-align: right;">${row[3]}</td>
+                        <td style="padding: 5px; text-align: right; font-weight: bold;">${row[4]}</td>
+                    </tr>
+                `).join('')}
+                <tr style="border-top: 2px solid #000; font-weight: bold; background-color: #f8fafc;">
+                    <td colspan="4" style="padding: 6px;">Summe berechneter Verzugszinsen:</td>
+                    <td style="padding: 6px; text-align: right;">${formatCurrency(totalCalculatedInterestRef)}</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3 style="font-size: 11pt; font-weight: bold; margin-top: 15px; margin-bottom: 8px; border-bottom: 1px solid #000; padding-bottom: 2px;">Anlage 3: Ablauf bei Mietrückstand und mögliche Folgekosten</h3>
+        <table style="width: 100%; border-collapse: collapse; font-size: 8pt; margin-bottom: 10px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
+                    <th style="padding: 5px; text-align: left; width: 25%;">Schritt</th>
+                    <th style="padding: 5px; text-align: left;">Erläuterung</th>
+                    <th style="padding: 5px; text-align: left; width: 30%;">Mögliche Folgekosten</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">1. Mietzahlung fällig</td>
+                    <td style="padding: 4px;">Die Miete ist bis spätestens zum dritten Werktag des Monats zu zahlen.</td>
+                    <td style="padding: 4px;">Keine Zusatzkosten bei fristgerechter Zahlung</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">2. Rückstand festgestellt</td>
+                    <td style="padding: 4px;">Offene Miete wird ermittelt und tagesgenaue Verzugszinsen laufen an.</td>
+                    <td style="padding: 4px;">Verzugszinsen nach § 288 BGB</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">3. Mahnung / Abmahnung</td>
+                    <td style="padding: 4px;">Zahlungsfrist wird gesetzt. Die Forderung wird schriftlich beziffert.</td>
+                    <td style="padding: 4px;">Auslagen für Porto/Druck</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">4. Keine fristgerechte Zahlung</td>
+                    <td style="padding: 4px;">Weitere Beitreibung kann eingeleitet werden: Anwalt, Mahnbescheid oder Klage.</td>
+                    <td style="padding: 4px;">Rechtsverfolgungs- und Gerichtskosten möglich</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">5. Kündigungsprüfung</td>
+                    <td style="padding: 4px;">Bei erheblichem Mietrückstand kann eine fristlose, hilfsweise ordentliche Kündigung geprüft werden.</td>
+                    <td style="padding: 4px;">Weitere Kostenrisiken für den Mieter</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 4px; font-weight: bold;">6. Gerichtliche Durchsetzung</td>
+                    <td style="padding: 4px;">Bei weiterem Ausbleiben kann die Forderung tituliert und vollstreckt werden; bei Kündigung ggf. Räumungsklage.</td>
+                    <td style="padding: 4px;">Gerichts-, Anwalts- und Vollstreckungskosten möglich</td>
+                </tr>
+            </tbody>
+        </table>
+        <div style="font-size: 8.5pt; font-weight: bold; color: #1e293b; margin-top: 8px; line-height: 1.4;">
+            Wichtig: Durch vollständige und fristgerechte Zahlung können weitere Kosten und rechtliche Schritte vermieden werden.
+            Die tatsächlichen Kosten hängen vom weiteren Verlauf und den gesetzlichen Gebühren ab.
+        </div>
+    </div>`;
+
+    // 9. QR Code / Portal link box
+    let qrBlockHtml = '';
+    if (portalLinkData && portalLinkData.token && portalLinkData.pin) {
+        const portalUrl = portalLinkData.link || `${window.location.origin}/forderung/portal/${portalLinkData.token}`;
+        try {
+            const qrDataUrl = await QRCode.toDataURL(portalUrl, { margin: 1, width: 120 });
+            qrBlockHtml = `
+            <div style="margin-top: 15px; margin-bottom: 15px; background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 6px; padding: 12px; text-align: center; font-size: 9.5pt; page-break-inside: avoid;">
+                <div style="margin-bottom: 6px;">
+                    <img src="${qrDataUrl}" style="width: 80px; height: 80px; display: inline-block;" alt="QR Code" />
+                </div>
+                <div style="font-weight: bold; color: #1e293b; margin-bottom: 4px; font-size: 10pt;">Online Forderungsportal</div>
+                <div style="color: #475569; line-height: 1.4; max-width: 480px; margin: 0 auto 6px; font-size: 8.5pt;">
+                    Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.
+                </div>
+                <div style="font-weight: bold; color: #1e293b; font-size: 10pt;">
+                    Zugangscode (PIN): <span style="background-color: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">${portalLinkData.pin}</span>
+                </div>
+            </div>`;
+        } catch (qrErr) {
+            console.error('Failed to generate QR code for HTML print', qrErr);
+        }
+    }
+
+    const localVars = {
         mieter_name: tenantName,
         mieter_anrede: `Sehr geehrte/r ${tenantName}`,
         mieter_adresse: `${tenantStreet}, ${tenantCity}`,
@@ -342,303 +426,173 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         zinsbetrag: formatCurrency(activeTotals.total_interest_open),
         nutzungszeitraum: leaseStart,
         vermieter_name: senderName,
-        vermieter_bankverbindung: bankDetailsStr
+        vermieter_bankverbindung: bankDetailsStr,
+        rechnungsdatum: dateStr,
+        forderungs_tabelle: summaryTableHtml + qrBlockHtml,
+        forderungs_detail_tabelle: detailTableHtml
     };
 
-    // Split template into text before and after the table
-    const fullTextHtml = template.content_html || DEFAULT_DUNNING_TEMPLATES[templateType].content_html;
-    const parts = fullTextHtml.split(/<span[^>]*data-id="forderungs_tabelle"[^>]*>.*?<\/span>|{forderungs_tabelle}/);
+    const replaceHTMLVariables = (htmlStr, vars) => {
+        if (!htmlStr) return '';
+        let result = htmlStr;
+        for (const [key, value] of Object.entries(vars)) {
+            const regex = new RegExp(`(<span[^>]*data-id="${key}"[^>]*>.*?<\/span>|{${key}})`, 'g');
+            result = result.replace(regex, value);
+        }
+        return result;
+    };
 
-    const beforeTableHtml = parts[0] || '';
-    const afterTableHtml = parts[1] || '';
+    const fullTemplateHtml = template.content_html || DEFAULT_DUNNING_TEMPLATES[templateType].content_html;
+    const renderedContent = replaceHTMLVariables(fullTemplateHtml, localVars);
 
-    // Draw before table text
-    yPos = drawDunningText(doc, beforeTableHtml, variables, margin, usableWidth, pageHeight, yPos);
-
-    // Forderungszusammenfassung Table
-    autoTable(doc, {
-        startY: yPos,
-        margin: { left: margin },
-        tableWidth: usableWidth * 0.8,
-        theme: 'plain',
-        body: [
-            [isSingleItem ? (activeItems[0].claim_items?.description || 'Hauptforderung') : 'Offene Hauptforderungen (Miete/Nebenkosten etc.)', formatCurrency(activeTotals.current_principal_open)],
-            [`Verzugszinsen bis einschließlich ${dateStr}`, formatCurrency(activeTotals.total_interest_open)],
-            ['Mahnauslagen für dieses Schreiben', formatCurrency(activeTotals.total_fees_open)]
-        ],
-        columnStyles: {
-            0: { fontStyle: 'normal', textColor: [0, 0, 0] },
-            1: { halign: 'right', fontStyle: 'normal', textColor: [0, 0, 0] }
-        },
-        styles: { fontSize: 11, cellPadding: 2 }
-    });
-    
-    yPos = doc.lastAutoTable.finalY;
-    
-    autoTable(doc, {
-        startY: yPos,
-        margin: { left: margin },
-        tableWidth: usableWidth * 0.8,
-        theme: 'plain',
-        body: [
-            [`Gesamtforderung zum ${dateStr}`, formatCurrency(activeTotals.total_due)]
-        ],
-        columnStyles: {
-            0: { fontStyle: 'bold', textColor: [0, 0, 0] },
-            1: { halign: 'right', fontStyle: 'bold', textColor: [0, 0, 0] }
-        },
-        styles: { fontSize: 11, cellPadding: 2 }
-    });
-
-    yPos = doc.lastAutoTable.finalY + 10;
-
-    // Draw after table text
-    yPos = drawDunningText(doc, afterTableHtml, variables, margin, usableWidth, pageHeight, yPos);
-
-    yPos += 5;
-
-    // QR Code / Forderungsportal
-    if (portalLinkData && portalLinkData.token && portalLinkData.pin) {
-        const portalUrl = portalLinkData.link || `${window.location.origin}/forderung/portal/${portalLinkData.token}`;
-        
-        try {
-            const qrDataUrl = await QRCode.toDataURL(portalUrl, { margin: 1, width: 120 });
-            const qrSize = 35;
-            
-            const boxWidth = usableWidth;
-            const boxPadding = 12;
-            const textWidth = boxWidth - (boxPadding * 2);
-            
-            const titleText = 'Online Forderungsportal';
-            const infoText = 'Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.';
-            const pinText = `Zugangscode (PIN): ${portalLinkData.pin}`;
-            
-            doc.setFontSize(9.5);
-            const splitPortalText = doc.splitTextToSize(infoText, textWidth);
-            const infoLinesCount = splitPortalText.length;
-            
-            // Calculate total height of the box:
-            // Padding Top (8) + QR Code (35) + Gap (6) + Title (5) + Gap (4) + Text Lines (count * 4.5) + Gap (5) + PIN (6) + Padding Bottom (8)
-            const boxHeight = 8 + qrSize + 6 + 5 + 4 + (infoLinesCount * 4.5) + 5 + 6 + 8;
-            
-            if (yPos + boxHeight > pageHeight - margin) {
-                doc.addPage();
-                yPos = margin;
+    // Build the final printed HTML
+    const finalHtml = `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><title>${documentType} - ${tenantName}</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
+        @page { size: A4; margin: 0; }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 0; background: #fff; font-family: 'Open Sans', Arial, sans-serif; font-size: 11pt; color: #000; }
+        .letter-page {
+            width: 210mm;
+            height: 297mm;
+            padding: 20mm 20mm 20mm 25mm;
+            margin: 0 auto;
+            background: #ffffff;
+            color: #000000;
+            box-sizing: border-box;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            text-align: left;
+            page-break-after: always;
+            page-break-inside: avoid;
+        }
+        .letter-sender {
+            font-size: 8pt;
+            color: #555555;
+            border-bottom: 1px solid #cccccc;
+            padding-bottom: 2mm;
+            margin-bottom: 5mm;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .letter-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10mm;
+        }
+        .letter-recipient {
+            width: 85mm;
+            font-size: 10pt;
+            line-height: 1.4;
+            color: #111111;
+            text-align: left;
+        }
+        .letter-date {
+            font-size: 10pt;
+            color: #333333;
+            text-align: right;
+        }
+        .letter-subject {
+            font-size: 13pt;
+            font-weight: bold;
+            margin-bottom: 4mm;
+            color: #000000;
+            text-align: left;
+        }
+        .letter-object {
+            font-size: 10pt;
+            color: #444444;
+            margin-bottom: 8mm;
+            padding-bottom: 2mm;
+            border-bottom: 1px dotted #e2e8f0;
+            text-align: left;
+        }
+        .letter-body {
+            flex-grow: 1;
+            font-size: 11pt;
+            line-height: 1.6;
+            text-align: left;
+        }
+        .letter-body p {
+            margin-bottom: 1em !important;
+        }
+        .letter-footer {
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid #dddddd;
+            padding-top: 5mm;
+            margin-top: 10mm;
+            font-size: 8pt;
+            color: #666666;
+            line-height: 1.4;
+            text-align: left;
+        }
+        .footer-col {
+            width: 30%;
+        }
+        @media print {
+            body {
+                margin: 0;
+                padding: 0;
+                background: #fff;
             }
-            
-            // Draw background gray box
-            doc.setFillColor(245, 247, 250);
-            doc.rect(margin, yPos, boxWidth, boxHeight, 'F');
-            
-            // Draw dashed border
-            doc.setDrawColor(180, 187, 200);
-            doc.setLineWidth(0.4);
-            doc.setLineDashPattern([2, 2], 0);
-            doc.rect(margin, yPos, boxWidth, boxHeight, 'D');
-            doc.setLineDashPattern([], 0); // reset to solid lines
-            
-            // Add QR Code centered
-            const qrX = margin + (boxWidth - qrSize) / 2;
-            const qrY = yPos + 8;
-            doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
-            
-            // Add Title centered
-            doc.setFontSize(11);
-            doc.setFont('helvetica', 'bold');
-            doc.setTextColor(30, 41, 59);
-            doc.text(titleText, margin + (boxWidth / 2), qrY + qrSize + 7, { align: 'center' });
-            
-            // Add Info Text centered
-            doc.setFontSize(9.5);
-            doc.setFont('helvetica', 'normal');
-            doc.setTextColor(71, 85, 105);
-            const textYStart = qrY + qrSize + 7 + 6;
-            for (let i = 0; i < splitPortalText.length; i++) {
-                doc.text(splitPortalText[i], margin + (boxWidth / 2), textYStart + (i * 4.5), { align: 'center' });
+            .letter-page {
+                margin: 0 !important;
+                border: none !important;
+                box-shadow: none !important;
+                page-break-after: always !important;
+                page-break-inside: avoid !important;
+                width: 210mm !important;
+                height: 297mm !important;
             }
-            
-            // Add PIN centered
-            doc.setFontSize(12);
-            doc.setFont('helvetica', 'bold');
-            doc.setTextColor(30, 41, 59);
-            const pinY = textYStart + (infoLinesCount * 4.5) + 4;
-            doc.text(pinText, margin + (boxWidth / 2), pinY, { align: 'center' });
-            
-            // Reset text color to black for following text
-            doc.setTextColor(0, 0, 0);
-            
-            yPos += boxHeight + 12; // Add 12mm of space below the box
-        } catch (qrErr) {
-            console.error('Failed to generate QR code', qrErr);
         }
-    }
+    </style></head><body style="background:#fff">
+    ${renderedContent}
+    </body></html>`;
 
-    // Schluss
-    if (yPos + 40 > pageHeight - margin) {
-        doc.addPage();
-        yPos = margin;
-    }
-    
-    doc.text('Mit freundlichen Grüßen', margin, yPos);
-    yPos += 15;
-    doc.text(senderName, margin, yPos);
-    yPos += 15;
-
-    doc.setFontSize(9);
-    doc.text('Anlagen:', margin, yPos);
-    yPos += 5;
-    doc.text('1. Forderungsaufstellung', margin, yPos);
-    yPos += 5;
-    doc.text('2. Zinsberechnung', margin, yPos);
-    yPos += 5;
-    doc.text('3. Übersicht: Ablauf bei Mietrückstand und mögliche Folgekosten', margin, yPos);
-
-    // ==========================================
-    // ANLAGE 1: Forderungsaufstellung
-    // ==========================================
-    doc.addPage();
-    let currentY = margin;
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Anlage 1: Forderungsaufstellung', margin, currentY);
-    currentY += 10;
-
-    autoTable(doc, {
-        startY: currentY,
-        margin: { left: margin, right: margin },
-        head: [['Position', 'Forderungsbetrag', 'Zahlung / Anrechnung', 'Offener Betrag']],
-        body: activeItems.map(item => [
-            item.claim_items?.description || item.claim_items?.item_type || 'Forderung',
-            formatCurrency(item.original_amount),
-            item.paid_principal > 0 ? formatCurrency(item.paid_principal) : '0,00 €',
-            formatCurrency(item.open_amount)
-        ]),
-        foot: [['Summe offener Hauptforderungen', '', '', formatCurrency(activeTotals.current_principal_open)]],
-        headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
-        footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
-        styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
-        columnStyles: {
-            1: { halign: 'right' },
-            2: { halign: 'right' },
-            3: { halign: 'right', fontStyle: 'bold' }
-        }
-    });
-
-    // ==========================================
-    // ANLAGE 2: Zinsberechnung
-    // ==========================================
-    currentY = doc.lastAutoTable.finalY + 20;
-    if (currentY > pageHeight - 60) {
-        doc.addPage();
-        currentY = margin;
-    }
-
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Anlage 2: Zinsberechnung', margin, currentY);
-    currentY += 8;
-
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    const zinsText = `Berechnet werden dürfen Verzugszinsen nach § 288 Abs. 1 BGB mit fünf Prozentpunkten über dem jeweiligen Basiszinssatz. Für die Berechnung wurde aus Kulanz lediglich ein Zinssatz von ${Number(claim.interest_rate || 5.00).toFixed(2)}% p.a. verwendet.`;
-    const splitZins = doc.splitTextToSize(zinsText, usableWidth);
-    doc.text(splitZins, margin, currentY);
-    currentY += splitZins.length * 5 + 5;
-
-    const endDateRef = new Date();
-    let totalCalculatedInterestRef = 0;
-    const interestBody = [];
-
-    activeItems.filter(item => Number(item.open_amount) > 0).forEach(item => {
-        if (item.claim_items?.interest_breakdown) {
-            item.claim_items.interest_breakdown.forEach(b => {
-                totalCalculatedInterestRef += b.interest;
-                interestBody.push([
-                    b.description,
-                    formatCurrency(b.amount),
-                    `${b.fM.toLocaleDateString('de-DE')} - ${endDateRef.toLocaleDateString('de-DE')}`,
-                    b.diffDays.toString(),
-                    formatCurrency(b.interest)
-                ]);
-            });
-        }
-    });
-
-    // If there is no item with open amount, show a fallback
-    if (interestBody.length === 0) {
-        interestBody.push(['Keine offenen Beträge für Zinsberechnung', '', '', '', '0,00 €']);
-    }
-
-    autoTable(doc, {
-        startY: currentY,
-        margin: { left: margin, right: margin },
-        head: [['Position', 'Verzinslicher Betrag', 'Zeitraum', 'Tage', 'Zinsen']],
-        body: interestBody,
-        foot: [['Summe berechneter Verzugszinsen', '', '', '', formatCurrency(totalCalculatedInterestRef)]],
-        headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
-        footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
-        styles: { fontSize: 10, cellPadding: 3, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
-        columnStyles: {
-            1: { halign: 'right' },
-            3: { halign: 'right' },
-            4: { halign: 'right', fontStyle: 'bold' }
-        }
-    });
-
-    // ==========================================
-    // ANLAGE 3: Ablauf bei Mietrückstand
-    // ==========================================
-    doc.addPage();
-    currentY = margin;
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Anlage 3: Ablauf bei Mietrückstand und mögliche Folgekosten', margin, currentY);
-    currentY += 10;
-
-    autoTable(doc, {
-        startY: currentY,
-        margin: { left: margin, right: margin },
-        head: [['Schritt', 'Erläuterung', 'Mögliche Folgekosten']],
-        body: [
-            ['1. Mietzahlung fällig', 'Die Miete ist bis spätestens zum dritten Werktag des Monats zu zahlen.', 'Keine Zusatzkosten bei fristgerechter Zahlung'],
-            ['2. Rückstand festgestellt', 'Offene Miete wird ermittelt und tagesgenaue Verzugszinsen laufen an.', 'Verzugszinsen nach § 288 BGB'],
-            ['3. Mahnung / Abmahnung', 'Zahlungsfrist wird gesetzt. Die Forderung wird schriftlich beziffert.', 'Auslagen für Porto/Druck'],
-            ['4. Keine fristgerechte Zahlung', 'Weitere Beitreibung kann eingeleitet werden: Anwalt, Mahnbescheid oder Klage.', 'Rechtsverfolgungs- und Gerichtskosten möglich'],
-            ['5. Kündigungsprüfung', 'Bei erheblichem Mietrückstand kann eine fristlose, hilfsweise ordentliche Kündigung geprüft werden.', 'Weitere Kostenrisiken für den Mieter'],
-            ['6. Gerichtliche Durchsetzung', 'Bei weiterem Ausbleiben kann die Forderung tituliert und vollstreckt werden; bei Kündigung ggf. Räumungsklage.', 'Gerichts-, Anwalts- und Vollstreckungskosten möglich']
-        ],
-        headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
-        styles: { fontSize: 10, cellPadding: 4, textColor: [0, 0, 0], lineColor: [200, 200, 200], lineWidth: 0.1 },
-        columnStyles: {
-            0: { cellWidth: 40, fontStyle: 'bold' }
-        }
-    });
-
-    currentY = doc.lastAutoTable.finalY + 10;
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Wichtig: Durch vollständige und fristgerechte Zahlung können weitere Kosten und rechtliche Schritte vermieden werden. Die tatsächlichen Kosten hängen vom weiteren Verlauf und den gesetzlichen Gebühren ab.', margin, currentY, { maxWidth: usableWidth });
-
-    // ==========================================
-    // FOOTER (All Pages)
-    // ==========================================
-    const pageCount = doc.internal.getNumberOfPages();
-    const footerText = `${documentType} - Stand ${dateStr}`;
-    for (let i = 1; i <= pageCount; i++) {
-        doc.setPage(i);
-        doc.setFontSize(8);
-        doc.setTextColor(150, 150, 150);
-        doc.text(footerText, margin, pageHeight - 10);
-        doc.text(`Seite ${i} von ${pageCount}`, pageWidth - margin - 20, pageHeight - 10);
-    }
-
-    // Generate output
+    // 10. Generate file name
     const cleanTenantName = tenantName.replace(/[^a-z0-9]/gi, '_').replace(/_+/g, '_');
     const dateYMD = docDate.toISOString().split('T')[0];
     const fileName = `${documentType}_Zahlungsverzug_${cleanTenantName}_${dateYMD}.pdf`;
 
-    // Calculate SHA256 (for tracking)
-    const pdfArrayBuffer = doc.output('arraybuffer');
+    // 11. Render PDF using iframe + html2pdf.js to calculate SHA256 and open/download
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'absolute';
+    iframe.style.left = '-9999px';
+    iframe.style.width = '210mm';
+    iframe.style.height = '297mm';
+    document.body.appendChild(iframe);
+    iframe.contentDocument.open();
+    iframe.contentDocument.write(finalHtml);
+    iframe.contentDocument.close();
+
+    const loadScript = () => new Promise((resolve) => {
+        if (window.html2pdf) return resolve();
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js';
+        script.onload = resolve;
+        document.head.appendChild(script);
+    });
+
+    await loadScript();
+
+    // Wait for iframe to render fully
+    await new Promise(r => setTimeout(r, 600));
+
+    // Generate pdf array buffer
+    const pdfArrayBuffer = await window.html2pdf().set({
+        margin: 10,
+        filename: fileName,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    }).from(iframe.contentDocument.body).output('arraybuffer');
+
+    document.body.removeChild(iframe);
+
+    // Calculate SHA256
     const hashBuffer = await crypto.subtle.digest('SHA-256', pdfArrayBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const document_sha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -648,7 +602,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const pdfUrl = URL.createObjectURL(pdfBlob);
     window.open(pdfUrl, '_blank');
 
-    // Create Metadata Snapshot
+    // Create Event Metadata Snapshot
     const eventMetadata = {
         document_type: documentType,
         snapshot_date: docDate.toISOString(),
@@ -663,7 +617,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         target_item_id: targetItemId || null
     };
 
-    // Save to claim_events (Deduplicate by documentType)
+    // Save/Update claim_event
     const { data: existingEvents } = await supabase
         .from('claim_events')
         .select('id, event_metadata')
@@ -673,7 +627,6 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const existingEvent = existingEvents?.find(e => e.event_metadata?.document_type === documentType);
 
     if (existingEvent) {
-        // Update the existing event to refresh its timestamp and metadata
         const { error: updateError } = await supabase
             .from('claim_events')
             .update({
@@ -684,7 +637,6 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             
         if (updateError) console.error('Error updating claim_event:', updateError);
     } else {
-        // Insert new event
         const { error: eventError } = await supabase.from('claim_events').insert([{
             user_id: claim.user_id,
             claim_id: claim.id,
@@ -698,9 +650,6 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
             throw new Error('Fehler beim Speichern der Historie.');
         }
     }
-
-    // Optional: Upload to Supabase Storage if a bucket exists
-    // const { error: uploadError } = await supabase.storage.from('claims_documents').upload(`${claim.id}/${fileName}`, pdfBlob);
 
     return { fileName, eventMetadata };
 };

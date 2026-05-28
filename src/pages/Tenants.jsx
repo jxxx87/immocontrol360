@@ -192,6 +192,12 @@ const Tenants = () => {
                 }
             }
 
+            const params = new URLSearchParams(window.location.search);
+            const urlUnitId = params.get('unitId');
+            if (urlUnitId) {
+                finalUnits = finalUnits.filter(u => u.id === urlUnitId);
+            }
+
             setUnits(finalUnits);
 
             // 6. Calc KPIs
@@ -224,7 +230,23 @@ const Tenants = () => {
 
     useEffect(() => {
         if (user) fetchData();
-    }, [user, selectedPortfolioID, filterPropertyId, filterStatus]); // Refetch/Recalc when filter changes
+    }, [user, selectedPortfolioID, filterPropertyId, filterStatus, location.search]); // Refetch/Recalc when filter or search changes
+
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const urlUnitId = params.get('unitId');
+        const action = params.get('action');
+        if (urlUnitId && action !== 'create' && units.length > 0) {
+            const targetUnit = units.find(u => u.id === urlUnitId);
+            if (targetUnit && targetUnit.activeLease) {
+                setSelectedLease(targetUnit.activeLease);
+                setEditTenantForm({ ...targetUnit.activeLease.tenant });
+                setEditLeaseForm({ ...targetUnit.activeLease });
+                setIsEditingDetails(false);
+                setIsDetailModalOpen(true);
+            }
+        }
+    }, [location.search, units]);
 
     // Handlers
     const handleSetVacationRental = async () => {
@@ -918,6 +940,26 @@ const Tenants = () => {
                     </div>
                 </Card>
             </div>
+
+            {new URLSearchParams(location.search).get('unitId') && (
+                <div style={{
+                    padding: '10px 16px',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    border: '1px solid rgba(59, 130, 246, 0.2)',
+                    borderRadius: 'var(--radius-md)',
+                    marginBottom: 'var(--spacing-md)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: '0.9rem',
+                    color: 'var(--text-primary)'
+                }}>
+                    <span>Gefiltert nach einer bestimmten Einheit aus dem Cockpit.</span>
+                    <Button variant="ghost" size="sm" onClick={() => navigate('/tenants', { replace: true })}>
+                        Filter aufheben
+                    </Button>
+                </div>
+            )}
 
             <Card>
                 {units.length === 0 ? (
