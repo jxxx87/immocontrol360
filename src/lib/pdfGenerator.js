@@ -288,7 +288,7 @@ function buildHtml({
                                     <th style="width:15%;padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Etage</th>
                                     <th style="width:12%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Fläche</th>
                                     <th style="width:10%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Zimmer</th>
-                                    <th style="width:15%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Soll-Miete</th>
+                                    <th style="width:15%;padding:3px 8px;text-align:right;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Miete Ist</th>
                                     <th style="width:13%;padding:3px 8px;text-align:left;font-size:7px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #e2e8f0;">Status</th>
                                 </tr>
                             </thead>

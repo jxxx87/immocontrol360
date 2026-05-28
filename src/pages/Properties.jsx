@@ -821,6 +821,7 @@ const Properties = () => {
                                 marktpreis: p.market_value_total || 0,
                                 restschuld: p.remaining_debt || 0,
                                 miete_monat: p.stats?.totalActualRent || 0,
+                                bankrate: p.monthly_loan_payment || 0,
                                 cashflow_monat: (p.stats?.totalActualRent || 0) - (p.monthly_loan_payment || 0),
                                 wohnflaeche: p.stats?.totalArea || 0,
                                 leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
@@ -836,7 +837,9 @@ const Properties = () => {
                                 floor: u.floor || '–',
                                 sqm: u.sqm || 0,
                                 rooms: u.rooms || '–',
-                                target_rent: u.target_rent || 0,
+                                target_rent: u.is_vacation_rental 
+                                    ? (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0) 
+                                    : (parseFloat(u.leases?.find(l => l.status === 'active')?.cold_rent) || 0),
                                 status: u.is_vacation_rental ? 'Ferienwohnung' : (u.leases?.find(l => l.status === 'active') ? 'Vermietet' : 'Leerstand'),
                             })),
                         ]))}
