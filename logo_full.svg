@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 100" fill="none">
+  <!-- Icon Section -->
+  <g>
+    <!-- Top Left: Light Gray -->
+    <rect x="5" y="15" width="30" height="30" rx="6" fill="#D1D5DB" />
+    <!-- Top Right: Blue -->
+    <rect x="40" y="15" width="30" height="30" rx="6" fill="#0066CC" />
+    <!-- Bottom Left: Dark Gray -->
+    <rect x="5" y="50" width="30" height="30" rx="6" fill="#4B5563" />
+    <!-- Bottom Right: Medium Gray -->
+    <rect x="40" y="50" width="30" height="30" rx="6" fill="#9CA3AF" />
+  </g>
+  
+  <!-- Text Section -->
+  <text x="85" y="52" font-family="Inter, system-ui, sans-serif" font-weight="bold" font-size="34" fill="#003366">ImmoControl</text>
+  <text x="160" y="85" font-family="Inter, system-ui, sans-serif" font-weight="normal" font-size="28" fill="#5F6368">Pro 360</text>
+</svg>
