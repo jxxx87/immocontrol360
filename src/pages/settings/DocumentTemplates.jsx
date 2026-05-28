@@ -294,6 +294,12 @@ export const DocumentTemplates = () => {
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [selectedVariable, setSelectedVariable] = useState(null);
+    const [diagnostics, setDiagnostics] = useState({
+        lastError: null,
+        loadSource: 'Initial',
+        dbDataFound: false,
+        contentLength: 0
+    });
     
     useEffect(() => {
         setPreviewPage(1);
@@ -496,6 +502,12 @@ export const DocumentTemplates = () => {
             if (data) {
                 setSubject(data.subject || '');
                 editor?.commands.setContent(data.content_html || '');
+                setDiagnostics({
+                    lastError: null,
+                    loadSource: 'Datenbank (Portfolio)',
+                    dbDataFound: true,
+                    contentLength: (data.content_html || '').length
+                });
             } else {
                 // If it's a custom template, it must be in the DB.
                 // If not found in portfolio-specific, try global custom template
@@ -511,12 +523,24 @@ export const DocumentTemplates = () => {
                         if (globalCustom) {
                             setSubject(globalCustom.subject || '');
                             editor?.commands.setContent(globalCustom.content_html || '');
+                            setDiagnostics({
+                                lastError: null,
+                                loadSource: 'Datenbank (Eigene Global)',
+                                dbDataFound: true,
+                                contentLength: (globalCustom.content_html || '').length
+                            });
                             setLoading(false);
                             return;
                         }
                     }
                     editor?.commands.setContent('');
                     setSubject('');
+                    setDiagnostics({
+                        lastError: null,
+                        loadSource: 'Datenbank (Eigene Leer)',
+                        dbDataFound: false,
+                        contentLength: 0
+                    });
                     setLoading(false);
                     return;
                 }
@@ -534,6 +558,12 @@ export const DocumentTemplates = () => {
                     if (globalData) {
                         setSubject(globalData.subject || '');
                         editor?.commands.setContent(globalData.content_html || '');
+                        setDiagnostics({
+                            lastError: null,
+                            loadSource: 'Datenbank (Global)',
+                            dbDataFound: true,
+                            contentLength: (globalData.content_html || '').length
+                        });
                         setLoading(false);
                         return;
                     }
@@ -543,6 +573,12 @@ export const DocumentTemplates = () => {
                 const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
                 setSubject(defaultVal.subject || '');
                 editor?.commands.setContent(defaultVal.content_html || '');
+                setDiagnostics({
+                    lastError: null,
+                    loadSource: 'Hardcoded Default',
+                    dbDataFound: false,
+                    contentLength: (defaultVal.content_html || '').length
+                });
             }
         } catch (error) {
             console.error('Error loading template:', error);
@@ -550,6 +586,12 @@ export const DocumentTemplates = () => {
             const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
             setSubject(defaultVal.subject || '');
             editor?.commands.setContent(defaultVal.content_html || '');
+            setDiagnostics({
+                lastError: error.message || String(error),
+                loadSource: 'Fehler-Fallback (Default)',
+                dbDataFound: false,
+                contentLength: (defaultVal.content_html || '').length
+            });
         } finally {
             setLoading(false);
         }
@@ -1759,6 +1801,43 @@ export const DocumentTemplates = () => {
                     </div>
                 </div>
             </Modal>
+
+            {/* Diagnose-Tools */}
+            <div style={{
+                marginTop: '2rem',
+                padding: '1rem',
+                backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.2)',
+                borderRadius: '8px',
+                fontSize: '0.85rem',
+                color: 'var(--text-primary)'
+            }}>
+                <details>
+                    <summary style={{ fontWeight: 600, cursor: 'pointer', outline: 'none' }}>
+                        🛠️ Editor-Diagnose (Hier klicken bei Fehlern)
+                    </summary>
+                    <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div><strong>User Status:</strong> {user ? `Eingeloggt (ID: ${user.id})` : 'Nicht eingeloggt'}</div>
+                        <div><strong>Editor Status:</strong> {editor ? 'Initialisiert und geladen' : 'Nicht initialisiert'}</div>
+                        <div><strong>Lade-Status:</strong> {loading ? 'Lädt...' : 'Bereit'}</div>
+                        <div><strong>Aktive Vorlage (ID):</strong> {activeType}</div>
+                        <div><strong>Aktives Portfolio (ID):</strong> {selectedPortfolioId}</div>
+                        <div><strong>Datenquelle:</strong> {diagnostics.loadSource}</div>
+                        <div><strong>Eintrag in DB gefunden:</strong> {diagnostics.dbDataFound ? 'Ja' : 'Nein'}</div>
+                        <div><strong>Geladene HTML-Länge:</strong> {diagnostics.contentLength} Zeichen</div>
+                        {diagnostics.lastError && (
+                            <div style={{ color: 'var(--danger-color)', padding: '8px', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px', borderLeft: '3px solid var(--danger-color)' }}>
+                                <strong>Letzter Fehler:</strong> {diagnostics.lastError}
+                            </div>
+                        )}
+                        <div style={{ marginTop: '8px' }}>
+                            <Button size="xs" variant="secondary" onClick={() => loadTemplate()}>
+                                Vorlage neu laden
+                            </Button>
+                        </div>
+                    </div>
+                </details>
+            </div>
         </Card>
     );
 };
