@@ -1179,6 +1179,21 @@ export const DocumentTemplates = () => {
                 .ProseMirror > .letter-page:nth-of-type(${activePage}) {
                     display: flex !important;
                 }
+                @media (max-width: 1450px) {
+                    .letter-page {
+                        zoom: 0.85;
+                    }
+                }
+                @media (max-width: 1300px) {
+                    .letter-page {
+                        zoom: 0.75;
+                    }
+                }
+                @media (max-width: 1100px) {
+                    .letter-page {
+                        zoom: 0.65;
+                    }
+                }
             `}</style>
             {/* Portfolio Selector & Add template button */}
             <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>

@@ -29,6 +29,7 @@ const Settings = () => {
     const { onboardingLocked, unlockOnboarding } = useOutletContext() || {};
     const location = useLocation();
     const [activeTab, setActiveTab] = useState('profile');
+    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
     
     // Sharing modal state
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
@@ -46,6 +47,11 @@ const Settings = () => {
     useEffect(() => {
         if (location.state && location.state.activeTab) {
             setActiveTab(location.state.activeTab);
+            if (location.state.activeTab === 'document-templates') {
+                setIsSidebarCollapsed(true);
+            } else {
+                setIsSidebarCollapsed(false);
+            }
         }
     }, [location]);
 
@@ -690,42 +696,70 @@ const Settings = () => {
 
     return (
         <div>
-            <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xl)' }}>Einstellungen</h1>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--spacing-xl)', flexWrap: 'wrap', gap: '10px' }}>
+                <h1 style={{ fontSize: '1.875rem', fontWeight: 700, margin: 0 }}>Einstellungen</h1>
+                {!isMobile && (
+                    <Button 
+                        variant="ghost" 
+                        size="sm" 
+                        icon={PanelLeft} 
+                        onClick={() => setIsSidebarCollapsed(prev => !prev)}
+                        style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                        {isSidebarCollapsed ? 'Seitenmenü einblenden' : 'Seitenmenü ausblenden'}
+                    </Button>
+                )}
+            </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '100%' : '250px 1fr', gap: 'var(--spacing-xl)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '100%' : (isSidebarCollapsed ? '1fr' : '250px 1fr'), gap: isMobile ? 'var(--spacing-xl)' : (isSidebarCollapsed ? '0px' : 'var(--spacing-xl)') }}>
                 {/* Settings Sidebar */}
-                <Card style={{ padding: '0', height: 'fit-content', overflow: 'hidden' }}>
-                    <div style={{ display: 'flex', flexDirection: isMobile ? 'row' : 'column', overflowX: isMobile ? 'auto' : 'visible' }}>
-                        {tabs.map(tab => {
-                            const isDisabled = onboardingLocked && tab.id !== 'profile';
-                            return (
-                                <button
-                                    key={tab.id}
-                                    onClick={() => !isDisabled && (tab.link ? navigate(tab.link) : setActiveTab(tab.id))}
-                                    disabled={isDisabled}
-                                    style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        padding: 'var(--spacing-md)',
-                                        backgroundColor: activeTab === tab.id ? '#F3F4F6' : 'transparent',
-                                        borderLeft: !isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '3px solid transparent',
-                                        borderBottom: isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '1px solid var(--border-color)',
-                                        textAlign: 'left',
-                                        cursor: isDisabled ? 'not-allowed' : 'pointer',
-                                        fontWeight: activeTab === tab.id ? 500 : 400,
-                                        transition: 'background 0.2s',
-                                        whiteSpace: 'nowrap',
-                                        borderRight: isMobile ? '1px solid var(--border-color)' : 'none',
-                                        opacity: isDisabled ? 0.4 : 1,
-                                    }}
-                                >
-                                    <tab.icon size={18} style={{ marginRight: '10px', color: activeTab === tab.id ? 'var(--primary-color)' : 'var(--text-secondary)' }} />
-                                    {tab.label}
-                                </button>
-                            );
-                        })}
-                    </div>
-                </Card>
+                {(!isMobile && isSidebarCollapsed) ? null : (
+                    <Card style={{ padding: '0', height: 'fit-content', overflow: 'hidden' }}>
+                        <div style={{ display: 'flex', flexDirection: isMobile ? 'row' : 'column', overflowX: isMobile ? 'auto' : 'visible' }}>
+                            {tabs.map(tab => {
+                                const isDisabled = onboardingLocked && tab.id !== 'profile';
+                                return (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => {
+                                            if (!isDisabled) {
+                                                if (tab.link) {
+                                                    navigate(tab.link);
+                                                } else {
+                                                    setActiveTab(tab.id);
+                                                    if (tab.id === 'document-templates') {
+                                                        setIsSidebarCollapsed(true);
+                                                    } else {
+                                                        setIsSidebarCollapsed(false);
+                                                    }
+                                                }
+                                            }
+                                        }}
+                                        disabled={isDisabled}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            padding: 'var(--spacing-md)',
+                                            backgroundColor: activeTab === tab.id ? '#F3F4F6' : 'transparent',
+                                            borderLeft: !isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '3px solid transparent',
+                                            borderBottom: isMobile && activeTab === tab.id ? '3px solid var(--primary-color)' : '1px solid var(--border-color)',
+                                            textAlign: 'left',
+                                            cursor: isDisabled ? 'not-allowed' : 'pointer',
+                                            fontWeight: activeTab === tab.id ? 500 : 400,
+                                            transition: 'background 0.2s',
+                                            whiteSpace: 'nowrap',
+                                            borderRight: isMobile ? '1px solid var(--border-color)' : 'none',
+                                            opacity: isDisabled ? 0.4 : 1,
+                                        }}
+                                    >
+                                        <tab.icon size={18} style={{ marginRight: '10px', color: activeTab === tab.id ? 'var(--primary-color)' : 'var(--text-secondary)' }} />
+                                        {tab.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </Card>
+                )}
 
                 {/* Content Area */}
                 <div style={{ flex: 1 }}>
