@@ -1145,15 +1145,39 @@ export const DocumentTemplates = () => {
             <style>{`
                 .templates-layout-grid {
                     display: grid;
-                    grid-template-columns: 320px 1fr;
+                    grid-template-columns: 280px 1fr;
                     gap: 2rem;
                     align-items: start;
                 }
-                @media (max-width: 1024px) {
+                @media (max-width: 768px) {
                     .templates-layout-grid {
                         grid-template-columns: 1fr;
                         gap: 1.5rem;
                     }
+                }
+                .editor-canvas-container {
+                    padding: 2.5rem;
+                    background-color: var(--background-color);
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 1.5rem;
+                    border-radius: var(--radius-md);
+                    border: 1px solid var(--border-color-soft);
+                    overflow-y: auto;
+                    max-height: 800px;
+                    width: 100%;
+                    box-sizing: border-box;
+                }
+                .ProseMirror {
+                    outline: none;
+                    width: 100%;
+                }
+                .ProseMirror > .letter-page {
+                    display: none !important;
+                }
+                .ProseMirror > .letter-page:nth-of-type(${activePage}) {
+                    display: flex !important;
                 }
             `}</style>
             {/* Portfolio Selector & Add template button */}
