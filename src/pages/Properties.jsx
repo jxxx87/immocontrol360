@@ -634,7 +634,7 @@ const Properties = () => {
                 const streets = Array.from(new Set(g.properties.map(pr => pr.street).filter(Boolean)));
                 const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
                 const numbers = g.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
-                g.street = weRow?.name || `Wirtschaftseinheit: ${streetName}`;
+                g.street = (weRow?.name && weRow.name !== 'Wirtschaftseinheit') ? weRow.name : `Wirtschaftseinheit: ${streetName}`;
                 g.house_number = numbers;
 
                 if (weRow) {
@@ -805,21 +805,30 @@ const Properties = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <ExportDropdown
                         reportType="immobilien"
-                        data={groupedProperties.map(p => ({
-                            property_id: p.id,
-                            adresse: p.isGroup ? p.street : `${p.street} ${p.house_number || ''}`.trim(),
-                            einheiten: p.stats?.totalUnits || 0,
-                            kaufpreis: p.total_investment_cost || 0,
-                            marktpreis: p.market_value_total || 0,
-                            restschuld: p.remaining_debt || 0,
-                            miete_monat: p.stats?.totalActualRent || 0,
-                            cashflow_monat: (p.stats?.totalActualRent || 0) - (p.monthly_loan_payment || 0),
-                            wohnflaeche: p.stats?.totalArea || 0,
-                            leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
-                            ltv: p.market_value_total > 0 ? (p.remaining_debt || 0) / p.market_value_total : 0,
-                            dscr: p.monthly_loan_payment > 0 ? (p.stats?.totalActualRent || 0) / p.monthly_loan_payment : 0,
-                            _propertyLabel: p.isGroup ? p.street : `${p.street} ${p.house_number || ''}`.trim(),
-                        }))}
+                        data={groupedProperties.map(p => {
+                            const formattedAddress = p.isGroup ? (() => {
+                                const streets = Array.from(new Set(p.properties.map(pr => pr.street).filter(Boolean)));
+                                const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
+                                const numbers = p.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                                return `${streetName} ${numbers}`.trim();
+                            })() : `${p.street} ${p.house_number || ''}`.trim();
+
+                            return {
+                                property_id: p.id,
+                                adresse: formattedAddress,
+                                einheiten: p.stats?.totalUnits || 0,
+                                kaufpreis: p.total_investment_cost || 0,
+                                marktpreis: p.market_value_total || 0,
+                                restschuld: p.remaining_debt || 0,
+                                miete_monat: p.stats?.totalActualRent || 0,
+                                cashflow_monat: (p.stats?.totalActualRent || 0) - (p.monthly_loan_payment || 0),
+                                wohnflaeche: p.stats?.totalArea || 0,
+                                leerstand: p.stats?.totalUnits ? `${p.stats.totalUnits - (p.stats.occupiedUnits || p.stats.totalUnits)} / ${p.stats.totalUnits}` : '–',
+                                ltv: p.market_value_total > 0 ? (p.remaining_debt || 0) / p.market_value_total : 0,
+                                dscr: p.monthly_loan_payment > 0 ? (p.stats?.totalActualRent || 0) / p.monthly_loan_payment : 0,
+                                _propertyLabel: formattedAddress,
+                            };
+                        })}
                         unitData={Object.fromEntries(groupedProperties.map(p => [
                             p.id,
                             (p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || [])).map(u => ({
