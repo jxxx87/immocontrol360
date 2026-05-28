@@ -16,7 +16,7 @@ import {
     AlignLeft, AlignCenter, AlignRight, 
     List, ListOrdered, Undo, Redo, 
     Save, RotateCcw, FileText, ChevronRight, 
-    HelpCircle, Image as ImageIcon, Plus, Trash2, Folder
+    HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2
 } from 'lucide-react';
 
 // Deutsche Variablen für globale Verwendung
@@ -95,127 +95,127 @@ const DEFAULT_TEMPLATES = {
         name: 'Zahlungserinnerung',
         category: 'Mahnwesen',
         subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>bei der regelmäßigen Überprüfung unserer Zahlungseingänge mussten wir leider feststellen, dass für das Mietverhältnis über die Wohneinheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> im Objekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> noch offene Posten bestehen.</p><p>Sicherlich handelt es sich hierbei nur um ein vorübergehendes Versäumnis oder ein Missverständnis Ihrerseits. Wir möchten Sie höflich bitten, den ausstehenden Gesamtbetrag zeitnah auszugleichen.</p><p>Die offenen Forderungen setzen sich wie folgt zusammen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Bitte überweisen Sie den fälligen Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf die folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Falls Sie den Betrag in den letzten Tagen bereits überwiesen haben, betrachten Sie dieses Schreiben bitte als gegenstandslos. Sollten Sie Fragen zur Aufstellung haben oder Unterstützung benötigen, stehen wir Ihnen selbstverständlich gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     dunning_1: {
         name: 'Mahnung (Stufe 1)',
         category: 'Mahnwesen',
         subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>trotz unserer Zahlungserinnerung konnten wir für das Mietverhältnis über die Wohneinheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> (<span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>) bis heute keinen vollständigen Zahlungseingang verzeichnen.</p><p>Gemäß § 556b Abs. 1 BGB ist die Miete jeweils zu Beginn des Monats, spätestens bis zum dritten Werktag, im Voraus zu entrichten. Durch die verspätete bzw. ausbleibende Miete befinden Sie sich gesetzlich im Verzug.</p><p>Wir fordern Sie hiermit förmlich auf, den nachfolgend aufgeschlüsselten Rückstand umgehend auszugleichen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Bitte überweisen Sie die Gesamtsumme von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> (inklusive einer Mahngebühr für Porto und Bearbeitungsaufwand) bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf unser Konto:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Wir weisen darauf hin, dass wir bei fruchtlosem Ablauf dieser Frist gezwungen sind, das gerichtliche Mahnverfahren einzuleiten oder ein Inkassobüro zu beauftragen, wodurch Ihnen erhebliche weitere Kosten entstehen würden.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     dunning_2: {
         name: 'Abmahnung (Stufe 2)',
         category: 'Mahnwesen',
         subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit mahnen wir Sie wegen des fortgesetzten Zahlungsverzugs bezüglich der Wohnung <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> (<span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>) ausdrücklich ab.</p><p>Trotz unserer vorherigen Mahnungen weisen Sie aktuell einen erheblichen Mietrückstand auf. Dieses vertragswidrige Verhalten gefährdet den Fortbestand des Mietverhältnisses. Gemäß den gesetzlichen Bestimmungen sind Sie verpflichtet, die vereinbarte Miete pünktlich zu entrichten.</p><p>Der Rückstand setzt sich aktuell wie folgt zusammen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Wir fordern Sie letztmalig unter Androhung rechtlicher Konsequenzen auf, den ausstehenden Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf folgendes Konto einzuzahlen:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p><strong>Wichtiger rechtlicher Hinweis:</strong> Sollte dieser Betrag nicht fristgerecht und vollständig bei uns eingehen, behalten wir uns das Recht vor, das Mietverhältnis ohne weitere Ankündigung außerordentlich fristlos aus wichtigem Grund gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise ordentlich wegen schuldhafter Pflichtverletzung gemäß § 573 Abs. 2 Nr. 1 BGB, zu kündigen. In diesem Fall müssen Sie mit einer Räumungsklage und der gerichtlichen Beitreibung der Kosten rechnen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     dunning_final: {
         name: 'Letzte Zahlungsaufforderung',
         category: 'Mahnwesen',
         subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>dies ist unsere letzte außergerichtliche Zahlungsaufforderung bezüglich Ihres Mietrückstands für die Wohnung <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Sie haben sämtliche bisherige Zahlungsfristen verstreichen lassen. Ihr Mietrückstand überschreitet mittlerweile die gesetzliche Grenze, die uns zur sofortigen Kündigung des Mietverhältnisses berechtigt.</p><p>Der Gesamtrückstand zum heutigen Tag beträgt:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Wir geben Ihnen hiermit letztmalig Gelegenheit, die Räumung der Wohnung und ein kostenintensives Gerichtsverfahren abzuwenden, indem Sie den Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf unser Konto überweisen:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollter der Betrag nicht fristgerecht gutgeschrieben werden, werden wir den Vorgang ohne weiteren Zwischenschritt an unsere Rechtsanwaltskanzlei zur Durchführung der Räumungsklage und zur Einleitung der Zwangsvollstreckung übergeben. Sämtliche hierbei entstehenden Kosten gehen zu Ihren Lasten.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     utility_intro: {
         name: 'Nebenkosten (Einleitung)',
         category: 'Nebenkosten',
-        subject: '',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`
+        subject: 'Betriebskostenabrechnung für das Abrechnungsjahr',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für das Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p>`
     },
     utility_outro: {
         name: 'Nebenkosten (Schlusswort)',
         category: 'Nebenkosten',
         subject: '',
-        content_html: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     invoice_intro: {
         name: 'Fewo-Rechnung (Einleitung)',
         category: 'FEWO-Rechnungen',
-        subject: '',
-        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span>:</p>`
+        subject: 'Rechnung über erbrachte Leistungen für Ihren Aufenthalt',
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen für den Zeitraum vom/auf <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span></strong> in Rechnung zu stellen:</p>`
     },
     invoice_outro: {
         name: 'Fewo-Rechnung (Schlusswort)',
         category: 'FEWO-Rechnungen',
         subject: '',
-        content_html: `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto. Vielen Dank für Ihren Aufenthalt und wir freuen uns auf Ihren nächsten Besuch.</p>`
+        content_html: `<p>Bitte überweisen Sie den fälligen Gesamtbetrag von <strong><span data-type="mention" data-id="brutto_betrag" data-label="Gesamtbetrag (Brutto)">Gesamtbetrag (Brutto)</span></strong> unter Angabe der Rechnungsnummer <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong> innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Wir hoffen, dass Sie Ihren Aufenthalt genossen haben, und würden uns freuen, Sie bald wieder als Gast begrüßen zu dürfen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     credit_note_intro: {
         name: 'Fewo-Gutschrift (Einleitung)',
         category: 'FEWO-Rechnungen',
-        subject: '',
-        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
+        subject: 'Gutschrift zu Ihrem Aufenthalt',
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns für den Kontakt und schreiben Ihnen für Ihren Aufenthalt vom/auf <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span></strong> folgende Beträge als Gutschrift gut:</p>`
     },
     rental_agreement: {
         name: 'Mietvertrag Anschreiben',
         category: 'Verträge',
         subject: 'Übersendung des Mietvertrags zur Unterschrift',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich freue mich, Sie bald als neuen Mieter begrüßen zu dürfen. Anbei übersende ich Ihnen den Mietvertrag für das Objekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Dokumente, unterzeichnen Sie beide Ausfertigungen an den markierten Stellen und senden Sie ein Exemplar an mich zurück.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>ich freue mich, Sie bald als neuen Mieter begrüßen zu dürfen. Anbei übersende ich Ihnen den Mietvertrag für das Objekt <strong><span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span></strong>, Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Dokumente sorgfältig, unterzeichnen Sie beide Ausfertigungen an den markierten Stellen und senden Sie ein Exemplar für meine Unterlagen an mich zurück.</p><p>Nach Erhalt der Kaution und des unterzeichneten Vertrags steht der Wohnungsübergabe nichts mehr im Wege. Wir werden uns bezüglich eines Termins rechtzeitig mit Ihnen abstimmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     sublease_agreement: {
         name: 'Untermietvertrag Anschreiben',
         category: 'Verträge',
         subject: 'Übersendung des Untermietvertrags zur Unterschrift',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen den Untermietvertrag für die Wohnung/das Zimmer in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> zur Unterschrift in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Vertragsbedingungen, unterzeichnen Sie beide Exemplare und senden Sie eine Ausfertigung an mich zurück.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen den Untermietvertrag für die Wohnung/das Zimmer in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> zur Unterschrift in zweifacher Ausfertigung.</p><p>Bitte prüfen Sie die Vertragsbedingungen, unterzeichnen Sie beide Exemplare und senden Sie eine Ausfertigung an mich zurück.</p><p>Für Rückfragen stehe ich Ihnen selbstverständlich gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     rent_increase: {
         name: 'Mieterhöhungsschreiben',
         category: 'Mieterhöhung',
-        subject: 'Mieterhöhung für Ihr Mietobjekt',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>seit dem Mietbeginn wurde die Miete für Ihre Wohnung nicht mehr angepasst. Die ortsübliche Vergleichsmiete hat sich in der Zwischenzeit erhöht.</p><p>Ich schlage daher vor, die Nettokaltmiete von derzeit <span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span> um <span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span> auf zukünftig <span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span> zum <span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span> anzupassen.</p><p>Bitte erteilen Sie mir hierzu Ihre schriftliche Zustimmung bis spätestens zum <span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span>. Eine entsprechende Zustimmungserklärung liegt diesem Schreiben bei.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        subject: 'Mieterhöhung für Ihr Mietobjekt gemäß § 558 BGB',
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>seit Ihrem Einzug bzw. der letzten Mietanpassung haben sich die ortsüblichen Vergleichsmieten für vergleichbaren Wohnraum in unserer Region spürbar erhöht. Nach sorgfältiger Prüfung schlagen wir daher eine Anpassung Ihrer Nettokaltmiete gemäß § 558 BGB vor.</p><p>Ihre aktuelle Nettokaltmiete beträgt derzeit <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong>. Wir beabsichtigen, diese Miete um einen Betrag von <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> anzupassen, so dass sich ab dem <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> eine neue Nettokaltmiete von monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> ergibt.</p><p>Diese Miete liegt innerhalb der ortsüblichen Vergleichsmiete für Wohnungen vergleichbarer Art, Größe, Ausstattung, Beschaffenheit und Lage (gemäß dem aktuellen Mietspiegel).</p><p>Um diese Anpassung wirksam werden zu lassen, bitten wir Sie gesetzlich um Ihre schriftliche Zustimmung. Bitte senden Sie uns hierzu die beigefügte Zustimmungserklärung unterschrieben bis spätestens zum <strong><span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span></strong> zurück.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     rent_increase_consent: {
         name: 'Zustimmungserklärung',
         category: 'Mieterhöhung',
         subject: 'Zustimmungserklärung zur Mieterhöhung',
-        content_html: `<p><b>Zustimmungserklärung</b></p><p>Hiermit stimme ich, <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span>, der Erhöhung der Nettokaltmiete für die Wohnung in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> von bisher <span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span> um <span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span> auf nunmehr <span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span> ab dem <span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span> zu.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mieters</p>`
+        content_html: `<p><b>Zustimmungserklärung zur Mieterhöhung</b></p><p>Hiermit stimme ich, <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span>, als Hauptmieter der Wohnung/Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, der beabsichtigten Erhöhung der Nettokaltmiete zu.</p><p>Die monatliche Nettokaltmiete wird von bisher <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong> um den Anpassungsbetrag von <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> auf zukünftig monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> angehoben. Diese Änderung tritt zum <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> in Kraft.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mieters / aller Mieter</p>`
     },
     landlord_confirmation: {
         name: 'Wohnungsgeberbestätigung',
         category: 'Bescheinigungen',
-        subject: '',
-        content_html: `<h1 style="text-align:center">Wohnungsgeberbestätigung</h1><p style="text-align:center">nach § 19 Abs. 3 des Bundesmeldegesetzes (BMG)</p><p><br><b>1. Einzug des Mieters</b><br>Es wird bestätigt, dass am <span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span> folgende Personen in die unten genannte Wohnung eingezogen sind:<br><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></p><p><b>2. Anschrift der Wohnung</b><br><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Wohneinheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></p><p><b>3. Angaben zum Wohnungsgeber (Vermieter)</b><br>Name: <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br>Anschrift: <span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers</p>`
+        subject: 'Wohnungsgeberbestätigung nach § 19 BMG',
+        content_html: `<h1 style="text-align:center">Wohnungsgeberbestätigung</h1><p style="text-align:center">nach § 19 Abs. 3 des Bundesmeldegesetzes (BMG)</p><p><br><b>1. Einzug des Mieters</b><br>Es wird hiermit bestätigt, dass am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong> folgende Personen in die unten genannte Wohnung eingezogen sind:<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong></p><p><b>2. Anschrift der Wohnung</b><br><strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Wohneinheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong></p><p><b>3. Angaben zum Wohnungsgeber (Vermieter / Eigentümer)</b><br>Name: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>Anschrift: <span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers / Vermieters</p>`
     },
     rent_clearance_certificate: {
         name: 'Mietschuldenfreiheitsbescheinigung',
         category: 'Bescheinigungen',
         subject: 'Bescheinigung über Mietschuldenfreiheit',
-        content_html: `<p>Hiermit bestätige ich, <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span>, als Vermieter der Wohnung in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, dass das Mietverhältnis mit <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span> vertragsgemäß verlaufen ist.</p><p>Der Mieter hat alle Mietzahlungen und Betriebskosten bis zum heutigen Tag vollständig und fristgerecht geleistet. Es bestehen keine Mietrückstände.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Hiermit bestätige ich, <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong>, als Vermieter der Wohnung in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, dass das Mietverhältnis mit <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> stets ordnungsgemäß verlaufen ist.</p><p>Die vereinbarte Miete sowie die fälligen Betriebskostenvorauszahlungen wurden bis zum heutigen Tag stets vollständig und fristgerecht entrichtet. Es bestehen zum aktuellen Zeitpunkt keinerlei Mietrückstände oder sonstige offene Forderungen aus dem genannten Mietverhältnis.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     handover_intro: {
         name: 'Übergabeprotokoll Anschreiben',
         category: 'Bescheinigungen',
         subject: 'Übersendung des Wohnungsübergabeprotokolls',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen eine Kopie des Übergabeprotokolls für Ihr Mietobjekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span>, das wir im Rahmen des Einzugs/Auszugs gemeinsam erstellt haben.</p><p>Bitte bewahren Sie das Dokument für Ihre Unterlagen auf.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei übersende ich Ihnen eine Kopie des Übergabeprotokolls für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span></strong>, das wir im Rahmen des Einzugs/Auszugs gemeinsam erstellt haben.</p><p>Bitte bewahren Sie das Dokument für Ihre Unterlagen auf. Es dient als Nachweis über den Zustand der Wohnung und die Zählerstände bei Übergabe.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     sepa_mandate: {
         name: 'SEPA-Lastschriftmandat',
         category: 'Bescheinigungen',
         subject: 'SEPA-Lastschriftmandat für Mietzahlungen',
-        content_html: `<h2 style="text-align:center">SEPA-Lastschriftmandat</h2><p><b>Zahlungsempfänger (Gläubiger):</b><br>Name: <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br>Gläubiger-Identifikationsnummer: DE99ZZZ00000000000</p><p><b>Zahlungspflichtiger (Schuldner):</b><br>Name: <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span><br>Adresse: <span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></p><p>Ich ermächtige den Zahlungsempfänger <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span>, Zahlungen von meinem Konto mittels Lastschrift einzuziehen. Zugleich weise ich mein Kreditinstitut an, die vom Zahlungsempfänger auf mein Konto gezogenen Lastschriften einzulösen.</p><p><b>Bankverbindung des Zahlungspflichtigen:</b><br>IBAN: ___________________________<br>BIC: ___________________________</p><p>Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum, die Erstattung des belasteten Betrages verlangen. Es gelten dabei die mit meinem Kreditinstitut vereinbarten Bedingungen.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Kontoinhabers</p>`
+        content_html: `<h2 style="text-align:center">SEPA-Lastschriftmandat</h2><p><b>Zahlungsempfänger (Gläubiger):</b><br>Name: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>Gläubiger-Identifikationsnummer: DE99ZZZ00000000000</p><p><b>Zahlungspflichtiger (Schuldner):</b><br>Name: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br>Adresse: <span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></p><p>Ich ermächtige den Zahlungsempfänger <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong>, Zahlungen von meinem Konto mittels Lastschrift einzuziehen. Zugleich weise ich mein Kreditinstitut an, die vom Zahlungsempfänger auf mein Konto gezogenen Lastschriften einzulösen.</p><p><b>Bankverbindung des Zahlungspflichtigen:</b><br>IBAN: ___________________________<br>BIC: ___________________________</p><p>Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum, die Erstattung des belasteten Betrages verlangen. Es gelten dabei die mit meinem Kreditinstitut vereinbarten Bedingungen.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Kontoinhabers (Schuldner)</p>`
     },
     termination_receipt: {
         name: 'Kündigungsbestätigung',
         category: 'Bescheinigungen',
         subject: 'Bestätigung Ihrer Wohnungskündigung',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> in der <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>.</p><p>Das Mietverhältnis endet vereinbarungsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werde ich mich in Kürze mit Ihnen in Verbindung setzen.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Das Mietverhältnis endet vereinbarungsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werde ich mich in Kürze mit Ihnen in Verbindung setzen, um einen gemeinsamen Termin abzustimmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     },
     tenant_self_disclosure: {
         name: 'Mieterselbstauskunft',
         category: 'Bescheinigungen',
         subject: 'Selbstauskunft für Mietinteressenten',
-        content_html: `<h2 style="text-align:center">Mieterselbstauskunft</h2><p>Ich bin daran interessiert, das Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> anzumieten. Hierfür gebe ich folgende Auskünfte:</p><p><b>1. Persönliche Daten:</b><br>Name, Vorname: <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span><br>Geburtsdatum: ___________________________<br>Beruf/Tätigkeit: ___________________________<br>Nettoeinkommen p.M.: ___________________________</p><p><b>2. Weitere Fragen:</b><br>Bestehen Mietrückstände aus früheren Mietverhältnissen? [ ] Ja [ ] Nein<br>Wurde in den letzten 5 Jahren ein Insolvenzverfahren eröffnet? [ ] Ja [ ] Nein</p><p>Ich versichere, die Angaben wahrheitsgemäß gemacht zu haben.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mietinteressenten</p>`
+        content_html: `<h2 style="text-align:center">Mieterselbstauskunft</h2><p>Ich bin daran interessiert, das Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> anzumieten. Hierfür gebe ich folgende Auskünfte:</p><p><b>1. Persönliche Daten:</b><br>Name, Vorname: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br>Geburtsdatum: ___________________________<br>Beruf/Tätigkeit: ___________________________<br>Nettoeinkommen p.M.: ___________________________</p><p><b>2. Weitere Fragen:</b><br>Bestehen Mietrückstände aus früheren Mietverhältnissen? [ ] Ja [ ] Nein<br>Wurde in den letzten 5 Jahren ein Insolvenzverfahren eröffnet? [ ] Ja [ ] Nein</p><p>Ich versichere, die Angaben wahrheitsgemäß und nach bestem Wissen gemacht zu haben.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mietinteressenten</p>`
     },
     rental_guarantee: {
         name: 'Mietbürgschaft',
         category: 'Bescheinigungen',
         subject: 'Mietbürgschaftserklärung',
-        content_html: `<h2 style="text-align:center">Mietbürgschaftserklärung</h2><p>Für die Forderungen aus dem Mietverhältnis über das Mietobjekt <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>, Einheit <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span> zwischen dem Vermieter <span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> und dem Mieter <span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span> übernehme ich:</p><p>Bürge Name: ___________________________<br>Anschrift: ___________________________</p><p>hiermit die selbstschuldnerische Bürgschaft bis zu einem Höchstbetrag von drei Nettokaltmieten zur Absicherung aller Ansprüche aus dem Mietvertrag (z.B. Mietzins, Nebenkosten, Beschädigungen).</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Bürgen</p>`
+        content_html: `<h2 style="text-align:center">Mietbürgschaftserklärung</h2><p>Für die Forderungen aus dem Mietverhältnis über das Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> zwischen dem Vermieter <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong> und dem Mieter <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> übernehme ich:</p><p>Bürge Name: ___________________________<br>Anschrift: ___________________________</p><p>hiermit die selbstschuldnerische Bürgschaft bis zu einem Höchstbetrag von drei Nettokaltmieten zur Absicherung aller Ansprüche aus dem Mietvertrag (z.B. Mietzins, Nebenkosten, Beschädigungen).</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Bürgen</p>`
     },
     house_rules: {
         name: 'Hausordnung',
         category: 'Bescheinigungen',
-        subject: 'Hausordnung',
-        content_html: `<h2 style="text-align:center">Hausordnung</h2><p>Für ein harmonisches Zusammenleben im Mietobjekt <span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span> gilt folgende Hausordnung:</p><p><b>1. Ruhezeiten:</b><br>Die allgemeinen Ruhezeiten von 22:00 bis 07:00 Uhr sowie von 13:00 bis 15:00 Uhr sind einzuhalten. In dieser Zeit sind störende Geräusche (z.B. laute Musik, Bohren) zu vermeiden.</p><p><b>2. Sicherheit:</b><br>Die Hauseingangstüren sind stets geschlossen zu halten. Fluchtwege und Treppenhäuser müssen von Gegenständen freigehalten werden.</p><p><b>3. Reinigung & Pflege:</b><br>Die Reinigung des Treppenhauses erfolgt nach dem vereinbarten Kehrwochenplan.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
+        subject: 'Hausordnung für das Wohngebäude',
+        content_html: `<h2 style="text-align:center">Hausordnung</h2><p>Für ein harmonisches Zusammenleben im Mietobjekt <strong><span data-type="mention" data-id="objekt_name" data-label="Objektname">Objektname</span></strong> gilt folgende Hausordnung:</p><p><b>1. Ruhezeiten:</b><br>Die allgemeinen Ruhezeiten von 22:00 bis 07:00 Uhr sowie von 13:00 bis 15:00 Uhr sind einzuhalten. In dieser Zeit sind störende Geräusche (z.B. laute Musik, Bohren) zu vermeiden.</p><p><b>2. Sicherheit:</b><br>Die Hauseingangstüren sind stets geschlossen zu halten. Fluchtwege und Treppenhäuser müssen von Gegenständen freigehalten werden.</p><p><b>3. Reinigung & Pflege:</b><br>Die Reinigung des Treppenhauses erfolgt nach dem vereinbarten Kehrwochenplan.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
     }
 };
 
@@ -248,6 +248,20 @@ export const DocumentTemplates = () => {
     const { portfolios } = usePortfolio();
     
     const [selectedPortfolioId, setSelectedPortfolioId] = useState('global');
+
+    const activePortfolio = (portfolios || []).find(p => p.id === selectedPortfolioId);
+    const selectedPortfolioName = activePortfolio?.name || 'ImmoControlpro360 Vermietung';
+    const selectedPortfolioCompany = activePortfolio?.company_name || '';
+    const selectedPortfolioAddress = activePortfolio 
+        ? `${activePortfolio.street || ''} ${activePortfolio.house_number || ''}, ${activePortfolio.zip || ''} ${activePortfolio.city || ''}`.trim() 
+        : 'Musterstraße 12, 12345 Musterstadt';
+    const selectedPortfolioEmail = activePortfolio?.email || 'kontakt@immocontrol360.de';
+    const selectedPortfolioPhone = activePortfolio?.phone || '+49 (0) 1234 56789';
+    const selectedPortfolioIban = activePortfolio?.iban || 'DE89 5003 0000 0123 4567 89';
+    const selectedPortfolioBic = activePortfolio?.bic || 'WELADED1XXX';
+    const selectedPortfolioBank = activePortfolio?.bank_name || 'Musterbank AG';
+    const selectedPortfolioTax = activePortfolio?.tax_number || '09/123/45678';
+    const selectedPortfolioVat = activePortfolio?.vat_id || 'DE 987654321';
     const [activeType, setActiveType] = useState('payment_reminder');
     const [subject, setSubject] = useState('');
     const [loading, setLoading] = useState(false);
@@ -572,6 +586,481 @@ export const DocumentTemplates = () => {
     // Filter templates to make sure we don't display empty groups
     const availableGroups = groups.filter(g => allTemplates.some(t => t.group === g));
 
+    const sheetStyle = {
+        width: '100%',
+        maxWidth: '800px',
+        backgroundColor: '#ffffff',
+        minHeight: '1130px',
+        padding: '4rem 3rem 4rem 3rem',
+        boxShadow: '0 10px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
+        borderRadius: '4px',
+        border: '1px solid #cbd5e1',
+        display: 'flex',
+        flexDirection: 'column',
+        position: 'relative',
+        boxSizing: 'border-box'
+    };
+
+    const renderUtilityLayout = () => {
+        const isIntro = activeType === 'utility_intro';
+        return (
+            <>
+                {/* Seite 1 */}
+                <div style={sheetStyle}>
+                    {/* Small sender header */}
+                    <div style={{ fontSize: '8px', color: '#aaa', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '10px', textTransform: 'uppercase' }}>
+                        {selectedPortfolioName} • {selectedPortfolioAddress}
+                    </div>
+                    
+                    {/* Recipient Block & Date */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px' }}>
+                        <div style={{ fontSize: '11px', lineHeight: '1.5' }}>
+                            Herr/Frau Max Mustermann<br />
+                            Musterweg 12<br />
+                            12345 Musterstadt
+                        </div>
+                        <div style={{ fontSize: '11px', textAlign: 'right' }}>
+                            {new Date().toLocaleDateString('de-DE')}
+                        </div>
+                    </div>
+
+                    {/* Intro text */}
+                    {isIntro ? (
+                        <div style={{ border: '1px dashed var(--primary-color)', padding: '5px', borderRadius: '4px', marginBottom: '15px' }}>
+                            <EditorContent editor={editor} />
+                        </div>
+                    ) : (
+                        <div style={{ color: '#475569', fontStyle: 'italic', borderLeft: '3px solid #cbd5e1', paddingLeft: '10px', marginBottom: '15px', fontSize: '11px', lineHeight: '1.5' }}>
+                            Sehr geehrte/r Max Mustermann, anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für das Mietobjekt Musterstraße 42 (Einheit: EG links) für das Abrechnungsjahr 2025... Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:
+                        </div>
+                    )}
+
+                    {/* Ihre Daten Box */}
+                    <div style={{ border: '1px solid var(--primary-color)', borderRadius: '3px', padding: '10px 12px', margin: '15px 0', position: 'relative' }}>
+                        <div style={{ position: 'absolute', top: '-8px', left: '8px', background: '#fff', padding: '0 5px', fontWeight: '600', color: 'var(--primary-color)', fontSize: '11px' }}>Ihre Daten</div>
+                        <table style={{ width: '100%', fontSize: '10px' }}>
+                            <tbody>
+                                <tr>
+                                    <td style={{ width: '40%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Adresse</span><br /><b>Musterstraße 42<br />12345 Musterstadt</b></td>
+                                    <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Lage</span><br /><b>EG links</b></td>
+                                    <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Abrechnungszeitraum</span><br /><b style={{ color: 'var(--primary-color)' }}>01.01.2025 - 31.12.2025</b></td>
+                                </tr>
+                                <tr>
+                                    <td style={{ padding: '5px 0 1px' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Erstellungsdatum</span><br /><b>{new Date().toLocaleDateString('de-DE')}</b></td>
+                                    <td style={{ padding: '5px 0 1px' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Ihre Personen</span><br /><b>2</b></td>
+                                    <td style={{ padding: '5px 0 1px' }}><span style={{ color: '#aaa', fontSize: '9px' }}>Ihre Wohneinheiten</span><br /><b>1</b></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h3 style={{ fontSize: '12px', fontWeight: '700', margin: '10px 0 5px' }}>1. Aufstellung der Gesamtkosten</h3>
+                    <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse', marginBottom: '15px' }}>
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th style={{ textAlign: 'right', fontWeight: '600', fontStyle: 'italic', paddingBottom: '5px' }}>Brutto</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style={{ borderTop: '2px solid #1f2937' }}>
+                                <td style={{ padding: '5px 0' }}>Ihre Gesamtkosten</td>
+                                <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
+                            </tr>
+                            <tr style={{ borderTop: '1px solid #e5e7eb' }}>
+                                <td style={{ padding: '4px 0', color: '#555' }}>Ihre Betriebskosten-Vorauszahlung</td>
+                                <td style={{ padding: '4px 0', textAlign: 'right' }}>400,00 €</td>
+                            </tr>
+                            <tr>
+                                <td style={{ padding: '4px 0', color: '#555' }}>Ihre Heizkosten-Vorauszahlung</td>
+                                <td style={{ padding: '4px 0', textAlign: 'right' }}>200,00 €</td>
+                            </tr>
+                            <tr style={{ borderTop: '2px solid #1f2937' }}>
+                                <td style={{ padding: '6px 0', fontWeight: '700', fontSize: '12px' }}>⬅ <b style={{ color: '#16a34a' }}>Ihre Gutschrift</b></td>
+                                <td style={{ padding: '6px 0', textAlign: 'right', fontWeight: '700', fontSize: '12px', color: '#16a34a' }}>50,00 €</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    {/* Outro text */}
+                    {!isIntro ? (
+                        <div style={{ border: '1px dashed var(--primary-color)', padding: '5px', borderRadius: '4px', marginTop: '15px' }}>
+                            <EditorContent editor={editor} />
+                        </div>
+                    ) : (
+                        <div style={{ color: '#475569', fontStyle: 'italic', borderLeft: '3px solid #cbd5e1', paddingLeft: '10px', marginTop: '15px', fontSize: '11px', lineHeight: '1.5' }}>
+                            Daraus ergibt sich für Sie ein Saldo in Höhe von 50,00 € als Gutschrift. Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen...
+                            <br /><br />Mit freundlichen Grüßen,<br /><strong>{selectedPortfolioName}</strong>
+                        </div>
+                    )}
+
+                    {/* Golden Page number footer */}
+                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '10px', fontSize: '8px', color: '#e6a817', letterSpacing: '2px', fontWeight: '600' }}>
+                        SEITE 1 / 2
+                    </div>
+                </div>
+
+                {/* Seite 2 */}
+                <div style={sheetStyle}>
+                    <h3 style={{ fontSize: '12px', fontWeight: '700', margin: '0 0 10px' }}>Aufteilung der Gesamtkosten für Ihr Mietobjekt (01.01.2025 - 31.12.2025)</h3>
+                    
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '9px', marginBottom: '20px' }}>
+                        <thead>
+                            <tr style={{ borderBottom: '2px solid #1f2937' }}>
+                                <th style={{ textAlign: 'left', padding: '3px' }}>Kostenart</th>
+                                <th style={{ textAlign: 'left', padding: '3px' }}>Verteilerschlüssel</th>
+                                <th style={{ textAlign: 'right', padding: '3px' }}>Gesamtkosten</th>
+                                <th style={{ textAlign: 'right', padding: '3px' }}>Gesamteinheiten</th>
+                                <th style={{ textAlign: 'right', padding: '3px' }}>Kosten / Einheit</th>
+                                <th style={{ textAlign: 'right', padding: '3px' }}>Ihre Einheiten</th>
+                                <th style={{ textAlign: 'right', padding: '3px' }}>Ihr Kostenanteil</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style={{ borderBottom: '1px solid #eee' }}>
+                                <td style={{ padding: '3px', fontWeight: '700' }}>Grundsteuer</td>
+                                <td style={{ padding: '3px' }}>Wohnfläche</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>450,00 €</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>300,00 m²</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>1,50 € / m²</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>100,00 m²</td>
+                                <td style={{ padding: '3px', textAlign: 'right', fontWeight: '700' }}>150,00 €</td>
+                            </tr>
+                            <tr style={{ borderBottom: '1px solid #eee' }}>
+                                <td style={{ padding: '3px', fontWeight: '700' }}>Kaltwasser / Abwasser</td>
+                                <td style={{ padding: '3px' }}>Personen</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>1.200,00 €</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>6,00 P.</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>200,00 € / P.</td>
+                                <td style={{ padding: '3px', textAlign: 'right' }}>2,00 P.</td>
+                                <td style={{ padding: '3px', textAlign: 'right', fontWeight: '700' }}>400,00 €</td>
+                            </tr>
+                            <tr style={{ borderTop: '2px solid #1f2937' }}>
+                                <td colspan="6" style={{ padding: '5px 0', fontWeight: '700' }}>Gesamtsumme (zeitanteilig)</td>
+                                <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '10px', fontSize: '8px', color: '#e6a817', letterSpacing: '2px', fontWeight: '600' }}>
+                        SEITE 2 / 2
+                    </div>
+                </div>
+            </>
+        );
+    };
+
+    const renderInvoiceLayout = () => {
+        const isIntro = activeType === 'invoice_intro' || activeType === 'credit_note_intro';
+        const titleText = activeType === 'credit_note_intro' ? 'Gutschrift Nr. GS-2026-0001' : 'Rechnung Nr. RE-2026-0001';
+        
+        return (
+            <div style={sheetStyle}>
+                {/* Sender small line */}
+                <div style={{ fontSize: '7pt', textDecoration: 'underline', color: '#555', marginBottom: '15px' }}>
+                    {selectedPortfolioCompany || selectedPortfolioName} • {selectedPortfolioAddress}
+                </div>
+
+                {/* Recipient & Info Block */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '30px' }}>
+                    <div style={{ fontSize: '11pt', lineHeight: '1.4' }}>
+                        <strong>Herrn / Frau</strong><br />
+                        <strong>Max Mustermann (Gast)</strong><br />
+                        Musterweg 12<br />
+                        12345 Musterstadt
+                    </div>
+                    <div style={{ fontSize: '10pt', backgroundColor: '#f8fafc', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                            <span style={{ color: '#555' }}>Nummer:</span>
+                            <span style={{ fontWeight: '600' }}>RE-2026-0001</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                            <span style={{ color: '#555' }}>Datum:</span>
+                            <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString('de-DE')}</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                            <span style={{ color: '#555' }}>Zeitraum:</span>
+                            <span style={{ fontWeight: '600' }}>15.05.2026 - 18.05.2026</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span style={{ color: '#555' }}>Gäste:</span>
+                            <span style={{ fontWeight: '600' }}>2</span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Headline */}
+                <div style={{ fontSize: '14pt', fontWeight: 'bold', marginBottom: '20px', borderBottom: '1px solid #000', paddingBottom: '5px' }}>
+                    {titleText}
+                </div>
+
+                {/* Intro */}
+                {isIntro ? (
+                    <div style={{ border: '1px dashed var(--primary-color)', padding: '5px', borderRadius: '4px', marginBottom: '15px' }}>
+                        <EditorContent editor={editor} />
+                    </div>
+                ) : (
+                    <div style={{ color: '#475569', fontStyle: 'italic', borderLeft: '3px solid #cbd5e1', paddingLeft: '10px', marginBottom: '15px' }}>
+                        Sehr geehrte Damen und Herren, wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen in Rechnung zu stellen:
+                    </div>
+                )}
+
+                {/* Positions Table */}
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '9pt', marginBottom: '15px' }}>
+                    <thead>
+                        <tr style={{ borderBottom: '1.5px solid #000', fontWeight: 'bold' }}>
+                            <th style={{ textAlign: 'left', padding: '4px' }}>Pos.</th>
+                            <th style={{ textAlign: 'left', padding: '4px' }}>Bezeichnung</th>
+                            <th style={{ textAlign: 'right', padding: '4px' }}>Einzel</th>
+                            <th style={{ textAlign: 'right', padding: '4px' }}>Netto</th>
+                            <th style={{ textAlign: 'right', padding: '4px' }}>MwSt</th>
+                            <th style={{ textAlign: 'right', padding: '4px' }}>Brutto</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style={{ borderBottom: '1px solid #eee' }}>
+                            <td style={{ padding: '4px' }}>1</td>
+                            <td style={{ padding: '4px' }}>Ferienwohnung Buchung (3 Nächte)</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>100,00 €</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>280,37 €</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>7%</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>300,00 €</td>
+                        </tr>
+                        <tr style={{ borderBottom: '1px solid #eee' }}>
+                            <td style={{ padding: '4px' }}>2</td>
+                            <td style={{ padding: '4px' }}>Endreinigung Pauschale</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>50,00 €</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>46,73 €</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>7%</td>
+                            <td style={{ padding: '4px', textAlign: 'right' }}>50,00 €</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                {/* Totals */}
+                <div style={{ marginLeft: 'auto', width: '220px', fontSize: '9pt', marginBottom: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+                        <span>Summe Netto:</span>
+                        <span>327,10 €</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px', borderBottom: '1px solid #ccc', paddingBottom: '3px' }}>
+                        <span>zzgl. 7% MwSt:</span>
+                        <span>22,90 €</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '10pt', marginTop: '5px' }}>
+                        <span>Gesamtbetrag:</span>
+                        <span>350,00 €</span>
+                    </div>
+                </div>
+
+                {/* Outro */}
+                {!isIntro ? (
+                    <div style={{ border: '1px dashed var(--primary-color)', padding: '5px', borderRadius: '4px' }}>
+                        <EditorContent editor={editor} />
+                    </div>
+                ) : (
+                    <div style={{ color: '#475569', fontStyle: 'italic', borderLeft: '3px solid #cbd5e1', paddingLeft: '10px' }}>
+                        Bitte überweisen Sie den fälligen Gesamtbetrag unter Angabe der Rechnungsnummer RE-2026-0001 innerhalb von 14 Tagen auf unser angegebenes Bankkonto...
+                        <br /><br />Mit freundlichen Grüßen,<br /><strong>{selectedPortfolioName}</strong>
+                    </div>
+                )}
+
+                {/* DIN 5008 3-Column Footer */}
+                <div style={{ borderTop: '1px solid #ccc', marginTop: 'auto', paddingTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', fontSize: '7.5pt', color: '#444', lineHeight: '1.4' }}>
+                    <div>
+                        <strong>Anschrift</strong><br />
+                        {selectedPortfolioCompany || selectedPortfolioName}<br />
+                        {selectedPortfolioAddress}
+                    </div>
+                    <div>
+                        <strong>Kontakt</strong><br />
+                        Tel: {selectedPortfolioPhone}<br />
+                        Email: {selectedPortfolioEmail}
+                    </div>
+                    <div>
+                        <strong>Bankverbindung</strong><br />
+                        {selectedPortfolioBank}<br />
+                        IBAN: {selectedPortfolioIban}<br />
+                        BIC: {selectedPortfolioBic}<br />
+                        {selectedPortfolioTax && `St.-Nr.: ${selectedPortfolioTax}`}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderDunningLayout = () => {
+        return (
+            <div style={sheetStyle}>
+                {/* 1. Absenderzeile (DIN 5008 Typ B: y=45) */}
+                <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
+                    {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
+                </div>
+
+                {/* 2. Empfängerblock (Zone 3 starts at Y=65) & Date (Y=105) */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '35px' }}>
+                    <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
+                        Herrn/Frau<br />
+                        <strong>Max Mustermann</strong><br />
+                        Musterweg 12<br />
+                        12345 Musterstadt
+                    </div>
+                    <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
+                        Musterstadt, den {new Date().toLocaleDateString('de-DE')}
+                    </div>
+                </div>
+
+                {/* 3. Betreff & Mietobjekt */}
+                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>
+                    {subject || activeConfig.label}
+                </div>
+                <div style={{ fontSize: '11px', marginBottom: '25px' }}>
+                    Mietobjekt: Musterstraße 42, 12345 Musterstadt (Einheit: EG links)
+                </div>
+
+                {/* 4. Editor Content */}
+                <div>
+                    <EditorContent editor={editor} />
+                </div>
+
+                {/* 5. Mock Forderungszusammenfassung Table */}
+                <div style={{ marginTop: '20px', pointerEvents: 'none' }}>
+                    <h4 style={{ fontSize: '10px', fontWeight: 'bold', margin: '15px 0 5px' }}>Forderungszusammenfassung</h4>
+                    <table style={{ width: '80%', fontSize: '11px', borderCollapse: 'collapse', marginBottom: '10px' }}>
+                        <tbody>
+                            <tr style={{ borderBottom: '1px solid #eee' }}>
+                                <td style={{ padding: '3px 0' }}>Offene Hauptforderungen (Miete/Nebenkosten)</td>
+                                <td style={{ padding: '3px 0', textAlign: 'right' }}>900,00 €</td>
+                            </tr>
+                            <tr style={{ borderBottom: '1px solid #eee' }}>
+                                <td style={{ padding: '3px 0' }}>Verzugszinsen (5,00 % p.a. bis heute)</td>
+                                <td style={{ padding: '3px 0', textAlign: 'right' }}>3,70 €</td>
+                            </tr>
+                            <tr style={{ borderBottom: '1.5px solid #000' }}>
+                                <td style={{ padding: '3px 0' }}>Mahnauslagen für dieses Schreiben</td>
+                                <td style={{ padding: '3px 0', textAlign: 'right' }}>5,00 €</td>
+                            </tr>
+                            <tr style={{ fontWeight: 'bold' }}>
+                                <td style={{ padding: '5px 0' }}>Gesamtforderung zum {new Date().toLocaleDateString('de-DE')}</td>
+                                <td style={{ padding: '5px 0', textAlign: 'right' }}>908,70 €</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                {/* 6. QR Code Box (Matches PDF generator exactly) */}
+                <div style={{
+                    backgroundColor: '#f5f7fa',
+                    border: '0.42mm dashed #b4bcc8',
+                    borderRadius: '6px',
+                    padding: '12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    textAlign: 'center',
+                    margin: '20px 0',
+                    pointerEvents: 'none'
+                }}>
+                    <div style={{ width: '80px', height: '80px', backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '0.7rem', color: '#64748b', fontWeight: 'bold', marginBottom: '6px' }}>[QR-Code]</div>
+                    <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#1e293b', marginBottom: '4px' }}>Online Forderungsportal</div>
+                    <div style={{ fontSize: '9.5px', color: '#475569', maxWidth: '400px', marginBottom: '5px' }}>
+                        Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.
+                    </div>
+                    <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#1e293b' }}>
+                        Zugangscode (PIN): 9821
+                    </div>
+                </div>
+
+                {/* 7. Signature */}
+                <div style={{ marginTop: '20px' }}>
+                    Mit freundlichen Grüßen,<br /><br />
+                    <strong>{selectedPortfolioCompany || selectedPortfolioName}</strong>
+                </div>
+
+                {/* 8. Anlagen Block */}
+                <div style={{ marginTop: '30px', fontSize: '9px', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                    <strong>Anlagen:</strong><br />
+                    1. Forderungsaufstellung<br />
+                    2. Zinsberechnung<br />
+                    3. Übersicht: Ablauf bei Mietrückstand und mögliche Folgekosten
+                </div>
+
+                {/* 9. Left-aligned Dunning Footer */}
+                <div style={{ borderTop: '1px solid #eee', marginTop: 'auto', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#969696' }}>
+                    <span>{activeConfig.label} - Stand {new Date().toLocaleDateString('de-DE')}</span>
+                    <span>Seite 1 von 1</span>
+                </div>
+            </div>
+        );
+    };
+
+    const renderDefaultDIN5008Layout = () => {
+        return (
+            <div style={sheetStyle}>
+                {/* Absenderzeile */}
+                <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
+                    {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
+                </div>
+
+                {/* Empfängerblock & Date */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '35px' }}>
+                    <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
+                        Herrn/Frau<br />
+                        <strong>Max Mustermann</strong><br />
+                        Musterweg 12<br />
+                        12345 Musterstadt
+                    </div>
+                    <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
+                        Musterstadt, den {new Date().toLocaleDateString('de-DE')}
+                    </div>
+                </div>
+
+                {/* Betreff */}
+                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '15px', borderBottom: '1px solid #f1f5f9', paddingBottom: '5px' }}>
+                    {subject || activeConfig.label}
+                </div>
+
+                {/* Editor Content */}
+                <div style={{ flex: 1 }}>
+                    <EditorContent editor={editor} />
+                </div>
+
+                {/* Footer */}
+                <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', fontSize: '7.5px', color: '#64748b', lineHeight: '1.5', pointerEvents: 'none' }}>
+                    <div>
+                        <strong>Bankverbindung:</strong><br />
+                        Empfänger: {selectedPortfolioCompany || selectedPortfolioName}<br />
+                        Bank: {selectedPortfolioBank}<br />
+                        IBAN: {selectedPortfolioIban}<br />
+                        BIC: {selectedPortfolioBic}
+                    </div>
+                    <div>
+                        <strong>Steuerdaten & Kontakt:</strong><br />
+                        Steuernummer: {selectedPortfolioTax}<br />
+                        USt-IdNr.: {selectedPortfolioVat}<br />
+                        E-Mail: {selectedPortfolioEmail}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderDocumentLayout = () => {
+        const isDunning = activeConfig.group === 'Mahnwesen';
+        const isUtility = activeConfig.group === 'Nebenkosten';
+        const isInvoice = activeConfig.group === 'FEWO-Rechnungen';
+        
+        if (isUtility) {
+            return renderUtilityLayout();
+        } else if (isInvoice) {
+            return renderInvoiceLayout();
+        } else if (isDunning) {
+            return renderDunningLayout();
+        } else {
+            return renderDefaultDIN5008Layout();
+        }
+    };
+
     return (
         <Card title="Schreibvorlagen verwalten" subtitle="Passe hier die automatischen Anschreiben, Mahnstufen, Verträge und Rechnungs-Texte nach deinen Vorstellungen an oder erstelle freie Briefe.">
             {/* Portfolio Selector & Add template button */}
@@ -590,7 +1079,7 @@ export const DocumentTemplates = () => {
                         }}
                     >
                         <option value="global">Standard (alle Portfolios)</option>
-                        {portfolios.map(p => (
+                        {(portfolios || []).map(p => (
                             <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
                     </select>
@@ -860,74 +1349,66 @@ export const DocumentTemplates = () => {
                                     </div>
                                 </div>
 
-                                {/* Editor Content Area (Word-like white sheet) */}
-                                <div style={{ 
-                                    padding: '2.5rem', 
-                                    backgroundColor: '#f8fafc', 
-                                    display: 'flex', 
-                                    justifyContent: 'center', 
-                                    overflowY: 'auto',
-                                    maxHeight: '600px'
-                                }}>
-                                    <div style={{
-                                        width: '100%',
-                                        maxWidth: '700px',
-                                        backgroundColor: '#ffffff',
-                                        minHeight: '400px',
-                                        padding: '2.5rem',
-                                        boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
-                                        borderRadius: '4px',
-                                        border: '1px solid #e2e8f0',
-                                        outline: 'none'
-                                    }}>
-                                        {/* CSS styling for Tiptap editor */}
-                                        <style>{`
-                                            .ProseMirror {
-                                                outline: none;
-                                                min-height: 350px;
-                                                font-family: 'Segoe UI', Arial, sans-serif;
-                                                font-size: 14px;
-                                                line-height: 1.6;
-                                                color: #1e293b;
-                                            }
-                                            .ProseMirror p {
-                                                margin-top: 0;
-                                                margin-bottom: 0.75rem;
-                                            }
-                                            .ProseMirror ul, .ProseMirror ol {
-                                                padding-left: 1.5rem;
-                                                margin-top: 0;
-                                                margin-bottom: 0.75rem;
-                                            }
-                                            .variable-chip {
-                                                background-color: #e0f2fe !important;
-                                                color: #0369a1 !important;
-                                                border: 1px solid #bae6fd !important;
-                                                border-radius: 4px !important;
-                                                padding: 2px 6px !important;
-                                                font-weight: 500 !important;
-                                                display: inline-flex !important;
-                                                align-items: center !important;
-                                                margin: 0 2px !important;
-                                                user-select: none !important;
-                                                cursor: pointer !important;
-                                                box-decoration-break: clone;
-                                                font-size: 0.85em;
-                                            }
-                                            .editor-image {
-                                                max-width: 100%;
-                                                height: auto;
-                                                max-height: 150px;
-                                                border: 1px dashed #cbd5e1;
-                                                border-radius: 4px;
-                                                padding: 4px;
-                                                display: block;
-                                                margin: 10px 0;
-                                            }
-                                        `}</style>
-                                        <EditorContent editor={editor} />
-                                    </div>
-                                </div>
+                                {/* Editor Content Area (Word-like white sheet with DIN 5008 formatting) */}
+                                 <div style={{ 
+                                     padding: '2.5rem', 
+                                     backgroundColor: '#f8fafc', 
+                                     display: 'flex', 
+                                     flexDirection: 'column',
+                                     alignItems: 'center',
+                                     gap: '2rem',
+                                     overflowY: 'auto',
+                                     maxHeight: '750px',
+                                     width: '100%'
+                                 }}>
+                                     {/* CSS styling for Tiptap editor */}
+                                     <style>{`
+                                         .ProseMirror {
+                                             outline: none;
+                                             min-height: 250px;
+                                             font-family: 'Segoe UI', Arial, sans-serif;
+                                             font-size: 14px;
+                                             line-height: 1.6;
+                                             color: #1e293b;
+                                             width: 100%;
+                                         }
+                                         .ProseMirror p {
+                                             margin-top: 0;
+                                             margin-bottom: 0.75rem;
+                                         }
+                                         .ProseMirror ul, .ProseMirror ol {
+                                             padding-left: 1.5rem;
+                                             margin-top: 0;
+                                             margin-bottom: 0.75rem;
+                                         }
+                                         .variable-chip {
+                                             background-color: #e0f2fe !important;
+                                             color: #0369a1 !important;
+                                             border: 1px solid #bae6fd !important;
+                                             border-radius: 4px !important;
+                                             padding: 2px 6px !important;
+                                             font-weight: 500 !important;
+                                             display: inline-flex !important;
+                                             align-items: center !important;
+                                             margin: 0 2px !important;
+                                             user-select: none !important;
+                                             cursor: pointer !important;
+                                             box-decoration-break: clone;
+                                             font-size: 0.85em;
+                                         }
+                                         .editor-image {
+                                             max-width: 100%;
+                                             height: auto;
+                                             max-height: 120px;
+                                             border: 1px dashed #cbd5e1;
+                                             border-radius: 4px;
+                                             padding: 4px;
+                                             display: block;
+                                             margin: 10px 0;
+                                         }
+                                     `}</style>
+                                     {renderDocumentLayout()}
+                                 </div>
                             </div>
                         </>
                     )}
