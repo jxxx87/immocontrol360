@@ -7,12 +7,15 @@
       .cls-4 { fill: #1e3a8a; } /* Darkest */
     </style>
   </defs>
-  <!-- Top Left -->
-  <rect class="cls-1" x="0" y="0" width="244" height="244" rx="40" />
-  <!-- Top Right -->
-  <rect class="cls-2" x="268" y="0" width="244" height="244" rx="40" />
-  <!-- Bottom Left -->
-  <rect class="cls-2" x="0" y="268" width="244" height="244" rx="40" />
-  <!-- Bottom Right -->
-  <rect class="cls-4" x="268" y="268" width="244" height="244" rx="40" />
+  <!-- Icon Group -->
+  <g id="icon">
+    <!-- Top Left -->
+    <rect class="cls-1" x="0" y="0" width="244" height="244" rx="40" />
+    <!-- Top Right -->
+    <rect class="cls-2" x="268" y="0" width="244" height="244" rx="40" />
+    <!-- Bottom Left -->
+    <rect class="cls-2" x="0" y="268" width="244" height="244" rx="40" />
+    <!-- Bottom Right -->
+    <rect class="cls-4" x="268" y="268" width="244" height="244" rx="40" />
+  </g>
 </svg>
