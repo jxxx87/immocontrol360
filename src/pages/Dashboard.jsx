@@ -175,6 +175,12 @@ const Dashboard = () => {
                     expectedThisMonth += (l.cold_rent || 0) + (l.service_charge || 0) + (l.heating_cost || 0) + (l.other_costs || 0);
                 }
             });
+            // Add target rent of vacation rentals (Ferienwohnungen)
+            allUnits.forEach(u => {
+                if (u.is_vacation_rental) {
+                    expectedThisMonth += (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0);
+                }
+            });
             const overdue = Math.max(0, expectedThisMonth - incCurrent);
             setOverdueRent(overdue);
 

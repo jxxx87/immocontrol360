@@ -4,6 +4,9 @@ import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Mention from '@tiptap/extension-mention';
 import Image from '@tiptap/extension-image';
+import { TextAlign } from '@tiptap/extension-text-align';
+import { TextStyle } from '@tiptap/extension-text-style';
+import { Color } from '@tiptap/extension-color';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
@@ -13,10 +16,11 @@ import Input from '../../components/ui/Input';
 import Modal from '../../components/ui/Modal';
 import { 
     Bold, Italic, Underline as UnderlineIcon, 
-    AlignLeft, AlignCenter, AlignRight, 
+    AlignLeft, AlignCenter, AlignRight, AlignJustify,
     List, ListOrdered, Undo, Redo, 
-    Save, RotateCcw, FileText, ChevronRight, 
-    HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2
+    Save, RotateCcw, FileText, ChevronLeft, ChevronRight, 
+    HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2,
+    ArrowLeft, ArrowRight, Minus, Strikethrough
 } from 'lucide-react';
 
 // Deutsche Variablen für globale Verwendung
@@ -95,25 +99,25 @@ const DEFAULT_TEMPLATES = {
         name: 'Zahlungserinnerung',
         category: 'Mahnwesen',
         subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>bei der regelmäßigen Überprüfung unserer Zahlungseingänge mussten wir leider feststellen, dass für das Mietverhältnis über die Wohneinheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> im Objekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> noch offene Posten bestehen.</p><p>Sicherlich handelt es sich hierbei nur um ein vorübergehendes Versäumnis oder ein Missverständnis Ihrerseits. Wir möchten Sie höflich bitten, den ausstehenden Gesamtbetrag zeitnah auszugleichen.</p><p>Die offenen Forderungen setzen sich wie folgt zusammen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Bitte überweisen Sie den fälligen Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf die folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Falls Sie den Betrag in den letzten Tagen bereits überwiesen haben, betrachten Sie dieses Schreiben bitte als gegenstandslos. Sollten Sie Fragen zur Aufstellung haben oder Unterstützung benötigen, stehen wir Ihnen selbstverständlich gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
     },
     dunning_1: {
         name: 'Mahnung (Stufe 1)',
         category: 'Mahnwesen',
         subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>trotz unserer Zahlungserinnerung konnten wir für das Mietverhältnis über die Wohneinheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> (<span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>) bis heute keinen vollständigen Zahlungseingang verzeichnen.</p><p>Gemäß § 556b Abs. 1 BGB ist die Miete jeweils zu Beginn des Monats, spätestens bis zum dritten Werktag, im Voraus zu entrichten. Durch die verspätete bzw. ausbleibende Miete befinden Sie sich gesetzlich im Verzug.</p><p>Wir fordern Sie hiermit förmlich auf, den nachfolgend aufgeschlüsselten Rückstand umgehend auszugleichen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Bitte überweisen Sie die Gesamtsumme von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> (inklusive einer Mahngebühr für Porto und Bearbeitungsaufwand) bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf unser Konto:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Wir weisen darauf hin, dass wir bei fruchtlosem Ablauf dieser Frist gezwungen sind, das gerichtliche Mahnverfahren einzuleiten oder ein Inkassobüro zu beauftragen, wodurch Ihnen erhebliche weitere Kosten entstehen würden.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
     },
     dunning_2: {
         name: 'Abmahnung (Stufe 2)',
         category: 'Mahnwesen',
         subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit mahnen wir Sie wegen des fortgesetzten Zahlungsverzugs bezüglich der Wohnung <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> (<span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span>) ausdrücklich ab.</p><p>Trotz unserer vorherigen Mahnungen weisen Sie aktuell einen erheblichen Mietrückstand auf. Dieses vertragswidrige Verhalten gefährdet den Fortbestand des Mietverhältnisses. Gemäß den gesetzlichen Bestimmungen sind Sie verpflichtet, die vereinbarte Miete pünktlich zu entrichten.</p><p>Der Rückstand setzt sich aktuell wie folgt zusammen:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Wir fordern Sie letztmalig unter Androhung rechtlicher Konsequenzen auf, den ausstehenden Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf folgendes Konto einzuzahlen:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p><strong>Wichtiger rechtlicher Hinweis:</strong> Sollte dieser Betrag nicht fristgerecht und vollständig bei uns eingehen, behalten wir uns das Recht vor, das Mietverhältnis ohne weitere Ankündigung außerordentlich fristlos aus wichtigem Grund gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise ordentlich wegen schuldhafter Pflichtverletzung gemäß § 573 Abs. 2 Nr. 1 BGB, zu kündigen. In diesem Fall müssen Sie mit einer Räumungsklage und der gerichtlichen Beitreibung der Kosten rechnen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
     },
     dunning_final: {
         name: 'Letzte Zahlungsaufforderung',
         category: 'Mahnwesen',
         subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>dies ist unsere letzte außergerichtliche Zahlungsaufforderung bezüglich Ihres Mietrückstands für die Wohnung <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Sie haben sämtliche bisherige Zahlungsfristen verstreichen lassen. Ihr Mietrückstand überschreitet mittlerweile die gesetzliche Grenze, die uns zur sofortigen Kündigung des Mietverhältnisses berechtigt.</p><p>Der Gesamtrückstand zum heutigen Tag beträgt:</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Wir geben Ihnen hiermit letztmalig Gelegenheit, die Räumung der Wohnung und ein kostenintensives Gerichtsverfahren abzuwenden, indem Sie den Gesamtbetrag von <strong><span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span></strong> bis spätestens zum <strong><span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span></strong> auf unser Konto überweisen:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollter der Betrag nicht fristgerecht gutgeschrieben werden, werden wir den Vorgang ohne weiteren Zwischenschritt an unsere Rechtsanwaltskanzlei zur Durchführung der Räumungsklage und zur Einleitung der Zwangsvollstreckung übergeben. Sämtliche hierbei entstehenden Kosten gehen zu Ihren Lasten.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
+        content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></p>`
     },
     utility_intro: {
         name: 'Nebenkosten (Einleitung)',
@@ -131,19 +135,19 @@ const DEFAULT_TEMPLATES = {
         name: 'Fewo-Rechnung (Einleitung)',
         category: 'FEWO-Rechnungen',
         subject: 'Rechnung über erbrachte Leistungen für Ihren Aufenthalt',
-        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen für den Zeitraum vom/auf <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span></strong> in Rechnung zu stellen:</p>`
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span>:</p>`
     },
     invoice_outro: {
         name: 'Fewo-Rechnung (Schlusswort)',
         category: 'FEWO-Rechnungen',
         subject: '',
-        content_html: `<p>Bitte überweisen Sie den fälligen Gesamtbetrag von <strong><span data-type="mention" data-id="brutto_betrag" data-label="Gesamtbetrag (Brutto)">Gesamtbetrag (Brutto)</span></strong> unter Angabe der Rechnungsnummer <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong> innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Wir hoffen, dass Sie Ihren Aufenthalt genossen haben, und würden uns freuen, Sie bald wieder als Gast begrüßen zu dürfen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p>`
+        content_html: `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto. Vielen Dank für Ihren Aufenthalt und wir freuen uns auf Ihren nächsten Besuch.</p>`
     },
     credit_note_intro: {
         name: 'Fewo-Gutschrift (Einleitung)',
         category: 'FEWO-Rechnungen',
         subject: 'Gutschrift zu Ihrem Aufenthalt',
-        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns für den Kontakt und schreiben Ihnen für Ihren Aufenthalt vom/auf <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Leistungszeitraum">Leistungszeitraum</span></strong> folgende Beträge als Gutschrift gut:</p>`
+        content_html: `<p>Sehr geehrte Damen und Herren,</p><p>wir schreiben Ihnen für Ihren Aufenthalt folgende Leistungen gut:</p>`
     },
     rental_agreement: {
         name: 'Mietvertrag Anschreiben',
@@ -263,10 +267,15 @@ export const DocumentTemplates = () => {
     const selectedPortfolioTax = activePortfolio?.tax_number || '09/123/45678';
     const selectedPortfolioVat = activePortfolio?.vat_id || 'DE 987654321';
     const [activeType, setActiveType] = useState('payment_reminder');
+    const [previewPage, setPreviewPage] = useState(1);
     const [subject, setSubject] = useState('');
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     
+    useEffect(() => {
+        setPreviewPage(1);
+    }, [activeType]);
+
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
     
@@ -281,6 +290,12 @@ export const DocumentTemplates = () => {
         extensions: [
             StarterKit,
             Underline,
+            TextAlign.configure({
+                types: ['heading', 'paragraph'],
+                alignments: ['left', 'center', 'right', 'justify'],
+            }),
+            TextStyle,
+            Color,
             Mention.configure({
                 HTMLAttributes: {
                     class: 'variable-chip',
@@ -293,11 +308,57 @@ export const DocumentTemplates = () => {
                 inline: true,
                 HTMLAttributes: {
                     class: 'editor-image',
-                    style: 'max-height: 120px; object-fit: contain; margin: 10px 0; display: block;'
+                    style: 'max-height: 240px; object-fit: contain; margin: 10px 0; display: block;'
                 }
             })
         ],
         content: '',
+        editorProps: {
+            handleDrop(view, event, slice, moved) {
+                if (!moved && event.dataTransfer) {
+                    const files = event.dataTransfer.files;
+                    if (files && files.length > 0) {
+                        const file = files[0];
+                        if (file.type.startsWith('image/')) {
+                            if (file.size > 2 * 1024 * 1024) {
+                                alert('Das Bild darf maximal 2MB groß sein.');
+                                return true;
+                            }
+                            const reader = new FileReader();
+                            reader.onload = (readerEvent) => {
+                                const base64 = readerEvent.target.result;
+                                const coordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
+                                if (coordinates) {
+                                    const { schema } = view.state;
+                                    const node = schema.nodes.image.create({ src: base64 });
+                                    const transaction = view.state.tr.insert(coordinates.pos, node);
+                                    view.dispatch(transaction);
+                                }
+                            };
+                            reader.readAsDataURL(file);
+                            return true;
+                        }
+                    }
+                    const data = event.dataTransfer.getData('text/plain');
+                    try {
+                        const json = JSON.parse(data);
+                        if (json && json.type === 'mention') {
+                            const coordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
+                            if (coordinates) {
+                                const { schema } = view.state;
+                                const node = schema.nodes.mention.create({ id: json.id, label: json.label });
+                                const transaction = view.state.tr.insert(coordinates.pos, node);
+                                view.dispatch(transaction);
+                                return true;
+                            }
+                        }
+                    } catch (e) {
+                        // ignore error
+                    }
+                }
+                return false;
+            }
+        }
     });
 
     // Combine system and custom templates
@@ -603,9 +664,8 @@ export const DocumentTemplates = () => {
 
     const renderUtilityLayout = () => {
         const isIntro = activeType === 'utility_intro';
-        return (
-            <>
-                {/* Seite 1 */}
+        if (previewPage === 1) {
+            return (
                 <div style={sheetStyle}>
                     {/* Small sender header */}
                     <div style={{ fontSize: '8px', color: '#aaa', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '10px', textTransform: 'uppercase' }}>
@@ -699,8 +759,9 @@ export const DocumentTemplates = () => {
                         SEITE 1 / 2
                     </div>
                 </div>
-
-                {/* Seite 2 */}
+            );
+        } else {
+            return (
                 <div style={sheetStyle}>
                     <h3 style={{ fontSize: '12px', fontWeight: '700', margin: '0 0 10px' }}>Aufteilung der Gesamtkosten für Ihr Mietobjekt (01.01.2025 - 31.12.2025)</h3>
                     
@@ -736,7 +797,7 @@ export const DocumentTemplates = () => {
                                 <td style={{ padding: '3px', textAlign: 'right', fontWeight: '700' }}>400,00 €</td>
                             </tr>
                             <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                <td colspan="6" style={{ padding: '5px 0', fontWeight: '700' }}>Gesamtsumme (zeitanteilig)</td>
+                                <td colSpan="6" style={{ padding: '5px 0', fontWeight: '700' }}>Gesamtsumme (zeitanteilig)</td>
                                 <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
                             </tr>
                         </tbody>
@@ -746,8 +807,8 @@ export const DocumentTemplates = () => {
                         SEITE 2 / 2
                     </div>
                 </div>
-            </>
-        );
+            );
+        }
     };
 
     const renderInvoiceLayout = () => {
@@ -1182,14 +1243,18 @@ export const DocumentTemplates = () => {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '12px', backgroundColor: 'var(--background-color)', flex: 1 }}>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: '0' }}>Platzhalter</h4>
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Klicke zum Einfügen in das Dokument.</span>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Klicke oder ziehe den Platzhalter in das Dokument.</span>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflowY: 'auto', maxHeight: '300px', paddingRight: '4px' }}>
                             {activeConfig.variables?.map(v => (
                                 <button
                                     key={v.id}
                                     onClick={() => insertVariable(v)}
-                                    title={`Klicke, um ${v.label} an Cursorposition einzufügen`}
+                                    draggable="true"
+                                    onDragStart={(e) => {
+                                        e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'mention', id: v.id, label: v.label }));
+                                    }}
+                                    title={`Ziehe oder klicke, um ${v.label} einzufügen`}
                                     style={{
                                         display: 'flex',
                                         alignItems: 'center',
@@ -1198,7 +1263,7 @@ export const DocumentTemplates = () => {
                                         borderRadius: '6px',
                                         border: '1px solid var(--border-color)',
                                         backgroundColor: 'var(--surface-color)',
-                                        cursor: 'pointer',
+                                        cursor: 'grab',
                                         fontSize: '0.75rem',
                                         fontWeight: 500,
                                         color: 'var(--text-primary)',
@@ -1262,20 +1327,111 @@ export const DocumentTemplates = () => {
                                         disabled={!editor}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('italic') ? '#e2e8f0' : 'transparent' }}
                                         title="Kursiv"
-                                    >
-                                        <Italic size={16} />
-                                    </button>
-                                    <button 
-                                        type="button"
-                                        onClick={() => editor?.chain().focus().toggleUnderline().run()} 
-                                        disabled={!editor}
-                                        style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('underline') ? '#e2e8f0' : 'transparent' }}
-                                        title="Unterstreichen"
-                                    >
-                                        <UnderlineIcon size={16} />
-                                    </button>
-                                    
-                                    <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+                                     >
+                                         <Italic size={16} />
+                                     </button>
+                                     <button 
+                                         type="button"
+                                         onClick={() => editor?.chain().focus().toggleUnderline().run()} 
+                                         disabled={!editor}
+                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('underline') ? '#e2e8f0' : 'transparent' }}
+                                         title="Unterstreichen"
+                                     >
+                                         <UnderlineIcon size={16} />
+                                     </button>
+                                     
+                                     <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                     {/* Formatierung Dropdown */}
+                                     <select
+                                         onChange={(e) => {
+                                             const val = e.target.value;
+                                             if (val === 'p') editor?.chain().focus().setParagraph().run();
+                                             else if (val === 'h1') editor?.chain().focus().toggleHeading({ level: 1 }).run();
+                                             else if (val === 'h2') editor?.chain().focus().toggleHeading({ level: 2 }).run();
+                                             else if (val === 'h3') editor?.chain().focus().toggleHeading({ level: 3 }).run();
+                                         }}
+                                         value={
+                                             editor?.isActive('heading', { level: 1 }) ? 'h1' :
+                                             editor?.isActive('heading', { level: 2 }) ? 'h2' :
+                                             editor?.isActive('heading', { level: 3 }) ? 'h3' : 'p'
+                                         }
+                                         style={{
+                                             padding: '4px 8px',
+                                             fontSize: '0.8rem',
+                                             borderRadius: '4px',
+                                             border: '1px solid var(--border-color)',
+                                             backgroundColor: 'var(--surface-color)',
+                                             cursor: 'pointer'
+                                         }}
+                                     >
+                                         <option value="p">Standard Text</option>
+                                         <option value="h1">Überschrift 1</option>
+                                         <option value="h2">Überschrift 2</option>
+                                         <option value="h3">Überschrift 3</option>
+                                     </select>
+
+                                     <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                     {/* Textausrichtung */}
+                                     <button 
+                                         type="button"
+                                         onClick={() => editor?.chain().focus().setTextAlign('left').run()} 
+                                         disabled={!editor}
+                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'left' }) ? '#e2e8f0' : 'transparent' }}
+                                         title="Linksbündig"
+                                     >
+                                         <AlignLeft size={16} />
+                                     </button>
+                                     <button 
+                                         type="button"
+                                         onClick={() => editor?.chain().focus().setTextAlign('center').run()} 
+                                         disabled={!editor}
+                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'center' }) ? '#e2e8f0' : 'transparent' }}
+                                         title="Zentriert"
+                                     >
+                                         <AlignCenter size={16} />
+                                     </button>
+                                     <button 
+                                         type="button"
+                                         onClick={() => editor?.chain().focus().setTextAlign('right').run()} 
+                                         disabled={!editor}
+                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'right' }) ? '#e2e8f0' : 'transparent' }}
+                                         title="Rechtsbündig"
+                                     >
+                                         <AlignRight size={16} />
+                                     </button>
+                                     <button 
+                                         type="button"
+                                         onClick={() => editor?.chain().focus().setTextAlign('justify').run()} 
+                                         disabled={!editor}
+                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'justify' }) ? '#e2e8f0' : 'transparent' }}
+                                         title="Blocksatz"
+                                     >
+                                         <AlignJustify size={16} />
+                                     </button>
+
+                                     <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                                     {/* Farbwähler */}
+                                     <input 
+                                         type="color"
+                                         onInput={(e) => editor?.chain().focus().setColor(e.target.value).run()}
+                                         value={editor?.getAttributes('textStyle').color || '#000000'}
+                                         style={{
+                                             width: '24px',
+                                             height: '24px',
+                                             border: '1px solid var(--border-color)',
+                                             padding: '0',
+                                             borderRadius: '4px',
+                                             cursor: 'pointer',
+                                             backgroundColor: 'transparent',
+                                             marginRight: '4px'
+                                         }}
+                                         title="Textfarbe"
+                                     />
+
+                                     <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
 
                                     <button 
                                         type="button"
@@ -1407,6 +1563,29 @@ export const DocumentTemplates = () => {
                                              margin: 10px 0;
                                          }
                                      `}</style>
+                                     {activeConfig.group === 'Nebenkosten' && (
+                                         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', backgroundColor: 'var(--surface-color)', padding: '8px 16px', borderRadius: '24px', border: '1px solid var(--border-color)', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', userSelect: 'none' }}>
+                                             <button
+                                                 type="button"
+                                                 onClick={() => setPreviewPage(1)}
+                                                 disabled={previewPage === 1}
+                                                 style={{ display: 'flex', alignItems: 'center', gap: '4px', border: 'none', background: 'none', cursor: previewPage === 1 ? 'not-allowed' : 'pointer', color: previewPage === 1 ? 'var(--text-secondary)' : 'var(--primary-color)', fontSize: '0.85rem', fontWeight: 600 }}
+                                             >
+                                                 <ChevronLeft size={16} /> Vorherige Seite
+                                             </button>
+                                             <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                 Seite {previewPage} von 2
+                                             </span>
+                                             <button
+                                                 type="button"
+                                                 onClick={() => setPreviewPage(2)}
+                                                 disabled={previewPage === 2}
+                                                 style={{ display: 'flex', alignItems: 'center', gap: '4px', border: 'none', background: 'none', cursor: previewPage === 2 ? 'not-allowed' : 'pointer', color: previewPage === 2 ? 'var(--text-secondary)' : 'var(--primary-color)', fontSize: '0.85rem', fontWeight: 600 }}
+                                             >
+                                                 Nächste Seite <ChevronRight size={16} />
+                                             </button>
+                                         </div>
+                                     )}
                                      {renderDocumentLayout()}
                                  </div>
                             </div>
