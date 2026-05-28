@@ -301,7 +301,31 @@ export const DocumentTemplates = () => {
         contentLength: 0
     });
 
+    useEffect(() => {
+        setPreviewPage(1);
+        if (editor) {
+            let count = 0;
+            editor.state.doc.descendants(node => {
+                if (node.type.name === 'letterPage') {
+                    count++;
+                }
+            });
+            setPageCount(count > 0 ? count : 1);
+        }
+    }, [activeType]);
 
+    useEffect(() => {
+        if (editor && !loading) {
+            let count = 0;
+            editor.state.doc.descendants(node => {
+                if (node.type.name === 'letterPage') {
+                    count++;
+                }
+            });
+            setPageCount(count > 0 ? count : 1);
+            setPreviewPage(1);
+        }
+    }, [loading, editor]);
 
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
@@ -411,7 +435,7 @@ export const DocumentTemplates = () => {
                                 return true;
                             }
                         }
-                    } catch (e) {
+                    } catch {
                         // ignore error
                     }
                 }
@@ -744,6 +768,7 @@ export const DocumentTemplates = () => {
     };
 
     // Handle Image insertion (Base64)
+    // Handle Image insertion (Base64)
     const handleImageInsert = (e) => {
         const file = e.target.files[0];
         if (file) {
@@ -760,6 +785,491 @@ export const DocumentTemplates = () => {
         }
     };
 
+    // Open A4 print preview window with replaced placeholders and tables
+    const handlePrintPreview = () => {
+        if (!editor) return;
+
+        // 1. Editor-Inhalt holen
+        let contentHtml = editor.getHTML();
+
+        // 2. Realistische Testdaten definieren
+        const mockData = {
+            mieter_name: "Max Mustermann",
+            mieter_anrede: "Sehr geehrter Herr Mustermann",
+            mieter_adresse: "Musterweg 12<br/>12345 Musterstadt",
+            objekt_name: "Wohnpark Sonnenseite",
+            einheit_name: "Wohnung EG links",
+            objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
+            vermieter_name: selectedPortfolioCompany || selectedPortfolioName || "ImmoControlpro Vermieter GmbH",
+            vermieter_bankverbindung: selectedPortfolioBank && selectedPortfolioIban && selectedPortfolioBic
+                ? `${selectedPortfolioBank}<br/>IBAN: ${selectedPortfolioIban}<br/>BIC: ${selectedPortfolioBic}`
+                : "Sparkasse Musterstadt<br/>IBAN: DE89 5005 0400 1122 3344 55<br/>BIC: SOLODEM1MUC",
+            offener_betrag: "908,70 €",
+            zahlungsfrist_datum: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('de-DE'),
+            verzugstage: "14",
+            mahnstufe: "2",
+            zinsbetrag: "3,70 €",
+            abrechnungsjahr: "2025",
+            abrechnungszeitraum: "01.01.2025 - 31.12.2025",
+            nutzungszeitraum: "01.01.2025 - 31.12.2025",
+            gesamtkosten_mieter: "550,00 €",
+            vorauszahlungs_betrag: "400,00 €",
+            saldo_betrag: "150,00 €",
+            saldo_art: "Nachzahlung",
+            gast_name: "Dr. Sabine Sommer",
+            gast_adresse: "Lindenallee 7<br/>50667 Köln",
+            buchungszeitraum: "15.05.2026 - 22.05.2026",
+            gaeste_anzahl: "2",
+            rechnungsnummer: "RE-2026-0412",
+            rechnungsdatum: new Date().toLocaleDateString('de-DE'),
+            netto_betrag: "560,75 €",
+            mwst_betrag: "39,25 €",
+            brutto_betrag: "600,00 €",
+            original_rechnungsnummer: "RE-2026-0399",
+            aktuelle_miete: "650,00 €",
+            neue_miete: "715,00 €",
+            erhoehungs_betrag: "65,00 €",
+            erhoehungs_datum: "01.08.2026",
+            zustimmungs_frist: "31.07.2026",
+            einzug_datum: "01.06.2026",
+            vermieter_adresse: selectedPortfolioAddress || "Musterstraße 42, 12345 Musterstadt",
+            vermieter_email: selectedPortfolioEmail,
+            vermieter_telefon: selectedPortfolioPhone,
+            vermieter_steuernummer: selectedPortfolioTax || "123/456/78901",
+            vermieter_ust_id: selectedPortfolioVat || "DE123456789",
+            rechnungs_datum: new Date().toLocaleDateString('de-DE'),
+            erstellungsdatum: new Date().toLocaleDateString('de-DE'),
+            mieter_nachname: "Mustermann",
+            storno_nummer: "ST-2026-0001",
+            kaution_betrag: "1.950,00 €"
+        };
+
+        // Realistische Tabellenvorlagen definieren
+        const mockTables = {
+            forderungs_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Fälligkeit</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Bezeichnung</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Soll-Betrag</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ist-Betrag</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundmiete + NK-Vorauszahlung Mai 2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">850,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="4" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamtrückstand:</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">855,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            forderungs_detail_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Datum / Zeitraum</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Posten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Soll</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Haben</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinssatz</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinsen</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">01.05.2026 - 31.05.2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miete Mai 2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,12% p.a.</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">3,70 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">853,70 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">12.05.2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="6" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme inkl. Zinsen:</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">858,70 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            nebenkosten_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Kostenart</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Gesamtkosten</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundsteuer</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1.200,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Müllabfuhr & Straßenreinigung</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">800,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">100,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Heizkosten (Schätzung)</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2.400,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohnfläche (m²)</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">300,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="3" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">550,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            nebenkosten_detail_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Betriebskostenart</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtkosten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Umlageschlüssel</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamteinheiten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Ihre Einheiten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Anteil €</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Grundsteuer</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.200,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Quadratmeter</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">400,00 m²</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">50,00 m²</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">150,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wohngebäudeversicherung</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">800,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.000,00 MEA</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">125,00 MEA</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">100,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Kabelgebühren / TV</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">600,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">6 WE</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1 WE</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">100,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Hausmeister & Gartenpflege</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.600,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Quadratmeter</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">400,00 m²</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">50,00 m²</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">200,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="5" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme Umlage:</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #1e3a8a;">550,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            positions_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Pos.</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Leistung / Beschreibung</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Menge</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Einzelpreis</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">MwSt.</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamt</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Übernachtung Ferienwohnung "Bergblick"<br/><small style="color: #64748b;">Zeitraum: 15.05.2026 - 18.05.2026</small></td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">3 Nächte</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">7%</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">450,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Endreinigung Pauschal</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">1 Stk.</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">80,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">19%</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">80,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">3</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Kurbeitrag (Gästetax) Erwachsen</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">6 Tage</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">2,50 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0%</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">15,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Netto-Gesamt:</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">560,75 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">zzgl. Umsatzsteuer (Gesamt):</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">39,25 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #cbd5e1; font-size: 11pt;">
+                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Rechnungsbetrag (Brutto):</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #1e3a8a;">600,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`
+        };
+
+        // Ersetzungsmethode für Mentions & Text-Platzhalter
+        const replacePlaceholders = (htmlStr) => {
+            let res = htmlStr;
+            
+            // 1. Tabellen-Platzhalter
+            Object.keys(mockTables).forEach(key => {
+                const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
+                res = res.replace(mentionRegex, mockTables[key]);
+                
+                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+                res = res.replace(textRegex, mockTables[key]);
+            });
+
+            // 2. Reguläre Platzhalter
+            Object.keys(mockData).forEach(key => {
+                const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
+                res = res.replace(mentionRegex, mockData[key]);
+                
+                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+                res = res.replace(textRegex, mockData[key]);
+            });
+
+            return res;
+        };
+
+        const previewHtml = replacePlaceholders(contentHtml);
+
+        // Neues Fenster öffnen und das PDF-Layout reinschreiben
+        const win = window.open('', '_blank');
+        if (win) {
+            win.document.write(`<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Vorschau - ${activeConfig.label || activeConfig.name || 'Dokument'}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        @page {
+            size: A4;
+            margin: 0;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Arial', 'Helvetica', sans-serif;
+            color: #000000;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+        }
+        @media print {
+            .no-print { display: none !important; }
+            body { padding: 0; background: #ffffff; }
+            .letter-page {
+                box-shadow: none !important;
+                border: none !important;
+                margin: 0 auto !important;
+                page-break-after: always !important;
+            }
+            .letter-page:last-child {
+                page-break-after: avoid !important;
+            }
+        }
+        @media screen {
+            body { 
+                padding: 30px 20px; 
+                background: #f1f5f9;
+            }
+            .letter-page {
+                margin: 0 auto 30px;
+            }
+        }
+        
+        /* DIN 5008 A4 Page Style */
+        .letter-page {
+            width: 210mm;
+            min-height: 297mm;
+            padding: 20mm 20mm 20mm 25mm;
+            background: #ffffff !important;
+            color: #000000 !important;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            border: 1px solid #cbd5e1;
+            font-size: 11pt;
+            line-height: 1.5;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            text-align: left;
+        }
+        
+        .letter-sender {
+            font-size: 8pt;
+            color: #555555;
+            border-bottom: 1px solid #cccccc;
+            padding-bottom: 2mm;
+            margin-bottom: 5mm;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .letter-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10mm;
+        }
+        
+        .letter-recipient {
+            width: 85mm;
+            font-size: 10pt;
+            line-height: 1.4;
+            color: #111111;
+            text-align: left;
+        }
+        
+        .letter-date {
+            font-size: 10pt;
+            color: #333333;
+            text-align: right;
+        }
+        
+        .letter-subject {
+            font-size: 13pt;
+            font-weight: bold;
+            margin-bottom: 4mm;
+            color: #000000;
+            text-align: left;
+        }
+        
+        .letter-object {
+            font-size: 10pt;
+            color: #444444;
+            margin-bottom: 8mm;
+            padding-bottom: 2mm;
+            border-bottom: 1px dotted #e2e8f0;
+            text-align: left;
+        }
+        
+        .letter-body {
+            flex-grow: 1;
+            font-size: 11pt;
+            line-height: 1.6;
+            text-align: left;
+        }
+        
+        .letter-body p {
+            margin-bottom: 1em !important;
+        }
+        
+        .letter-footer {
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid #dddddd;
+            padding-top: 5mm;
+            margin-top: 10mm;
+            font-size: 8pt;
+            color: #666666;
+            line-height: 1.4;
+            text-align: left;
+        }
+        
+        .footer-col {
+            width: 30%;
+        }
+        
+        /* Tabellen im Editor */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            background-color: transparent !important;
+            border: 1px solid #cbd5e1 !important;
+        }
+        th {
+            background-color: #f1f5f9 !important;
+            color: #0f172a !important;
+            font-weight: bold;
+            border: 1px solid #cbd5e1 !important;
+            padding: 8px 12px !important;
+        }
+        td {
+            border: 1px solid #cbd5e1 !important;
+            padding: 8px 12px !important;
+            color: #334155 !important;
+            background-color: transparent !important;
+        }
+    </style>
+</head>
+<body>
+    <!-- Print button (screen only) -->
+    <div class="no-print" style="text-align:center;padding:12px 0 20px;">
+        <button onclick="window.print()" style="padding:10px 28px;font-size:14px;font-weight:600;background:#0ea5e9;color:white;border:none;border-radius:8px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+            🖨️ Als PDF drucken / speichern
+        </button>
+        <p style="margin-top:8px;font-size:12px;color:#64748b;">Drücke Strg+P oder klicke den Button. Wähle "Als PDF speichern" im Druckdialog.</p>
+    </div>
+
+    <div class="preview-content">
+        ${previewHtml}
+    </div>
+
+    <script>
+        // Automatisch den Druckdialog öffnen
+        setTimeout(() => {
+            window.print();
+        }, 500);
+    </script>
+</body>
+</html>`);
+            win.document.close();
+        }
+    };
+
     // Categories groups list
     const groups = [
         'Mahnwesen', 
@@ -773,371 +1283,6 @@ export const DocumentTemplates = () => {
 
     // Filter templates to make sure we don't display empty groups
     const availableGroups = groups.filter(g => allTemplates.some(t => t.group === g));
-
-    const sheetStyle = {
-        width: '100%',
-        maxWidth: '800px',
-        backgroundColor: '#ffffff',
-        minHeight: '1130px',
-        padding: '4rem 3rem 4rem 3rem',
-        boxShadow: '0 10px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
-        borderRadius: '4px',
-        border: '1px solid #cbd5e1',
-        display: 'flex',
-        flexDirection: 'column',
-        position: 'relative',
-        boxSizing: 'border-box'
-    };
-
-    const renderUnifiedLayout = () => {
-        const isDunning = activeConfig.group === 'Mahnwesen';
-        const isUtility = activeConfig.group === 'Nebenkosten';
-        const isInvoice = activeConfig.group === 'FEWO-Rechnungen';
-        
-        return (
-            <div style={sheetStyle}>
-                {/* 1. Header (Absender) */}
-                {isUtility && (
-                    <div style={{ fontSize: '8px', color: '#aaa', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '10px', textTransform: 'uppercase' }}>
-                        {selectedPortfolioName} • {selectedPortfolioAddress}
-                    </div>
-                )}
-                {isDunning && (
-                    <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
-                        {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
-                    </div>
-                )}
-                {isInvoice && (
-                    <div style={{ fontSize: '7pt', textDecoration: 'underline', color: '#555', marginBottom: '15px' }}>
-                        {selectedPortfolioCompany || selectedPortfolioName} • {selectedPortfolioAddress}
-                    </div>
-                )}
-                {!isUtility && !isDunning && !isInvoice && (
-                    <div style={{ fontSize: '7px', color: '#000', borderBottom: '1px solid #ddd', paddingBottom: '3px', marginBottom: '15px' }}>
-                        {selectedPortfolioCompany || selectedPortfolioName} · {selectedPortfolioAddress}
-                    </div>
-                )}
-
-                {/* 2. Sub-Header (Empfänger & Datum / Info Block) */}
-                {isInvoice ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '30px' }}>
-                        <div style={{ fontSize: '11pt', lineHeight: '1.4' }}>
-                            <strong>Herrn / Frau</strong><br />
-                            <strong>Max Mustermann (Gast)</strong><br />
-                            Musterweg 12<br />
-                            12345 Musterstadt
-                        </div>
-                        <div style={{ fontSize: '10pt', backgroundColor: '#f8fafc', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                                <span style={{ color: '#555' }}>Nummer:</span>
-                                <span style={{ fontWeight: '600' }}>RE-2026-0001</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                                <span style={{ color: '#555' }}>Datum:</span>
-                                <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString('de-DE')}</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                                <span style={{ color: '#555' }}>Zeitraum:</span>
-                                <span style={{ fontWeight: '600' }}>15.05.2026 - 18.05.2026</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span style={{ color: '#555' }}>Gäste:</span>
-                                <span style={{ fontWeight: '600' }}>2</span>
-                            </div>
-                        </div>
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: isUtility ? '15px' : '35px' }}>
-                        <div style={{ fontSize: '9px', lineHeight: '1.4' }}>
-                            Herrn/Frau<br />
-                            <strong>Max Mustermann</strong><br />
-                            Musterweg 12<br />
-                            12345 Musterstadt
-                        </div>
-                        <div style={{ fontSize: '11px', textAlign: 'right', alignSelf: 'flex-end' }}>
-                            {isDunning ? `Musterstadt, den ${new Date().toLocaleDateString('de-DE')}` : new Date().toLocaleDateString('de-DE')}
-                        </div>
-                    </div>
-                )}
-
-                {/* 3. Subject / Headline */}
-                {isDunning && (
-                    <>
-                        <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>
-                            {subject || activeConfig.label}
-                        </div>
-                        <div style={{ fontSize: '11px', marginBottom: '25px' }}>
-                            Mietobjekt: Musterstraße 42, 12345 Musterstadt (Einheit: EG links)
-                        </div>
-                    </>
-                )}
-                {isInvoice && (
-                    <div style={{ fontSize: '14pt', fontWeight: 'bold', marginBottom: '20px', borderBottom: '1px solid #000', paddingBottom: '5px' }}>
-                        {activeType === 'fewo_credit_note' ? 'Gutschrift Nr. GS-2026-0001' : 'Rechnung Nr. RE-2026-0001'}
-                    </div>
-                )}
-                {!isUtility && !isDunning && !isInvoice && (
-                    <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '15px', borderBottom: '1px solid #f1f5f9', paddingBottom: '5px' }}>
-                        {subject || activeConfig.label}
-                    </div>
-                )}
-
-                {/* 4. Editor Content */}
-                <div style={{ flex: 1, minHeight: '350px' }}>
-                    <EditorContent editor={editor} />
-                </div>
-
-                {/* 5. Utility Layout Previews */}
-                {isUtility && (
-                    <>
-                        {/* Ihre Daten Box */}
-                        <div style={{ border: '1px solid var(--primary-color)', borderRadius: '3px', padding: '8px 10px', margin: '10px 0', position: 'relative' }}>
-                            <div style={{ position: 'absolute', top: '-8px', left: '8px', background: '#fff', padding: '0 5px', fontWeight: '600', color: 'var(--primary-color)', fontSize: '9px' }}>Vorschau: Ihre Daten</div>
-                            <table style={{ width: '100%', fontSize: '9px' }}>
-                                <tbody>
-                                    <tr>
-                                        <td style={{ width: '40%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Adresse</span><br /><b>Musterstraße 42<br />12345 Musterstadt</b></td>
-                                        <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Lage</span><br /><b>EG links</b></td>
-                                        <td style={{ width: '30%', padding: '1px 0' }}><span style={{ color: '#aaa', fontSize: '8px' }}>Abrechnungszeitraum</span><br /><b style={{ color: 'var(--primary-color)' }}>01.01.2025 - 31.12.2025</b></td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        {/* Summary Table */}
-                        <table style={{ width: '100%', fontSize: '10px', borderCollapse: 'collapse', marginBottom: '15px' }}>
-                            <thead>
-                                <tr>
-                                    <th></th>
-                                    <th style={{ textAlign: 'right', fontWeight: '600', fontStyle: 'italic', paddingBottom: '3px' }}>Brutto</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                    <td style={{ padding: '4px 0' }}>Ihre Gesamtkosten</td>
-                                    <td style={{ padding: '4px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
-                                </tr>
-                                <tr style={{ borderTop: '1px solid #e5e7eb' }}>
-                                    <td style={{ padding: '3px 0', color: '#555' }}>Ihre Betriebskosten-Vorauszahlung</td>
-                                    <td style={{ padding: '3px 0', textAlign: 'right' }}>400,00 €</td>
-                                </tr>
-                                <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                    <td style={{ padding: '5px 0', fontWeight: '700', fontSize: '11px' }}>⬅ <b style={{ color: '#16a34a' }}>Ihre Gutschrift</b></td>
-                                    <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700', fontSize: '11px', color: '#16a34a' }}>50,00 €</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </>
-                )}
-
-                {/* 6. Footers */}
-                {isUtility && (
-                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '10px', fontSize: '8px', color: '#e6a817', letterSpacing: '2px', fontWeight: '600' }}>
-                        SEITE 1 / 2
-                    </div>
-                )}
-                {isDunning && (
-                    <div style={{ borderTop: '1px solid #eee', marginTop: 'auto', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#969696' }}>
-                        <span>{activeConfig.label} - Stand {new Date().toLocaleDateString('de-DE')}</span>
-                        <span>Seite 1 von 2</span>
-                    </div>
-                )}
-                {isInvoice && (
-                    <div style={{ borderTop: '1px solid #ccc', marginTop: 'auto', paddingTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px', fontSize: '7.5pt', color: '#444', lineHeight: '1.4' }}>
-                        <div>
-                            <strong>Anschrift</strong><br />
-                            {selectedPortfolioCompany || selectedPortfolioName}<br />
-                            {selectedPortfolioAddress}
-                        </div>
-                        <div>
-                            <strong>Kontakt</strong><br />
-                            Tel: {selectedPortfolioPhone}<br />
-                            Email: {selectedPortfolioEmail}
-                        </div>
-                        <div>
-                            <strong>Bankverbindung</strong><br />
-                            {selectedPortfolioBank}<br />
-                            IBAN: {selectedPortfolioIban}<br />
-                            BIC: {selectedPortfolioBic}<br />
-                            {selectedPortfolioTax && `St.-Nr.: ${selectedPortfolioTax}`}
-                        </div>
-                    </div>
-                )}
-                {!isUtility && !isDunning && !isInvoice && (
-                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', fontSize: '7.5px', color: '#64748b', lineHeight: '1.5', pointerEvents: 'none' }}>
-                        <div>
-                            <strong>Bankverbindung:</strong><br />
-                            Empfänger: {selectedPortfolioCompany || selectedPortfolioName}<br />
-                            Bank: {selectedPortfolioBank}<br />
-                            IBAN: {selectedPortfolioIban}<br />
-                            BIC: {selectedPortfolioBic}
-                        </div>
-                        <div>
-                            <strong>Steuerdaten & Kontakt:</strong><br />
-                            Steuernummer: {selectedPortfolioTax}<br />
-                            USt-IdNr.: {selectedPortfolioVat}<br />
-                            E-Mail: {selectedPortfolioEmail}
-                        </div>
-                    </div>
-                )}
-            </div>
-        );
-    };
-
-    const renderStaticPage2 = () => {
-        const isDunning = activeConfig.group === 'Mahnwesen';
-        const isUtility = activeConfig.group === 'Nebenkosten';
-        
-        if (isUtility) {
-            return (
-                <div style={sheetStyle}>
-                    <h3 style={{ fontSize: '12px', fontWeight: '700', margin: '0 0 10px' }}>Aufteilung der Gesamtkosten für Ihr Mietobjekt (01.01.2025 - 31.12.2025)</h3>
-                    
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '9px', marginBottom: '20px' }}>
-                        <thead>
-                            <tr style={{ borderBottom: '2px solid #1f2937' }}>
-                                <th style={{ textAlign: 'left', padding: '3px' }}>Kostenart</th>
-                                <th style={{ textAlign: 'left', padding: '3px' }}>Verteilerschlüssel</th>
-                                <th style={{ textAlign: 'right', padding: '3px' }}>Gesamtkosten</th>
-                                <th style={{ textAlign: 'right', padding: '3px' }}>Gesamteinheiten</th>
-                                <th style={{ textAlign: 'right', padding: '3px' }}>Kosten / Einheit</th>
-                                <th style={{ textAlign: 'right', padding: '3px' }}>Ihre Einheiten</th>
-                                <th style={{ textAlign: 'right', padding: '3px' }}>Ihr Kostenanteil</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style={{ borderBottom: '1px solid #eee' }}>
-                                <td style={{ padding: '3px', fontWeight: '700' }}>Grundsteuer</td>
-                                <td style={{ padding: '3px' }}>Wohnfläche</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>450,00 €</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>300,00 m²</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>1,50 € / m²</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>100,00 m²</td>
-                                <td style={{ padding: '3px', textAlign: 'right', fontWeight: '700' }}>150,00 €</td>
-                            </tr>
-                            <tr style={{ borderBottom: '1px solid #eee' }}>
-                                <td style={{ padding: '3px', fontWeight: '700' }}>Kaltwasser / Abwasser</td>
-                                <td style={{ padding: '3px' }}>Personen</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>1.200,00 €</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>6,00 P.</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>200,00 € / P.</td>
-                                <td style={{ padding: '3px', textAlign: 'right' }}>2,00 P.</td>
-                                <td style={{ padding: '3px', textAlign: 'right', fontWeight: '700' }}>400,00 €</td>
-                            </tr>
-                            <tr style={{ borderTop: '2px solid #1f2937' }}>
-                                <td colSpan="6" style={{ padding: '5px 0', fontWeight: '700' }}>Gesamtsumme (zeitanteilig)</td>
-                                <td style={{ padding: '5px 0', textAlign: 'right', fontWeight: '700' }}>550,00 €</td>
-                            </tr>
-                        </tbody>
-                    </table>
-
-                    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 'auto', paddingTop: '10px', fontSize: '8px', color: '#e6a817', letterSpacing: '2px', fontWeight: '600' }}>
-                        SEITE 2 / 2
-                    </div>
-                </div>
-            );
-        }
-
-        if (isDunning) {
-            return (
-                <div style={sheetStyle}>
-                    {/* Header */}
-                    <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '15px', borderBottom: '1.5px solid #000', paddingBottom: '5px' }}>
-                        Anlage zur Mahnung: Forderungsaufstellung & Informationen
-                    </div>
-
-                    {/* 5. Mock Forderungszusammenfassung Table */}
-                    <div style={{ marginTop: '10px' }}>
-                        <h4 style={{ fontSize: '10px', fontWeight: 'bold', margin: '0 0 5px' }}>Forderungszusammenfassung</h4>
-                        <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse', marginBottom: '15px' }}>
-                            <tbody>
-                                <tr style={{ borderBottom: '1px solid #eee' }}>
-                                    <td style={{ padding: '4px 0' }}>Offene Hauptforderungen (Miete/Nebenkosten)</td>
-                                    <td style={{ padding: '4px 0', textAlign: 'right' }}>900,00 €</td>
-                                </tr>
-                                <tr style={{ borderBottom: '1px solid #eee' }}>
-                                    <td style={{ padding: '4px 0' }}>Verzugszinsen (5,00 % p.a. bis heute)</td>
-                                    <td style={{ padding: '4px 0', textAlign: 'right' }}>3,70 €</td>
-                                </tr>
-                                <tr style={{ borderBottom: '1.5px solid #000' }}>
-                                    <td style={{ padding: '4px 0' }}>Mahnauslagen für dieses Schreiben</td>
-                                    <td style={{ padding: '4px 0', textAlign: 'right' }}>5,00 €</td>
-                                </tr>
-                                <tr style={{ fontWeight: 'bold' }}>
-                                    <td style={{ padding: '6px 0' }}>Gesamtforderung zum {new Date().toLocaleDateString('de-DE')}</td>
-                                    <td style={{ padding: '6px 0', textAlign: 'right' }}>908,70 €</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    {/* 6. QR Code Box */}
-                    <div style={{
-                        backgroundColor: '#f5f7fa',
-                        border: '0.42mm dashed #b4bcc8',
-                        borderRadius: '6px',
-                        padding: '12px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        textAlign: 'center',
-                        margin: '15px 0',
-                    }}>
-                        <div style={{ width: '80px', height: '80px', backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '0.7rem', color: '#64748b', fontWeight: 'bold', marginBottom: '6px' }}>[QR-Code]</div>
-                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#1e293b', marginBottom: '4px' }}>Online Forderungsportal</div>
-                        <div style={{ fontSize: '9.5px', color: '#475569', maxWidth: '400px', marginBottom: '5px' }}>
-                            Sie können die aktuelle Forderung auch online einsehen und eine Ratenzahlung anfragen. Scannen Sie hierzu den QR-Code und geben Sie den unten genannten Zugangscode ein.
-                        </div>
-                        <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#1e293b' }}>
-                            Zugangscode (PIN): 9821
-                        </div>
-                    </div>
-
-                    {/* 7. Signature */}
-                    <div style={{ marginTop: '15px' }}>
-                        Mit freundlichen Grüßen,<br /><br />
-                        <strong>{selectedPortfolioCompany || selectedPortfolioName}</strong>
-                    </div>
-
-                    {/* 8. Anlagen Block */}
-                    <div style={{ marginTop: '20px', fontSize: '9px', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-                        <strong>Anlagen:</strong><br />
-                        1. Forderungsaufstellung<br />
-                        2. Zinsberechnung<br />
-                        3. Übersicht: Ablauf bei Mietrückstand und mögliche Folgekosten
-                    </div>
-
-                    {/* Footer */}
-                    <div style={{ borderTop: '1px solid #eee', marginTop: 'auto', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#969696' }}>
-                        <span>{activeConfig.label} - Stand {new Date().toLocaleDateString('de-DE')}</span>
-                        <span>Seite 2 von 2</span>
-                    </div>
-                </div>
-            );
-        }
-
-        return null;
-    };
-
-    const renderDocumentLayout = () => {
-        const isUtility = activeConfig.group === 'Nebenkosten';
-        const isDunning = activeConfig.group === 'Mahnwesen';
-        const hasSecondPage = (isUtility || isDunning);
-
-        return (
-            <>
-                <div style={{ display: previewPage === 1 ? 'block' : 'none' }}>
-                    {renderUnifiedLayout()}
-                </div>
-                {hasSecondPage && (
-                    <div style={{ display: previewPage === 2 ? 'block' : 'none' }}>
-                        {renderStaticPage2()}
-                    </div>
-                )}
-            </>
-        );
-    };
-
     const activePage = Math.min(previewPage, pageCount);
 
     return (
@@ -1725,6 +1870,9 @@ export const DocumentTemplates = () => {
                                     </button>
 
                                     <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                                        <Button variant="secondary" size="sm" icon={FileText} onClick={handlePrintPreview}>
+                                            PDF-Vorschau
+                                        </Button>
                                         {!activeConfig.isCustom && (
                                             <Button variant="ghost" size="sm" icon={RotateCcw} onClick={handleReset} style={{ color: 'var(--text-secondary)' }}>
                                                 Standard
