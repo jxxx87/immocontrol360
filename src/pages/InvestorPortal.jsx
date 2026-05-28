@@ -284,9 +284,15 @@ const InvestorPortal = () => {
             }
 
             (p.units || []).forEach(u => {
-                const activeLease = u.leases?.find(l => l.status === 'active');
-                totalMonthlyIncome += activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0;
-                totalTargetRent += (parseFloat(u.target_rent) || 0);
+                if (u.is_vacation_rental) {
+                    const fewoRent = parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0;
+                    totalMonthlyIncome += fewoRent;
+                    totalTargetRent += fewoRent;
+                } else {
+                    const activeLease = u.leases?.find(l => l.status === 'active');
+                    totalMonthlyIncome += activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0;
+                    totalTargetRent += (parseFloat(u.target_rent) || 0);
+                }
             });
         });
 
@@ -354,14 +360,23 @@ const InvestorPortal = () => {
     const getPropertyRentIst = (property) => {
         let total = 0;
         (property.units || []).forEach(u => {
-            const activeLease = u.leases?.find(l => l.status === 'active');
-            if (activeLease) total += parseFloat(activeLease.cold_rent) || 0;
+            if (u.is_vacation_rental) {
+                total += parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0;
+            } else {
+                const activeLease = u.leases?.find(l => l.status === 'active');
+                if (activeLease) total += parseFloat(activeLease.cold_rent) || 0;
+            }
         });
         return total;
     };
 
     const getPropertyRentSoll = (property) => {
-        return (property.units || []).reduce((sum, u) => sum + (parseFloat(u.target_rent) || 0), 0);
+        return (property.units || []).reduce((sum, u) => {
+            if (u.is_vacation_rental) {
+                return sum + (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0);
+            }
+            return sum + (parseFloat(u.target_rent) || 0);
+        }, 0);
     };
 
     // Group Properties by Economic Unit
