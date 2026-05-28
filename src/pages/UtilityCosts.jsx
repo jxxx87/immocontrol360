@@ -855,7 +855,6 @@ const UtilityCosts = () => {
 
 
     const fetchWritingTemplates = async (portfolioId) => {
-        const types = ['utility_intro', 'utility_outro'];
         const results = {
             utility_intro: `<p>Sehr geehrte/r <span data-id="mieter_anrede">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für Ihr Mietobjekt <span data-id="objekt_adresse">Objekt-Adresse</span> für das Abrechnungsjahr <span data-id="abrechnungsjahr">Abrechnungsjahr</span>.</p><p>Die Aufstellung Ihrer Gesamtkosten und Vorauszahlungen entnehmen Sie bitte der folgenden Übersicht:</p>`,
             utility_outro: `<p>Die detaillierte Aufteilung der einzelnen Betriebskostenarten sowie die jeweiligen Verteilerschlüssel können Sie den Folgeseiten entnehmen. Bitte prüfen Sie die Aufstellung. Bei Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><span data-id="vermieter_name">Vermieter Name</span></p>`
@@ -864,32 +863,73 @@ const UtilityCosts = () => {
         if (!user) return results;
 
         try {
+            // First check if there is a 'utility_costs' template
+            let query = supabase
+                .from('document_templates')
+                .select('content_html')
+                .eq('user_id', user.id)
+                .eq('type', 'utility_costs');
+
+            if (portfolioId) {
+                query = query.eq('portfolio_id', portfolioId);
+            } else {
+                query = query.is('portfolio_id', null);
+            }
+
+            let { data, error } = await query.maybeSingle();
+            
+            // If portfolio-specific 'utility_costs' is not found and portfolioId is set, check global 'utility_costs'
+            if ((error || !data) && portfolioId) {
+                const { data: globalData, error: globalErr } = await supabase
+                    .from('document_templates')
+                    .select('content_html')
+                    .eq('user_id', user.id)
+                    .eq('type', 'utility_costs')
+                    .is('portfolio_id', null)
+                    .maybeSingle();
+                if (!globalErr && globalData) {
+                    data = globalData;
+                }
+            }
+
+            if (data?.content_html) {
+                // Split by 'nebenkosten_tabelle' placeholder
+                const content = data.content_html;
+                // Search for placeholder span or curly braces fallback
+                const parts = content.split(/<span[^>]*data-id="nebenkosten_tabelle"[^>]*>.*?<\/span>|<span[^>]*data-id="nebenkosten_tabelle"[^>]*>.*?<\/span>|{nebenkosten_tabelle}/);
+                results.utility_intro = parts[0] || '';
+                results.utility_outro = parts[1] || '';
+                return results;
+            }
+
+            // Fallback: if 'utility_costs' is not found, load the old 'utility_intro' and 'utility_outro'
+            const types = ['utility_intro', 'utility_outro'];
             for (const type of types) {
-                let query = supabase
+                let q = supabase
                     .from('document_templates')
                     .select('content_html')
                     .eq('user_id', user.id)
                     .eq('type', type);
 
                 if (portfolioId) {
-                    query = query.eq('portfolio_id', portfolioId);
+                    q = q.eq('portfolio_id', portfolioId);
                 } else {
-                    query = query.is('portfolio_id', null);
+                    q = q.is('portfolio_id', null);
                 }
 
-                const { data, error } = await query.maybeSingle();
-                if (!error && data?.content_html) {
-                    results[type] = data.content_html;
+                const { data: oldData, error: oldErr } = await q.maybeSingle();
+                if (!oldErr && oldData?.content_html) {
+                    results[type] = oldData.content_html;
                 } else if (portfolioId) {
-                    const { data: globalData } = await supabase
+                    const { data: globalOld } = await supabase
                         .from('document_templates')
                         .select('content_html')
                         .eq('user_id', user.id)
                         .eq('type', type)
                         .is('portfolio_id', null)
                         .maybeSingle();
-                    if (globalData?.content_html) {
-                        results[type] = globalData.content_html;
+                    if (globalOld?.content_html) {
+                        results[type] = globalOld.content_html;
                     }
                 }
             }

@@ -221,7 +221,6 @@ const Invoices = () => {
     };
 
     const fetchInvoiceTemplates = async (portfolioId) => {
-        const types = ['invoice_intro', 'invoice_outro', 'credit_note_intro'];
         const results = {
             invoice_intro: `<p>Sehr geehrte Damen und Herren,</p><p>vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen vereinbarungsgemäß folgende Leistungen für den Zeitraum vom <span data-id="buchungszeitraum">Leistungszeitraum</span>:</p>`,
             invoice_outro: `<p>Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf unser unten genanntes Bankkonto. Vielen Dank für Ihren Aufenthalt und wir freuen uns auf Ihren nächsten Besuch.</p>`,
@@ -231,34 +230,78 @@ const Invoices = () => {
         if (!user) return results;
 
         try {
-            for (const type of types) {
-                let query = supabase
+            // 1. Fetch 'fewo_invoice'
+            let invoiceQuery = supabase
+                .from('document_templates')
+                .select('content_html')
+                .eq('user_id', user.id)
+                .eq('type', 'fewo_invoice');
+            if (portfolioId) {
+                invoiceQuery = invoiceQuery.eq('portfolio_id', portfolioId);
+            } else {
+                invoiceQuery = invoiceQuery.is('portfolio_id', null);
+            }
+            let { data: invData } = await invoiceQuery.maybeSingle();
+
+            if (!invData && portfolioId) {
+                const { data: globalInv } = await supabase
                     .from('document_templates')
                     .select('content_html')
                     .eq('user_id', user.id)
-                    .eq('type', type);
+                    .eq('type', 'fewo_invoice')
+                    .is('portfolio_id', null)
+                    .maybeSingle();
+                if (globalInv) invData = globalInv;
+            }
 
-                if (portfolioId) {
-                    query = query.eq('portfolio_id', portfolioId);
-                } else {
-                    query = query.is('portfolio_id', null);
-                }
+            if (invData?.content_html) {
+                const parts = invData.content_html.split(/<span[^>]*data-id="positions_tabelle"[^>]*>.*?<\/span>|<span[^>]*data-id="positions_tabelle"[^>]*>.*?<\/span>|{positions_tabelle}/);
+                results.invoice_intro = parts[0] || '';
+                results.invoice_outro = parts[1] || '';
+            } else {
+                // Try old invoice_intro and invoice_outro
+                const oldIntroQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'invoice_intro');
+                const oldOutroQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'invoice_outro');
+                
+                const introRes = await (portfolioId ? oldIntroQ.eq('portfolio_id', portfolioId) : oldIntroQ.is('portfolio_id', null)).maybeSingle();
+                const outroRes = await (portfolioId ? oldOutroQ.eq('portfolio_id', portfolioId) : oldOutroQ.is('portfolio_id', null)).maybeSingle();
 
-                const { data, error } = await query.maybeSingle();
-                if (!error && data?.content_html) {
-                    results[type] = data.content_html;
-                } else if (portfolioId) {
-                    const { data: globalData } = await supabase
-                        .from('document_templates')
-                        .select('content_html')
-                        .eq('user_id', user.id)
-                        .eq('type', type)
-                        .is('portfolio_id', null)
-                        .maybeSingle();
-                    if (globalData?.content_html) {
-                        results[type] = globalData.content_html;
-                    }
-                }
+                if (introRes.data?.content_html) results.invoice_intro = introRes.data.content_html;
+                if (outroRes.data?.content_html) results.invoice_outro = outroRes.data.content_html;
+            }
+
+            // 2. Fetch 'fewo_credit_note'
+            let cnQuery = supabase
+                .from('document_templates')
+                .select('content_html')
+                .eq('user_id', user.id)
+                .eq('type', 'fewo_credit_note');
+            if (portfolioId) {
+                cnQuery = cnQuery.eq('portfolio_id', portfolioId);
+            } else {
+                cnQuery = cnQuery.is('portfolio_id', null);
+            }
+            let { data: cnData } = await cnQuery.maybeSingle();
+
+            if (!cnData && portfolioId) {
+                const { data: globalCn } = await supabase
+                    .from('document_templates')
+                    .select('content_html')
+                    .eq('user_id', user.id)
+                    .eq('type', 'fewo_credit_note')
+                    .is('portfolio_id', null)
+                    .maybeSingle();
+                if (globalCn) cnData = globalCn;
+            }
+
+            if (cnData?.content_html) {
+                const parts = cnData.content_html.split(/<span[^>]*data-id="positions_tabelle"[^>]*>.*?<\/span>|<span[^>]*data-id="positions_tabelle"[^>]*>.*?<\/span>|{positions_tabelle}/);
+                results.credit_note_intro = parts[0] || '';
+            } else {
+                // Try old credit_note_intro
+                const oldCnQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'credit_note_intro');
+                const cnRes = await (portfolioId ? oldCnQ.eq('portfolio_id', portfolioId) : oldCnQ.is('portfolio_id', null)).maybeSingle();
+                if (cnRes.data?.content_html) results.credit_note_intro = cnRes.data.content_html;
             }
         } catch (e) {
             console.error('Error fetching invoice writing templates:', e);
