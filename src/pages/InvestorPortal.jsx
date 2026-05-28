@@ -37,6 +37,7 @@ import { usePdfTemplate } from '../lib/usePdfTemplate';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { useViewMode } from '../context/ViewModeContext';
+import ExportDropdown from '../components/ExportDropdown';
 import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 
 const InvestorPortal = () => {
@@ -377,6 +378,42 @@ const InvestorPortal = () => {
             }
             return sum + (parseFloat(u.target_rent) || 0);
         }, 0);
+    };
+
+    const getPropertyLoanPayment = (propertyId) => {
+        return loans
+            .filter(l => l.property_id === propertyId)
+            .reduce((sum, l) => {
+                const amount = parseFloat(l.loan_amount) || 0;
+                const interestRate = (parseFloat(l.interest_rate) || 0) / 100;
+                const repaymentRate = (parseFloat(l.initial_repayment_rate) || 0) / 100;
+                if (l.fixed_annuity) return sum + parseFloat(l.fixed_annuity);
+                return sum + (amount * (interestRate + repaymentRate)) / 12;
+            }, 0);
+    };
+
+    const getGroupOrPropertyLoanPayment = (p) => {
+        if (p.isGroup) {
+            let sum = p.properties.reduce((s, subP) => s + getPropertyLoanPayment(subP.id), 0);
+            const weLoans = loans.filter(l => l.economic_unit_id === p.economic_unit_id && !l.property_id);
+            weLoans.forEach(l => {
+                const amount = parseFloat(l.loan_amount) || 0;
+                const interestRate = (parseFloat(l.interest_rate) || 0) / 100;
+                const repaymentRate = (parseFloat(l.initial_repayment_rate) || 0) / 100;
+                if (l.fixed_annuity) sum += parseFloat(l.fixed_annuity);
+                else sum += (amount * (interestRate + repaymentRate)) / 12;
+            });
+            return sum;
+        }
+        return getPropertyLoanPayment(p.id);
+    };
+
+    const getVacancy = (p) => {
+        const units = p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || []);
+        const total = units.length;
+        if (total === 0) return '–';
+        const vacant = units.filter(u => !u.is_vacation_rental && !u.leases?.some(l => l.status === 'active')).length;
+        return `${vacant} / ${total}`;
     };
 
     // Group Properties by Economic Unit
@@ -2069,31 +2106,85 @@ const InvestorPortal = () => {
     // ─── MAIN RENDER ────────────────────────────────────────────────
     return (
         <>
-            <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>
-                    {activeTab === 'cockpit' && 'Investorportal – Cockpit'}
-                    {activeTab === 'deals' && 'Neue Deals – Überblick'}
-                    {activeTab === 'audit' && (activeDealType === 'fix_flip' ? 'Fix & Flip' : 'Buy & Hold')}
-                    {activeTab === 'calculator' && 'Rechner'}
-                </h1>
-                <p style={{ color: 'var(--text-secondary)' }}>
-                    {activeTab === 'cockpit' && 'Strategisches Performance-Monitoring & Objekt-Sicht'}
-                    {activeTab === 'deals' && 'Rechne Smart – Kaufe Schnell'}
-                    {activeTab === 'audit' && (
-                        activeDealType === 'fix_flip' ? (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                                Ankauf – Aufwertung – Verkauf: Kosten & Gewinn schnell berechnet
-                                <Flame size={16} style={{ color: '#f97316' }} />
-                            </span>
-                        ) : (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                                Ankauf – Finanzierung – Vermietung: Cashflow & Rendite berechnet
-                                <TrendingUp size={16} style={{ color: 'var(--success-color)' }} />
-                            </span>
-                        )
-                    )}
-                    {activeTab === 'calculator' && 'Cashflow-Optimierung und Refinanzierungstools'}
-                </p>
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', marginBottom: 'var(--spacing-md)', gap: isMobile ? '10px' : '0' }}>
+                <div>
+                    <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>
+                        {activeTab === 'cockpit' && 'Investorportal – Cockpit'}
+                        {activeTab === 'deals' && 'Neue Deals – Überblick'}
+                        {activeTab === 'audit' && (activeDealType === 'fix_flip' ? 'Fix & Flip' : 'Buy & Hold')}
+                        {activeTab === 'calculator' && 'Rechner'}
+                    </h1>
+                    <p style={{ color: 'var(--text-secondary)' }}>
+                        {activeTab === 'cockpit' && 'Strategisches Performance-Monitoring & Objekt-Sicht'}
+                        {activeTab === 'deals' && 'Rechne Smart – Kaufe Schnell'}
+                        {activeTab === 'audit' && (
+                            activeDealType === 'fix_flip' ? (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                    Ankauf – Aufwertung – Verkauf: Kosten & Gewinn schnell berechnet
+                                    <Flame size={16} style={{ color: '#f97316' }} />
+                                </span>
+                            ) : (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                    Ankauf – Finanzierung – Vermietung: Cashflow & Rendite berechnet
+                                    <TrendingUp size={16} style={{ color: 'var(--success-color)' }} />
+                                </span>
+                            )
+                        )}
+                        {activeTab === 'calculator' && 'Cashflow-Optimierung und Refinanzierungstools'}
+                    </p>
+                </div>
+                {activeTab === 'cockpit' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <ExportDropdown
+                            reportType="immobilien"
+                            data={groupedProperties.map(p => {
+                                const formattedAddress = p.isGroup ? (() => {
+                                    const streets = Array.from(new Set(p.properties.map(pr => pr.street).filter(Boolean)));
+                                    const streetName = streets.length > 0 ? streets.join(', ') : 'Diverse';
+                                    const numbers = p.properties.map(pr => pr.house_number).filter(Boolean).join(' & ');
+                                    return `${streetName} ${numbers}`.trim();
+                                })() : `${p.street} ${p.house_number || ''}`.trim();
+
+                                const rentIstMo = p.isGroup ? p._rentIst : getPropertyRentIst(p);
+                                const bankrate = getGroupOrPropertyLoanPayment(p);
+                                const totalSqm = p.isGroup ? p._totalSqm : (p.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0);
+                                const debt = p.isGroup ? p._debt : getPropertyDebt(p.id);
+
+                                return {
+                                    property_id: p.id,
+                                    adresse: formattedAddress,
+                                    einheiten: p.isGroup ? p.properties.reduce((sum, pr) => sum + (pr.units?.length || 0), 0) : (p.units?.length || 0),
+                                    kaufpreis: p.total_investment_cost || 0,
+                                    marktpreis: p.market_value_total || 0,
+                                    restschuld: debt,
+                                    miete_monat: rentIstMo,
+                                    bankrate: bankrate,
+                                    cashflow_monat: rentIstMo - bankrate,
+                                    wohnflaeche: totalSqm,
+                                    leerstand: getVacancy(p),
+                                    ltv: parseFloat(p.market_value_total) > 0 ? debt / parseFloat(p.market_value_total) : 0,
+                                    dscr: bankrate > 0 ? rentIstMo / bankrate : 0,
+                                    _propertyLabel: formattedAddress,
+                                };
+                            })}
+                            unitData={Object.fromEntries(groupedProperties.map(p => [
+                                p.id,
+                                (p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || [])).map(u => ({
+                                    unit_name: u.unit_name || '–',
+                                    floor: u.floor || '–',
+                                    sqm: u.sqm || 0,
+                                    rooms: u.rooms || '–',
+                                    target_rent: u.is_vacation_rental 
+                                        ? (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0) 
+                                        : (parseFloat(u.leases?.find(l => l.status === 'active')?.cold_rent) || 0),
+                                    status: u.is_vacation_rental ? 'Ferienwohnung' : (u.leases?.find(l => l.status === 'active') ? 'Vermietet' : 'Leerstand'),
+                                })),
+                            ]))}
+                            properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number || ''}`.trim() }))}
+                            totalRows={groupedProperties.length}
+                        />
+                    </div>
+                )}
             </div>
 
             {activeTab === 'cockpit' && renderCockpit()}
