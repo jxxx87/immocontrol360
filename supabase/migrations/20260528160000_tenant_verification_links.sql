@@ -64,7 +64,7 @@ BEGIN
     END IF;
 
     -- 3. Get the unit name and property address from their active lease (if any)
-    SELECT u.unit_name, p.street, p.house_number, p.postal_code, p.city 
+    SELECT u.unit_name, p.street, p.house_number, p.zip, p.city 
     INTO v_unit_name, v_prop_street, v_prop_house_number, v_prop_postal_code, v_prop_city
     FROM leases l
     JOIN units u ON u.id = l.unit_id
