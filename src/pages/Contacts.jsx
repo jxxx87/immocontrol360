@@ -404,6 +404,7 @@ const Contacts = () => {
                     <input
                         type="text"
                         placeholder="Kontakte suchen..."
+                        className="search-input-padding"
                         style={{
                             width: '100%',
                             padding: '10px 12px 10px 44px',

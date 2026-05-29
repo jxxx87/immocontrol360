@@ -754,6 +754,10 @@ input.padded-left-icon {
   padding-left: 35px !important;
 }
 
+input.search-input-padding {
+  padding-left: 44px !important;
+}
+
 /* ── TIPTAP & LETTER TEMPLATE WRAPPER STYLING ────────────────── */
 .tiptap {
   min-height: 297mm;
