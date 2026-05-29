@@ -1105,14 +1105,14 @@ const Properties = () => {
                                                             </h4>
                                                             <Button size="sm" icon={Plus} onClick={() => {
                                                                 if (!checkGlobalAccess()) return;
-                                                                handleOpenUnitModal(property);
+                                                                handleOpenUnitModal(propertyOrGroup);
                                                             }}>Neue Einheit</Button>
                                                         </div>
 
-                                                        {loadingUnits[property.id] ? (
+                                                        {loadingUnits[propertyOrGroup.id] ? (
                                                             <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
                                                         ) : (
-                                                            !units[property.id] || units[property.id].length === 0 ? (
+                                                            !units[propertyOrGroup.id] || units[propertyOrGroup.id].length === 0 ? (
                                                                 <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
                                                             ) : (
                                                                 <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
@@ -1128,7 +1128,7 @@ const Properties = () => {
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
-                                                                        {units[property.id].map(unit => (
+                                                                        {units[propertyOrGroup.id].map(unit => (
                                                                             <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
                                                                                 <td style={{ padding: '8px' }}>{unit.unit_name}</td>
                                                                                 <td style={{ padding: '8px' }}>{unit.floor}</td>
@@ -1196,7 +1196,7 @@ const Properties = () => {
                                                                                                 }}>
                                                                                                     {unit.status === 'vacant' && (
                                                                                                         <button
-                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${property.id}&unitId=${unit.id}`); }}
+                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${propertyOrGroup.id}&unitId=${unit.id}`); }}
                                                                                                             style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
                                                                                                             title="Einheit vermieten"
                                                                                                         >
@@ -1204,7 +1204,7 @@ const Properties = () => {
                                                                                                         </button>
                                                                                                     )}
                                                                                                     <button
-                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(property, unit); }}
+                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(propertyOrGroup, unit); }}
                                                                                                         style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
                                                                                                         title="Einheit bearbeiten"
                                                                                                     >
@@ -1212,7 +1212,7 @@ const Properties = () => {
                                                                                                     </button>
                                                                                                     <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
                                                                                                     <button
-                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(property.id, unit.id); }}
+                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(propertyOrGroup.id, unit.id); }}
                                                                                                         style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
                                                                                                         title="Einheit löschen"
                                                                                                     >
