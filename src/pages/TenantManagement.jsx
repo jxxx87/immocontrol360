@@ -145,6 +145,14 @@ const TenantManagement = () => {
     const handleGenerateLink = async (tenantId) => {
         setGeneratingLinkId(tenantId);
         try {
+            // Cleanup: delete old, expired, and unused links for this tenant to keep DB tidy
+            await supabase
+                .from('tenant_verification_links')
+                .delete()
+                .eq('tenant_id', tenantId)
+                .eq('is_updated', false)
+                .lt('expires_at', new Date().toISOString());
+
             // Generate standard UUID token
             const token = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
             const expiresAt = new Date();
