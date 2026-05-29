@@ -935,14 +935,14 @@ const UtilityCosts = () => {
             let query = supabase
                 .from('document_templates')
                 .select('content_html')
-                .eq('user_id', user.id)
                 .eq('type', 'utility_costs');
 
             if (portfolioId) {
                 query = query.eq('portfolio_id', portfolioId);
             } else {
-                query = query.is('portfolio_id', null);
+                query = query.eq('user_id', user.id).is('portfolio_id', null);
             }
+
 
             let { data, error } = await query.maybeSingle();
             
@@ -977,14 +977,14 @@ const UtilityCosts = () => {
                 let q = supabase
                     .from('document_templates')
                     .select('content_html')
-                    .eq('user_id', user.id)
                     .eq('type', type);
 
                 if (portfolioId) {
                     q = q.eq('portfolio_id', portfolioId);
                 } else {
-                    q = q.is('portfolio_id', null);
+                    q = q.eq('user_id', user.id).is('portfolio_id', null);
                 }
+
 
                 const { data: oldData, error: oldErr } = await q.maybeSingle();
                 if (!oldErr && oldData?.content_html) {

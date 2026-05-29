@@ -464,11 +464,19 @@ export const DocumentTemplates = () => {
     const fetchCustomTemplates = async () => {
         if (!user) return;
         try {
-            const { data, error } = await supabase
+            let query = supabase
                 .from('document_templates')
                 .select('*')
-                .eq('user_id', user.id)
                 .eq('is_custom', true);
+
+            const portfolioIds = (portfolios || []).map(p => p.id);
+            if (portfolioIds.length > 0) {
+                query = query.or(`user_id.eq.${user.id},portfolio_id.in.(${portfolioIds.join(',')})`);
+            } else {
+                query = query.eq('user_id', user.id);
+            }
+
+            const { data, error } = await query;
             if (!error && data) {
                 setCustomTemplates(data);
             }
@@ -476,6 +484,7 @@ export const DocumentTemplates = () => {
             console.error('Error fetching custom templates:', e);
         }
     };
+
 
     const loadTemplate = async () => {
         if (!user) return;
@@ -486,14 +495,14 @@ export const DocumentTemplates = () => {
             let query = supabase
                 .from('document_templates')
                 .select('*')
-                .eq('user_id', user.id)
                 .eq('type', activeType);
 
             if (portfolioFilter) {
                 query = query.eq('portfolio_id', portfolioFilter);
             } else {
-                query = query.is('portfolio_id', null);
+                query = query.eq('user_id', user.id).is('portfolio_id', null);
             }
+
 
             const { data, error } = await query.maybeSingle();
 
@@ -601,7 +610,8 @@ export const DocumentTemplates = () => {
         if (user) {
             fetchCustomTemplates();
         }
-    }, [user]);
+    }, [user, portfolios]);
+
 
     useEffect(() => {
         if (editor) {
@@ -621,14 +631,14 @@ export const DocumentTemplates = () => {
             let query = supabase
                 .from('document_templates')
                 .select('id')
-                .eq('user_id', user.id)
                 .eq('type', activeType);
 
             if (portfolioFilter) {
                 query = query.eq('portfolio_id', portfolioFilter);
             } else {
-                query = query.is('portfolio_id', null);
+                query = query.eq('user_id', user.id).is('portfolio_id', null);
             }
+
 
             const { data: existingRecord } = await query.maybeSingle();
 
@@ -650,7 +660,10 @@ export const DocumentTemplates = () => {
 
             const { error } = await supabase
                 .from('document_templates')
-                .upsert([payload]);
+                .upsert([payload], {
+                    onConflict: portfolioFilter ? 'portfolio_id,type' : 'user_id,type'
+                });
+
 
             if (error) throw error;
             alert('Vorlage erfolgreich gespeichert.');
@@ -715,10 +728,10 @@ export const DocumentTemplates = () => {
             const { error } = await supabase
                 .from('document_templates')
                 .delete()
-                .eq('user_id', user.id)
-                .eq('type', type);
+                .eq('id', templateId);
 
             if (error) throw error;
+
 
             await fetchCustomTemplates();
             setActiveType('payment_reminder');

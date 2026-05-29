@@ -6,7 +6,7 @@ import { useNotifications } from '../context/NotificationContext';
 import {
     Users, Mail, Send, CheckCircle2, Clock,
     X, Plus, Building2, DoorOpen, Search, RefreshCw, Loader,
-    Link2, Copy, Trash2
+    Link2, Copy, Trash2, Filter
 } from 'lucide-react';
 
 const TenantManagement = () => {
@@ -37,6 +37,7 @@ const TenantManagement = () => {
     // Tenant data verification states
     const [filterMode, setFilterMode] = useState('active'); // 'all', 'active', 'old'
     const [searchQuery, setSearchQuery] = useState('');
+    const [tenantDataPropertyId, setTenantDataPropertyId] = useState('');
     const [generatingLinkId, setGeneratingLinkId] = useState(null);
 
     // Update activeTab when URL search parameters change
@@ -364,6 +365,15 @@ const TenantManagement = () => {
         if (filterMode === 'active' && !isActive) return false;
         if (filterMode === 'old' && isActive) return false;
 
+        if (tenantDataPropertyId) {
+            const tenantLeases = leases.filter(l => l.tenant_id === t.id);
+            const matchesProperty = tenantLeases.some(l => {
+                const u = units.find(unit => unit.id === l.unit_id);
+                return u?.property_id === tenantDataPropertyId;
+            });
+            if (!matchesProperty) return false;
+        }
+
         if (searchQuery) {
             const query = searchQuery.toLowerCase();
             const fullName = `${t.first_name} ${t.last_name}`.toLowerCase();
@@ -375,13 +385,11 @@ const TenantManagement = () => {
         return true;
     });
 
-    // Stats calculations (current cycle / 14 days)
+    // Stats calculations (current cycle / active links only)
     const now = new Date();
-    const fourteenDaysAgo = new Date();
-    fourteenDaysAgo.setDate(now.getDate() - 14);
 
     const openLinksCount = verificationLinks.filter(l => !l.is_updated && new Date(l.expires_at) > now).length;
-    const updatedLinksCount = verificationLinks.filter(l => l.is_updated && new Date(l.created_at) >= fourteenDaysAgo).length;
+    const updatedLinksCount = verificationLinks.filter(l => l.is_updated && new Date(l.expires_at) > now).length;
 
     const totalCurrentLinks = openLinksCount + updatedLinksCount;
     const responseRate = totalCurrentLinks > 0 ? Math.round((updatedLinksCount / totalCurrentLinks) * 100) : 0;
@@ -613,47 +621,85 @@ const TenantManagement = () => {
                         </div>
                     </div>
 
-                    {/* Filters & Search */}
-                    <div style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        flexWrap: 'wrap', gap: '16px', marginBottom: '20px'
-                    }}>
-                        <div style={{ display: 'flex', gap: '8px', backgroundColor: 'rgba(0,0,0,0.05)', padding: '4px', borderRadius: 'var(--radius-md)' }}>
-                            {[
-                                { key: 'active', label: 'Aktive Mieter' },
-                                { key: 'old', label: 'Alte Mieter' },
-                                { key: 'all', label: 'Alle Mieter' }
-                            ].map(f => (
-                                <button
-                                    key={f.key}
-                                    onClick={() => setFilterMode(f.key)}
-                                    style={{
-                                        border: 'none', padding: '6px 16px', borderRadius: 'var(--radius-sm)',
-                                        fontSize: '0.85rem', fontWeight: 500, cursor: 'pointer',
-                                        backgroundColor: filterMode === f.key ? 'var(--surface-color)' : 'transparent',
-                                        color: filterMode === f.key ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                        boxShadow: filterMode === f.key ? '0 1px 3px rgba(0,0,0,0.05)' : 'none',
-                                        transition: 'all 0.15s'
-                                    }}
-                                >
-                                    {f.label}
-                                </button>
-                            ))}
-                        </div>
-
+                    {/* Search and Count */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', marginBottom: '20px', flexWrap: 'wrap' }}>
                         <div style={{ display: 'flex', alignItems: 'center', position: 'relative', width: '100%', maxWidth: '300px' }}>
-                            <Search size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
+                            <Search size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)' }} />
                             <input
                                 type="text"
                                 placeholder="Mieter suchen..."
+                                className="search-input-padding"
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                                 style={{
-                                    width: '100%', padding: '8px 12px 8px 36px',
+                                    width: '100%', padding: '10px 12px 10px 44px',
                                     borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)',
                                     outline: 'none', fontSize: '0.9rem', backgroundColor: 'var(--surface-color)'
                                 }}
                             />
+                        </div>
+                    </div>
+
+                    {/* Filter Bar */}
+                    <div style={{ 
+                        marginBottom: 'var(--spacing-lg)', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: 'var(--spacing-md)', 
+                        flexWrap: 'wrap',
+                        backgroundColor: 'rgba(0, 0, 0, 0.02)',
+                        padding: '12px 16px',
+                        borderRadius: 'var(--radius-md)',
+                        border: '1px solid var(--border-color)'
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Filter size={18} style={{ color: 'var(--text-secondary)' }} />
+                            <span style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-secondary)' }}>Filter:</span>
+                        </div>
+                        
+                        <div>
+                            <select
+                                value={filterMode}
+                                onChange={e => setFilterMode(e.target.value)}
+                                style={{ 
+                                    padding: '8px 12px', 
+                                    borderRadius: '6px', 
+                                    border: '1px solid var(--border-color)', 
+                                    minWidth: '160px', 
+                                    fontSize: '0.875rem',
+                                    backgroundColor: 'var(--surface-color)',
+                                    color: 'var(--text-primary)',
+                                    outline: 'none',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <option value="active">Aktive Mieter</option>
+                                <option value="old">Alte Mieter</option>
+                                <option value="all">Alle Mieter</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <select
+                                value={tenantDataPropertyId}
+                                onChange={e => setTenantDataPropertyId(e.target.value)}
+                                style={{ 
+                                    padding: '8px 12px', 
+                                    borderRadius: '6px', 
+                                    border: '1px solid var(--border-color)', 
+                                    minWidth: '200px', 
+                                    fontSize: '0.875rem',
+                                    backgroundColor: 'var(--surface-color)',
+                                    color: 'var(--text-primary)',
+                                    outline: 'none',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <option value="">Alle Immobilien</option>
+                                {properties.map(p => (
+                                    <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>
+                                ))}
+                            </select>
                         </div>
                     </div>
 

@@ -235,13 +235,13 @@ const Invoices = () => {
             let invoiceQuery = supabase
                 .from('document_templates')
                 .select('content_html')
-                .eq('user_id', user.id)
                 .eq('type', 'fewo_invoice');
             if (portfolioId) {
                 invoiceQuery = invoiceQuery.eq('portfolio_id', portfolioId);
             } else {
-                invoiceQuery = invoiceQuery.is('portfolio_id', null);
+                invoiceQuery = invoiceQuery.eq('user_id', user.id).is('portfolio_id', null);
             }
+
             let { data: invData } = await invoiceQuery.maybeSingle();
 
             if (!invData && portfolioId) {
@@ -262,27 +262,34 @@ const Invoices = () => {
                 results.invoice_outro = parts[1] || '';
             } else {
                 // Try old invoice_intro and invoice_outro
-                const oldIntroQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'invoice_intro');
-                const oldOutroQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'invoice_outro');
+                const oldIntroQ = supabase.from('document_templates').select('content_html').eq('type', 'invoice_intro');
+                const oldOutroQ = supabase.from('document_templates').select('content_html').eq('type', 'invoice_outro');
                 
-                const introRes = await (portfolioId ? oldIntroQ.eq('portfolio_id', portfolioId) : oldIntroQ.is('portfolio_id', null)).maybeSingle();
-                const outroRes = await (portfolioId ? oldOutroQ.eq('portfolio_id', portfolioId) : oldOutroQ.is('portfolio_id', null)).maybeSingle();
+                const introRes = await (portfolioId 
+                    ? oldIntroQ.eq('portfolio_id', portfolioId) 
+                    : oldIntroQ.eq('user_id', user.id).is('portfolio_id', null)
+                ).maybeSingle();
+                const outroRes = await (portfolioId 
+                    ? oldOutroQ.eq('portfolio_id', portfolioId) 
+                    : oldOutroQ.eq('user_id', user.id).is('portfolio_id', null)
+                ).maybeSingle();
 
                 if (introRes.data?.content_html) results.invoice_intro = introRes.data.content_html;
                 if (outroRes.data?.content_html) results.invoice_outro = outroRes.data.content_html;
             }
 
+
             // 2. Fetch 'fewo_credit_note'
             let cnQuery = supabase
                 .from('document_templates')
                 .select('content_html')
-                .eq('user_id', user.id)
                 .eq('type', 'fewo_credit_note');
             if (portfolioId) {
                 cnQuery = cnQuery.eq('portfolio_id', portfolioId);
             } else {
-                cnQuery = cnQuery.is('portfolio_id', null);
+                cnQuery = cnQuery.eq('user_id', user.id).is('portfolio_id', null);
             }
+
             let { data: cnData } = await cnQuery.maybeSingle();
 
             if (!cnData && portfolioId) {
@@ -302,10 +309,14 @@ const Invoices = () => {
                 results.credit_note_intro = parts[0] || '';
             } else {
                 // Try old credit_note_intro
-                const oldCnQ = supabase.from('document_templates').select('content_html').eq('user_id', user.id).eq('type', 'credit_note_intro');
-                const cnRes = await (portfolioId ? oldCnQ.eq('portfolio_id', portfolioId) : oldCnQ.is('portfolio_id', null)).maybeSingle();
+                const oldCnQ = supabase.from('document_templates').select('content_html').eq('type', 'credit_note_intro');
+                const cnRes = await (portfolioId 
+                    ? oldCnQ.eq('portfolio_id', portfolioId) 
+                    : oldCnQ.eq('user_id', user.id).is('portfolio_id', null)
+                ).maybeSingle();
                 if (cnRes.data?.content_html) results.credit_note_intro = cnRes.data.content_html;
             }
+
         } catch (e) {
             console.error('Error fetching invoice writing templates:', e);
         }

@@ -85,6 +85,7 @@ const RenovationCalculator = () => {
                     <Search size={16} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
                     <input
                         placeholder="Kalkulation suchen..."
+                        className="padded-left-icon"
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
                         style={{

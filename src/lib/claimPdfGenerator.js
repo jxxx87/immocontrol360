@@ -80,13 +80,12 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         let query = supabase
             .from('document_templates')
             .select('*')
-            .eq('user_id', claim.user_id)
             .eq('type', templateType);
 
         if (portfolioId) {
             query = query.eq('portfolio_id', portfolioId);
         } else {
-            query = query.is('portfolio_id', null);
+            query = query.eq('user_id', claim.user_id).is('portfolio_id', null);
         }
 
         const { data, error } = await query.maybeSingle();
