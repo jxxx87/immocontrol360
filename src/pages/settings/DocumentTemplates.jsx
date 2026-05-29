@@ -301,32 +301,6 @@ export const DocumentTemplates = () => {
         contentLength: 0
     });
 
-    useEffect(() => {
-        setPreviewPage(1);
-        if (editor) {
-            let count = 0;
-            editor.state.doc.descendants(node => {
-                if (node.type.name === 'letterPage') {
-                    count++;
-                }
-            });
-            setPageCount(count > 0 ? count : 1);
-        }
-    }, [activeType]);
-
-    useEffect(() => {
-        if (editor && !loading) {
-            let count = 0;
-            editor.state.doc.descendants(node => {
-                if (node.type.name === 'letterPage') {
-                    count++;
-                }
-            });
-            setPageCount(count > 0 ? count : 1);
-            setPreviewPage(1);
-        }
-    }, [loading, editor]);
-
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
     
@@ -1007,56 +981,60 @@ export const DocumentTemplates = () => {
                 </table>`,
             
             positions_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                <table class="invoice-table" style="width: 100%; border-collapse: collapse; margin-bottom: 8mm;">
                   <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Pos.</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Leistung / Beschreibung</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Menge</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Einzelpreis</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">MwSt.</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamt</th>
+                    <tr>
+                      <th style="width: 8%; text-align: center; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Pos.</th>
+                      <th style="width: 42%; text-align: left; border-bottom: 2px solid #000; padding: 8px 10px; font-weight: 700;">Bezeichnung</th>
+                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Einzelpreis</th>
+                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Netto</th>
+                      <th style="width: 5%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">MwSt</th>
+                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Brutto</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Übernachtung Ferienwohnung "Bergblick"<br/><small style="color: #64748b;">Zeitraum: 15.05.2026 - 18.05.2026</small></td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">3 Nächte</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">7%</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">450,00 €</td>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">1</td>
+                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">3 Übernachtungen in Ferienwohnung "Bergblick"<br/><small style="color: #64748b;">Zeitraum: 15.05.2026 - 18.05.2026</small></td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">150,00 €</td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">420,56 €</td>
+                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">450,00 €</td>
                     </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Endreinigung Pauschal</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">1 Stk.</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">80,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">19%</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">80,00 €</td>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">2</td>
+                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">Endreinigung Pauschal</td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;"></td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">74,77 €</td>
+                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">80,00 €</td>
                     </tr>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">3</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Kurbeitrag (Gästetax) Erwachsen</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">6 Tage</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">2,50 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0%</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">15,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Netto-Gesamt:</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">560,75 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">zzgl. Umsatzsteuer (Gesamt):</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">39,25 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #cbd5e1; font-size: 11pt;">
-                      <td colspan="5" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Rechnungsbetrag (Brutto):</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #1e3a8a;">600,00 €</td>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">3</td>
+                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">Kurbeitrag (Gästetax) Erwachsen</td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;"></td>
+                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">65,42 €</td>
+                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">70,00 €</td>
                     </tr>
                   </tbody>
-                </table>`
+                </table>
+                <div class="totals" style="display: flex; justify-content: flex-end; margin-bottom: 20mm;">
+                  <div class="totals-box" style="width: 80mm;">
+                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span>Summe Netto</span>
+                      <span>560,75 €</span>
+                    </div>
+                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span>zzgl. 7% MwSt</span>
+                      <span>39,25 €</span>
+                    </div>
+                    <div class="t-row final" style="display: flex; justify-content: space-between; margin-bottom: 4px; border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt;">
+                      <span>Gesamtbetrag</span>
+                      <span>600,00 €</span>
+                    </div>
+                  </div>
+                </div>`
         };
 
         // Ersetzungsmethode für Mentions & Text-Platzhalter
@@ -1223,25 +1201,76 @@ export const DocumentTemplates = () => {
         }
         
         /* Tabellen im Editor */
-        table {
+        table:not(.invoice-table) {
             width: 100%;
             border-collapse: collapse;
             margin: 15px 0;
             background-color: transparent !important;
             border: 1px solid #cbd5e1 !important;
         }
-        th {
+        table:not(.invoice-table) th {
             background-color: #f1f5f9 !important;
             color: #0f172a !important;
             font-weight: bold;
             border: 1px solid #cbd5e1 !important;
             padding: 8px 12px !important;
         }
-        td {
+        table:not(.invoice-table) td {
             border: 1px solid #cbd5e1 !important;
             padding: 8px 12px !important;
             color: #334155 !important;
             background-color: transparent !important;
+        }
+        
+        /* Stile für Fewo-Rechnungen */
+        .invoice-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 8mm;
+            background-color: transparent !important;
+            border: none !important;
+        }
+        .invoice-table th {
+            border-bottom: 2px solid #000 !important;
+            border-top: none !important;
+            border-left: none !important;
+            border-right: none !important;
+            text-align: left;
+            padding: 8px 0 !important;
+            font-weight: 700;
+            background-color: transparent !important;
+            color: #000000 !important;
+        }
+        .invoice-table td {
+            border-bottom: 1px solid #ddd !important;
+            border-top: none !important;
+            border-left: none !important;
+            border-right: none !important;
+            padding: 8px 0 !important;
+            color: #000000 !important;
+            background-color: transparent !important;
+        }
+        .totals {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 20mm;
+        }
+        .totals-box {
+            width: 80mm;
+        }
+        .t-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            color: #000000;
+        }
+        .t-row.final {
+            border-top: 2px solid #000;
+            padding-top: 4px;
+            margin-top: 4px;
+            font-weight: 700;
+            font-size: 11pt;
+            color: #000000;
         }
     </style>
 </head>

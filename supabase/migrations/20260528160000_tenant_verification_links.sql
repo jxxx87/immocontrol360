@@ -40,6 +40,10 @@ DECLARE
     v_link record;
     v_tenant record;
     v_unit_name text;
+    v_prop_street text;
+    v_prop_house_number text;
+    v_prop_postal_code text;
+    v_prop_city text;
 BEGIN
     -- 1. Find and validate the link
     SELECT * INTO v_link 
@@ -59,10 +63,12 @@ BEGIN
         RETURN json_build_object('error', 'Mieter nicht gefunden.');
     END IF;
 
-    -- 3. Get the unit name from their active lease (if any)
-    SELECT u.unit_name INTO v_unit_name
+    -- 3. Get the unit name and property address from their active lease (if any)
+    SELECT u.unit_name, p.street, p.house_number, p.postal_code, p.city 
+    INTO v_unit_name, v_prop_street, v_prop_house_number, v_prop_postal_code, v_prop_city
     FROM leases l
     JOIN units u ON u.id = l.unit_id
+    JOIN properties p ON p.id = u.property_id
     WHERE l.tenant_id = v_tenant.id AND l.status = 'active'
     LIMIT 1;
 
@@ -70,10 +76,10 @@ BEGIN
         'id', v_tenant.id,
         'first_name', v_tenant.first_name,
         'last_name', v_tenant.last_name,
-        'street', COALESCE(v_tenant.street, ''),
-        'house_number', COALESCE(v_tenant.house_number, ''),
-        'postal_code', COALESCE(v_tenant.postal_code, ''),
-        'city', COALESCE(v_tenant.city, ''),
+        'street', COALESCE(v_tenant.street, v_prop_street, ''),
+        'house_number', COALESCE(v_tenant.house_number, v_prop_house_number, ''),
+        'postal_code', COALESCE(v_tenant.postal_code, v_prop_postal_code, ''),
+        'city', COALESCE(v_tenant.city, v_prop_city, ''),
         'phone', COALESCE(v_tenant.phone, ''),
         'email', COALESCE(v_tenant.email, ''),
         'unit_name', COALESCE(v_unit_name, 'Keine aktive Zuordnung'),

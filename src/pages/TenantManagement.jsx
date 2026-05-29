@@ -6,7 +6,7 @@ import { useNotifications } from '../context/NotificationContext';
 import {
     Users, Mail, Send, CheckCircle2, Clock,
     X, Plus, Building2, DoorOpen, Search, RefreshCw, Loader,
-    Link2, Copy
+    Link2, Copy, Trash2
 } from 'lucide-react';
 
 const TenantManagement = () => {
@@ -178,6 +178,33 @@ const TenantManagement = () => {
         }
     };
 
+    // ── DEACTIVATE TEMPORARY VERIFICATION LINK ──────────────────────
+    const handleDeactivateLink = async (linkId) => {
+        try {
+            const { error } = await supabase
+                .from('tenant_verification_links')
+                .update({ expires_at: new Date().toISOString() })
+                .eq('id', linkId);
+
+            if (error) throw error;
+
+            addNotification({
+                type: 'success',
+                title: 'Link deaktiviert',
+                body: 'Der Verifikations-Link wurde erfolgreich deaktiviert.'
+            });
+
+            await fetchData();
+        } catch (err) {
+            console.error('Error deactivating link:', err);
+            addNotification({
+                type: 'error',
+                title: 'Fehler',
+                body: 'Deaktivieren fehlgeschlagen: ' + err.message
+            });
+        }
+    };
+
     // ── AUTO-SELECT UNIT/PROPERTY WHEN TENANT CHANGES ───────────────
     useEffect(() => {
         if (!inviteForm.tenant_id) return;
@@ -231,9 +258,44 @@ const TenantManagement = () => {
         return `${u.unit_name} (${addr})`;
     };
 
+    const getTenantContactAddress = (tenantId) => {
+        const t = tenants.find(x => x.id === tenantId);
+        if (t && (t.street || t.house_number || t.postal_code || t.city)) {
+            return `${t.street || ''} ${t.house_number || ''}, ${t.postal_code || ''} ${t.city || ''}`.trim().replace(/^,\s*/, '');
+        }
+        // Fallback to property of active lease
+        const activeLease = leases.find(l => 
+            l.tenant_id === tenantId && 
+            l.status === 'active' && 
+            l.start_date <= today && 
+            (!l.end_date || l.end_date >= today)
+        );
+        if (activeLease) {
+            const u = units.find(x => x.id === activeLease.unit_id);
+            if (u) {
+                const prop = properties.find(p => p.id === u.property_id);
+                if (prop) {
+                    return `${prop.street || ''} ${prop.house_number || ''}, ${prop.postal_code || ''} ${prop.city || ''}`.trim().replace(/^,\s*/, '');
+                }
+            }
+        }
+        return 'Keine Adresse hinterlegt';
+    };
+
     const getActiveLink = (tenantId) => {
         const now = new Date().toISOString();
         return verificationLinks.find(l => l.tenant_id === tenantId && l.expires_at > now);
+    };
+
+    const getLinkValidityLabel = (link) => {
+        if (!link) return '—';
+        const now = new Date();
+        const expires = new Date(link.expires_at);
+        const diffTime = expires - now;
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        if (diffDays <= 0) return 'Abgelaufen';
+        if (diffDays === 1) return 'Noch 1 Tag';
+        return `Noch ${diffDays} Tage`;
     };
 
     const formatDate = (d) => new Date(d).toLocaleDateString('de-DE', {
@@ -302,7 +364,9 @@ const TenantManagement = () => {
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                 <div>
-                    <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Mieter-Verwaltung</h1>
+                    <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>
+                        {activeTab === 'portal-access' ? 'Mieter-Verwaltung' : 'Mieterdaten'}
+                    </h1>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginTop: '4px' }}>
                         {activeTab === 'portal-access' 
                             ? 'Laden Sie Mieter zum Portal ein und verwalten Sie deren Zugang.'
@@ -328,40 +392,6 @@ const TenantManagement = () => {
                         </button>
                     )}
                 </div>
-            </div>
-
-            {/* Tabs */}
-            <div style={{ display: 'flex', gap: '24px', borderBottom: '1px solid var(--border-color)', marginBottom: '24px' }}>
-                <button
-                    onClick={() => {
-                        setActiveTab('portal-access');
-                        window.history.pushState({}, '', window.location.pathname);
-                    }}
-                    style={{
-                        background: 'none', border: 'none', padding: '12px 4px', cursor: 'pointer',
-                        color: activeTab === 'portal-access' ? 'var(--primary-color)' : 'var(--text-secondary)',
-                        fontWeight: activeTab === 'portal-access' ? 600 : 400,
-                        borderBottom: activeTab === 'portal-access' ? '2px solid var(--primary-color)' : '2px solid transparent',
-                        fontSize: '0.95rem', transition: 'all 0.2s'
-                    }}
-                >
-                    Portal-Zugänge
-                </button>
-                <button
-                    onClick={() => {
-                        setActiveTab('tenant-data');
-                        window.history.pushState({}, '', `${window.location.pathname}?tab=tenant-data`);
-                    }}
-                    style={{
-                        background: 'none', border: 'none', padding: '12px 4px', cursor: 'pointer',
-                        color: activeTab === 'tenant-data' ? 'var(--primary-color)' : 'var(--text-secondary)',
-                        fontWeight: activeTab === 'tenant-data' ? 600 : 400,
-                        borderBottom: activeTab === 'tenant-data' ? '2px solid var(--primary-color)' : '2px solid transparent',
-                        fontSize: '0.95rem', transition: 'all 0.2s'
-                    }}
-                >
-                    Mieterdaten
-                </button>
             </div>
 
             {/* Status Message */}
@@ -608,13 +638,16 @@ const TenantManagement = () => {
                                     <th>MIETOBJEKT</th>
                                     <th>KONTAKTADRESSE</th>
                                     <th>KONTAKTDATEN</th>
-                                    <th>TEMPORÄRER UPDATE-LINK (2 WOCHEN)</th>
+                                    <th>GÜLTIGKEIT</th>
+                                    <th>STATUS</th>
+                                    <th>UPDATE-LINK</th>
+                                    <th style={{ textAlign: 'right' }}>AKTIONEN</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {filteredTenants.length === 0 ? (
                                     <tr>
-                                        <td colSpan="5" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
+                                        <td colSpan="8" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
                                             Keine Mieter gefunden, die den Kriterien entsprechen.
                                         </td>
                                     </tr>
@@ -649,15 +682,8 @@ const TenantManagement = () => {
                                                     </div>
                                                 </td>
                                                 <td>
-                                                    <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                                                        {t.street ? (
-                                                            <span>{t.street} {t.house_number || ''}</span>
-                                                        ) : (
-                                                            <span style={{ fontStyle: 'italic', color: 'var(--text-secondary)' }}>Nicht hinterlegt</span>
-                                                        )}
-                                                        {t.postal_code && (
-                                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{t.postal_code} {t.city || ''}</span>
-                                                        )}
+                                                    <div style={{ fontSize: '0.85rem' }}>
+                                                        {getTenantContactAddress(t.id)}
                                                     </div>
                                                 </td>
                                                 <td>
@@ -667,36 +693,45 @@ const TenantManagement = () => {
                                                     </div>
                                                 </td>
                                                 <td>
+                                                    <div style={{ fontSize: '0.85rem', fontWeight: 500, color: activeLink ? '#1e293b' : 'var(--text-secondary)' }}>
+                                                        {getLinkValidityLabel(activeLink)}
+                                                    </div>
+                                                </td>
+                                                <td>
                                                     {activeLink ? (
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                            <button
-                                                                onClick={() => {
-                                                                    const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
-                                                                    navigator.clipboard.writeText(url);
-                                                                    addNotification({
-                                                                        type: 'success',
-                                                                        title: 'Link kopiert',
-                                                                        body: 'Der Update-Link wurde in die Zwischenablage kopiert.'
-                                                                    });
-                                                                }}
-                                                                className="btn btn-secondary btn-sm"
-                                                                style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px' }}
-                                                            >
-                                                                <Copy size={13} /> Link kopieren
-                                                            </button>
-                                                            <span style={{
-                                                                display: 'inline-flex', alignItems: 'center', gap: '3px',
-                                                                padding: '2px 8px', borderRadius: '10px', fontSize: '0.72rem', fontWeight: 500,
-                                                                backgroundColor: activeLink.is_updated ? '#D1FAE5' : '#FEF3C7',
-                                                                color: activeLink.is_updated ? '#065F46' : '#92400E'
-                                                            }}>
-                                                                {activeLink.is_updated ? (
-                                                                    <><CheckCircle2 size={10} /> Aktualisiert</>
-                                                                ) : (
-                                                                    <><Clock size={10} /> Ausstehend</>
-                                                                )}
-                                                            </span>
-                                                        </div>
+                                                        <span style={{
+                                                            display: 'inline-flex', alignItems: 'center', gap: '3px',
+                                                            padding: '2px 8px', borderRadius: '10px', fontSize: '0.72rem', fontWeight: 500,
+                                                            backgroundColor: activeLink.is_updated ? '#D1FAE5' : '#FEF3C7',
+                                                            color: activeLink.is_updated ? '#065F46' : '#92400E'
+                                                        }}>
+                                                            {activeLink.is_updated ? (
+                                                                <><CheckCircle2 size={10} /> Aktualisiert</>
+                                                            ) : (
+                                                                <><Clock size={10} /> Ausstehend</>
+                                                            )}
+                                                        </span>
+                                                    ) : (
+                                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Kein Link</span>
+                                                    )}
+                                                </td>
+                                                <td>
+                                                    {activeLink ? (
+                                                        <button
+                                                            onClick={() => {
+                                                                const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
+                                                                navigator.clipboard.writeText(url);
+                                                                addNotification({
+                                                                    type: 'success',
+                                                                    title: 'Link kopiert',
+                                                                    body: 'Der Update-Link wurde in die Zwischenablage kopiert.'
+                                                                });
+                                                            }}
+                                                            className="btn btn-secondary btn-sm"
+                                                            style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px' }}
+                                                        >
+                                                            <Copy size={13} /> Link kopieren
+                                                        </button>
                                                     ) : (
                                                         <button
                                                             onClick={() => handleGenerateLink(t.id)}
@@ -711,6 +746,23 @@ const TenantManagement = () => {
                                                             )}
                                                             Link erstellen
                                                         </button>
+                                                    )}
+                                                </td>
+                                                <td style={{ textAlign: 'right' }}>
+                                                    {activeLink ? (
+                                                        <button
+                                                            onClick={() => handleDeactivateLink(activeLink.id)}
+                                                            className="btn btn-secondary btn-sm"
+                                                            style={{
+                                                                color: '#EF4444', borderColor: '#FEE2E2', backgroundColor: '#FEF2F2',
+                                                                padding: '6px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
+                                                            }}
+                                                            title="Link deaktivieren"
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    ) : (
+                                                        <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                     )}
                                                 </td>
                                             </tr>
@@ -767,14 +819,20 @@ const TenantManagement = () => {
                                         </div>
 
                                         <div style={{ marginBottom: '8px', fontSize: '0.85rem' }}>
-                                            <strong>Adresse:</strong> {t.street ? `${t.street} ${t.house_number || ''}, ${t.postal_code || ''} ${t.city || ''}` : 'Nicht hinterlegt'}
+                                            <strong>Kontaktadresse:</strong> {getTenantContactAddress(t.id)}
                                         </div>
 
-                                        <div style={{ marginBottom: '12px', fontSize: '0.85rem' }}>
+                                        <div style={{ marginBottom: '8px', fontSize: '0.85rem' }}>
                                             <strong>Kontakt:</strong> {t.email || '—'} {t.phone ? `/ ${t.phone}` : ''}
                                         </div>
 
-                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
+                                        {activeLink && (
+                                            <div style={{ marginBottom: '12px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                <strong>Gültigkeit:</strong> {getLinkValidityLabel(activeLink)}
+                                            </div>
+                                        )}
+
+                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '10px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                                             {activeLink ? (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'space-between' }}>
                                                     <span style={{
@@ -785,21 +843,31 @@ const TenantManagement = () => {
                                                     }}>
                                                         {activeLink.is_updated ? 'Aktualisiert' : 'Ausstehend'}
                                                     </span>
-                                                    <button
-                                                        onClick={() => {
-                                                            const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
-                                                            navigator.clipboard.writeText(url);
-                                                            addNotification({
-                                                                type: 'success',
-                                                                title: 'Link kopiert',
-                                                                body: 'Der Link wurde in die Zwischenablage kopiert.'
-                                                            });
-                                                        }}
-                                                        className="btn btn-secondary btn-sm"
-                                                        style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
-                                                    >
-                                                        <Copy size={12} /> Kopieren
-                                                    </button>
+                                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                                        <button
+                                                            onClick={() => {
+                                                                const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
+                                                                navigator.clipboard.writeText(url);
+                                                                addNotification({
+                                                                    type: 'success',
+                                                                    title: 'Link kopiert',
+                                                                    body: 'Der Link wurde in die Zwischenablage kopiert.'
+                                                                });
+                                                            }}
+                                                            className="btn btn-secondary btn-sm"
+                                                            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+                                                        >
+                                                            <Copy size={12} /> Kopieren
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDeactivateLink(activeLink.id)}
+                                                            className="btn btn-secondary btn-sm"
+                                                            style={{ color: '#EF4444', borderColor: '#FEE2E2', backgroundColor: '#FEF2F2', padding: '6px' }}
+                                                            title="Link deaktivieren"
+                                                        >
+                                                            <Trash2 size={12} />
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             ) : (
                                                 <button
