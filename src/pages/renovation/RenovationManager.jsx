@@ -135,7 +135,15 @@ const RenovationManager = () => {
     const tabs = [
         { key: 'projects', label: 'Projekte', icon: FolderKanban },
         { key: 'calculator', label: 'Sanierungsrechner', icon: Calculator },
-        { key: 'floorplan', label: 'Grundrisseditor', icon: PenTool },
+        { 
+            key: 'floorplan', 
+            label: (
+                <span>
+                    Grundrisseditor <span style={{ color: '#ef4444', marginLeft: '2px', fontSize: '0.78rem', fontWeight: 600 }}>(Testphase)</span>
+                </span>
+            ), 
+            icon: PenTool 
+        },
         { key: 'tasks', label: 'Aufgaben', icon: ClipboardList },
         { key: 'settings', label: 'Einstellungen', icon: SettingsIcon },
     ];
