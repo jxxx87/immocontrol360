@@ -654,15 +654,19 @@ export const DocumentTemplates = () => {
                 updated_at: new Date()
             };
 
+            let error;
             if (existingRecord) {
-                payload.id = existingRecord.id;
+                const { error: updateError } = await supabase
+                    .from('document_templates')
+                    .update(payload)
+                    .eq('id', existingRecord.id);
+                error = updateError;
+            } else {
+                const { error: insertError } = await supabase
+                    .from('document_templates')
+                    .insert([payload]);
+                error = insertError;
             }
-
-            const { error } = await supabase
-                .from('document_templates')
-                .upsert([payload], {
-                    onConflict: portfolioFilter ? 'portfolio_id,type' : 'user_id,type'
-                });
 
 
             if (error) throw error;
