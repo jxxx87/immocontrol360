@@ -385,11 +385,21 @@ const TenantManagement = () => {
         return true;
     });
 
-    // Stats calculations (current cycle / active links only)
+    // Stats calculations (current cycle / active links only for filtered tenants)
     const now = new Date();
+    const filteredTenantIds = new Set(filteredTenants.map(t => t.id));
 
-    const openLinksCount = verificationLinks.filter(l => !l.is_updated && new Date(l.expires_at) > now).length;
-    const updatedLinksCount = verificationLinks.filter(l => l.is_updated && new Date(l.expires_at) > now).length;
+    const openLinksCount = verificationLinks.filter(l => 
+        !l.is_updated && 
+        new Date(l.expires_at) > now && 
+        filteredTenantIds.has(l.tenant_id)
+    ).length;
+    
+    const updatedLinksCount = verificationLinks.filter(l => 
+        l.is_updated && 
+        new Date(l.expires_at) > now && 
+        filteredTenantIds.has(l.tenant_id)
+    ).length;
 
     const totalCurrentLinks = openLinksCount + updatedLinksCount;
     const responseRate = totalCurrentLinks > 0 ? Math.round((updatedLinksCount / totalCurrentLinks) * 100) : 0;
