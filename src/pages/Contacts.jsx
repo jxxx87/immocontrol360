@@ -5,7 +5,7 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
-import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home } from 'lucide-react';
+import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
@@ -121,6 +121,8 @@ const Contacts = () => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterType, setFilterType] = useState('all');
+    const [filterPropertyId, setFilterPropertyId] = useState('');
+    const [properties, setProperties] = useState([]);
     const [editingContact, setEditingContact] = useState(null);
     const [invitePrompt, setInvitePrompt] = useState(null); // { contactName, tenantId }
 
@@ -140,7 +142,20 @@ const Contacts = () => {
             setLoading(true);
             const { data, error } = await supabase
                 .from('contacts')
-                .select('*')
+                .select(`
+                    *,
+                    tenant:tenants (
+                        id,
+                        leases (
+                            id,
+                            status,
+                            unit:units (
+                                id,
+                                property_id
+                            )
+                        )
+                    )
+                `)
                 .order('name', { ascending: true });
 
             if (error) throw error;
@@ -152,9 +167,24 @@ const Contacts = () => {
         }
     };
 
+    const fetchProperties = async () => {
+        try {
+            const { data, error } = await supabase
+                .from('properties')
+                .select('id, street, house_number')
+                .order('street', { ascending: true });
+            if (!error && data) {
+                setProperties(data);
+            }
+        } catch (error) {
+            console.error('Error fetching properties:', error);
+        }
+    };
+
     useEffect(() => {
         if (user) {
             fetchContacts();
+            fetchProperties();
         }
     }, [user]);
 
@@ -164,6 +194,15 @@ const Contacts = () => {
         // Filter by Type
         if (filterType !== 'all') {
             result = result.filter(c => c.contact_type === filterType);
+        }
+
+        // Filter by Property (only if type is tenant and property filter is selected)
+        if (filterType === 'tenant' && filterPropertyId) {
+            result = result.filter(c => {
+                if (!c.tenant) return false;
+                const leases = c.tenant.leases || [];
+                return leases.some(l => l.status === 'active' && l.unit?.property_id === filterPropertyId);
+            });
         }
         
         // Filter by Search term
@@ -181,7 +220,7 @@ const Contacts = () => {
             `.toLowerCase();
             return searchStr.includes(lowerTerm);
         });
-    }, [contacts, filterType, searchTerm]);
+    }, [contacts, filterType, filterPropertyId, searchTerm]);
 
     const handleOpenAdd = () => {
         setEditingContact(null);
@@ -359,61 +398,104 @@ const Contacts = () => {
                 <Button icon={Plus} onClick={handleOpenAdd}>Kontakt erstellen</Button>
             </div>
 
-            {/* Search + Filters + Count */}
+            {/* Search and Count */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', marginBottom: '20px', flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', flex: '1' }}>
-                    <div style={{ position: 'relative', minWidth: '240px', maxWidth: '360px', flex: '1' }}>
-                        <input
-                            type="text"
-                            placeholder="Kontakte suchen..."
-                            style={{
-                                width: '100%',
-                                padding: '10px 12px 10px 38px',
-                                borderRadius: 'var(--radius-md)',
-                                border: '1px solid var(--border-color)',
-                                outline: 'none',
-                                backgroundColor: 'var(--surface-color)',
-                                fontSize: '0.88rem',
-                                color: 'var(--text-primary)',
-                                transition: 'border-color 0.2s, box-shadow 0.2s'
-                            }}
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            onFocus={(e) => { e.target.style.borderColor = 'var(--primary-color)'; e.target.style.boxShadow = '0 0 0 3px rgba(14,165,233,0.1)'; }}
-                            onBlur={(e) => { e.target.style.borderColor = 'var(--border-color)'; e.target.style.boxShadow = 'none'; }}
-                        />
-                        <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
-                    </div>
-
-                    <div style={{ display: 'flex', gap: '4px', backgroundColor: 'rgba(0,0,0,0.05)', padding: '4px', borderRadius: 'var(--radius-md)', flexWrap: 'wrap' }}>
-                        {[
-                            { key: 'all', label: 'Alle' },
-                            { key: 'tenant', label: 'Mieter' },
-                            { key: 'vendor', label: 'Dienstleister' },
-                            { key: 'guest', label: 'Gäste' },
-                            { key: 'other', label: 'Sonstige' }
-                        ].map(f => (
-                            <button
-                                key={f.key}
-                                onClick={() => setFilterType(f.key)}
-                                style={{
-                                    border: 'none', padding: '6px 12px', borderRadius: 'var(--radius-sm)',
-                                    fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer',
-                                    backgroundColor: filterType === f.key ? 'var(--surface-color)' : 'transparent',
-                                    color: filterType === f.key ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                    boxShadow: filterType === f.key ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                                    transition: 'all 0.15s'
-                                }}
-                            >
-                                {f.label}
-                            </button>
-                        ))}
-                    </div>
+                <div style={{ position: 'relative', minWidth: '240px', maxWidth: '360px', flex: '1' }}>
+                    <input
+                        type="text"
+                        placeholder="Kontakte suchen..."
+                        style={{
+                            width: '100%',
+                            padding: '10px 12px 10px 44px',
+                            borderRadius: 'var(--radius-md)',
+                            border: '1px solid var(--border-color)',
+                            outline: 'none',
+                            backgroundColor: 'var(--surface-color)',
+                            fontSize: '0.88rem',
+                            color: 'var(--text-primary)',
+                            transition: 'border-color 0.2s, box-shadow 0.2s'
+                        }}
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        onFocus={(e) => { e.target.style.borderColor = 'var(--primary-color)'; e.target.style.boxShadow = '0 0 0 3px rgba(14,165,233,0.1)'; }}
+                        onBlur={(e) => { e.target.style.borderColor = 'var(--border-color)'; e.target.style.boxShadow = 'none'; }}
+                    />
+                    <Search size={16} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
                 </div>
-
+                
                 <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
                     {filteredContacts.length} {filteredContacts.length === 1 ? 'Kontakt' : 'Kontakte'}
                 </div>
+            </div>
+
+            {/* Filter Bar */}
+            <div style={{ 
+                marginBottom: 'var(--spacing-lg)', 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: 'var(--spacing-md)', 
+                flexWrap: 'wrap',
+                backgroundColor: 'rgba(0, 0, 0, 0.02)',
+                padding: '12px 16px',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)'
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Filter size={18} style={{ color: 'var(--text-secondary)' }} />
+                    <span style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-secondary)' }}>Filter:</span>
+                </div>
+                
+                <div>
+                    <select
+                        value={filterType}
+                        onChange={e => {
+                            setFilterType(e.target.value);
+                            setFilterPropertyId(''); // Reset property filter when type changes
+                        }}
+                        style={{ 
+                            padding: '8px 12px', 
+                            borderRadius: '6px', 
+                            border: '1px solid var(--border-color)', 
+                            minWidth: '160px', 
+                            fontSize: '0.875rem',
+                            backgroundColor: 'var(--surface-color)',
+                            color: 'var(--text-primary)',
+                            outline: 'none',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        <option value="all">Alle Kategorien</option>
+                        <option value="tenant">Mieter</option>
+                        <option value="vendor">Dienstleister</option>
+                        <option value="guest">Gäste</option>
+                        <option value="other">Sonstige</option>
+                    </select>
+                </div>
+
+                {filterType === 'tenant' && (
+                    <div>
+                        <select
+                            value={filterPropertyId}
+                            onChange={e => setFilterPropertyId(e.target.value)}
+                            style={{ 
+                                padding: '8px 12px', 
+                                borderRadius: '6px', 
+                                border: '1px solid var(--border-color)', 
+                                minWidth: '200px', 
+                                fontSize: '0.875rem',
+                                backgroundColor: 'var(--surface-color)',
+                                color: 'var(--text-primary)',
+                                outline: 'none',
+                                cursor: 'pointer'
+                            }}
+                        >
+                            <option value="">Alle Immobilien</option>
+                            {properties.map(p => (
+                                <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
             </div>
 
             {/* Contact Cards Grid */}
