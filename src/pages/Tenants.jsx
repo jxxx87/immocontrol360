@@ -347,27 +347,6 @@ const Tenants = () => {
 
             if (unitUpdateError) console.error('Fehler beim Aktualisieren der Einheit:', unitUpdateError);
 
-            // 3. Create Contact automatically
-            const property = propertiesDropdown.find(p => p.id === leaseForm.property_id);
-            const unit = unitsDropdown.find(u => u.id === leaseForm.unit_id);
-
-            if (property) {
-                const { error: contactError } = await supabase.from('contacts').insert([
-                    {
-                        user_id: user.id,
-                        name: `${tenantForm.first_name} ${tenantForm.last_name}`,
-                        contact_type: 'tenant',
-                        email: tenantForm.email,
-                        phone: tenantForm.phone,
-                        street: `${property.street} ${property.house_number}`,
-                        zip: property.zip,
-                        city: property.city,
-                        unit_name: unit ? unit.unit_name : ''
-                    }
-                ]);
-                if (contactError) console.error('Fehler beim Erstellen des Kontakts:', contactError);
-            }
-
             await new Promise(resolve => setTimeout(resolve, 800));
 
             setIsCreateModalOpen(false);

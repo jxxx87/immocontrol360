@@ -238,6 +238,7 @@ const Import = () => {
                         if (!tErr) {
                             tenantId = newTenant.id;
                             stats.tenants++;
+                            stats.contacts++;
                         } else {
                             addLog(`Fehler bei Mieter ${row.t_lastname}: ${tErr.message}`, 'error');
                         }
@@ -267,32 +268,6 @@ const Import = () => {
                             });
 
                             if (lErr) addLog(`Fehler bei Mietvertrag: ${lErr.message}`, 'error');
-                        }
-                    }
-
-                    // 4. Contacts (Check/Insert)
-                    if (row.t_lastname) {
-                        try {
-                            const fullName = `${row.t_firstname || ''} ${row.t_lastname || ''}`.trim();
-                            const { data: existingContact } = await supabase
-                                .from('contacts')
-                                .select('id')
-                                .eq('name', fullName)
-                                .maybeSingle();
-
-                            if (!existingContact && fullName) {
-                                const { error: cErr } = await supabase.from('contacts').insert({
-                                    user_id: user.id,
-                                    name: fullName,
-                                    email: row.t_email,
-                                    phone: row.t_phone,
-                                    unit_name: row.unit_name,
-                                    contact_type: 'tenant'
-                                });
-                                if (!cErr) stats.contacts++;
-                            }
-                        } catch (contactError) {
-                            console.error('Contact import error:', contactError);
                         }
                     }
                 }
