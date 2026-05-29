@@ -375,9 +375,16 @@ const TenantManagement = () => {
         return true;
     });
 
-    // Stats calculations
-    const totalLinks = verificationLinks.length;
-    const updatedLinks = verificationLinks.filter(l => l.is_updated).length;
+    // Stats calculations (current cycle / 14 days)
+    const now = new Date();
+    const fourteenDaysAgo = new Date();
+    fourteenDaysAgo.setDate(now.getDate() - 14);
+
+    const openLinksCount = verificationLinks.filter(l => !l.is_updated && new Date(l.expires_at) > now).length;
+    const updatedLinksCount = verificationLinks.filter(l => l.is_updated && new Date(l.created_at) >= fourteenDaysAgo).length;
+
+    const totalCurrentLinks = openLinksCount + updatedLinksCount;
+    const responseRate = totalCurrentLinks > 0 ? Math.round((updatedLinksCount / totalCurrentLinks) * 100) : 0;
 
     if (loading) {
         return (
@@ -574,8 +581,8 @@ const TenantManagement = () => {
                                 <Link2 size={24} />
                             </div>
                             <div>
-                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{totalLinks}</div>
-                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Erstellte Links</div>
+                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{openLinksCount}</div>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Offene Links (Wartend)</div>
                             </div>
                         </div>
 
@@ -587,8 +594,8 @@ const TenantManagement = () => {
                                 <CheckCircle2 size={24} />
                             </div>
                             <div>
-                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{updatedLinks}</div>
-                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Aktualisierte Mieter</div>
+                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{updatedLinksCount}</div>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Aktualisierte Links</div>
                             </div>
                         </div>
 
@@ -600,10 +607,8 @@ const TenantManagement = () => {
                                 <RefreshCw size={24} />
                             </div>
                             <div>
-                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>
-                                    {totalLinks > 0 ? Math.round((updatedLinks / totalLinks) * 100) : 0}%
-                                </div>
-                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Rücklaufquote</div>
+                                <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{responseRate}%</div>
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Rücklaufquote (Aktuell)</div>
                             </div>
                         </div>
                     </div>
