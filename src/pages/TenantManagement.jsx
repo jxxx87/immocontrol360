@@ -292,10 +292,30 @@ const TenantManagement = () => {
         const now = new Date();
         const expires = new Date(link.expires_at);
         const diffTime = expires - now;
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        if (diffDays <= 0) return 'Abgelaufen';
-        if (diffDays === 1) return 'Noch 1 Tag';
-        return `Noch ${diffDays} Tage`;
+        
+        if (diffTime <= 0) return 'Abgelaufen';
+        
+        const diffHours = Math.floor(diffTime / (1000 * 60 * 60));
+        const diffDays = Math.floor(diffHours / 24);
+        const remainingHours = diffHours % 24;
+        
+        if (diffDays > 0) {
+            if (remainingHours > 0) {
+                return `Noch ${diffDays} t, ${remainingHours} Std.`;
+            }
+            return `Noch ${diffDays} Tage`;
+        }
+        
+        if (diffHours > 0) {
+            return `Noch ${diffHours} Std.`;
+        }
+        
+        const diffMinutes = Math.floor(diffTime / (1000 * 60));
+        if (diffMinutes > 0) {
+            return `Noch ${diffMinutes} Min.`;
+        }
+        
+        return 'Läuft gleich ab';
     };
 
     const formatDate = (d) => new Date(d).toLocaleDateString('de-DE', {
