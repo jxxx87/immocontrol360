@@ -7,7 +7,7 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { Plus, Building2, ChevronDown, ChevronRight, MoreVertical, Edit, Edit3, Trash2, AlertCircle, Home, Key, LayoutGrid, Check, Filter } from 'lucide-react';
+import { Plus, Building2, ChevronDown, ChevronRight, MoreVertical, Edit, Edit3, Trash2, AlertCircle, Home, Key, LayoutGrid, List, Check, Filter, Upload, Image, Loader2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
@@ -71,6 +71,463 @@ const calculateMonthlyPayment = (loan) => {
     return (originalAmount * (interestRate + repaymentRate)) / 12;
 };
 
+
+// CloudImage Component
+const CloudImage = ({ provider, itemId, fallbackIcon: FallbackIcon, style }) => {
+    const [imgSrc, setImgSrc] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        if (!itemId) {
+            setLoading(false);
+            return;
+        }
+        let isMounted = true;
+        const loadThumbnail = async () => {
+            try {
+                const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                    body: { 
+                        action: 'get_download_link', 
+                        provider: provider || 'onedrive',
+                        itemId: itemId
+                    }
+                });
+                if (!error && data && data.downloadUrl && isMounted) {
+                    setImgSrc(data.downloadUrl);
+                }
+            } catch (e) {
+                console.error("Error loading thumbnail:", e);
+            } finally {
+                if (isMounted) setLoading(false);
+            }
+        };
+        loadThumbnail();
+        return () => { isMounted = false; };
+    }, [itemId, provider]);
+
+    if (loading) {
+        return (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)', borderRadius: 'var(--radius-sm)', ...style }}>
+                <Loader2 className="animate-spin" size={16} color="var(--primary-color)" />
+            </div>
+        );
+    }
+
+    if (!imgSrc) {
+        return (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)', color: 'var(--text-secondary)', borderRadius: 'var(--radius-sm)', ...style }}>
+                <FallbackIcon size={24} strokeWidth={1.5} />
+            </div>
+        );
+    }
+
+    return (
+        <img 
+            src={imgSrc} 
+            alt="Vorschau" 
+            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'var(--radius-sm)', ...style }} 
+            onError={() => setImgSrc(null)}
+        />
+    );
+};
+
+// CloudImageManager Component
+const CloudImageManager = ({ 
+    provider, 
+    propertyFolderName, 
+    relativePath, 
+    currentThumbnailId, 
+    onSelectThumbnail,
+    isNewEntity,
+    localFiles = [],
+    onLocalFilesChange,
+    pendingThumbnailIndex,
+    onSelectPendingThumbnail
+}) => {
+    const [images, setImages] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [uploading, setUploading] = useState(false);
+    const fileInputRef = React.useRef(null);
+
+    const fullPath = propertyFolderName + (relativePath ? '/' + relativePath : '');
+
+    const fetchImages = async () => {
+        if (isNewEntity || !propertyFolderName) return;
+        setLoading(true);
+        try {
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: { 
+                    action: 'list', 
+                    provider: provider || 'onedrive',
+                    path: fullPath
+                }
+            });
+            if (error) throw error;
+            const list = (data?.files || []).filter(f => 
+                !f.isFolder && f.name.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp)$/)
+            );
+            setImages(list);
+        } catch (e) {
+            console.error("Error fetching images:", e);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchImages();
+    }, [provider, propertyFolderName, relativePath, isNewEntity]);
+
+    const handleUpload = async (e) => {
+        if (isNewEntity) {
+            const selectedFiles = Array.from(e.target.files || []);
+            if (selectedFiles.length > 0) {
+                onLocalFilesChange([...localFiles, ...selectedFiles]);
+                if (pendingThumbnailIndex === null || pendingThumbnailIndex === undefined) {
+                    onSelectPendingThumbnail(0);
+                }
+            }
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            return;
+        }
+
+        const file = e.target.files?.[0];
+        if (!file || !propertyFolderName) return;
+        setUploading(true);
+        try {
+            const formData = new FormData();
+            formData.append('action', 'upload');
+            formData.append('provider', provider || 'onedrive');
+            formData.append('path', fullPath);
+            formData.append('file', file);
+            
+            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+                body: formData
+            });
+            if (error) throw error;
+            fetchImages();
+        } catch (err) {
+            console.error("Upload error:", err);
+            alert("Fehler beim Hochladen des Bildes.");
+        } finally {
+            setUploading(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    const handleDeleteCloudImage = async (e, imgId) => {
+        e.stopPropagation();
+        if (!confirm("Möchten Sie dieses Bild wirklich aus der Cloud löschen?")) return;
+        setLoading(true);
+        try {
+            const { error } = await supabase.functions.invoke('cloud-drive', {
+                body: { 
+                    action: 'delete', 
+                    provider: provider || 'onedrive',
+                    itemId: imgId
+                }
+            });
+            if (error) throw error;
+            if (imgId === currentThumbnailId) {
+                onSelectThumbnail(null);
+            }
+            fetchImages();
+        } catch (err) {
+            console.error("Delete image error:", err);
+            alert("Fehler beim Löschen des Bildes.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteLocalFile = (e, idx) => {
+        e.stopPropagation();
+        const updated = localFiles.filter((_, i) => i !== idx);
+        onLocalFilesChange(updated);
+        
+        if (pendingThumbnailIndex === idx) {
+            onSelectPendingThumbnail(updated.length > 0 ? 0 : null);
+        } else if (pendingThumbnailIndex > idx) {
+            onSelectPendingThumbnail(pendingThumbnailIndex - 1);
+        }
+    };
+
+    return (
+        <div style={{
+            backgroundColor: 'rgba(0,0,0,0.02)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--spacing-md)',
+            marginTop: 'var(--spacing-sm)'
+        }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-md)' }}>
+                <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                    {isNewEntity ? 'Lokale Bilder (Werden beim Speichern hochgeladen)' : 'Bilder in der Cloud'}
+                </span>
+                <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleUpload} 
+                    style={{ display: 'none' }} 
+                    accept="image/*"
+                    multiple={isNewEntity}
+                />
+                <Button 
+                    type="button"
+                    variant="secondary"
+                    size="sm" 
+                    icon={uploading ? undefined : Upload} 
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading || loading}
+                >
+                    {uploading ? 'Wird hochgeladen...' : 'Bilder hinzufügen'}
+                </Button>
+            </div>
+
+            {loading ? (
+                <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                    <Loader2 className="animate-spin" size={20} style={{ margin: '0 auto 8px', color: 'var(--primary-color)' }} />
+                    Lade Bilder aus der Cloud...
+                </div>
+            ) : isNewEntity ? (
+                localFiles.length === 0 ? (
+                    <div style={{
+                        padding: '24px',
+                        textAlign: 'center',
+                        color: 'var(--text-secondary)',
+                        fontSize: '0.85rem',
+                        border: '1px dashed var(--border-color)',
+                        borderRadius: 'var(--radius-md)',
+                        backgroundColor: 'var(--surface-color)'
+                    }}>
+                        Keine Bilder ausgewählt. Klicken Sie auf "Bilder hinzufügen".
+                    </div>
+                ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '12px', maxHeight: '200px', overflowY: 'auto', padding: '4px' }}>
+                        {localFiles.map((file, idx) => {
+                            const isSelected = idx === pendingThumbnailIndex;
+                            const previewUrl = URL.createObjectURL(file);
+                            return (
+                                <div 
+                                    key={idx}
+                                    onClick={() => onSelectPendingThumbnail(idx)}
+                                    style={{
+                                        position: 'relative',
+                                        aspectRatio: '1.25',
+                                        cursor: 'pointer',
+                                        border: isSelected ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-md)',
+                                        overflow: 'hidden',
+                                        boxShadow: isSelected ? '0 0 0 2px rgba(59, 130, 246, 0.2)' : 'var(--shadow-sm)',
+                                        transition: 'all 0.15s ease',
+                                        transform: isSelected ? 'scale(1.02)' : 'none'
+                                    }}
+                                >
+                                    <img 
+                                        src={previewUrl} 
+                                        alt="Vorschau" 
+                                        style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                    />
+                                    
+                                    {isSelected && (
+                                        <div style={{
+                                            position: 'absolute',
+                                            top: '4px',
+                                            left: '4px',
+                                            backgroundColor: 'var(--primary-color)',
+                                            color: 'white',
+                                            borderRadius: '12px',
+                                            padding: '2px 6px',
+                                            fontSize: '0.65rem',
+                                            fontWeight: 700,
+                                            boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
+                                        }}>
+                                            Titelbild
+                                        </div>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        onClick={(e) => handleDeleteLocalFile(e, idx)}
+                                        style={{
+                                            position: 'absolute',
+                                            top: '4px',
+                                            right: '4px',
+                                            backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '50%',
+                                            width: '20px',
+                                            height: '20px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            cursor: 'pointer',
+                                            boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                                            transition: 'transform 0.15s'
+                                        }}
+                                        onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                                        onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                    >
+                                        <Trash2 size={12} />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )
+            ) : (
+                images.length === 0 ? (
+                    <div style={{
+                        padding: '24px',
+                        textAlign: 'center',
+                        color: 'var(--text-secondary)',
+                        fontSize: '0.85rem',
+                        border: '1px dashed var(--border-color)',
+                        borderRadius: 'var(--radius-md)',
+                        backgroundColor: 'var(--surface-color)'
+                    }}>
+                        Keine Bilder in der Cloud unter /Bilder vorhanden.
+                    </div>
+                ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '12px', maxHeight: '200px', overflowY: 'auto', padding: '4px' }}>
+                        {images.map(img => {
+                            const isSelected = img.id === currentThumbnailId;
+                            return (
+                                <div 
+                                    key={img.id}
+                                    onClick={() => onSelectThumbnail(img.id)}
+                                    style={{
+                                        position: 'relative',
+                                        aspectRatio: '1.25',
+                                        cursor: 'pointer',
+                                        border: isSelected ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-md)',
+                                        overflow: 'hidden',
+                                        boxShadow: isSelected ? '0 0 0 2px rgba(59, 130, 246, 0.2)' : 'var(--shadow-sm)',
+                                        transition: 'all 0.15s ease',
+                                        transform: isSelected ? 'scale(1.02)' : 'none'
+                                    }}
+                                >
+                                    <CloudImage provider={provider} itemId={img.id} fallbackIcon={Home} />
+                                    
+                                    {isSelected && (
+                                        <div style={{
+                                            position: 'absolute',
+                                            top: '4px',
+                                            left: '4px',
+                                            backgroundColor: 'var(--primary-color)',
+                                            color: 'white',
+                                            borderRadius: '12px',
+                                            padding: '2px 6px',
+                                            fontSize: '0.65rem',
+                                            fontWeight: 700,
+                                            boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
+                                        }}>
+                                            Titelbild
+                                        </div>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        onClick={(e) => handleDeleteCloudImage(e, img.id)}
+                                        style={{
+                                            position: 'absolute',
+                                            top: '4px',
+                                            right: '4px',
+                                            backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '50%',
+                                            width: '20px',
+                                            height: '20px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            cursor: 'pointer',
+                                            boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                                            transition: 'transform 0.15s'
+                                        }}
+                                        onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                                        onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                    >
+                                        <Trash2 size={12} />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )
+            )}
+        </div>
+    );
+};
+
+const resolveCloudConnection = async (portfolioId) => {
+    if (!portfolioId) return null;
+    try {
+        const { data: linkData } = await supabase
+            .from('portfolio_cloud_links')
+            .select('cloud_connection_id')
+            .eq('portfolio_id', portfolioId)
+            .maybeSingle();
+
+        if (linkData?.cloud_connection_id) {
+            const { data: connData } = await supabase
+                .from('cloud_connections')
+                .select('*')
+                .eq('id', linkData.cloud_connection_id)
+                .maybeSingle();
+            return connData;
+        }
+
+        const { data: fallbackConns } = await supabase
+            .from('cloud_connections')
+            .select('*')
+            .limit(1);
+        if (fallbackConns && fallbackConns.length > 0) {
+            return fallbackConns[0];
+        }
+    } catch (e) {
+        console.error("Error resolving cloud connection:", e);
+    }
+    return null;
+};
+
+const getPropertyFolderName = (property, allProperties = []) => {
+    if (!property) return '';
+    
+    if (property.isGroup) {
+        return property.displayFolderName || '';
+    }
+    
+    if (property.economic_unit_id) {
+        const members = allProperties.filter(p => p.economic_unit_id === property.economic_unit_id);
+        if (members.length > 0) {
+            const groupedByStreet = {};
+            members.forEach(m => {
+                if (!m.street) return;
+                if (!groupedByStreet[m.street]) groupedByStreet[m.street] = [];
+                if (m.house_number) {
+                    groupedByStreet[m.street].push(m.house_number);
+                }
+            });
+            const parts = Object.keys(groupedByStreet).map(street => {
+                const nums = groupedByStreet[street];
+                if (nums.length > 0) {
+                    return `${street} ${nums.join(' & ')}`;
+                }
+                return street;
+            });
+            const displayNames = parts.slice(0, 2).join(' | ');
+            const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
+            return `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`;
+        }
+    }
+    
+    return `${property.street || ''} ${property.house_number || ''}`.trim();
+};
+
 const Properties = () => {
     const navigate = useNavigate();
     const location = useLocation();
@@ -85,6 +542,13 @@ const Properties = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
     const [searchTerm, setSearchTerm] = useState('');
+    const [viewMode, setViewMode] = useState('table');
+    const [newPropertyImages, setNewPropertyImages] = useState([]);
+    const [newUnitImages, setNewUnitImages] = useState([]);
+    const [pendingPropertyThumbnailIndex, setPendingPropertyThumbnailIndex] = useState(null);
+    const [pendingUnitThumbnailIndex, setPendingUnitThumbnailIndex] = useState(null);
+    const [propertyProvider, setPropertyProvider] = useState('onedrive');
+    const [unitProvider, setUnitProvider] = useState('onedrive');
 
     // Property Modal State
     const [isPropertyModalOpen, setIsPropertyModalOpen] = useState(false);
@@ -321,7 +785,8 @@ const Properties = () => {
                 property_type: propertyForm.property_type,
                 total_investment_cost: finalEconomicUnitId ? 0 : (parseFloat(propertyForm.total_investment_cost) || 0),
                 equity_invested: finalEconomicUnitId ? 0 : (parseFloat(propertyForm.equity_invested) || 0),
-                economic_unit_id: finalEconomicUnitId
+                economic_unit_id: finalEconomicUnitId,
+                thumbnail_image: propertyForm.thumbnail_image || null
             };
 
             let error;
@@ -378,6 +843,54 @@ const Properties = () => {
                 }
             }
 
+            // Sync and upload initial files if this is a new property
+            if (!editingPropertyId && currentPropId) {
+                try {
+                    await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: 'onedrive', action: 'create' }
+                    });
+                    await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: 'googledrive', action: 'create' }
+                    });
+
+                    // Upload local files selected during creation
+                    if (newPropertyImages.length > 0) {
+                        const folderName = `${propData.street} ${propData.house_number || ''}`.trim();
+                        const targetPath = `${folderName}/Bilder`;
+                        let uploadedThumbnailId = null;
+
+                        for (let i = 0; i < newPropertyImages.length; i++) {
+                            const file = newPropertyImages[i];
+                            try {
+                                const formData = new FormData();
+                                formData.append('action', 'upload');
+                                formData.append('provider', propertyProvider);
+                                formData.append('path', targetPath);
+                                formData.append('file', file);
+                                
+                                const response = await supabase.functions.invoke('cloud-drive', { body: formData });
+                                if (response.data?.success && response.data?.file?.id) {
+                                    if (i === pendingPropertyThumbnailIndex) {
+                                        uploadedThumbnailId = response.data.file.id;
+                                    }
+                                }
+                            } catch (uploadErr) {
+                                console.error("Error uploading initial property file:", uploadErr);
+                            }
+                        }
+
+                        if (uploadedThumbnailId) {
+                            await supabase
+                                .from('properties')
+                                .update({ thumbnail_image: uploadedThumbnailId })
+                                .eq('id', currentPropId);
+                        }
+                    }
+                } catch (syncErr) {
+                    console.error("Cloud folder sync/upload error:", syncErr);
+                }
+            }
+
             await new Promise(resolve => setTimeout(resolve, 500));
 
             // Redirect based on returnTo (e.g. back to Cockpit after edit from InvestorPortal)
@@ -395,13 +908,24 @@ const Properties = () => {
     };
 
     // Save Unit
-    const handleOpenUnitModal = (property) => {
+    // Save Unit
+    const handleOpenUnitModal = async (property) => {
         setCurrentPropertyForUnit(property);
         setEditingUnitId(null); // Reset editing state
+        setNewUnitImages([]);
+        
+        const conn = await resolveCloudConnection(property.portfolio_id);
+        if (conn && conn.provider) {
+            setUnitProvider(conn.provider);
+        } else {
+            setUnitProvider('onedrive');
+        }
+
         setUnitForm({
             unit_name: '', floor: '', sqm: '', rooms: '', target_rent: '',
             bathrooms: 1, bedrooms: 1, balcony: false, fitted_kitchen: false, is_vacation_rental: false,
-            cold_rent_ist: '', service_charge_soll: '', heating_cost_soll: '', other_costs_soll: '', deposit_soll: ''
+            cold_rent_ist: '', service_charge_soll: '', heating_cost_soll: '', other_costs_soll: '', deposit_soll: '',
+            thumbnail_image: ''
         });
         setIsUnitModalOpen(true);
     };
@@ -445,10 +969,12 @@ const Properties = () => {
                 service_charge_soll: parseFloat(unitForm.service_charge_soll) || null,
                 heating_cost_soll: parseFloat(unitForm.heating_cost_soll) || null,
                 other_costs_soll: parseFloat(unitForm.other_costs_soll) || null,
-                deposit_soll: parseFloat(unitForm.deposit_soll) || null
+                deposit_soll: parseFloat(unitForm.deposit_soll) || null,
+                thumbnail_image: unitForm.thumbnail_image || null
             };
 
             let error;
+            let currentUnitId = editingUnitId;
 
             if (editingUnitId) {
                 // UPDATE
@@ -459,13 +985,64 @@ const Properties = () => {
                 error = updateError;
             } else {
                 // INSERT
-                const { error: insertError } = await supabase
+                const { data: insertData, error: insertError } = await supabase
                     .from('units')
-                    .insert([unitData]);
+                    .insert([unitData])
+                    .select('id')
+                    .single();
                 error = insertError;
+                if (insertData) currentUnitId = insertData.id;
             }
 
             if (error) throw error;
+
+            // Trigger sync to ensure folders are created and upload files if needed
+            if (!editingUnitId && currentUnitId) {
+                try {
+                    await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: 'onedrive', action: 'create' }
+                    });
+                    await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: 'googledrive', action: 'create' }
+                    });
+
+                    // Upload local files selected during creation
+                    if (newUnitImages.length > 0) {
+                        const propFolderName = getPropertyFolderName(currentPropertyForUnit, properties);
+                        const targetPath = `${propFolderName}/Neuvermietung/${unitForm.unit_name}/Bilder`;
+                        let uploadedThumbnailId = null;
+
+                        for (let i = 0; i < newUnitImages.length; i++) {
+                            const file = newUnitImages[i];
+                            try {
+                                const formData = new FormData();
+                                formData.append('action', 'upload');
+                                formData.append('provider', unitProvider);
+                                formData.append('path', targetPath);
+                                formData.append('file', file);
+                                
+                                const response = await supabase.functions.invoke('cloud-drive', { body: formData });
+                                if (response.data?.success && response.data?.file?.id) {
+                                    if (i === pendingUnitThumbnailIndex) {
+                                        uploadedThumbnailId = response.data.file.id;
+                                    }
+                                }
+                            } catch (uploadErr) {
+                                console.error("Error uploading initial file:", uploadErr);
+                            }
+                        }
+
+                        if (uploadedThumbnailId) {
+                            await supabase
+                                .from('units')
+                                .update({ thumbnail_image: uploadedThumbnailId })
+                                .eq('id', currentUnitId);
+                        }
+                    }
+                } catch (syncErr) {
+                    console.error("Cloud folder creation/upload error:", syncErr);
+                }
+            }
 
             await new Promise(resolve => setTimeout(resolve, 500));
             window.location.reload();
@@ -476,9 +1053,17 @@ const Properties = () => {
         }
     };
 
-    const handleEditUnit = (property, unit) => {
+    const handleEditUnit = async (property, unit) => {
         setCurrentPropertyForUnit(property);
         setEditingUnitId(unit.id);
+        
+        const conn = await resolveCloudConnection(property.portfolio_id);
+        if (conn && conn.provider) {
+            setUnitProvider(conn.provider);
+        } else {
+            setUnitProvider('onedrive');
+        }
+
         setUnitForm({
             unit_name: unit.unit_name,
             floor: unit.floor,
@@ -494,7 +1079,8 @@ const Properties = () => {
             service_charge_soll: unit.service_charge_soll || '',
             heating_cost_soll: unit.heating_cost_soll || '',
             other_costs_soll: unit.other_costs_soll || '',
-            deposit_soll: unit.deposit_soll || ''
+            deposit_soll: unit.deposit_soll || '',
+            thumbnail_image: unit.thumbnail_image || ''
         });
         setIsUnitModalOpen(true);
     };
@@ -803,6 +1389,46 @@ const Properties = () => {
                     <p style={{ color: 'var(--text-secondary)' }}>Übersicht Ihrer Wohn- und Gewerbeobjekte</p>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '2px', backgroundColor: 'var(--bg-secondary)' }}>
+                        <button
+                            onClick={() => setViewMode('table')}
+                            style={{
+                                padding: '6px 12px',
+                                borderRadius: '4px',
+                                border: 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                fontSize: '0.85rem',
+                                cursor: 'pointer',
+                                backgroundColor: viewMode === 'table' ? 'var(--surface-color)' : 'transparent',
+                                color: viewMode === 'table' ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                boxShadow: viewMode === 'table' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                                fontWeight: viewMode === 'table' ? 600 : 'normal'
+                            }}
+                        >
+                            <List size={14} /> Tabelle
+                        </button>
+                        <button
+                            onClick={() => setViewMode('grid')}
+                            style={{
+                                padding: '6px 12px',
+                                borderRadius: '4px',
+                                border: 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                fontSize: '0.85rem',
+                                cursor: 'pointer',
+                                backgroundColor: viewMode === 'grid' ? 'var(--surface-color)' : 'transparent',
+                                color: viewMode === 'grid' ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                boxShadow: viewMode === 'grid' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                                fontWeight: viewMode === 'grid' ? 600 : 'normal'
+                            }}
+                        >
+                            <LayoutGrid size={14} /> Kacheln
+                        </button>
+                    </div>
                     <ExportDropdown
                         reportType="immobilien"
                         data={groupedProperties.map(p => {
@@ -846,10 +1472,18 @@ const Properties = () => {
                         properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number || ''}`.trim() }))}
                         totalRows={groupedProperties.length}
                     />
-                    <Button icon={Plus} onClick={() => {
+                    <Button icon={Plus} onClick={async () => {
                         if (!checkGlobalAccess()) return;
-                        // Pre-select active portfolio if set
                         setEditingPropertyId(null);
+                        setNewPropertyImages([]);
+                        
+                        const conn = await resolveCloudConnection(selectedPortfolioID || (portfolios[0]?.id));
+                        if (conn && conn.provider) {
+                            setPropertyProvider(conn.provider);
+                        } else {
+                            setPropertyProvider('onedrive');
+                        }
+
                         setPropertyForm({
                             portfolio_id: selectedPortfolioID || '',
                             street: '',
@@ -859,7 +1493,10 @@ const Properties = () => {
                             construction_year: '',
                             property_type: 'residential',
                             total_investment_cost: '',
-                            equity_invested: ''
+                            equity_invested: '',
+                            economic_unit_members: [],
+                            _original_economic_unit_id: null,
+                            thumbnail_image: ''
                         });
                         setIsPropertyModalOpen(true);
                     }}>Neue Immobilie</Button>
@@ -970,340 +1607,338 @@ const Properties = () => {
                                                                             !units[subProp.id] || units[subProp.id].length === 0 ? (
                                                                                 <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
                                                                             ) : (
-                                                                                // Table rendering code is the same, just mapped to subProp.id
-                                                                                <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
-                                                                                    {/* Same header and body logic as below */}
-                                                                                    <thead style={{ backgroundColor: 'var(--background-color)' }}>
-                                                                                        <tr>
-                                                                                            <th style={{ padding: '8px' }}>Name</th>
-                                                                                            <th style={{ padding: '8px' }}>Etage</th>
-                                                                                            <th style={{ padding: '8px' }}>Fläche</th>
-                                                                                            <th style={{ padding: '8px' }}>Zimmer</th>
-                                                                                            <th style={{ padding: '8px' }}>Status</th>
-                                                                                            <th style={{ padding: '8px' }}>Istmiete</th>
-                                                                                            <th style={{ padding: '8px' }}></th>
-                                                                                        </tr>
-                                                                                    </thead>
-                                                                                    <tbody>
-                                                                                        {units[subProp.id].map(unit => (
-                                                                                            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
-                                                                                                <td style={{ padding: '8px' }}>{unit.unit_name}</td>
-                                                                                                <td style={{ padding: '8px' }}>{unit.floor}</td>
-                                                                                                <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
-                                                                                                <td style={{ padding: '8px' }}>{unit.rooms}</td>
-                                                                                                <td style={{ padding: '8px' }}>
-                                                                                                    {unit.status === 'vacation_rental' ? (
-                                                                                                        <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                                            <Home size={12} /> Ferienwohnung
-                                                                                                        </span>
-                                                                                                    ) : unit.status === 'rented' ? (
-                                                                                                        <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                                            <Key size={12} /> Vermietet
-                                                                                                        </span>
-                                                                                                    ) : (
-                                                                                                        <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                                            <AlertCircle size={12} /> Leerstand
-                                                                                                        </span>
-                                                                                                    )}
-                                                                                                </td>
-                                                                                                <td style={{ padding: '8px', fontWeight: 600 }}>
-                                                                                                    {unit.is_vacation_rental 
-                                                                                                        ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-                                                                                                        : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-                                                                                                    }
-                                                                                                </td>
-                                                                                                <td style={{ padding: '8px', textAlign: 'right' }}>
-                                                                                                    <div style={{ position: 'relative', display: 'inline-block' }}>
-                                                                                                        <button
-                                                                                                            onClick={(e) => {
-                                                                                                                e.stopPropagation();
-                                                                                                                if (openActionMenuId === unit.id) {
-                                                                                                                    setOpenActionMenuId(null);
-                                                                                                                } else {
-                                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
-                                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right });
-                                                                                                                    setOpenActionMenuId(unit.id);
-                                                                                                                }
-                                                                                                            }}
-                                                                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
-                                                                                                        >
-                                                                                                            <MoreVertical size={16} color="var(--text-secondary)" />
-                                                                                                        </button>
-
-                                                                                                        {openActionMenuId === unit.id && createPortal(
-                                                                                                            <>
-                                                                                                                <div
-                                                                                                                    style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
-                                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
-                                                                                                                />
-                                                                                                                <div style={{
-                                                                                                                    position: 'fixed',
-                                                                                                                    top: menuPos.top + 5,
-                                                                                                                    left: menuPos.left,
-                                                                                                                    transform: 'translateX(-100%)',
-                                                                                                                    backgroundColor: 'var(--surface-color)',
-                                                                                                                    border: '1px solid var(--border-color)',
-                                                                                                                    borderRadius: 'var(--radius-md)',
-                                                                                                                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                                                                                                                    zIndex: 9999,
-                                                                                                                    minWidth: '160px',
-                                                                                                                    display: 'flex',
-                                                                                                                    flexDirection: 'column',
-                                                                                                                    padding: '4px'
-                                                                                                                }}>
-                                                                                                                    {unit.status === 'vacant' && (
-                                                                                                                        <button
-                                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${subProp.id}&unitId=${unit.id}`); }}
-                                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
-                                                                                                                            title="Einheit vermieten"
-                                                                                                                        >
-                                                                                                                            <Plus size={14} /> Vermieten
-                                                                                                                        </button>
-                                                                                                                    )}
-                                                                                                                    <button
-                                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(subProp, unit); }}
-                                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
-                                                                                                                        title="Einheit bearbeiten"
-                                                                                                                    >
-                                                                                                                        <Edit size={14} /> Bearbeiten
-                                                                                                                    </button>
-                                                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                                                                    <button
-                                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(subProp.id, unit.id); }}
-                                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
-                                                                                                                        title="Einheit löschen"
-                                                                                                                    >
-                                                                                                                        <Trash2 size={14} /> Löschen
-                                                                                                                    </button>
-                                                                                                                </div>
-                                                                                                            </>,
-                                                                                                            document.body
-                                                                                                        )}
-                                                                                                    </div>
-                                                                                                </td>
+                                                                                    <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
+                                                                                        <thead style={{ backgroundColor: 'var(--background-color)' }}>
+                                                                                            <tr>
+                                                                                                <th style={{ padding: '8px' }}>Name</th>
+                                                                                                <th style={{ padding: '8px' }}>Etage</th>
+                                                                                                <th style={{ padding: '8px' }}>Fläche</th>
+                                                                                                <th style={{ padding: '8px' }}>Zimmer</th>
+                                                                                                <th style={{ padding: '8px' }}>Status</th>
+                                                                                                <th style={{ padding: '8px' }}>Istmiete</th>
+                                                                                                <th style={{ padding: '8px' }}></th>
                                                                                             </tr>
-                                                                                        ))}
-                                                                                    </tbody>
-                                                                                </table>
-                                                                            )
-                                                                        )}
-                                                                    </td>
-                                                                </tr>
-                                                            )}
-                                                        </React.Fragment>
-                                                    ))}
-                                                </>
-                                            )}
+                                                                                        </thead>
+                                                                                        <tbody>
+                                                                                            {units[subProp.id].map(unit => (
+                                                                                                <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
+                                                                                                    <td style={{ padding: '8px' }}>{unit.unit_name}</td>
+                                                                                                    <td style={{ padding: '8px' }}>{unit.floor}</td>
+                                                                                                    <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                                    <td style={{ padding: '8px' }}>{unit.rooms}</td>
+                                                                                                    <td style={{ padding: '8px' }}>
+                                                                                                        {unit.status === 'vacation_rental' ? (
+                                                                                                            <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                                <Home size={12} /> Ferienwohnung
+                                                                                                            </span>
+                                                                                                        ) : unit.status === 'rented' ? (
+                                                                                                            <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                                <Key size={12} /> Vermietet
+                                                                                                            </span>
+                                                                                                        ) : (
+                                                                                                            <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                                <AlertCircle size={12} /> Leerstand
+                                                                                                            </span>
+                                                                                                        )}
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '8px', fontWeight: 600 }}>
+                                                                                                        {unit.is_vacation_rental 
+                                                                                                            ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                                            : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                                        }
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '8px', textAlign: 'right' }}>
+                                                                                                        <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                                                            <button
+                                                                                                                onClick={(e) => {
+                                                                                                                    e.stopPropagation();
+                                                                                                                    if (openActionMenuId === unit.id) {
+                                                                                                                        setOpenActionMenuId(null);
+                                                                                                                    } else {
+                                                                                                                        const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                                        setMenuPos({ top: rect.bottom, left: rect.right });
+                                                                                                                        setOpenActionMenuId(unit.id);
+                                                                                                                    }
+                                                                                                                }}
+                                                                                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
+                                                                                                            >
+                                                                                                                <MoreVertical size={16} color="var(--text-secondary)" />
+                                                                                                            </button>
 
-                                            {/* Render Units for Normal Property (Not Group) */}
-                                            {!propertyOrGroup.isGroup && expandedPropertyId === propertyOrGroup.id && (
-                                                <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
-                                                    <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl)' }}>
-                                                        <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                            <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                <Home size={16} /> Einheiten
-                                                            </h4>
-                                                            <Button size="sm" icon={Plus} onClick={() => {
-                                                                if (!checkGlobalAccess()) return;
-                                                                handleOpenUnitModal(propertyOrGroup);
-                                                            }}>Neue Einheit</Button>
-                                                        </div>
+                                                                                                            {openActionMenuId === unit.id && createPortal(
+                                                                                                                <>
+                                                                                                                    <div
+                                                                                                                        style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
+                                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
+                                                                                                                    />
+                                                                                                                    <div style={{
+                                                                                                                        position: 'fixed',
+                                                                                                                        top: menuPos.top + 5,
+                                                                                                                        left: menuPos.left,
+                                                                                                                        transform: 'translateX(-100%)',
+                                                                                                                        backgroundColor: 'var(--surface-color)',
+                                                                                                                        border: '1px solid var(--border-color)',
+                                                                                                                        borderRadius: 'var(--radius-md)',
+                                                                                                                        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                                                        zIndex: 9999,
+                                                                                                                        minWidth: '160px',
+                                                                                                                        display: 'flex',
+                                                                                                                        flexDirection: 'column',
+                                                                                                                        padding: '4px'
+                                                                                                                    }}>
+                                                                                                                        {unit.status === 'vacant' && (
+                                                                                                                            <button
+                                                                                                                                onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${subProp.id}&unitId=${unit.id}`); }}
+                                                                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
+                                                                                                                                title="Einheit vermieten"
+                                                                                                                            >
+                                                                                                                                <Plus size={14} /> Vermieten
+                                                                                                                            </button>
+                                                                                                                        )}
+                                                                                                                        <button
+                                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(subProp, unit); }}
+                                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
+                                                                                                                            title="Einheit bearbeiten"
+                                                                                                                        >
+                                                                                                                            <Edit size={14} /> Bearbeiten
+                                                                                                                        </button>
+                                                                                                                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                                                        <button
+                                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(subProp.id, unit.id); }}
+                                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
+                                                                                                                            title="Einheit löschen"
+                                                                                                                        >
+                                                                                                                            <Trash2 size={14} /> Löschen
+                                                                                                                        </button>
+                                                                                                                    </div>
+                                                                                                                </>,
+                                                                                                                document.body
+                                                                                                            )}
+                                                                                                        </div>
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
+                                                                                )
+                                                                            )}
+                                                                        </td>
+                                                                    </tr>
+                                                                )}
+                                                            </React.Fragment>
+                                                        ))}
+                                                    </>
+                                                )}
 
-                                                        {loadingUnits[propertyOrGroup.id] ? (
-                                                            <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
-                                                        ) : (
-                                                            !units[propertyOrGroup.id] || units[propertyOrGroup.id].length === 0 ? (
-                                                                <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
+                                                {/* Render Units for Normal Property (Not Group) */}
+                                                {!propertyOrGroup.isGroup && expandedPropertyId === propertyOrGroup.id && (
+                                                    <tr style={{ backgroundColor: 'var(--background-color)', borderBottom: '1px solid var(--border-color)' }}>
+                                                        <td colSpan={propertyColumns.length} style={{ padding: 'var(--spacing-md) var(--spacing-xl)' }}>
+                                                            <div style={{ marginBottom: 'var(--spacing-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                    <Home size={16} /> Einheiten
+                                                                </h4>
+                                                                <Button size="sm" icon={Plus} onClick={() => {
+                                                                    if (!checkGlobalAccess()) return;
+                                                                    handleOpenUnitModal(propertyOrGroup);
+                                                                }}>Neue Einheit</Button>
+                                                            </div>
+
+                                                            {loadingUnits[propertyOrGroup.id] ? (
+                                                                <div style={{ padding: '10px', color: 'var(--text-secondary)' }}>Lade Einheiten...</div>
                                                             ) : (
-                                                                <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
-                                                                    <thead style={{ backgroundColor: 'var(--background-color)' }}>
-                                                                        <tr>
-                                                                            <th style={{ padding: '8px' }}>Name</th>
-                                                                            <th style={{ padding: '8px' }}>Etage</th>
-                                                                            <th style={{ padding: '8px' }}>Fläche</th>
-                                                                            <th style={{ padding: '8px' }}>Zimmer</th>
-                                                                            <th style={{ padding: '8px' }}>Status</th>
-                                                                            <th style={{ padding: '8px' }}>Istmiete</th>
-                                                                            <th style={{ padding: '8px' }}></th>
-                                                                        </tr>
-                                                                    </thead>
-                                                                    <tbody>
-                                                                        {units[propertyOrGroup.id].map(unit => (
-                                                                            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
-                                                                                <td style={{ padding: '8px' }}>{unit.unit_name}</td>
-                                                                                <td style={{ padding: '8px' }}>{unit.floor}</td>
-                                                                                <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
-                                                                                <td style={{ padding: '8px' }}>{unit.rooms}</td>
-                                                                                <td style={{ padding: '8px' }}>
-                                                                                    {unit.status === 'vacation_rental' ? (
-                                                                                        <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                            <Home size={12} /> Ferienwohnung
-                                                                                        </span>
-                                                                                    ) : unit.status === 'rented' ? (
-                                                                                        <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                            <Key size={12} /> Vermietet
-                                                                                        </span>
-                                                                                    ) : (
-                                                                                        <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
-                                                                                            <AlertCircle size={12} /> Leerstand
-                                                                                        </span>
-                                                                                    )}
-                                                                                </td>
-                                                                                <td style={{ padding: '8px', fontWeight: 600 }}>
-                                                                                    {unit.is_vacation_rental 
-                                                                                        ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-                                                                                        : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-                                                                                    }
-                                                                                </td>
-                                                                                <td style={{ padding: '8px', textAlign: 'right' }}>
-                                                                                    <div style={{ position: 'relative', display: 'inline-block' }}>
-                                                                                        <button
-                                                                                            onClick={(e) => {
-                                                                                                e.stopPropagation();
-                                                                                                if (openActionMenuId === unit.id) {
-                                                                                                    setOpenActionMenuId(null);
-                                                                                                } else {
-                                                                                                    const rect = e.currentTarget.getBoundingClientRect();
-                                                                                                    setMenuPos({ top: rect.bottom, left: rect.right });
-                                                                                                    setOpenActionMenuId(unit.id);
-                                                                                                }
-                                                                                            }}
-                                                                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
-                                                                                        >
-                                                                                            <MoreVertical size={16} color="var(--text-secondary)" />
-                                                                                        </button>
-
-                                                                                        {openActionMenuId === unit.id && createPortal(
-                                                                                            <>
-                                                                                                <div
-                                                                                                    style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
-                                                                                                    onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
-                                                                                                />
-                                                                                                <div style={{
-                                                                                                    position: 'fixed',
-                                                                                                    top: menuPos.top + 5,
-                                                                                                    left: menuPos.left,
-                                                                                                    transform: 'translateX(-100%)',
-                                                                                                    backgroundColor: 'var(--surface-color)',
-                                                                                                    border: '1px solid var(--border-color)',
-                                                                                                    borderRadius: 'var(--radius-md)',
-                                                                                                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                                                                                                    zIndex: 9999,
-                                                                                                    minWidth: '160px',
-                                                                                                    display: 'flex',
-                                                                                                    flexDirection: 'column',
-                                                                                                    padding: '4px'
-                                                                                                }}>
-                                                                                                    {unit.status === 'vacant' && (
-                                                                                                        <button
-                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${propertyOrGroup.id}&unitId=${unit.id}`); }}
-                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
-                                                                                                            title="Einheit vermieten"
-                                                                                                        >
-                                                                                                            <Plus size={14} /> Vermieten
-                                                                                                        </button>
-                                                                                                    )}
-                                                                                                    <button
-                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(propertyOrGroup, unit); }}
-                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
-                                                                                                        title="Einheit bearbeiten"
-                                                                                                    >
-                                                                                                        <Edit size={14} /> Bearbeiten
-                                                                                                    </button>
-                                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                                                    <button
-                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(propertyOrGroup.id, unit.id); }}
-                                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
-                                                                                                        title="Einheit löschen"
-                                                                                                    >
-                                                                                                        <Trash2 size={14} /> Löschen
-                                                                                                    </button>
-                                                                                                </div>
-                                                                                            </>,
-                                                                                            document.body
-                                                                                        )}
-                                                                                    </div>
-                                                                                </td>
+                                                                !units[propertyOrGroup.id] || units[propertyOrGroup.id].length === 0 ? (
+                                                                    <div style={{ padding: '10px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Keine Einheiten angelegt.</div>
+                                                                ) : (
+                                                                    <table style={{ width: '100%', backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.875rem' }}>
+                                                                        <thead style={{ backgroundColor: 'var(--background-color)' }}>
+                                                                            <tr>
+                                                                                <th style={{ padding: '8px' }}>Name</th>
+                                                                                <th style={{ padding: '8px' }}>Etage</th>
+                                                                                <th style={{ padding: '8px' }}>Fläche</th>
+                                                                                <th style={{ padding: '8px' }}>Zimmer</th>
+                                                                                <th style={{ padding: '8px' }}>Status</th>
+                                                                                <th style={{ padding: '8px' }}>Istmiete</th>
+                                                                                <th style={{ padding: '8px' }}></th>
                                                                             </tr>
-                                                                        ))}
-                                                                    </tbody>
-                                                                </table>
-                                                            )
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </React.Fragment>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                                                                        </thead>
+                                                                        <tbody>
+                                                                            {units[propertyOrGroup.id].map(unit => (
+                                                                                <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
+                                                                                    <td style={{ padding: '8px' }}>{unit.unit_name}</td>
+                                                                                    <td style={{ padding: '8px' }}>{unit.floor}</td>
+                                                                                    <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                    <td style={{ padding: '8px' }}>{unit.rooms}</td>
+                                                                                    <td style={{ padding: '8px' }}>
+                                                                                        {unit.status === 'vacation_rental' ? (
+                                                                                            <span style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                <Home size={12} /> Ferienwohnung
+                                                                                            </span>
+                                                                                        ) : unit.status === 'rented' ? (
+                                                                                            <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                <Key size={12} /> Vermietet
+                                                                                            </span>
+                                                                                        ) : (
+                                                                                            <span style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: 600, backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '2px 8px', borderRadius: '12px', width: 'fit-content' }}>
+                                                                                                <AlertCircle size={12} /> Leerstand
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </td>
+                                                                                    <td style={{ padding: '8px', fontWeight: 600 }}>
+                                                                                        {unit.is_vacation_rental 
+                                                                                            ? (parseFloat(unit.cold_rent_ist) || parseFloat(unit.target_rent) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                            : (unit.leases?.find(l => l.status === 'active')?.cold_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+                                                                                        }
+                                                                                    </td>
+                                                                                    <td style={{ padding: '8px', textAlign: 'right' }}>
+                                                                                        <div style={{ position: 'relative', display: 'inline-block' }}>
+                                                                                            <button
+                                                                                                onClick={(e) => {
+                                                                                                    e.stopPropagation();
+                                                                                                    if (openActionMenuId === unit.id) {
+                                                                                                        setOpenActionMenuId(null);
+                                                                                                    } else {
+                                                                                                        const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                        setMenuPos({ top: rect.bottom, left: rect.right });
+                                                                                                        setOpenActionMenuId(unit.id);
+                                                                                                    }
+                                                                                                }}
+                                                                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
+                                                                                            >
+                                                                                                <MoreVertical size={16} color="var(--text-secondary)" />
+                                                                                            </button>
 
-                        {/* Mobile Card View */}
-                        <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                            {filteredProperties.map(property => {
-                                const totalSqm = property.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
-                                // Calculate unit details for quick view
-                                const unitCount = property.units?.length || 0;
-                                const rentedUnits = property.units?.filter(u => u.status === 'rented').length || 0;
+                                                                                            {openActionMenuId === unit.id && createPortal(
+                                                                                                <>
+                                                                                                    <div
+                                                                                                        style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998, cursor: 'default' }}
+                                                                                                        onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); }}
+                                                                                                    />
+                                                                                                    <div style={{
+                                                                                                        position: 'fixed',
+                                                                                                        top: menuPos.top + 5,
+                                                                                                        left: menuPos.left,
+                                                                                                        transform: 'translateX(-100%)',
+                                                                                                        backgroundColor: 'var(--surface-color)',
+                                                                                                        border: '1px solid var(--border-color)',
+                                                                                                        borderRadius: 'var(--radius-md)',
+                                                                                                        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                                                                                                        zIndex: 9999,
+                                                                                                        minWidth: '160px',
+                                                                                                        display: 'flex',
+                                                                                                        flexDirection: 'column',
+                                                                                                        padding: '4px'
+                                                                                                    }}>
+                                                                                                        {unit.status === 'vacant' && (
+                                                                                                            <button
+                                                                                                                onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); navigate(`/tenants?action=create&propertyId=${propertyOrGroup.id}&unitId=${unit.id}`); }}
+                                                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--success-color)' }}
+                                                                                                                title="Einheit vermieten"
+                                                                                                            >
+                                                                                                                <Plus size={14} /> Vermieten
+                                                                                                            </button>
+                                                                                                        )}
+                                                                                                        <button
+                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleEditUnit(propertyOrGroup, unit); }}
+                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)' }}
+                                                                                                            title="Einheit bearbeiten"
+                                                                                                        >
+                                                                                                            <Edit size={14} /> Bearbeiten
+                                                                                                        </button>
+                                                                                                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                                        <button
+                                                                                                            onClick={(e) => { e.stopPropagation(); setOpenActionMenuId(null); handleDeleteUnit(propertyOrGroup.id, unit.id); }}
+                                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)' }}
+                                                                                                            title="Einheit löschen"
+                                                                                                        >
+                                                                                                            <Trash2 size={14} /> Löschen
+                                                                                                        </button>
+                                                                                                    </div>
+                                                                                                </>,
+                                                                                                document.body
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </td>
+                                                                                </tr>
+                                                                            ))}
+                                                                        </tbody>
+                                                                    </table>
+                                                                )
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
 
-                                return (
-                                    <div key={property.id}
-                                        onClick={() => handleEditProperty(property)}
-                                        style={{
-                                            border: '1px solid var(--border-color)',
-                                            borderRadius: 'var(--radius-md)',
-                                            padding: 'var(--spacing-md)',
-                                            backgroundColor: 'var(--surface-color)',
-                                            cursor: 'pointer'
-                                        }}>
+                            {/* Mobile Card View */}
+                            <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                                {filteredProperties.map(property => {
+                                    const totalSqm = property.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
+                                    // Calculate unit details for quick view
+                                    const unitCount = property.units?.length || 0;
+                                    const rentedUnits = property.units?.filter(u => u.status === 'rented').length || 0;
 
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                                            <div>
-                                                <div style={{ fontWeight: 600, fontSize: '1rem' }}>{property.street} {property.house_number}</div>
-                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{property.zip} {property.city}</div>
-                                            </div>
-                                            <div style={{
-                                                padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 600,
-                                                backgroundColor: property.property_type === 'commercial' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-                                                color: property.property_type === 'commercial' ? 'var(--warning-color)' : 'var(--primary-color)'
+                                    return (
+                                        <div key={property.id}
+                                            onClick={() => handleEditProperty(property)}
+                                            style={{
+                                                border: '1px solid var(--border-color)',
+                                                borderRadius: 'var(--radius-md)',
+                                                padding: 'var(--spacing-md)',
+                                                backgroundColor: 'var(--surface-color)',
+                                                cursor: 'pointer'
                                             }}>
-                                                {property.property_type === 'commercial' ? 'Gewerbe' : 'Wohnen'}
-                                            </div>
-                                        </div>
 
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px', fontSize: '0.85rem' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                <Home size={14} className="text-secondary" />
-                                                <span>
-                                                    {unitCount === 0 ? 'Keine Einheiten' : `${rentedUnits}/${unitCount} Vermietet`}
-                                                </span>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>{property.street} {property.house_number}</div>
+                                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{property.zip} {property.city}</div>
+                                                </div>
+                                                <div style={{
+                                                    padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 600,
+                                                    backgroundColor: property.property_type === 'commercial' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+                                                    color: property.property_type === 'commercial' ? 'var(--warning-color)' : 'var(--primary-color)'
+                                                }}>
+                                                    {property.property_type === 'commercial' ? 'Gewerbe' : 'Wohnen'}
+                                                </div>
                                             </div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                <LayoutGrid size={14} className="text-secondary" />
-                                                <span>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
-                                            </div>
-                                        </div>
 
-                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', gap: '8px' }}>
-                                            <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); handleEditProperty(property); }}>
-                                                <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
-                                            </Button>
-                                            <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (!checkGlobalAccess()) return;
-                                                handleOpenUnitModal(property);
-                                            }}>
-                                                <Plus size={14} style={{ marginRight: '6px' }} /> Einheit
-                                            </Button>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px', fontSize: '0.85rem' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <Home size={14} className="text-secondary" />
+                                                    <span>
+                                                        {unitCount === 0 ? 'Keine Einheiten' : `${rentedUnits}/${unitCount} Vermietet`}
+                                                    </span>
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <LayoutGrid size={14} className="text-secondary" />
+                                                    <span>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
+                                                </div>
+                                            </div>
+
+                                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', gap: '8px' }}>
+                                                <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); handleEditProperty(property); }}>
+                                                    <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                                </Button>
+                                                <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    if (!checkGlobalAccess()) return;
+                                                    handleOpenUnitModal(property);
+                                                }}>
+                                                    <Plus size={14} style={{ marginRight: '6px' }} /> Einheit
+                                                </Button>
+                                            </div>
                                         </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </>
-                )}
-            </Card>
+                                    );
+                                })}
+                            </div>
+                        </>
+                    )}
+                </Card>
 
             {/* Property Modal */}
             <Modal
@@ -1401,6 +2036,22 @@ const Properties = () => {
                     <CurrencyInput label="Gesamtinvestition (€)" value={propertyForm.total_investment_cost} onChange={(e) => setPropertyForm({ ...propertyForm, total_investment_cost: e.target.value })} />
                     <CurrencyInput label="Eigenkapital (€)" value={propertyForm.equity_invested} onChange={(e) => setPropertyForm({ ...propertyForm, equity_invested: e.target.value })} />
                 </div>
+                
+                <div style={{ marginTop: 'var(--spacing-md)', borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-md)' }}>
+                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Bilder & Titelbild</h4>
+                    <CloudImageManager 
+                        provider={propertyProvider}
+                        propertyFolderName={editingPropertyId ? getPropertyFolderName(properties.find(p => p.id === editingPropertyId), properties) : ''}
+                        relativePath="Bilder"
+                        currentThumbnailId={propertyForm.thumbnail_image}
+                        onSelectThumbnail={(id) => setPropertyForm(prev => ({ ...prev, thumbnail_image: id }))}
+                        isNewEntity={!editingPropertyId}
+                        localFiles={newPropertyImages}
+                        onLocalFilesChange={setNewPropertyImages}
+                        pendingThumbnailIndex={pendingPropertyThumbnailIndex}
+                        onSelectPendingThumbnail={setPendingPropertyThumbnailIndex}
+                    />
+                </div>
             </Modal>
 
             {/* Unit Modal */}
@@ -1449,6 +2100,22 @@ const Properties = () => {
                     <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <input type="checkbox" checked={unitForm.is_vacation_rental} onChange={(e) => setUnitForm({ ...unitForm, is_vacation_rental: e.target.checked })} /> Ferienwohnung
                     </label>
+                </div>
+
+                <div style={{ marginTop: 'var(--spacing-md)', borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-md)' }}>
+                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Bilder & Titelbild</h4>
+                    <CloudImageManager 
+                        provider={unitProvider}
+                        propertyFolderName={currentPropertyForUnit ? getPropertyFolderName(currentPropertyForUnit, properties) : ''}
+                        relativePath={unitForm.unit_name ? `Neuvermietung/${unitForm.unit_name}/Bilder` : ''}
+                        currentThumbnailId={unitForm.thumbnail_image}
+                        onSelectThumbnail={(id) => setUnitForm(prev => ({ ...prev, thumbnail_image: id }))}
+                        isNewEntity={!editingUnitId}
+                        localFiles={newUnitImages}
+                        onLocalFilesChange={setNewUnitImages}
+                        pendingThumbnailIndex={pendingUnitThumbnailIndex}
+                        onSelectPendingThumbnail={setPendingUnitThumbnailIndex}
+                    />
                 </div>
             </Modal>
         </div>

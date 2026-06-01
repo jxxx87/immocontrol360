@@ -570,9 +570,20 @@ const CloudExplorer = () => {
                                         "Schriftverkehr",
                                         "Nebenkosten",
                                         "Versicherungen",
-                                        "Energieausweise"
+                                        "Energieausweise",
+                                        "Neuvermietung"
                                     ];
-                                    const isProtected = (file.isFolder && currentPath.length === 0 && PROTECTED_FOLDERS.includes(file.name)) || isLoadingFiles;
+                                    
+                                    let isProtected = isLoadingFiles;
+                                    if (file.isFolder) {
+                                        if (currentPath.length === 0 && PROTECTED_FOLDERS.includes(file.name)) {
+                                            isProtected = true;
+                                        } else if (currentPath.length === 1 && currentPath[0].name === 'Neuvermietung') {
+                                            isProtected = true;
+                                        } else if (currentPath.length === 2 && currentPath[0].name === 'Neuvermietung' && file.name === 'Bilder') {
+                                            isProtected = true;
+                                        }
+                                    }
                                     
                                     return (
                                         <div 

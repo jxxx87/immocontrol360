@@ -212,7 +212,10 @@ serve(async (req) => {
         nextPageToken = pageResult?.nextPageToken
       } while (nextPageToken)
 
-      let currentParentId = 'root';
+      const rootMeta = await googleDriveCall('/files/root', 'GET', null, { fields: 'id' });
+      const realRootId = rootMeta?.id || 'root';
+
+      let currentParentId = realRootId;
       for (const segment of segments) {
         let found = false;
         for (const f of allFolders) {
@@ -238,7 +241,7 @@ serve(async (req) => {
 
       if (action === 'list') {
         const cleanPath = path ? `/${sanitizePath(path)}` : '';
-        const endpoint = `/me/drive/root:/ImmoControlpro360${cleanPath}:/children?$select=id,name,folder,file,webUrl,size,lastModifiedDateTime`;
+        const endpoint = `/me/drive/root:/ImmoControlpro360${cleanPath}:/children?$select=id,name,folder,file,webUrl,size,lastModifiedDateTime,@microsoft.graph.downloadUrl`;
         
         let data = await msGraphCall(endpoint);
         
@@ -250,6 +253,8 @@ serve(async (req) => {
             name: f.name,
             isFolder: !!f.folder,
             url: f.webUrl,
+            downloadUrl: f["@microsoft.graph.downloadUrl"] || null,
+            thumbnailUrl: f["@microsoft.graph.downloadUrl"] || null,
             size: f.size,
             updatedAt: f.lastModifiedDateTime
         }));
@@ -267,8 +272,55 @@ serve(async (req) => {
          
          return new Response(JSON.stringify({ success: true, file: data }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
       }
-      
-      if (action === 'delete' && itemId) {
+            if (action === 'get_download_link') {
+          let endpoint = '';
+          if (itemId) {
+            endpoint = `/me/drive/items/${itemId}`;
+          } else if (path) {
+            const cleanPath = path ? `/${sanitizePath(path)}` : '';
+            endpoint = `/me/drive/root:/ImmoControlpro360${cleanPath}`;
+          } else {
+            throw new Error('Missing itemId or path');
+          }
+          const data = await msGraphCall(endpoint + '?$select=id,webUrl,@microsoft.graph.downloadUrl');
+          return new Response(JSON.stringify({ 
+            downloadUrl: data?.["@microsoft.graph.downloadUrl"] || null 
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+       }
+
+       if (action === 'get_download_link') {
+          let fileId = itemId;
+          if (!fileId && path) {
+            const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
+            fileId = await getGoogleFolderIdByPath(cleanPath);
+          }
+          if (!fileId) throw new Error('Missing itemId or path');
+          
+          const data = await googleDriveCall(`/files/${fileId}`, 'GET', null, {
+            fields: 'webContentLink, thumbnailLink'
+          });
+          return new Response(JSON.stringify({ 
+            downloadUrl: data?.thumbnailLink || data?.webContentLink || null 
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+       }
+
+       if (action === 'get_download_link') {
+          let fileId = itemId;
+          if (!fileId && path) {
+            const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
+            fileId = await getGoogleFolderIdByPath(cleanPath);
+          }
+          if (!fileId) throw new Error('Missing itemId or path');
+          
+          const data = await googleDriveCall(`/files/${fileId}`, 'GET', null, {
+            fields: 'webContentLink, thumbnailLink'
+          });
+          return new Response(JSON.stringify({ 
+            downloadUrl: data?.thumbnailLink || data?.webContentLink || null 
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+       }
+
+       if (action === 'delete' && itemId) {
          await msGraphCall(`/me/drive/items/${itemId}`, 'DELETE');
          return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
       }
@@ -302,7 +354,7 @@ serve(async (req) => {
 
         const data = await googleDriveCall('/files', 'GET', null, {
           q: `'${folderId}' in parents and trashed = false`,
-          fields: 'files(id, name, mimeType, webViewLink, size, modifiedTime)'
+          fields: 'files(id, name, mimeType, webViewLink, webContentLink, thumbnailLink, size, modifiedTime)'
         });
 
         const files = (data.files || []).map((f: any) => ({
@@ -310,6 +362,8 @@ serve(async (req) => {
             name: f.name,
             isFolder: f.mimeType === 'application/vnd.google-apps.folder',
             url: f.webViewLink,
+            downloadUrl: f.webContentLink || null,
+            thumbnailUrl: f.thumbnailLink || null,
             size: f.size ? parseInt(f.size) : 0,
             updatedAt: f.modifiedTime
         }));
@@ -343,6 +397,22 @@ serve(async (req) => {
 
          return new Response(JSON.stringify({ success: true, file: data }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
       }
+
+      if (action === 'get_download_link') {
+          let fileId = itemId;
+          if (!fileId && path) {
+            const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
+            fileId = await getGoogleFolderIdByPath(cleanPath);
+          }
+          if (!fileId) throw new Error('Missing itemId or path');
+          
+          const data = await googleDriveCall(`/files/${fileId}`, 'GET', null, {
+            fields: 'webContentLink, thumbnailLink'
+          });
+          return new Response(JSON.stringify({ 
+            downloadUrl: data?.thumbnailLink || data?.webContentLink || null 
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+       }
 
       if (action === 'delete' && itemId) {
          await googleDriveCall(`/files/${itemId}`, 'DELETE');

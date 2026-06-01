@@ -47,7 +47,7 @@ export const AuthProvider = ({ children }) => {
                     const { data: invitation } = await supabase
                         .from('tenant_invitations')
                         .select('*')
-                        .eq('email', userEmail)
+                        .ilike('email', userEmail)
                         .eq('status', 'pending')
                         .maybeSingle();
 
@@ -126,11 +126,7 @@ export const AuthProvider = ({ children }) => {
                 }
             }
 
-            if (accessToken) {
-                // Implicit flow (older): tokens are in the hash
-                // Supabase client handles this automatically via getSession
-                window.history.replaceState({}, '', window.location.pathname);
-            }
+            // No immediate replaceState for accessToken, let getSession read it.
 
             // Check active sessions
             supabase.auth.getSession().then(({ data: { session } }) => {
@@ -148,12 +144,17 @@ export const AuthProvider = ({ children }) => {
         handleAuthCallback();
 
         // Listen for changes on auth state (sign in, sign out, etc.)
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
             setSession(session);
             setUser(session?.user ?? null);
             setLoading(false);
             if (session?.user) {
                 fetchUserRole(session.user.id);
+                // Clean up URL parameters (code or access token hash) if present, after session is active
+                const params = new URLSearchParams(window.location.search);
+                if (params.get('code') || window.location.hash.includes('access_token')) {
+                    window.history.replaceState({}, '', window.location.pathname);
+                }
             } else {
                 setUserRole(null);
                 setRoleData(null);

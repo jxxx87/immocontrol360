@@ -107,7 +107,7 @@ const TenantManagement = () => {
 
             // Create invitation record
             const { error: invError } = await supabase.from('tenant_invitations').insert({
-                email: inviteForm.email,
+                email: inviteForm.email.toLowerCase().trim(),
                 tenant_id: inviteForm.tenant_id,
                 unit_id: unitId || null,
                 property_id: propertyId || null,
