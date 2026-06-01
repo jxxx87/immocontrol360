@@ -542,7 +542,7 @@ const Properties = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
     const [searchTerm, setSearchTerm] = useState('');
-    const [viewMode, setViewMode] = useState('table');
+    const [viewMode, setViewMode] = useState(isMobile ? 'grid' : 'table');
     const [newPropertyImages, setNewPropertyImages] = useState([]);
     const [newUnitImages, setNewUnitImages] = useState([]);
     const [pendingPropertyThumbnailIndex, setPendingPropertyThumbnailIndex] = useState(null);
@@ -695,6 +695,10 @@ const Properties = () => {
             fetchProperties();
         }
     }, [user, selectedPortfolioID]);
+
+    useEffect(() => {
+        setViewMode(isMobile ? 'grid' : 'table');
+    }, [isMobile]);
 
     // Fetch Units for a Property
     const fetchUnitsForProperty = async (propertyId) => {
@@ -1532,7 +1536,8 @@ const Properties = () => {
                     </div>
                 ) : (
                     <>
-                        <div className="hidden-mobile" style={{ overflowX: 'auto' }}>
+                        {viewMode === 'table' ? (
+                            <div style={{ overflowX: 'auto' }}>
                             {/* Custom Table Rendering to support expansion */}
                             <table style={{ width: '100%', minWidth: '800px', borderCollapse: 'collapse' }}>
                                 <thead>
@@ -1873,9 +1878,8 @@ const Properties = () => {
                                     </tbody>
                                 </table>
                             </div>
-
-                            {/* Mobile Card View */}
-                            <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
                                 {filteredProperties.map(property => {
                                     const totalSqm = property.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
                                     // Calculate unit details for quick view
@@ -1936,9 +1940,10 @@ const Properties = () => {
                                     );
                                 })}
                             </div>
-                        </>
-                    )}
-                </Card>
+                        )}
+                    </>
+                )}
+            </Card>
 
             {/* Property Modal */}
             <Modal

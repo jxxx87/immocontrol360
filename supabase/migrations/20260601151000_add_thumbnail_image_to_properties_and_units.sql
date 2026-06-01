@@ -1,0 +1,2 @@
+ALTER TABLE properties ADD COLUMN IF NOT EXISTS thumbnail_image TEXT;
+ALTER TABLE units ADD COLUMN IF NOT EXISTS thumbnail_image TEXT;

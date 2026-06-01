@@ -12,7 +12,7 @@ export const AuthProvider = ({ children }) => {
     const [roleLoading, setRoleLoading] = useState(true);
 
     // Fetch user role from user_roles table
-    const fetchUserRole = async (userId) => {
+    const fetchUserRole = async (userId, email = null) => {
         if (!userId) {
             setUserRole('investor'); // Default
             setRoleData(null);
@@ -41,7 +41,7 @@ export const AuthProvider = ({ children }) => {
                 });
             } else {
                 // No role entry → check if this is a new tenant from an invitation
-                const userEmail = (await supabase.auth.getUser())?.data?.user?.email;
+                const userEmail = email || (await supabase.auth.getUser())?.data?.user?.email;
 
                 if (userEmail) {
                     const { data: invitation } = await supabase
@@ -116,7 +116,7 @@ export const AuthProvider = ({ children }) => {
                         setSession(data.session);
                         setUser(data.session.user);
                         setLoading(false);
-                        fetchUserRole(data.session.user.id);
+                        fetchUserRole(data.session.user.id, data.session.user.email);
                         // Clean up URL
                         window.history.replaceState({}, '', window.location.pathname);
                         return; // Session established, don't run getSession below
@@ -134,7 +134,7 @@ export const AuthProvider = ({ children }) => {
                 setUser(session?.user ?? null);
                 setLoading(false);
                 if (session?.user) {
-                    fetchUserRole(session.user.id);
+                    fetchUserRole(session.user.id, session.user.email);
                 } else {
                     setRoleLoading(false);
                 }
@@ -149,7 +149,7 @@ export const AuthProvider = ({ children }) => {
             setUser(session?.user ?? null);
             setLoading(false);
             if (session?.user) {
-                fetchUserRole(session.user.id);
+                fetchUserRole(session.user.id, session.user.email);
                 // Clean up URL parameters (code or access token hash) if present, after session is active
                 const params = new URLSearchParams(window.location.search);
                 if (params.get('code') || window.location.hash.includes('access_token')) {
@@ -185,7 +185,7 @@ export const AuthProvider = ({ children }) => {
         roleLoading,
         isInvestor,
         isTenant,
-        refetchRole: () => user && fetchUserRole(user.id)
+        refetchRole: () => user && fetchUserRole(user.id, user.email)
     };
 
     return (
