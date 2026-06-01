@@ -6,7 +6,7 @@ import { useNotifications } from '../context/NotificationContext';
 import {
     Users, Mail, Send, CheckCircle2, Clock,
     X, Plus, Building2, DoorOpen, Search, RefreshCw, Loader,
-    Link2, Copy, Trash2, Filter
+    Link2, Copy, Trash2, Filter, QrCode
 } from 'lucide-react';
 
 const TenantManagement = () => {
@@ -33,6 +33,8 @@ const TenantManagement = () => {
     const [inviteForm, setInviteForm] = useState({ email: '', tenant_id: '', unit_id: '', property_id: '' });
     const [sending, setSending] = useState(false);
     const [statusMessage, setStatusMessage] = useState(null);
+    const [qrModalData, setQrModalData] = useState(null);
+    const [fetchingLinkIndex, setFetchingLinkIndex] = useState(null);
 
     // Tenant data verification states
     const [filterMode, setFilterMode] = useState('active'); // 'all', 'active', 'old'
@@ -180,6 +182,40 @@ const TenantManagement = () => {
             alert('Fehler beim Stornieren der Einladung: ' + err.message);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleShowQrModal = async (entry, idx) => {
+        setFetchingLinkIndex(idx);
+        try {
+            const { data, error } = await supabase.functions.invoke('send-letting-email', {
+                body: {
+                    action: 'get_invite_link',
+                    to: entry.email,
+                    tenantId: entry.tenantId,
+                    unitId: entry.unitId || null,
+                    propertyId: entry.propertyId || null,
+                    origin: window.location.origin
+                }
+            });
+
+            if (error) throw error;
+            if (data?.error) throw new Error(data.error);
+
+            if (data?.actionLink) {
+                setQrModalData({
+                    tenantName: getTenantName(entry.tenantId),
+                    email: entry.email,
+                    link: data.actionLink
+                });
+            } else {
+                throw new Error('Kein Link zurückgegeben');
+            }
+        } catch (err) {
+            console.error('Error fetching invite link:', err);
+            alert('Fehler beim Abrufen des Einladungslinks: ' + err.message);
+        } finally {
+            setFetchingLinkIndex(null);
         }
     };
 
@@ -634,28 +670,57 @@ const TenantManagement = () => {
                                             <td>
                                                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                                                     {entry.type === 'invited' && (
-                                                        <button
-                                                            onClick={() => handleCancelInvitation(entry)}
-                                                            style={{
-                                                                background: 'none',
-                                                                border: 'none',
-                                                                color: '#EF4444',
-                                                                cursor: 'pointer',
-                                                                padding: '4px',
-                                                                borderRadius: '4px',
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                gap: '4px',
-                                                                fontSize: '0.8rem',
-                                                                fontWeight: 600,
-                                                                transition: 'color 0.2s'
-                                                            }}
-                                                            title="Einladung stornieren"
-                                                            onMouseEnter={(e) => e.currentTarget.style.color = '#B91C1C'}
-                                                            onMouseLeave={(e) => e.currentTarget.style.color = '#EF4444'}
-                                                        >
-                                                            <Trash2 size={14} /> Stornieren
-                                                        </button>
+                                                        <>
+                                                            <button
+                                                                onClick={() => handleShowQrModal(entry, idx)}
+                                                                disabled={fetchingLinkIndex === idx}
+                                                                style={{
+                                                                    background: 'none',
+                                                                    border: 'none',
+                                                                    color: 'var(--primary-color)',
+                                                                    cursor: 'pointer',
+                                                                    padding: '4px',
+                                                                    borderRadius: '4px',
+                                                                    display: 'flex',
+                                                                    alignItems: 'center',
+                                                                    gap: '4px',
+                                                                    fontSize: '0.8rem',
+                                                                    fontWeight: 600,
+                                                                    transition: 'color 0.2s',
+                                                                    opacity: fetchingLinkIndex === idx ? 0.6 : 1
+                                                                }}
+                                                                title="Einladungslink & QR-Code anzeigen"
+                                                            >
+                                                                {fetchingLinkIndex === idx ? (
+                                                                    <Loader className="animate-spin" size={14} />
+                                                                ) : (
+                                                                    <QrCode size={14} />
+                                                                )}
+                                                                QR / Link
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleCancelInvitation(entry)}
+                                                                style={{
+                                                                    background: 'none',
+                                                                    border: 'none',
+                                                                    color: '#EF4444',
+                                                                    cursor: 'pointer',
+                                                                    padding: '4px',
+                                                                    borderRadius: '4px',
+                                                                    display: 'flex',
+                                                                    alignItems: 'center',
+                                                                    gap: '4px',
+                                                                    fontSize: '0.8rem',
+                                                                    fontWeight: 600,
+                                                                    transition: 'color 0.2s'
+                                                                }}
+                                                                title="Einladung stornieren"
+                                                                onMouseEnter={(e) => e.currentTarget.style.color = '#B91C1C'}
+                                                                onMouseLeave={(e) => e.currentTarget.style.color = '#EF4444'}
+                                                            >
+                                                                <Trash2 size={14} /> Stornieren
+                                                            </button>
+                                                        </>
                                                     )}
                                                 </div>
                                             </td>
@@ -712,22 +777,46 @@ const TenantManagement = () => {
                                                 {formatDate(entry.createdAt)}
                                             </div>
                                             {entry.type === 'invited' && (
-                                                <button
-                                                    onClick={() => handleCancelInvitation(entry)}
-                                                    style={{
-                                                        background: 'none',
-                                                        border: 'none',
-                                                        color: '#EF4444',
-                                                        cursor: 'pointer',
-                                                        padding: '4px',
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        justifyContent: 'center',
-                                                    }}
-                                                    title="Einladung stornieren"
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
+                                                <>
+                                                    <button
+                                                        onClick={() => handleShowQrModal(entry, idx)}
+                                                        disabled={fetchingLinkIndex === idx}
+                                                        style={{
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            color: 'var(--primary-color)',
+                                                            cursor: 'pointer',
+                                                            padding: '4px',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            opacity: fetchingLinkIndex === idx ? 0.6 : 1
+                                                        }}
+                                                        title="Einladungslink & QR-Code anzeigen"
+                                                    >
+                                                        {fetchingLinkIndex === idx ? (
+                                                            <Loader className="animate-spin" size={16} />
+                                                        ) : (
+                                                            <QrCode size={16} />
+                                                        )}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleCancelInvitation(entry)}
+                                                        style={{
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            color: '#EF4444',
+                                                            cursor: 'pointer',
+                                                            padding: '4px',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                        }}
+                                                        title="Einladung stornieren"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </>
                                             )}
                                         </div>
                                     </div>
@@ -1324,6 +1413,116 @@ const TenantManagement = () => {
                             >
                                 {sending ? <Loader size={14} className="animate-spin" /> : <Send size={14} />}
                                 Einladung senden
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── QR CODE & LINK MODAL ───────────────────────────────────── */}
+            {qrModalData && (
+                <div style={{
+                    position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
+                }} onClick={() => setQrModalData(null)}>
+                    <div
+                        style={{
+                            backgroundColor: 'var(--surface-color)',
+                            borderRadius: 'var(--radius-lg)',
+                            width: '100%', maxWidth: '440px',
+                            padding: '28px', boxSizing: 'border-box',
+                            boxShadow: 'var(--shadow-lg)',
+                            textAlign: 'center'
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                            <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <QrCode size={20} color="var(--primary-color)" />
+                                QR-Code & Einladungslink
+                            </h3>
+                            <button onClick={() => setQrModalData(null)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <div style={{ marginBottom: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                            Für Mieter: <strong style={{ color: 'var(--text-primary)' }}>{qrModalData.tenantName}</strong> ({qrModalData.email})
+                        </div>
+
+                        {/* QR Code Container */}
+                        <div style={{
+                            backgroundColor: '#fff',
+                            padding: '16px',
+                            borderRadius: 'var(--radius-md)',
+                            display: 'inline-block',
+                            border: '1px solid var(--border-color)',
+                            marginBottom: '20px'
+                        }}>
+                            <img
+                                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrModalData.link)}`}
+                                alt="QR Code"
+                                style={{ display: 'block', width: '200px', height: '200px' }}
+                            />
+                        </div>
+
+                        {/* Copy Link Section */}
+                        <div style={{ marginBottom: '20px', textAlign: 'left' }}>
+                            <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '6px', color: 'var(--text-secondary)' }}>
+                                Einladungslink (Magic Link)
+                            </label>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <input
+                                    type="text"
+                                    readOnly
+                                    value={qrModalData.link}
+                                    style={{
+                                        flex: 1,
+                                        padding: '10px 12px',
+                                        borderRadius: 'var(--radius-md)',
+                                        border: '1px solid var(--border-color)',
+                                        fontSize: '0.82rem',
+                                        backgroundColor: 'var(--background-color)',
+                                        color: 'var(--text-primary)',
+                                        outline: 'none'
+                                    }}
+                                    onClick={(e) => e.target.select()}
+                                />
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(qrModalData.link);
+                                        addNotification({
+                                            type: 'success',
+                                            title: 'Kopiert',
+                                            body: 'Einladungslink wurde in die Zwischenablage kopiert.'
+                                        });
+                                    }}
+                                    className="btn btn-secondary"
+                                    style={{ padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                    title="Link kopieren"
+                                >
+                                    <Copy size={16} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div style={{
+                            fontSize: '0.78rem',
+                            color: 'var(--text-secondary)',
+                            backgroundColor: 'var(--background-color)',
+                            padding: '12px',
+                            borderRadius: 'var(--radius-md)',
+                            border: '1px solid var(--border-color)',
+                            lineHeight: 1.4,
+                            marginBottom: '20px',
+                            textAlign: 'left'
+                        }}>
+                            💡 Sie können den QR-Code scannen, herunterladen (Rechtsklick → Bild speichern) oder den Link kopieren, um ihn z.B. per E-Post, Brief oder WhatsApp an den Mieter zu schicken.
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <button onClick={() => setQrModalData(null)} className="btn btn-primary btn-md">
+                                Fertig
                             </button>
                         </div>
                     </div>

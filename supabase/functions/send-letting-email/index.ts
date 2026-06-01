@@ -136,7 +136,14 @@ serve(async (req) => {
       }
 
       // Generate invite link (creates user in auth.users if not exists) or fallback to magiclink
-      const redirectTo = `${origin || 'https://app.immocontrol360.de'}/tenant/dashboard`;
+      let baseOrigin = origin || 'https://immocontrol360.de/app';
+      if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
+        baseOrigin = 'https://immocontrol360.de/app';
+      }
+      if (baseOrigin.endsWith('/')) {
+        baseOrigin = baseOrigin.slice(0, -1);
+      }
+      const redirectTo = `${baseOrigin}/tenant/dashboard`;
       console.log(`Generating link for ${to} redirecting to ${redirectTo}...`);
       
       let linkData;
@@ -190,6 +197,17 @@ serve(async (req) => {
       const magicLink = linkData.properties.action_link;
       console.log(`Successfully generated auth link.`);
 
+      // Fetch tenant name
+      const { data: tenant } = await supabaseAdmin
+        .from('tenants')
+        .select('first_name, last_name')
+        .eq('id', tenantId)
+        .maybeSingle();
+
+      const salutation = tenant && tenant.first_name && tenant.last_name 
+        ? `Hallo ${tenant.first_name} ${tenant.last_name},` 
+        : 'Hallo,';
+
       // Fetch SMTP config for landlord
       const config = await getSmtpConfig(supabaseAdmin, userId);
       if (!config) {
@@ -203,13 +221,13 @@ serve(async (req) => {
             <h2 style="margin: 0; font-size: 20px;">Einladung zum Mieterportal</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-            <p>Hallo,</p>
-            <p>Ihr Vermieter hat Sie eingeladen, das <strong>ImmoControlpro360 Mieterportal</strong> zu nutzen.</p>
-            <p>Über das Mieterportal können Sie:</p>
+            <p>${salutation}</p>
+            <p>Wir möchten Sie herzlich dazu einladen, das <strong>ImmoControlpro360 Mieterportal</strong> zu nutzen.</p>
+            <p>Über das Mieterportal können Sie ganz bequem:</p>
             <ul style="padding-left: 20px; color: #475569;">
-              <li>Ihre Mietverträge und Dokumente einsehen</li>
+              <li>Ihre Mietverträge und Dokumente online einsehen</li>
               <li>Nebenkostenabrechnungen prüfen</li>
-              <li>Meldungen und Anfragen direkt an Ihren Vermieter senden</li>
+              <li>Schadensmeldungen und Anfragen direkt an uns senden</li>
               <li>Ihre Kontaktdaten auf dem aktuellen Stand halten</li>
             </ul>
             <p>Klicken Sie auf den folgenden Button, um sich direkt und ohne Passwort im Portal anzumelden:</p>
@@ -227,6 +245,72 @@ serve(async (req) => {
       await sendMail(config, to, 'Einladung zum ImmoControlpro360 Mieterportal', inviteHtml);
 
       return new Response(JSON.stringify({ success: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      });
+    }
+
+    // ACTION: GET TENANT PORTAL INVITE LINK (Without sending email, returns the action link for QR code)
+    if (action === 'get_invite_link') {
+      if (!to || !tenantId) {
+        throw new Error('Missing required fields for invite link: to (email), tenantId');
+      }
+
+      let baseOrigin = origin || 'https://immocontrol360.de/app';
+      if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
+        baseOrigin = 'https://immocontrol360.de/app';
+      }
+      if (baseOrigin.endsWith('/')) {
+        baseOrigin = baseOrigin.slice(0, -1);
+      }
+      const redirectTo = `${baseOrigin}/tenant/dashboard`;
+      
+      let linkData;
+      let linkErr;
+      
+      const inviteResult = await supabaseAdmin.auth.admin.generateLink({
+        type: 'invite',
+        email: to,
+        options: {
+          redirectTo: redirectTo,
+          data: {
+            role: 'tenant',
+            tenant_id: tenantId,
+            unit_id: unitId || null,
+            property_id: propertyId || null
+          }
+        }
+      });
+      
+      if (!inviteResult.error && inviteResult.data?.properties?.action_link) {
+        linkData = inviteResult.data;
+      } else {
+        const magicResult = await supabaseAdmin.auth.admin.generateLink({
+          type: 'magiclink',
+          email: to,
+          options: {
+            redirectTo: redirectTo,
+            data: {
+              role: 'tenant',
+              tenant_id: tenantId,
+              unit_id: unitId || null,
+              property_id: propertyId || null
+            }
+          }
+        });
+        
+        if (!magicResult.error && magicResult.data?.properties?.action_link) {
+          linkData = magicResult.data;
+        } else {
+          linkErr = magicResult.error || new Error('Failed to generate magiclink');
+        }
+      }
+
+      if (linkErr || !linkData?.properties?.action_link) {
+        throw new Error(`Failed to generate any auth link: ${linkErr?.message || 'No action link returned'}`);
+      }
+
+      return new Response(JSON.stringify({ success: true, actionLink: linkData.properties.action_link }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       });
