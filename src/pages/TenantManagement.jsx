@@ -143,6 +143,46 @@ const TenantManagement = () => {
         }
     };
 
+    const handleCancelInvitation = async (entry) => {
+        if (!window.confirm(`Möchten Sie die Einladung für ${getTenantName(entry.tenantId)} wirklich stornieren?`)) {
+            return;
+        }
+
+        try {
+            setLoading(true);
+            
+            // 1. Delete from tenant_invitations
+            if (entry.id) {
+                const { error: invErr } = await supabase
+                    .from('tenant_invitations')
+                    .delete()
+                    .eq('id', entry.id);
+                if (invErr) throw invErr;
+            } else {
+                const { error: invErr } = await supabase
+                    .from('tenant_invitations')
+                    .delete()
+                    .eq('tenant_id', entry.tenantId);
+                if (invErr) throw invErr;
+            }
+
+            // 2. Delete from tenant_verification_links
+            const { error: linkErr } = await supabase
+                .from('tenant_verification_links')
+                .delete()
+                .eq('tenant_id', entry.tenantId);
+            if (linkErr) throw linkErr;
+
+            alert('Einladung wurde erfolgreich storniert.');
+            fetchData();
+        } catch (err) {
+            console.error('Error cancelling invitation:', err);
+            alert('Fehler beim Stornieren der Einladung: ' + err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     // ── GENERATE TEMPORARY VERIFICATION LINK ────────────────────────
     const handleGenerateLink = async (tenantId) => {
         setGeneratingLinkId(tenantId);
@@ -405,6 +445,7 @@ const TenantManagement = () => {
         ...invitations
             .filter(inv => !tenantRoles.find(r => r.tenant_id === inv.tenant_id))
             .map(inv => ({
+                id: inv.id,
                 type: inv.status === 'accepted' ? 'registered' : 'invited',
                 tenantId: inv.tenant_id,
                 unitId: inv.unit_id,
@@ -544,12 +585,13 @@ const TenantManagement = () => {
                                     <th>E-MAIL</th>
                                     <th>STATUS</th>
                                     <th>EINGELADEN AM</th>
+                                    <th style={{ textAlign: 'right' }}>AKTIONEN</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {allTenantEntries.length === 0 ? (
                                     <tr>
-                                        <td colSpan="5" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
+                                        <td colSpan="6" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
                                             Noch keine Mieter eingeladen. Klicken Sie auf "Mieter einladen".
                                         </td>
                                     </tr>
@@ -588,6 +630,34 @@ const TenantManagement = () => {
                                                 <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
                                                     {formatDate(entry.createdAt)}
                                                 </span>
+                                            </td>
+                                            <td>
+                                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                                                    {entry.type === 'invited' && (
+                                                        <button
+                                                            onClick={() => handleCancelInvitation(entry)}
+                                                            style={{
+                                                                background: 'none',
+                                                                border: 'none',
+                                                                color: '#EF4444',
+                                                                cursor: 'pointer',
+                                                                padding: '4px',
+                                                                borderRadius: '4px',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '4px',
+                                                                fontSize: '0.8rem',
+                                                                fontWeight: 600,
+                                                                transition: 'color 0.2s'
+                                                            }}
+                                                            title="Einladung stornieren"
+                                                            onMouseEnter={(e) => e.currentTarget.style.color = '#B91C1C'}
+                                                            onMouseLeave={(e) => e.currentTarget.style.color = '#EF4444'}
+                                                        >
+                                                            <Trash2 size={14} /> Stornieren
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </td>
                                         </tr>
                                     ))
@@ -637,8 +707,28 @@ const TenantManagement = () => {
                                         <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                                             {entry.email || '—'}
                                         </div>
-                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                            {formatDate(entry.createdAt)}
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                {formatDate(entry.createdAt)}
+                                            </div>
+                                            {entry.type === 'invited' && (
+                                                <button
+                                                    onClick={() => handleCancelInvitation(entry)}
+                                                    style={{
+                                                        background: 'none',
+                                                        border: 'none',
+                                                        color: '#EF4444',
+                                                        cursor: 'pointer',
+                                                        padding: '4px',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                    }}
+                                                    title="Einladung stornieren"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
