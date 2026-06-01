@@ -509,7 +509,7 @@ const Letting = () => {
 
       {!smtpConfigured && (
         <div 
-          onClick={() => navigate('/portfolio/settings', { state: { activeTab: 'email-settings' } })}
+          onClick={() => navigate('/settings', { state: { activeTab: 'email-settings' } })}
           style={{
             display: 'flex',
             alignItems: 'center',

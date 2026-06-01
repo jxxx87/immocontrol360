@@ -5,7 +5,7 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
-import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare } from 'lucide-react';
+import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare, FileText } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';

@@ -66,6 +66,10 @@ async function sendMail(config: SmtpConfig, to: string, subject: string, html: s
     to,
     subject,
     html,
+    envelope: {
+      from: config.user, // Force envelope sender to match SMTP auth user (resolves SPF/bounce issues)
+      to: to
+    }
   });
 
   console.log(`Email sent successfully: ${info.messageId}`);
@@ -130,12 +134,15 @@ serve(async (req) => {
         throw new Error('Missing required fields for tenant invitation: to (email), tenantId, userId');
       }
 
-      // Generate magic link via Supabase Auth admin API
+      // Generate invite link (creates user in auth.users if not exists) or fallback to magiclink
       const redirectTo = `${origin || 'https://app.immocontrol360.de'}/tenant/dashboard`;
-      console.log(`Generating magic link for ${to} redirecting to ${redirectTo}...`);
+      console.log(`Generating link for ${to} redirecting to ${redirectTo}...`);
       
-      const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
-        type: 'magiclink',
+      let linkData;
+      let linkErr;
+      
+      const inviteResult = await supabaseAdmin.auth.admin.generateLink({
+        type: 'invite',
         email: to,
         options: {
           redirectTo: redirectTo,
@@ -147,13 +154,40 @@ serve(async (req) => {
           }
         }
       });
+      
+      if (!inviteResult.error && inviteResult.data?.properties?.action_link) {
+        linkData = inviteResult.data;
+        console.log(`Successfully generated invite link.`);
+      } else {
+        console.log(`Invite link generation failed: ${inviteResult.error?.message}. Trying magiclink...`);
+        const magicResult = await supabaseAdmin.auth.admin.generateLink({
+          type: 'magiclink',
+          email: to,
+          options: {
+            redirectTo: redirectTo,
+            data: {
+              role: 'tenant',
+              tenant_id: tenantId,
+              unit_id: unitId || null,
+              property_id: propertyId || null
+            }
+          }
+        });
+        
+        if (!magicResult.error && magicResult.data?.properties?.action_link) {
+          linkData = magicResult.data;
+          console.log(`Successfully generated magiclink.`);
+        } else {
+          linkErr = magicResult.error || new Error('Failed to generate magiclink');
+        }
+      }
 
       if (linkErr || !linkData?.properties?.action_link) {
-        throw new Error(`Failed to generate magic link: ${linkErr?.message || 'No action link returned'}`);
+        throw new Error(`Failed to generate any auth link: ${linkErr?.message || 'No action link returned'}`);
       }
 
       const magicLink = linkData.properties.action_link;
-      console.log(`Successfully generated magic link.`);
+      console.log(`Successfully generated auth link.`);
 
       // Fetch SMTP config for landlord
       const config = await getSmtpConfig(supabaseAdmin, userId);

@@ -31,6 +31,8 @@ const BankReconciliation = () => {
     const [categories, setCategories] = useState([]);
     const [tenants, setTenants] = useState([]);
     const [units, setUnits] = useState([]);
+    const [rentPayments, setRentPayments] = useState([]);
+    const [expenses, setExpenses] = useState([]);
 
     // UI control states
     const [showConnectModal, setShowConnectModal] = useState(false);
@@ -138,6 +140,20 @@ const BankReconciliation = () => {
                 .order('unit_name');
             setUnits(unitsData || []);
 
+            // 9. Fetch rent payments
+            const { data: rentPaymentsData } = await supabase
+                .from('rent_payments')
+                .select('*')
+                .eq('user_id', user.id);
+            setRentPayments(rentPaymentsData || []);
+
+            // 10. Fetch expenses
+            const { data: expensesData } = await supabase
+                .from('expenses')
+                .select('*')
+                .eq('user_id', user.id);
+            setExpenses(expensesData || []);
+
         } catch (error) {
             console.error('Error loading bank reconciliation data:', error);
         } finally {
@@ -166,6 +182,129 @@ const BankReconciliation = () => {
         return transactions.map(tx => {
             if (tx.status !== 'pending') {
                 return { tx, type: tx.matched_type, targetId: tx.matched_target_id, confidence: 100, label: 'Bereits verbucht', matched: true };
+            }
+
+            const purposeLower = (tx.purpose || '').toLowerCase();
+            const senderLower = (tx.counterpart_name || '').toLowerCase();
+            const txDate = new Date(tx.booking_date);
+
+            // A. Check if this is already manually booked (prevent duplicates)
+            if (tx.amount > 0) {
+                // Find matching rent payment
+                // Try to find the recommended lease first
+                let recommendedLeaseId = null;
+                const matchedRule = rules.find(rule => {
+                    if (rule.counterpart_iban && tx.counterpart_iban && rule.counterpart_iban.replace(/\s+/g, '') === tx.counterpart_iban.replace(/\s+/g, '')) return true;
+                    if (rule.counterpart_name && tx.counterpart_name && tx.counterpart_name.toLowerCase().includes(rule.counterpart_name.toLowerCase())) return true;
+                    if (rule.purpose_keyword && tx.purpose && tx.purpose.toLowerCase().includes(rule.purpose_keyword.toLowerCase())) return true;
+                    return false;
+                });
+                if (matchedRule && matchedRule.target_type === 'income') {
+                    recommendedLeaseId = matchedRule.target_id;
+                } else {
+                    let bestLease = null;
+                    let maxScore = 0;
+                    leases.forEach(lease => {
+                        let score = 0;
+                        const tenantLastName = (lease.tenant?.last_name || '').toLowerCase();
+                        if (tenantLastName && (senderLower.includes(tenantLastName) || purposeLower.includes(tenantLastName))) score += 50;
+                        if (score > maxScore) {
+                            maxScore = score;
+                            bestLease = lease;
+                        }
+                    });
+                    if (bestLease && maxScore >= 30) {
+                        recommendedLeaseId = bestLease.id;
+                    }
+                }
+
+                // Look for payment
+                let duplicatePayment = rentPayments.find(p => {
+                    const matchAmount = Math.abs(p.amount - tx.amount) < 0.01;
+                    if (!matchAmount) return false;
+                    const pDate = new Date(p.payment_date);
+                    const diffDays = Math.abs(txDate - pDate) / (1000 * 60 * 60 * 24);
+                    if (diffDays > 10) return false;
+                    if (recommendedLeaseId && p.lease_id === recommendedLeaseId) return true;
+                    return false;
+                });
+
+                if (!duplicatePayment) {
+                    // Generic check fallback with narrower window (5 days)
+                    duplicatePayment = rentPayments.find(p => {
+                        const matchAmount = Math.abs(p.amount - tx.amount) < 0.01;
+                        if (!matchAmount) return false;
+                        const pDate = new Date(p.payment_date);
+                        const diffDays = Math.abs(txDate - pDate) / (1000 * 60 * 60 * 24);
+                        return diffDays <= 5;
+                    });
+                }
+
+                if (duplicatePayment) {
+                    const lease = leases.find(l => l.id === duplicatePayment.lease_id);
+                    return {
+                        tx,
+                        type: 'income',
+                        targetId: duplicatePayment.lease_id,
+                        confidence: 100,
+                        alreadyBooked: true,
+                        label: `Erfasste Miete: ${lease?.tenant?.last_name || 'Mieter'}`,
+                        reason: `Eine Zahlung über ${formatCurrency(duplicatePayment.amount)} für ${lease?.tenant?.first_name || ''} ${lease?.tenant?.last_name || ''} wurde bereits am ${new Date(duplicatePayment.payment_date).toLocaleDateString('de-DE')} manuell gebucht.`,
+                    };
+                }
+            } else {
+                // Check outgoing expense duplicates
+                let recommendedCategoryId = null;
+                let recommendedPropertyId = null;
+                const matchedRule = rules.find(rule => {
+                    if (rule.counterpart_iban && tx.counterpart_iban && rule.counterpart_iban.replace(/\s+/g, '') === tx.counterpart_iban.replace(/\s+/g, '')) return true;
+                    if (rule.counterpart_name && tx.counterpart_name && tx.counterpart_name.toLowerCase().includes(rule.counterpart_name.toLowerCase())) return true;
+                    if (rule.purpose_keyword && tx.purpose && tx.purpose.toLowerCase().includes(rule.purpose_keyword.toLowerCase())) return true;
+                    return false;
+                });
+                if (matchedRule && matchedRule.target_type === 'expense') {
+                    recommendedCategoryId = matchedRule.target_id;
+                    recommendedPropertyId = matchedRule.property_id;
+                }
+
+                let duplicateExpense = expenses.find(e => {
+                    const matchAmount = Math.abs(e.amount - Math.abs(tx.amount)) < 0.01;
+                    if (!matchAmount) return false;
+                    const eDate = new Date(e.booking_date);
+                    const diffDays = Math.abs(txDate - eDate) / (1000 * 60 * 60 * 24);
+                    if (diffDays > 10) return false;
+                    if (recommendedCategoryId && e.category_id === recommendedCategoryId) return true;
+                    if (recommendedPropertyId && e.property_id === recommendedPropertyId) return true;
+                    const ePayeeLower = (e.payee || '').toLowerCase();
+                    if (ePayeeLower && senderLower && (senderLower.includes(ePayeeLower) || ePayeeLower.includes(senderLower))) return true;
+                    return false;
+                });
+
+                if (!duplicateExpense) {
+                    duplicateExpense = expenses.find(e => {
+                        const matchAmount = Math.abs(e.amount - Math.abs(tx.amount)) < 0.01;
+                        if (!matchAmount) return false;
+                        const eDate = new Date(e.booking_date);
+                        const diffDays = Math.abs(txDate - eDate) / (1000 * 60 * 60 * 24);
+                        return diffDays <= 3;
+                    });
+                }
+
+                if (duplicateExpense) {
+                    const cat = categories.find(c => c.id === duplicateExpense.category_id);
+                    const prop = properties.find(p => p.id === duplicateExpense.property_id);
+                    return {
+                        tx,
+                        type: 'expense',
+                        targetId: duplicateExpense.category_id || null,
+                        propertyId: duplicateExpense.property_id || null,
+                        unitId: duplicateExpense.unit_id || null,
+                        confidence: 100,
+                        alreadyBooked: true,
+                        label: `Erfasste Ausgabe (${cat?.name || 'Kategorie'})`,
+                        reason: `Ausgabe über ${formatCurrency(duplicateExpense.amount)} (${duplicateExpense.payee || 'Unbekannt'}) am ${new Date(duplicateExpense.booking_date).toLocaleDateString('de-DE')} wurde bereits verbucht.`,
+                    };
+                }
             }
 
             // 1. Check rules database (highest priority / learned intelligence)
@@ -219,8 +358,6 @@ const BankReconciliation = () => {
             }
 
             // Heuristics matching (AI suggestions)
-            const purposeLower = (tx.purpose || '').toLowerCase();
-            const senderLower = (tx.counterpart_name || '').toLowerCase();
 
             // Case A: Mieteingänge (positive amounts)
             if (tx.amount > 0) {
@@ -336,7 +473,7 @@ const BankReconciliation = () => {
 
             return { tx, type: null, targetId: null, confidence: 0, label: 'Kein eindeutiger Treffer', reason: 'Keine passenden Regeln oder Namensübereinstimmungen gefunden' };
         });
-    }, [transactions, rules, leases, categories, properties]);
+    }, [transactions, rules, leases, categories, properties, rentPayments, expenses]);
 
     // Trigger Sandbox Mock connection flow via FinAPI
     const connectSandboxBank = async () => {
@@ -435,6 +572,30 @@ const BankReconciliation = () => {
         } catch (error) {
             console.error('Error inserting mock connection:', error);
             alert('Fehler beim Verbinden der Sandbox Bank: ' + error.message);
+        } finally {
+            setActionLoading(false);
+        }
+    };
+
+    // Link transaction to existing manual ledger record (without double posting)
+    const handleLinkExisting = async (txId, type, targetId) => {
+        setActionLoading(true);
+        try {
+            const { error } = await supabase
+                .from('bank_transactions')
+                .update({
+                    status: 'matched',
+                    matched_type: type,
+                    matched_target_id: targetId
+                })
+                .eq('id', txId);
+
+            if (error) throw error;
+            triggerToast('Buchung erfolgreich mit bestehendem Eintrag verknüpft (kein Duplikat erstellt).');
+            fetchData();
+        } catch (error) {
+            console.error('Error linking transaction:', error);
+            alert('Fehler beim Verknüpfen: ' + error.message);
         } finally {
             setActionLoading(false);
         }
@@ -913,7 +1074,7 @@ const BankReconciliation = () => {
                                     </div>
 
                                     {/* Table Body */}
-                                    {matchRecommendations.map(({ tx, type, targetId, propertyId, unitId, confidence, label, reason, rule, matched }, idx) => {
+                                    {matchRecommendations.map(({ tx, type, targetId, propertyId, unitId, confidence, label, reason, rule, matched, alreadyBooked }, idx) => {
                                         const isPositive = tx.amount > 0;
                                         return (
                                             <div 
@@ -968,8 +1129,54 @@ const BankReconciliation = () => {
                                                     ) : (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                                                             
-                                                            {/* AI recommendation label */}
-                                                            {confidence > 0 ? (
+                                                            {/* Check if transaction is already booked manually */}
+                                                            {alreadyBooked ? (
+                                                                <div style={{ 
+                                                                    display: 'flex', 
+                                                                    flexDirection: 'column',
+                                                                    padding: '8px', 
+                                                                    borderRadius: '6px', 
+                                                                    backgroundColor: 'rgba(245, 158, 11, 0.06)',
+                                                                    border: '1px dashed rgba(245, 158, 11, 0.3)'
+                                                                }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700, color: '#d97706' }}>
+                                                                        <AlertCircle size={12} /> Bereits erfasst
+                                                                    </div>
+                                                                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                        {label}
+                                                                    </div>
+                                                                    {reason && (
+                                                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.2 }}>
+                                                                            {reason}
+                                                                        </div>
+                                                                    )}
+
+                                                                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                                                                        <button 
+                                                                            onClick={() => handleLinkExisting(tx.id, type, targetId)}
+                                                                            style={{
+                                                                                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+                                                                                padding: '4px 6px', fontSize: '0.75rem', fontWeight: 600, border: 'none',
+                                                                                borderRadius: '4px', backgroundColor: '#d97706', color: 'white', cursor: 'pointer'
+                                                                            }}
+                                                                            title="Mit vorhandenem Eintrag verknüpfen"
+                                                                        >
+                                                                            <Check size={12} /> Verknüpfen
+                                                                        </button>
+                                                                        <button 
+                                                                            onClick={() => openManualMap(tx)}
+                                                                            style={{
+                                                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                                                padding: '4px', border: '1px solid var(--border-color)',
+                                                                                borderRadius: '4px', backgroundColor: 'var(--surface-color)', cursor: 'pointer'
+                                                                            }}
+                                                                            title="Neu verbuchen"
+                                                                        >
+                                                                            <Settings size={12} />
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : confidence > 0 ? (
                                                                 <div style={{ 
                                                                     display: 'flex', 
                                                                     flexDirection: 'column',
