@@ -59,6 +59,7 @@ import TenantTickets from './pages/tenant/TenantTickets';
 import TenantMessages from './pages/tenant/TenantMessages';
 import TenantAnnouncements from './pages/tenant/TenantAnnouncements';
 import TenantDocuments from './pages/tenant/TenantDocuments';
+import TenantStamdaten from './pages/tenant/TenantStamdaten';
 
 // ── Investor Portal Pages ──
 import TenantManagement from './pages/TenantManagement';
@@ -159,6 +160,7 @@ function App() {
                       <Route path="tenant/messages" element={<TenantMessages />} />
                       <Route path="tenant/announcements" element={<TenantAnnouncements />} />
                       <Route path="tenant/documents" element={<TenantDocuments />} />
+                      <Route path="tenant/stammdaten" element={<TenantStamdaten />} />
                     </Route>
                     {/* Catch-all route to redirect back to main index */}
                     <Route path="*" element={<Navigate to="/" replace />} />

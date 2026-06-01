@@ -203,6 +203,33 @@ const TenantDashboard = () => {
                 </p>
             </div>
 
+            {/* Password setup warning banner */}
+            {user && user.user_metadata?.password_set !== true && (
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '12px',
+                    padding: '16px 20px',
+                    borderRadius: 'var(--radius-lg)',
+                    backgroundColor: '#FFFBEB',
+                    border: '1px solid #FDE68A',
+                    color: '#92400E',
+                    fontSize: '0.88rem',
+                    lineHeight: 1.5,
+                    marginBottom: '24px',
+                    boxShadow: '0 2px 6px rgba(245,158,11,0.05)'
+                }}>
+                    <AlertCircle size={20} style={{ flexShrink: 0, marginTop: '2px', color: '#D97706' }} />
+                    <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, marginBottom: '2px' }}>Passwort einrichten erforderlich</div>
+                        <div>
+                            Richten Sie bitte ein Passwort ein, damit Sie sich in Zukunft bequem ohne E-Mail-Link anmelden können.
+                            Wechseln Sie hierzu zum Menüpunkt <a href="/tenant/stammdaten" style={{ color: '#B45309', fontWeight: 600, textDecoration: 'underline' }}>Stammdaten</a>.
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Objektkalender Quick-Info */}
             {(nextWaste || nextTask || nextCleaning) && (() => {
                 const cardCount = [nextCleaning, nextWaste, nextTask].filter(Boolean).length;

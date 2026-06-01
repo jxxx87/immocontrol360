@@ -26,7 +26,14 @@ const Layout = () => {
 
     useEffect(() => {
         const checkOnboarding = async () => {
-            if (!user || userRole === 'tenant') {
+            if (!user) {
+                setOnboardingChecked(true);
+                return;
+            }
+            if (userRole === null) {
+                return; // Wait for role to finish loading
+            }
+            if (userRole !== 'investor') {
                 setOnboardingChecked(true);
                 return;
             }

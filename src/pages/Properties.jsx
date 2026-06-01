@@ -1131,7 +1131,7 @@ const Properties = () => {
         }
     };
 
-    const handleEditProperty = (property, source = null) => {
+    const handleEditProperty = async (property, source = null) => {
         setEditingPropertyId(property.id);
         if (source) setReturnTo(source);
         
@@ -1139,6 +1139,13 @@ const Properties = () => {
         const weRow = property.economic_unit_id 
             ? economicUnits.find(eu => eu.id === property.economic_unit_id) 
             : null;
+
+        const conn = await resolveCloudConnection(property.portfolio_id);
+        if (conn && conn.provider) {
+            setPropertyProvider(conn.provider);
+        } else {
+            setPropertyProvider('onedrive');
+        }
 
         setPropertyForm({
             portfolio_id: property.portfolio_id || '',
@@ -1153,7 +1160,8 @@ const Properties = () => {
             economic_unit_members: property.economic_unit_id 
                 ? properties.filter(p => p.economic_unit_id === property.economic_unit_id && p.id !== property.id).map(p => p.id) 
                 : [],
-            _original_economic_unit_id: property.economic_unit_id
+            _original_economic_unit_id: property.economic_unit_id,
+            thumbnail_image: property.thumbnail_image || ''
         });
         
         setIsPropertyModalOpen(true);
@@ -2010,7 +2018,16 @@ const Properties = () => {
                     <select
                         style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
                         value={propertyForm.portfolio_id}
-                        onChange={(e) => setPropertyForm({ ...propertyForm, portfolio_id: e.target.value })}
+                        onChange={async (e) => {
+                            const val = e.target.value;
+                            setPropertyForm(prev => ({ ...prev, portfolio_id: val }));
+                            if (val) {
+                                const conn = await resolveCloudConnection(val);
+                                if (conn && conn.provider) {
+                                    setPropertyProvider(conn.provider);
+                                }
+                            }
+                        }}
                     >
                         <option value="">Bitte wählen...</option>
                         {portfolios.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}

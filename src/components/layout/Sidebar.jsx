@@ -27,7 +27,8 @@ import {
     Monitor,
     Lock,
     CalendarDays,
-    Folder
+    Folder,
+    User
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useViewMode } from '../../context/ViewModeContext';
@@ -181,6 +182,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
         { path: '/tenant/announcements', label: 'Aushang', icon: Pin },
         { path: '/tenant/documents', label: 'Dokumente', icon: Files },
         { path: '/object-calendar', label: 'Objektkalender', icon: CalendarDays },
+        { path: '/tenant/stammdaten', label: 'Stammdaten', icon: User },
     ];
 
     const navItems = userRole === 'tenant' ? tenantNavItems : investorNavItems;
