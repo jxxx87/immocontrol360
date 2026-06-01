@@ -22,7 +22,7 @@ serve(async (req) => {
   }
 
   try {
-    const { provider, action, foldersToCreate } = await req.json()
+    const { provider, action } = await req.json()
     
     // Initialize Supabase client
     const supabaseClient = createClient(
@@ -137,7 +137,6 @@ serve(async (req) => {
       const res = await fetch(`https://graph.microsoft.com/v1.0${endpoint}`, options)
       
       if (!res.ok) {
-        // Return null if not found (for checking folder existence)
         if (res.status === 404) return null
         const err = await res.text()
         throw new Error(`Graph API Error (${res.status}): ${err}`)
@@ -170,100 +169,227 @@ serve(async (req) => {
       return res.status === 204 ? null : await res.json()
     }
 
-    if (provider === 'onedrive') {
-      const appFolderName = "ImmoControlpro360"
-      
-      if (action === 'check') {
-        const rootFolder = await msGraphCall(`/me/drive/root:/${appFolderName}`)
-        if (!rootFolder) {
-           return new Response(JSON.stringify({ missingFolders: foldersToCreate }), {
-             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-             status: 200,
-           })
+    // 1. Fetch properties and units of the user
+    const { data: props, error: propsError } = await supabaseClient
+      .from('properties')
+      .select('id, street, house_number, city, economic_unit_id')
+      .order('street')
+
+    if (propsError) throw propsError
+
+    const { data: units, error: unitsError } = await supabaseClient
+      .from('units')
+      .select('id, property_id, unit_name')
+
+    if (unitsError) throw unitsError
+
+    // 2. Group properties and generate folder names
+    const groups: Record<string, any> = {}
+    const ungrouped: any[] = []
+    
+    const safeProps = props || []
+    safeProps.forEach((p: any) => {
+      if (p.economic_unit_id) {
+        if (!groups[p.economic_unit_id]) {
+          groups[p.economic_unit_id] = {
+            id: p.economic_unit_id,
+            isGroup: true,
+            members: []
+          }
         }
-        const children = await msGraphCall(`/me/drive/items/${rootFolder.id}/children?$select=id,name`)
-        const existingFolders = children?.value || []
-        const existingNames = existingFolders.map((c: any) => c.name)
-        
-        const missingFolders: string[] = []
-        const checkPromises = foldersToCreate.map(async (f) => {
-          const sanitizedF = f.replace(/["*:<>?\/\\|]/g, '')
-          const folderIdx = existingNames.indexOf(sanitizedF)
-          
-          if (folderIdx === -1) {
-            missingFolders.push(f)
-          } else {
-            const folderId = existingFolders[folderIdx].id
-            const subChildren = await msGraphCall(`/me/drive/items/${folderId}/children?$select=name`)
-            const subNames = (subChildren?.value || []).map((c: any) => c.name)
-            
-            const hasAllSubs = DEFAULT_SUBFOLDERS.every(sub => subNames.includes(sub))
-            if (!hasAllSubs) {
-              missingFolders.push(f)
-            }
+        groups[p.economic_unit_id].members.push(p)
+      } else {
+        ungrouped.push({ ...p, isGroup: false })
+      }
+    })
+
+    const finalGrouped = [...Object.values(groups), ...ungrouped]
+    
+    finalGrouped.forEach((item: any) => {
+      if (item.isGroup) {
+        const groupedByStreet: Record<string, string[]> = {}
+        item.members.forEach((m: any) => {
+          if (!m.street) return
+          if (!groupedByStreet[m.street]) groupedByStreet[m.street] = []
+          if (m.house_number) {
+            groupedByStreet[m.street].push(m.house_number)
           }
         })
+        const parts = Object.keys(groupedByStreet).map(street => {
+          const nums = groupedByStreet[street]
+          if (nums.length > 0) {
+            return `${street} ${nums.join(' & ')}`
+          }
+          return street
+        })
+        const displayNames = parts.slice(0, 2).join(' | ')
+        const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames
+        item.displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`
+      } else {
+        item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim()
+      }
+    })
+
+    // 3. Build expected folder paths list
+    const expectedPaths: string[] = []
+    
+    finalGrouped.forEach((item: any) => {
+      const folderName = item.displayFolderName
+      
+      // Standard folders
+      DEFAULT_SUBFOLDERS.forEach(sub => {
+        expectedPaths.push(`${folderName}/${sub}`)
+      })
+      
+      // Neuvermietung structure
+      // Collect units belonging to this property/group
+      const propertyIds = item.isGroup ? item.members.map((m: any) => m.id) : [item.id]
+      const relatedUnits = (units || []).filter((u: any) => propertyIds.includes(u.property_id))
+      
+      relatedUnits.forEach((unit: any) => {
+        if (unit.unit_name) {
+          expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Bilder`)
+        }
+      })
+    })
+
+    const appFolderName = "ImmoControlpro360"
+
+    // OneDrive Sync
+    if (provider === 'onedrive') {
+      // Helper to ensure path exists in OneDrive
+      const folderCacheOneDrive: Record<string, string> = {}
+      
+      const ensurePathOneDrive = async (path: string) => {
+        const segments = path.split('/').filter(s => s.length > 0)
+        let currentParentId = "root"
+        let currentPath = appFolderName
+        
+        // Ensure root app folder first
+        if (!folderCacheOneDrive[appFolderName]) {
+          let rootFolder = await msGraphCall(`/me/drive/root:/${appFolderName}`)
+          if (!rootFolder) {
+            rootFolder = await msGraphCall(`/me/drive/root/children`, 'POST', {
+              name: appFolderName,
+              folder: {},
+              "@microsoft.graph.conflictBehavior": "rename"
+            })
+          }
+          folderCacheOneDrive[appFolderName] = rootFolder.id
+        }
+        currentParentId = folderCacheOneDrive[appFolderName]
+
+        for (const segment of segments) {
+          const safeSegment = segment.replace(/["*:<>?\/\\|]/g, '')
+          currentPath = `${currentPath}/${safeSegment}`
+          
+          if (folderCacheOneDrive[currentPath]) {
+            currentParentId = folderCacheOneDrive[currentPath]
+            continue
+          }
+
+          let folder = await msGraphCall(`/me/drive/root:/${currentPath}`)
+          if (!folder) {
+            folder = await msGraphCall(`/me/drive/items/${currentParentId}/children`, 'POST', {
+              name: safeSegment,
+              folder: {},
+              "@microsoft.graph.conflictBehavior": "replace"
+            })
+          }
+          folderCacheOneDrive[currentPath] = folder.id
+          currentParentId = folder.id
+        }
+        return currentParentId
+      }
+
+      if (action === 'check') {
+        const missingPaths: string[] = []
+        
+        // Batch check paths
+        const checkPromises = expectedPaths.map(async (path) => {
+          const sanitizedPath = path.split('/').map(s => s.replace(/["*:<>?\/\\|]/g, '')).join('/')
+          const folder = await msGraphCall(`/me/drive/root:/${appFolderName}/${sanitizedPath}`)
+          if (!folder) {
+            missingPaths.push(path)
+          }
+        })
+        
         await Promise.all(checkPromises)
         
-        return new Response(JSON.stringify({ missingFolders }), {
-           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-           status: 200,
+        return new Response(JSON.stringify({ missingFolders: missingPaths }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 200,
         })
       }
 
-      // If action !== 'check', proceed to create
-      // 1. Ensure Root Folder exists
-      let rootFolder = await msGraphCall(`/me/drive/root:/${appFolderName}`)
-      if (!rootFolder) {
-        rootFolder = await msGraphCall(`/me/drive/root/children`, 'POST', {
-          name: appFolderName,
-          folder: {},
-          "@microsoft.graph.conflictBehavior": "rename"
-        })
+      // Action 'create'
+      for (const path of expectedPaths) {
+        await ensurePathOneDrive(path)
       }
 
-      // 2. Iterate over folders to create (Properties / WGs)
-      const createdFolders = []
-      
-      for (const folderName of foldersToCreate) {
-        // Sanitize folder name (remove invalid characters for OneDrive: " * : < > ? / \ |)
-        const safeFolderName = folderName.replace(/["*:<>?\/\\|]/g, '')
-        
-        let propFolder = await msGraphCall(`/me/drive/root:/${appFolderName}/${safeFolderName}`)
-        if (!propFolder) {
-          propFolder = await msGraphCall(`/me/drive/items/${rootFolder.id}/children`, 'POST', {
-            name: safeFolderName,
-            folder: {},
-            "@microsoft.graph.conflictBehavior": "replace"
-          })
-        }
-        
-        // 3. Create Default Subfolders inside the Property folder
-        const subfolderPromises = DEFAULT_SUBFOLDERS.map(async (sub) => {
-          let subF = await msGraphCall(`/me/drive/root:/${appFolderName}/${safeFolderName}/${sub}`)
-          if (!subF) {
-             return msGraphCall(`/me/drive/items/${propFolder.id}/children`, 'POST', {
-               name: sub,
-               folder: {},
-               "@microsoft.graph.conflictBehavior": "replace"
-             })
-          }
-          return subF
-        })
-
-        await Promise.all(subfolderPromises)
-        createdFolders.push(propFolder.id)
-      }
-
-      return new Response(JSON.stringify({ success: true, createdFolders }), {
+      return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       })
     }
 
+    // Google Drive Sync
     if (provider === 'googledrive') {
-      const appFolderName = "ImmoControlpro360"
-      
+      // Helper to ensure path exists in Google Drive
+      const folderCacheGoogle: Record<string, string> = {}
+
+      // Ensure root folder first
+      const getGoogleRootId = async () => {
+        if (folderCacheGoogle[appFolderName]) return folderCacheGoogle[appFolderName]
+        
+        const rootSearch = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
+          fields: 'files(id, name)'
+        })
+        let rootFolder = rootSearch?.files?.[0]
+        
+        if (!rootFolder) {
+          rootFolder = await googleDriveCall('/files', 'POST', {
+            name: appFolderName,
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: ['root']
+          })
+        }
+        folderCacheGoogle[appFolderName] = rootFolder.id
+        return rootFolder.id
+      }
+
+      const ensurePathGoogle = async (path: string) => {
+        const rootId = await getGoogleRootId()
+        const segments = path.split('/').filter(s => s.length > 0)
+        let currentParentId = rootId
+
+        for (const segment of segments) {
+          const cacheKey = `${currentParentId}:${segment}`
+          if (folderCacheGoogle[cacheKey]) {
+            currentParentId = folderCacheGoogle[cacheKey]
+            continue
+          }
+
+          const search = await googleDriveCall('/files', 'GET', null, {
+            q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+            fields: 'files(id, name)'
+          })
+          let folder = search?.files?.[0]
+          
+          if (!folder) {
+            folder = await googleDriveCall('/files', 'POST', {
+              name: segment,
+              mimeType: 'application/vnd.google-apps.folder',
+              parents: [currentParentId]
+            })
+          }
+          folderCacheGoogle[cacheKey] = folder.id
+          currentParentId = folder.id
+        }
+        return currentParentId
+      }
+
       if (action === 'check') {
         const rootSearch = await googleDriveCall('/files', 'GET', null, {
           q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
@@ -272,102 +398,52 @@ serve(async (req) => {
         const rootFolder = rootSearch?.files?.[0]
         
         if (!rootFolder) {
-           return new Response(JSON.stringify({ missingFolders: foldersToCreate }), {
-             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-             status: 200,
-           })
+          return new Response(JSON.stringify({ missingFolders: expectedPaths }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 200,
+          })
         }
+
+        const missingPaths: string[] = []
         
-        const childrenSearch = await googleDriveCall('/files', 'GET', null, {
-          q: `'${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-          fields: 'files(id, name)'
-        })
-        const existingFolders = childrenSearch?.files || []
-        const existingNames = existingFolders.map((f: any) => f.name)
-        
-        const missingFolders: string[] = []
-        const checkPromises = foldersToCreate.map(async (f) => {
-          const folderIdx = existingNames.indexOf(f)
-          if (folderIdx === -1) {
-            missingFolders.push(f)
-          } else {
-            const folderId = existingFolders[folderIdx].id
-            const subSearch = await googleDriveCall('/files', 'GET', null, {
-              q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        // Helper to check path existence level-by-level
+        const checkPathGoogle = async (path: string) => {
+          const segments = path.split('/').filter(s => s.length > 0)
+          let currentParentId = rootFolder.id
+          
+          for (const segment of segments) {
+            const search = await googleDriveCall('/files', 'GET', null, {
+              q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
               fields: 'files(id, name)'
             })
-            const subNames = (subSearch?.files || []).map((subF: any) => subF.name)
-            const hasAllSubs = DEFAULT_SUBFOLDERS.every(sub => subNames.includes(sub))
-            if (!hasAllSubs) {
-              missingFolders.push(f)
+            const folder = search?.files?.[0]
+            if (!folder) {
+              return false
             }
+            currentParentId = folder.id
           }
-        })
-        await Promise.all(checkPromises)
-        
-        return new Response(JSON.stringify({ missingFolders }), {
-           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-           status: 200,
+          return true
+        }
+
+        for (const path of expectedPaths) {
+          const exists = await checkPathGoogle(path)
+          if (!exists) {
+            missingPaths.push(path)
+          }
+        }
+
+        return new Response(JSON.stringify({ missingFolders: missingPaths }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 200,
         })
       }
 
       // Action 'create'
-      // 1. Ensure Root Folder exists
-      const rootSearch = await googleDriveCall('/files', 'GET', null, {
-        q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
-        fields: 'files(id, name)'
-      })
-      let rootFolder = rootSearch?.files?.[0]
-      
-      if (!rootFolder) {
-        rootFolder = await googleDriveCall('/files', 'POST', {
-          name: appFolderName,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: ['root']
-        })
+      for (const path of expectedPaths) {
+        await ensurePathGoogle(path)
       }
 
-      const createdFolders = []
-      
-      for (const folderName of foldersToCreate) {
-        // Search if already exists
-        const propSearch = await googleDriveCall('/files', 'GET', null, {
-          q: `name = '${folderName.replace(/'/g, "\\'")}' and '${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-          fields: 'files(id, name)'
-        })
-        let propFolder = propSearch?.files?.[0]
-        
-        if (!propFolder) {
-          propFolder = await googleDriveCall('/files', 'POST', {
-            name: folderName,
-            mimeType: 'application/vnd.google-apps.folder',
-            parents: [rootFolder.id]
-          })
-        }
-        
-        // Create Default Subfolders inside the Property folder
-        const subfolderPromises = DEFAULT_SUBFOLDERS.map(async (sub) => {
-          const subSearch = await googleDriveCall('/files', 'GET', null, {
-            q: `name = '${sub}' and '${propFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-            fields: 'files(id, name)'
-          })
-          let subF = subSearch?.files?.[0]
-          
-          if (!subF) {
-             return googleDriveCall('/files', 'POST', {
-               name: sub,
-               mimeType: 'application/vnd.google-apps.folder',
-               parents: [propFolder.id]
-             })
-          }
-          return subF
-        })
-
-        await Promise.all(subfolderPromises)
-        createdFolders.push(propFolder.id)
-      }
-
-      return new Response(JSON.stringify({ success: true, createdFolders }), {
+      return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       })

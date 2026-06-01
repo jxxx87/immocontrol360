@@ -101,7 +101,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             navKey: 'finance',
             subItems: [
                 { path: '/finance', label: 'Buchhaltung' },
-                { path: '/invoices', label: 'Rechnungen Fewo' }
+                { path: '/invoices', label: 'Rechnungen Fewo' },
+                { path: '/bank-reconciliation', label: 'Automatisierter Bankabgleich' }
             ]
         },
         { path: '/utility-costs', label: 'Nebenkosten', icon: Calculator, navKey: 'utility-costs' },
@@ -113,6 +114,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             icon: Home,
             navKey: 'mieterportal',
             subItems: [
+                { path: '/letting', label: 'Neuvermietung' },
                 { path: '/tenant-management', label: 'Mieter-Verwaltung' },
                 { path: '/tenant-management?tab=tenant-data', label: 'Mieterdaten' },
                 { path: '/ticket-board', label: 'Ticket-Board' },
@@ -189,7 +191,7 @@ const Sidebar = ({ mobileOpen, onClose }) => {
 
     React.useEffect(() => {
         // Auto-open sub-menus based on current path
-        const financeActive = ['/finance', '/invoices'].some(p => location.pathname.startsWith(p));
+        const financeActive = ['/finance', '/invoices', '/bank-reconciliation'].some(p => location.pathname.startsWith(p));
         const portalActive = ['/tenant-management', '/ticket-board', '/announcements', '/investor-messages', '/documents', '/object-calendar'].some(p => location.pathname.startsWith(p));
         const investorPortalActive = ['/investor-portal', '/loans', '/renovation'].some(p => location.pathname.startsWith(p));
 

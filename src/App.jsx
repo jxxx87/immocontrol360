@@ -6,6 +6,7 @@ import Properties from './pages/Properties';
 
 import Tenants from './pages/Tenants';
 import Finance from './pages/Finance';
+import BankReconciliation from './pages/BankReconciliation';
 import UtilityCosts from './pages/UtilityCosts';
 import Invoices from './pages/Invoices';
 import InvoiceForm from './pages/InvoiceForm';
@@ -19,6 +20,9 @@ import Loans from './pages/Loans';
 import Documents from './pages/Documents';
 import CloudExplorer from './pages/CloudExplorer';
 import Settings from './pages/Settings';
+import Letting from './pages/Letting';
+import PublicLettingPortal from './pages/tenant/PublicLettingPortal';
+import PublicViewingBooking from './pages/tenant/PublicViewingBooking';
 import { CloudCallback } from './pages/settings/CloudCallback';
 import Import from './pages/Import';
 import Privacy from './pages/Privacy';
@@ -96,6 +100,8 @@ function App() {
                     <Route path="/terms" element={<Terms />} />
                     <Route path="/forderung/portal/:token" element={<ClaimPortal />} />
                     <Route path="/mieterdaten/portal/:token" element={<TenantDataUpdatePortal />} />
+                    <Route path="/vermietung/:token" element={<PublicLettingPortal />} />
+                    <Route path="/besichtigung/:token" element={<PublicViewingBooking />} />
 
                     {/* Protected App Routes */}
                     <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
@@ -106,6 +112,7 @@ function App() {
                       <Route path="forderungen" element={<Claims />} />
                       <Route path="forderungen/:claimId" element={<ClaimDetail />} />
                       <Route path="finance" element={<Finance />} />
+                      <Route path="bank-reconciliation" element={<BankReconciliation />} />
                       <Route path="loans" element={<Loans />} />
                       <Route path="utility-costs" element={<UtilityCosts />} />
                       <Route path="invoices" element={<Invoices />} />
@@ -122,6 +129,7 @@ function App() {
                       <Route path="help" element={<PlaceholderPage title="Hilfe" />} />
 
                       {/* ── Investor Portal Routes ── */}
+                      <Route path="letting" element={<Letting />} />
                       <Route path="tenant-management" element={<TenantManagement />} />
                       <Route path="ticket-board" element={<TicketKanban />} />
                       <Route path="announcements" element={<Announcements />} />

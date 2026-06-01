@@ -142,7 +142,6 @@ const CloudExplorer = () => {
                     conn = item.cloud_connection;
                     item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim();
                 }
-                
                 item.cloud_connection = conn;
                 item.provider = conn ? conn.provider : null;
             });
@@ -161,6 +160,7 @@ const CloudExplorer = () => {
                     };
                     
                     finalGrouped.forEach(item => {
+                        if (item.isVirtual) return; // skip virtual folders in sync payload
                         const provider = item.provider;
                         if (provider && providerFoldersMap[provider]) {
                             providerFoldersMap[provider].push(item.displayFolderName);
@@ -480,7 +480,7 @@ const CloudExplorer = () => {
                                     >
                                         <Folder size={16} color={selectedProperty?.id === item.id ? 'var(--primary-color)' : '#64748b'} />
                                         <span style={{ fontSize: '0.9rem', fontWeight: selectedProperty?.id === item.id ? 600 : 400, color: selectedProperty?.id === item.id ? 'var(--primary-color)' : 'var(--text-primary)' }}>
-                                            {item.street} {item.house_number}
+                                            {item.isVirtual ? item.street : `${item.street} ${item.house_number}`}
                                         </span>
                                     </div>
                                 );

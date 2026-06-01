@@ -14,15 +14,15 @@ const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px' })
             left: 0,
             right: 0,
             bottom: 0,
-            backgroundColor: isMobileView ? 'var(--surface-color)' : 'rgba(0, 0, 0, 0.5)',
+            backgroundColor: isMobileView ? 'var(--surface-color-solid, #ffffff)' : 'rgba(15, 23, 42, 0.75)',
             display: 'flex',
             alignItems: isMobileView ? 'stretch' : 'center',
             justifyContent: 'center',
             zIndex: 110,
-            backdropFilter: isMobileView ? 'none' : 'blur(2px)'
+            backdropFilter: isMobileView ? 'none' : 'blur(4px)'
         }}>
             <div style={{
-                backgroundColor: 'var(--surface-color)',
+                backgroundColor: 'var(--surface-color-solid, #ffffff)',
                 borderRadius: isMobileView ? 0 : 'var(--radius-lg)',
                 width: '100%',
                 maxWidth: isMobileView ? '100%' : maxWidth,

@@ -32,6 +32,7 @@ import Modal from '../components/ui/Modal';
 import CurrencyInput from '../components/ui/CurrencyInput';
 import RateInput from '../components/ui/RateInput';
 import FixFlipCalculator from './investor/FixFlipCalculator';
+import InvestorCalculators from './investor/InvestorCalculators';
 import { supabase } from '../lib/supabase';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePdfTemplate } from '../lib/usePdfTemplate';
@@ -3012,11 +3013,7 @@ const InvestorPortal = () => {
                 ) : renderAudit()
             )}
             {activeTab === 'calculator' && (
-                <div style={{ textAlign: 'center', padding: '100px 0', opacity: 0.6 }}>
-                    <Calculator size={64} style={{ margin: '0 auto 20px' }} />
-                    <h3>Spezial-Rechner</h3>
-                    <p>Hier entstehen Werkzeuge für Cashflow-Optimierung und Refinanzierung.</p>
-                </div>
+                <InvestorCalculators properties={properties} loans={loans} economicUnits={economicUnits} />
             )}
 
             {/* Mieterhöhungen Detail Modal */}

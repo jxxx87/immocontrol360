@@ -5,7 +5,7 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
-import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter } from 'lucide-react';
+import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
@@ -126,6 +126,14 @@ const Contacts = () => {
     const [editingContact, setEditingContact] = useState(null);
     const [invitePrompt, setInvitePrompt] = useState(null); // { contactName, tenantId }
 
+    // Message modal state
+    const [activeContactForMessage, setActiveContactForMessage] = useState(null);
+    const [messageChannel, setMessageChannel] = useState('email');
+    const [emailSubject, setEmailSubject] = useState('');
+    const [emailContent, setEmailContent] = useState('');
+    const [sendingMessage, setSendingMessage] = useState(false);
+    const [smtpConfigured, setSmtpConfigured] = useState(true);
+
     // Form State
     const [formData, setFormData] = useState({
         name: '',
@@ -181,10 +189,25 @@ const Contacts = () => {
         }
     };
 
+    const checkSmtpSettings = async () => {
+        if (!user) return;
+        try {
+            const { data } = await supabase
+                .from('user_smtp_settings')
+                .select('id')
+                .eq('user_id', user.id)
+                .maybeSingle();
+            setSmtpConfigured(!!data);
+        } catch (err) {
+            console.error('Error checking SMTP settings:', err);
+        }
+    };
+
     useEffect(() => {
         if (user) {
             fetchContacts();
             fetchProperties();
+            checkSmtpSettings();
         }
     }, [user]);
 
@@ -294,64 +317,123 @@ const Contacts = () => {
     };
 
     // ===== HANDLE MESSAGE =====
-    const handleMessage = async (contact) => {
-        // Only for tenants
-        if (contact.contact_type !== 'tenant') {
-            alert('Nachrichten können nur an Mieter gesendet werden.');
+    const handleMessage = (contact) => {
+        setActiveContactForMessage(contact);
+        setEmailSubject('');
+        setEmailContent('');
+        // For tenants, support portal channel, else only email
+        if (contact.contact_type === 'tenant') {
+            setMessageChannel('portal');
+        } else {
+            setMessageChannel('email');
+        }
+    };
+
+    const handleSendMessageSubmit = async () => {
+        if (!activeContactForMessage) return;
+
+        if (messageChannel === 'portal') {
+            // Run the tenant portal check and routing
+            try {
+                // Find matching tenant by email or name
+                const { data: allTenants } = await supabase.from('tenants').select('id, first_name, last_name, email');
+                let matchedTenant = null;
+
+                if (activeContactForMessage.email) {
+                    matchedTenant = (allTenants || []).find(t => t.email && t.email.toLowerCase() === activeContactForMessage.email.toLowerCase());
+                }
+                if (!matchedTenant && activeContactForMessage.name) {
+                    matchedTenant = (allTenants || []).find(t => {
+                        const fullName1 = `${t.last_name}, ${t.first_name}`.toLowerCase();
+                        const fullName2 = `${t.first_name} ${t.last_name}`.toLowerCase();
+                        const contactName = activeContactForMessage.name.toLowerCase();
+                        return contactName === fullName1 || contactName === fullName2 || contactName === t.last_name.toLowerCase();
+                    });
+                }
+
+                if (!matchedTenant) {
+                    alert('Kein passender Mieter in der Mieterdatenbank gefunden.');
+                    return;
+                }
+
+                // Check if tenant has a user_role (= registered)
+                const { data: roles } = await supabase
+                    .from('user_roles')
+                    .select('user_id')
+                    .eq('tenant_id', matchedTenant.id)
+                    .eq('role', 'tenant');
+
+                if (roles && roles.length > 0) {
+                    // Tenant is registered → navigate to messages with pre-selected convo
+                    setActiveContactForMessage(null);
+                    navigate('/investor-messages', { state: { preSelectUserId: roles[0].user_id } });
+                } else {
+                    // Check if already invited but not yet registered
+                    const { data: invitations } = await supabase
+                        .from('tenant_invitations')
+                        .select('status')
+                        .eq('tenant_id', matchedTenant.id);
+
+                    const pending = invitations?.find(i => i.status === 'pending');
+                    if (pending) {
+                        alert(`${activeContactForMessage.name} wurde bereits eingeladen, hat sich aber noch nicht registriert.`);
+                    } else {
+                        // Not invited yet → show prompt
+                        setInvitePrompt({ contactName: activeContactForMessage.name, tenantId: matchedTenant.id });
+                        setActiveContactForMessage(null);
+                    }
+                }
+            } catch (err) {
+                console.error('Error checking tenant status:', err);
+                alert('Fehler bei der Prüfung des Mieterstatus.');
+            }
             return;
         }
 
-        try {
-            // Find matching tenant by email or name
-            const { data: allTenants } = await supabase.from('tenants').select('id, first_name, last_name, email');
-            let matchedTenant = null;
-
-            if (contact.email) {
-                matchedTenant = (allTenants || []).find(t => t.email && t.email.toLowerCase() === contact.email.toLowerCase());
+        if (messageChannel === 'email') {
+            if (!activeContactForMessage.email) {
+                alert('Dieser Kontakt hat keine E-Mailadresse hinterlegt.');
+                return;
             }
-            if (!matchedTenant && contact.name) {
-                // Try matching by name ("Nachname, Vorname" or "Vorname Nachname")
-                matchedTenant = (allTenants || []).find(t => {
-                    const fullName1 = `${t.last_name}, ${t.first_name}`.toLowerCase();
-                    const fullName2 = `${t.first_name} ${t.last_name}`.toLowerCase();
-                    const contactName = contact.name.toLowerCase();
-                    return contactName === fullName1 || contactName === fullName2 || contactName === t.last_name.toLowerCase();
-                });
-            }
-
-            if (!matchedTenant) {
-                alert('Kein passender Mieter in der Mieterdatenbank gefunden.');
+            if (!emailSubject.trim() || !emailContent.trim()) {
+                alert('Bitte Betreff und Nachricht eingeben.');
                 return;
             }
 
-            // Check if tenant has a user_role (= registered)
-            const { data: roles } = await supabase
-                .from('user_roles')
-                .select('user_id')
-                .eq('tenant_id', matchedTenant.id)
-                .eq('role', 'tenant');
+            try {
+                setSendingMessage(true);
 
-            if (roles && roles.length > 0) {
-                // Tenant is registered → navigate to messages with pre-selected convo
-                navigate('/investor-messages', { state: { preSelectUserId: roles[0].user_id } });
-            } else {
-                // Check if already invited but not yet registered
-                const { data: invitations } = await supabase
-                    .from('tenant_invitations')
-                    .select('status')
-                    .eq('tenant_id', matchedTenant.id);
+                const { data, error } = await supabase.functions.invoke('send-letting-email', {
+                    body: {
+                        action: 'send_custom_email',
+                        userId: user.id,
+                        to: activeContactForMessage.email,
+                        subject: emailSubject,
+                        html: `
+                            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+                                <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
+                                    <p>${emailContent.replace(/\n/g, '<br/>')}</p>
+                                </div>
+                            </div>
+                        `
+                    }
+                });
 
-                const pending = invitations?.find(i => i.status === 'pending');
-                if (pending) {
-                    alert(`${contact.name} wurde bereits eingeladen, hat sich aber noch nicht registriert.`);
-                } else {
-                    // Not invited yet → show prompt
-                    setInvitePrompt({ contactName: contact.name, tenantId: matchedTenant.id });
-                }
+                if (error) throw error;
+                if (data?.error) throw new Error(data.error);
+
+                alert('E-Mail wurde erfolgreich versendet!');
+                setActiveContactForMessage(null);
+            } catch (err) {
+                alert('Fehler beim E-Mail-Versand: ' + err.message);
+            } finally {
+                setSendingMessage(false);
             }
-        } catch (err) {
-            console.error('Error checking tenant status:', err);
-            alert('Fehler bei der Prüfung des Mieterstatus.');
+            return;
+        }
+
+        if (messageChannel === 'epost') {
+            alert('Die E-Post-Schnittstelle wird in Kürze implementiert.');
         }
     };
 
@@ -741,6 +823,214 @@ const Contacts = () => {
                 <div style={{ padding: '8px 0', fontSize: '0.95rem', lineHeight: 1.6 }}>
                     <p><strong>{invitePrompt?.contactName}</strong> ist noch nicht im Mieterportal registriert.</p>
                     <p style={{ marginTop: '8px' }}>Soll der Mieter eingeladen werden?</p>
+                </div>
+            </Modal>
+            {/* Unified Messaging Modal */}
+            <Modal
+                isOpen={!!activeContactForMessage}
+                onClose={() => setActiveContactForMessage(null)}
+                title={`Nachricht an ${activeContactForMessage?.name || 'Kontakt'}`}
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={() => setActiveContactForMessage(null)}>Abbrechen</Button>
+                        <Button 
+                            onClick={handleSendMessageSubmit} 
+                            disabled={sendingMessage || (messageChannel === 'email' && !activeContactForMessage?.email)}
+                        >
+                            {sendingMessage ? 'Sendet...' : (messageChannel === 'portal' ? 'Weiter' : 'Nachricht senden')}
+                        </Button>
+                    </>
+                }
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    {/* Channel selection */}
+                    <div>
+                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 600, marginBottom: '8px' }}>
+                            Versandkanal wählen
+                        </label>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                            <button
+                                type="button"
+                                onClick={() => setMessageChannel('email')}
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: '12px 8px',
+                                    borderRadius: '8px',
+                                    border: `2px solid ${messageChannel === 'email' ? 'var(--primary-color)' : 'var(--border-color)'}`,
+                                    backgroundColor: messageChannel === 'email' ? 'rgba(14,165,233,0.04)' : 'var(--surface-color)',
+                                    color: messageChannel === 'email' ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s',
+                                    gap: '6px'
+                                }}
+                            >
+                                <Mail size={20} />
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>E-Mail</span>
+                            </button>
+                            
+                            <button
+                                type="button"
+                                disabled={activeContactForMessage?.contact_type !== 'tenant'}
+                                onClick={() => setMessageChannel('portal')}
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: '12px 8px',
+                                    borderRadius: '8px',
+                                    border: `2px solid ${messageChannel === 'portal' ? 'var(--primary-color)' : 'var(--border-color)'}`,
+                                    backgroundColor: messageChannel === 'portal' ? 'rgba(14,165,233,0.04)' : 'var(--surface-color)',
+                                    color: messageChannel === 'portal' ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                    cursor: activeContactForMessage?.contact_type === 'tenant' ? 'pointer' : 'not-allowed',
+                                    opacity: activeContactForMessage?.contact_type === 'tenant' ? 1 : 0.4,
+                                    transition: 'all 0.2s',
+                                    gap: '6px'
+                                }}
+                                title={activeContactForMessage?.contact_type !== 'tenant' ? 'Nur für Mieter verfügbar' : ''}
+                            >
+                                <MessageSquare size={20} />
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>Mieterportal</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setMessageChannel('epost')}
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: '12px 8px',
+                                    borderRadius: '8px',
+                                    border: `2px solid ${messageChannel === 'epost' ? 'var(--primary-color)' : 'var(--border-color)'}`,
+                                    backgroundColor: messageChannel === 'epost' ? 'rgba(14,165,233,0.04)' : 'var(--surface-color)',
+                                    color: messageChannel === 'epost' ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s',
+                                    gap: '6px'
+                                }}
+                            >
+                                <FileText size={20} />
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>E-Post (Brief)</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Email Channel Content */}
+                    {messageChannel === 'email' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {!activeContactForMessage?.email ? (
+                                <div style={{
+                                    display: 'flex',
+                                    gap: '8px',
+                                    padding: '12px',
+                                    backgroundColor: '#FFFBEB',
+                                    border: '1px solid #FDE68A',
+                                    borderRadius: '8px',
+                                    color: '#92400E',
+                                    fontSize: '0.85rem'
+                                }}>
+                                    <AlertCircle size={18} style={{ flexShrink: 0 }} />
+                                    <span>Für diesen Kontakt ist keine E-Mailadresse hinterlegt. Bitte fügen Sie erst eine E-Mailadresse hinzu.</span>
+                                </div>
+                            ) : (
+                                <>
+                                    {!smtpConfigured && (
+                                        <div style={{
+                                            display: 'flex',
+                                            gap: '8px',
+                                            padding: '10px 12px',
+                                            backgroundColor: '#FFFBEB',
+                                            border: '1px solid #FDE68A',
+                                            borderRadius: '8px',
+                                            color: '#92400E',
+                                            fontSize: '0.8rem'
+                                        }}>
+                                            <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                                            <span>Hinweis: Kein eigener E-Mail-Server in den Einstellungen eingerichtet. Versand erfolgt über System-Fallback.</span>
+                                        </div>
+                                    )}
+
+                                    <Input
+                                        label="Betreff"
+                                        placeholder="Ihre Nachricht von ..."
+                                        value={emailSubject}
+                                        onChange={e => setEmailSubject(e.target.value)}
+                                        required
+                                    />
+
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '6px' }}>
+                                            Nachricht *
+                                        </label>
+                                        <textarea
+                                            rows={6}
+                                            style={{
+                                                width: '100%',
+                                                padding: '10px 12px',
+                                                borderRadius: 'var(--radius-md)',
+                                                border: '1px solid var(--border-color)',
+                                                outline: 'none',
+                                                backgroundColor: 'var(--surface-color)',
+                                                color: 'var(--text-primary)',
+                                                fontSize: '0.9rem',
+                                                resize: 'vertical',
+                                                fontFamily: 'sans-serif'
+                                            }}
+                                            placeholder="Guten Tag..."
+                                            value={emailContent}
+                                            onChange={e => setEmailContent(e.target.value)}
+                                            required
+                                        />
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Mieterportal Channel Content */}
+                    {messageChannel === 'portal' && (
+                        <div style={{
+                            display: 'flex',
+                            gap: '10px',
+                            padding: '12px',
+                            backgroundColor: 'rgba(16, 185, 129, 0.05)',
+                            border: '1px solid rgba(16, 185, 129, 0.2)',
+                            borderRadius: '8px',
+                            color: '#065f46',
+                            fontSize: '0.875rem',
+                            lineHeight: 1.5
+                        }}>
+                            <MessageSquare size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <span>
+                                Sie werden zum Mieterportal-Chat weitergeleitet. Dort können Sie direkt mit dem Mieter schreiben oder ihn einladen, falls er noch nicht registriert ist.
+                            </span>
+                        </div>
+                    )}
+
+                    {/* E-Post Channel Content */}
+                    {messageChannel === 'epost' && (
+                        <div style={{
+                            display: 'flex',
+                            gap: '10px',
+                            padding: '12px',
+                            backgroundColor: '#F0F9FF',
+                            border: '1px solid #B9E6FE',
+                            borderRadius: '8px',
+                            color: '#0369A1',
+                            fontSize: '0.875rem',
+                            lineHeight: 1.5
+                        }}>
+                            <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <span>
+                                Der physische Briefversand per E-Post-Schnittstelle wird in Kürze freigeschaltet. Sie können hiermit Dokumente und Briefe direkt aus der Anwendung drucken und per Post senden lassen.
+                            </span>
+                        </div>
+                    )}
                 </div>
             </Modal>
         </div>

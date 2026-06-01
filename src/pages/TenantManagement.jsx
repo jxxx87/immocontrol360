@@ -39,6 +39,7 @@ const TenantManagement = () => {
     const [searchQuery, setSearchQuery] = useState('');
     const [tenantDataPropertyId, setTenantDataPropertyId] = useState('');
     const [generatingLinkId, setGeneratingLinkId] = useState(null);
+    const [sendingLinkTenantId, setSendingLinkTenantId] = useState(null);
 
     // Update activeTab when URL search parameters change
     useEffect(() => {
@@ -114,21 +115,21 @@ const TenantManagement = () => {
 
             if (invError) throw invError;
 
-            // Send Magic Link via OTP
-            const { error: authError } = await supabase.auth.signInWithOtp({
-                email: inviteForm.email,
-                options: {
-                    data: {
-                        role: 'tenant',
-                        tenant_id: inviteForm.tenant_id,
-                        unit_id: unitId,
-                        property_id: propertyId
-                    },
-                    shouldCreateUser: true
+            // Send Magic Link via Edge Function using user's custom SMTP (or system fallback)
+            const { data: inviteData, error: inviteErr } = await supabase.functions.invoke('send-letting-email', {
+                body: {
+                    action: 'send_tenant_invite',
+                    userId: user.id,
+                    to: inviteForm.email,
+                    tenantId: inviteForm.tenant_id,
+                    unitId: unitId || null,
+                    propertyId: propertyId || null,
+                    origin: window.location.origin
                 }
             });
 
-            if (authError) throw authError;
+            if (inviteErr) throw inviteErr;
+            if (inviteData?.error) throw new Error(inviteData.error);
 
             setStatusMessage({ type: 'success', text: `Einladung an ${inviteForm.email} gesendet!` });
             setInviteForm({ email: '', tenant_id: '', unit_id: '', property_id: '' });
@@ -187,12 +188,73 @@ const TenantManagement = () => {
         }
     };
 
+    const handleSendVerificationLinkEmail = async (tenant, activeLink) => {
+        if (!tenant.email) {
+            addNotification({
+                type: 'error',
+                title: 'E-Mail fehlt',
+                body: 'Dieser Mieter hat keine E-Mail-Adresse hinterlegt.'
+            });
+            return;
+        }
+
+        setSendingLinkTenantId(tenant.id);
+        const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
+
+        try {
+            const { data, error } = await supabase.functions.invoke('send-letting-email', {
+                body: {
+                    action: 'send_custom_email',
+                    userId: user.id,
+                    to: tenant.email,
+                    subject: 'Aktualisierung Ihrer Kontaktdaten - ImmoControlpro360',
+                    html: `
+                        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+                          <div style="background-color: #0ea5e9; color: white; padding: 20px; border-radius: 6px; text-align: center;">
+                            <h2 style="margin: 0; font-size: 20px;">Kontaktdaten aktualisieren</h2>
+                          </div>
+                          <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
+                            <p>Hallo ${tenant.first_name} ${tenant.last_name},</p>
+                            <p>Ihr Vermieter bittet Sie, Ihre hinterlegten Kontaktdaten im System zu überprüfen und gegebenenfalls zu aktualisieren.</p>
+                            <p>Bitte klicken Sie auf den folgenden Link, um das Datenblatt aufzurufen:</p>
+                            <div style="text-align: center; margin: 30px 0;">
+                              <a href="${url}" style="background-color: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Daten aktualisieren</a>
+                            </div>
+                            <p style="font-size: 13px; color: #64748b;">Der Link ist für 14 Tage gültig. Falls der Button oben nicht funktioniert, kopieren Sie bitte folgenden Link in Ihren Browser:<br/>${url}</p>
+                            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
+                            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>
+                          </div>
+                        </div>
+                    `
+                }
+            });
+
+            if (error) throw error;
+            if (data?.error) throw new Error(data.error);
+
+            addNotification({
+                type: 'success',
+                title: 'E-Mail gesendet',
+                body: `Der Update-Link wurde erfolgreich an ${tenant.email} gesendet.`
+            });
+        } catch (err) {
+            console.error('Error sending verification link:', err);
+            addNotification({
+                type: 'error',
+                title: 'Fehler',
+                body: 'E-Mail konnte nicht gesendet werden: ' + err.message
+            });
+        } finally {
+            setSendingLinkTenantId(null);
+        }
+    };
+
     // ── DEACTIVATE TEMPORARY VERIFICATION LINK ──────────────────────
     const handleDeactivateLink = async (linkId) => {
         try {
             const { error } = await supabase
                 .from('tenant_verification_links')
-                .update({ expires_at: new Date().toISOString() })
+                .update({ expires_at: '1970-01-01T00:00:00Z' })
                 .eq('id', linkId);
 
             if (error) throw error;
@@ -806,21 +868,36 @@ const TenantManagement = () => {
                                                 </td>
                                                 <td>
                                                     {activeLink ? (
-                                                        <button
-                                                            onClick={() => {
-                                                                const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
-                                                                navigator.clipboard.writeText(url);
-                                                                addNotification({
-                                                                    type: 'success',
-                                                                    title: 'Link kopiert',
-                                                                    body: 'Der Update-Link wurde in die Zwischenablage kopiert.'
-                                                                });
-                                                            }}
-                                                            className="btn btn-secondary btn-sm"
-                                                            style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px' }}
-                                                        >
-                                                            <Copy size={13} /> Link kopieren
-                                                        </button>
+                                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                                            <button
+                                                                onClick={() => {
+                                                                    const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
+                                                                    navigator.clipboard.writeText(url);
+                                                                    addNotification({
+                                                                        type: 'success',
+                                                                        title: 'Link kopiert',
+                                                                        body: 'Der Update-Link wurde in die Zwischenablage kopiert.'
+                                                                    });
+                                                                }}
+                                                                className="btn btn-secondary btn-sm"
+                                                                style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px' }}
+                                                            >
+                                                                <Copy size={13} /> Link kopieren
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleSendVerificationLinkEmail(t, activeLink)}
+                                                                disabled={sendingLinkTenantId === t.id}
+                                                                className="btn btn-secondary btn-sm"
+                                                                style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px' }}
+                                                            >
+                                                                {sendingLinkTenantId === t.id ? (
+                                                                    <Loader size={13} className="animate-spin" />
+                                                                ) : (
+                                                                    <Mail size={13} />
+                                                                )}
+                                                                Per E-Mail senden
+                                                            </button>
+                                                        </div>
                                                     ) : (
                                                         <button
                                                             onClick={() => handleGenerateLink(t.id)}
@@ -933,6 +1010,19 @@ const TenantManagement = () => {
                                                         {activeLink.is_updated ? 'Aktualisiert' : 'Ausstehend'}
                                                     </span>
                                                     <div style={{ display: 'flex', gap: '6px' }}>
+                                                        <button
+                                                            onClick={() => handleSendVerificationLinkEmail(t, activeLink)}
+                                                            disabled={sendingLinkTenantId === t.id}
+                                                            className="btn btn-secondary btn-sm"
+                                                            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+                                                        >
+                                                            {sendingLinkTenantId === t.id ? (
+                                                                <Loader size={12} className="animate-spin" />
+                                                            ) : (
+                                                                <Mail size={12} />
+                                                            )}
+                                                            Senden
+                                                        </button>
                                                         <button
                                                             onClick={() => {
                                                                 const url = `${window.location.origin}/mieterdaten/portal/${activeLink.token}`;
@@ -1056,7 +1146,28 @@ const TenantManagement = () => {
                                 </label>
                                 <select
                                     value={inviteForm.tenant_id}
-                                    onChange={(e) => setInviteForm(prev => ({ ...prev, tenant_id: e.target.value }))}
+                                    onChange={(e) => {
+                                        const tenantId = e.target.value;
+                                        const selectedTenant = tenants.find(t => t.id === tenantId);
+                                        const email = selectedTenant?.email || '';
+                                        
+                                        // Also find unit_id and property_id from active lease of this tenant
+                                        let unitId = '';
+                                        let propertyId = '';
+                                        const activeLease = leases.find(l => l.tenant_id === tenantId && l.status === 'active');
+                                        if (activeLease) {
+                                            unitId = activeLease.unit_id;
+                                            const unitObj = units.find(u => u.id === unitId);
+                                            propertyId = unitObj?.property_id || '';
+                                        }
+                                        
+                                        setInviteForm({
+                                            tenant_id: tenantId,
+                                            email: email,
+                                            unit_id: unitId,
+                                            property_id: propertyId
+                                        });
+                                    }}
                                     style={{
                                         width: '100%', padding: '10px 14px',
                                         borderRadius: 'var(--radius-md)',
