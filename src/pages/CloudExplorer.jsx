@@ -20,6 +20,7 @@ const CloudExplorer = () => {
     const [isLoadingFiles, setIsLoadingFiles] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [fetchError, setFetchError] = useState(null);
+    const [syncedProperties, setSyncedProperties] = useState(new Set());
     const fileInputRef = useRef(null);
     
     const getErrorMessage = async (err) => {
@@ -147,64 +148,6 @@ const CloudExplorer = () => {
             });
 
             setGroupedProperties(finalGrouped);
-
-            if (finalGrouped.length > 0) {
-                setStatus('checking');
-                setStatusMessage('Überprüfe Cloud-Ordnerstruktur...');
-                
-                try {
-                    // Group expected folders by provider so we sync separately
-                    const providerFoldersMap = {
-                        onedrive: [],
-                        googledrive: []
-                    };
-                    
-                    finalGrouped.forEach(item => {
-                        if (item.isVirtual) return; // skip virtual folders in sync payload
-                        const provider = item.provider;
-                        if (provider && providerFoldersMap[provider]) {
-                            providerFoldersMap[provider].push(item.displayFolderName);
-                        }
-                    });
-
-                    let totalMissing = 0;
-                    
-                    const syncForProvider = async (provider, folders) => {
-                        if (folders.length === 0) return;
-                        
-                        const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
-                            body: { provider, action: 'check', foldersToCreate: folders }
-                        });
-                        
-                        if (checkError) throw checkError;
-                        if (checkData && checkData.error) throw new Error(checkData.error);
-                        
-                        const missingFolders = checkData.missingFolders || [];
-                        
-                        if (missingFolders.length > 0) {
-                            totalMissing += missingFolders.length;
-                            setMissingCount(totalMissing);
-                            setStatus('creating');
-                            setStatusMessage(`${totalMissing} neue Einheit(en) gefunden. Erstelle Ordnerstruktur in ${provider === 'onedrive' ? 'OneDrive' : 'Google Drive'}...`);
-                            
-                            const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
-                                body: { provider, action: 'create', foldersToCreate: missingFolders }
-                            });
-                            
-                            if (createError) throw createError;
-                            if (createData && createData.error) throw new Error(createData.error);
-                        }
-                    };
-
-                    await syncForProvider('onedrive', providerFoldersMap.onedrive);
-                    await syncForProvider('googledrive', providerFoldersMap.googledrive);
-                    
-                } catch (err) {
-                    console.error("Cloud Sync Error:", err);
-                    await new Promise(r => setTimeout(r, 2000));
-                }
-            }
-
             setStatus('ready');
             setStatusMessage('');
         };
@@ -238,15 +181,55 @@ const CloudExplorer = () => {
     };
 
     useEffect(() => {
-        if (selectedProperty && status === 'ready') {
+        if (selectedProperty && status === 'ready' && syncedProperties.has(selectedProperty.id)) {
             fetchFiles(selectedProperty, currentPath);
         }
-    }, [selectedProperty, currentPath, status]);
+    }, [selectedProperty, currentPath, status, syncedProperties]);
 
-    const handleSelectProperty = (prop) => {
+    const handleSelectProperty = async (prop) => {
         setSelectedProperty(prop);
         setCurrentPath([]);
         setFetchError(null);
+
+        if (!prop) return;
+
+        // If this property has not been synced in the current session
+        if (!syncedProperties.has(prop.id)) {
+            setIsLoadingFiles(true);
+            setFetchError(null);
+            try {
+                // Check missing folders for the selected property
+                const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
+                    body: { provider: prop.provider || 'onedrive', action: 'check', propertyId: prop.id }
+                });
+                
+                if (checkError) throw checkError;
+                if (checkData && checkData.error) throw new Error(checkData.error);
+                
+                const missingFolders = checkData.missingFolders || [];
+                if (missingFolders.length > 0) {
+                    // Create missing folders only
+                    const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: prop.provider || 'onedrive', action: 'create', propertyId: prop.id, foldersToCreate: missingFolders }
+                    });
+                    if (createError) throw createError;
+                    if (createData && createData.error) throw new Error(createData.error);
+                }
+                
+                // Add to synced set
+                setSyncedProperties(prev => {
+                    const next = new Set(prev);
+                    next.add(prop.id);
+                    return next;
+                });
+            } catch (err) {
+                console.error("Error syncing property folders:", err);
+                const errMsg = await getErrorMessage(err);
+                setFetchError("Ordnerstruktur konnte nicht überprüft werden: " + errMsg);
+            } finally {
+                setIsLoadingFiles(false);
+            }
+        }
     };
 
     const handleItemClick = (item) => {

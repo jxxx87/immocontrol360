@@ -22,7 +22,7 @@ serve(async (req) => {
   }
 
   try {
-    const { provider, action } = await req.json()
+    const { provider, action, propertyId, foldersToCreate } = await req.json()
     
     // Initialize Supabase client
     const supabaseClient = createClient(
@@ -170,17 +170,48 @@ serve(async (req) => {
     }
 
     // 1. Fetch properties and units of the user
-    const { data: props, error: propsError } = await supabaseClient
+    let propsQuery = supabaseClient
       .from('properties')
       .select('id, street, house_number, city, economic_unit_id')
-      .order('street')
 
+    if (propertyId) {
+      // Check if it's a property ID or an economic_unit_id
+      const { data: groupProps } = await supabaseClient
+        .from('properties')
+        .select('id, street, house_number, city, economic_unit_id')
+        .eq('economic_unit_id', propertyId)
+
+      if (groupProps && groupProps.length > 0) {
+        propsQuery = propsQuery.eq('economic_unit_id', propertyId)
+      } else {
+        // Fetch target property to check its economic_unit_id
+        const { data: targetProp } = await supabaseClient
+          .from('properties')
+          .select('economic_unit_id')
+          .eq('id', propertyId)
+          .single()
+
+        if (targetProp?.economic_unit_id) {
+          propsQuery = propsQuery.eq('economic_unit_id', targetProp.economic_unit_id)
+        } else {
+          propsQuery = propsQuery.eq('id', propertyId)
+        }
+      }
+    }
+
+    const { data: props, error: propsError } = await propsQuery.order('street')
     if (propsError) throw propsError
 
-    const { data: units, error: unitsError } = await supabaseClient
+    let unitsQuery = supabaseClient
       .from('units')
       .select('id, property_id, unit_name')
 
+    if (props && props.length > 0) {
+      const propIds = props.map((p: any) => p.id)
+      unitsQuery = unitsQuery.in('property_id', propIds)
+    }
+
+    const { data: units, error: unitsError } = await unitsQuery
     if (unitsError) throw unitsError
 
     // 2. Group properties and generate folder names
@@ -323,7 +354,8 @@ serve(async (req) => {
       }
 
       // Action 'create'
-      for (const path of expectedPaths) {
+      const pathsToCreate = foldersToCreate || expectedPaths
+      for (const path of pathsToCreate) {
         await ensurePathOneDrive(path)
       }
 
@@ -406,28 +438,46 @@ serve(async (req) => {
 
         const missingPaths: string[] = []
         
-        // Helper to check path existence level-by-level
-        const checkPathGoogle = async (path: string) => {
+        // Retrieve all folders in the drive to build an in-memory tree.
+        const allFolders: any[] = []
+        let nextPageToken: string | undefined = undefined
+        do {
+          const queryParams: any = {
+            q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+            fields: 'nextPageToken, files(id, name, parents)',
+            pageSize: 1000
+          }
+          if (nextPageToken) {
+            queryParams.pageToken = nextPageToken
+          }
+          const pageResult = await googleDriveCall('/files', 'GET', null, queryParams)
+          if (pageResult?.files) {
+            allFolders.push(...pageResult.files)
+          }
+          nextPageToken = pageResult?.nextPageToken
+        } while (nextPageToken)
+
+        // Helper to check path existence recursively in-memory
+        const checkPathInMemory = (path: string): boolean => {
           const segments = path.split('/').filter(s => s.length > 0)
           let currentParentId = rootFolder.id
           
           for (const segment of segments) {
-            const search = await googleDriveCall('/files', 'GET', null, {
-              q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-              fields: 'files(id, name)'
-            })
-            const folder = search?.files?.[0]
-            if (!folder) {
-              return false
+            let found = false
+            for (const f of allFolders) {
+              if (f.name === segment && f.parents && f.parents.includes(currentParentId)) {
+                currentParentId = f.id
+                found = true
+                break
+              }
             }
-            currentParentId = folder.id
+            if (!found) return false
           }
           return true
         }
 
         for (const path of expectedPaths) {
-          const exists = await checkPathGoogle(path)
-          if (!exists) {
+          if (!checkPathInMemory(path)) {
             missingPaths.push(path)
           }
         }
@@ -439,7 +489,8 @@ serve(async (req) => {
       }
 
       // Action 'create'
-      for (const path of expectedPaths) {
+      const pathsToCreate = foldersToCreate || expectedPaths
+      for (const path of pathsToCreate) {
         await ensurePathGoogle(path)
       }
 

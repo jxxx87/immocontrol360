@@ -136,9 +136,9 @@ serve(async (req) => {
       }
 
       // Generate invite link (creates user in auth.users if not exists) or fallback to magiclink
-      let baseOrigin = origin || 'https://immocontrol360.de/app';
+      let baseOrigin = origin || 'https://app.immocontrol360.de';
       if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
-        baseOrigin = 'https://immocontrol360.de/app';
+        baseOrigin = 'https://app.immocontrol360.de';
       }
       if (baseOrigin.endsWith('/')) {
         baseOrigin = baseOrigin.slice(0, -1);
@@ -256,9 +256,9 @@ serve(async (req) => {
         throw new Error('Missing required fields for invite link: to (email), tenantId');
       }
 
-      let baseOrigin = origin || 'https://immocontrol360.de/app';
+      let baseOrigin = origin || 'https://app.immocontrol360.de';
       if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
-        baseOrigin = 'https://immocontrol360.de/app';
+        baseOrigin = 'https://app.immocontrol360.de';
       }
       if (baseOrigin.endsWith('/')) {
         baseOrigin = baseOrigin.slice(0, -1);
@@ -425,7 +425,7 @@ serve(async (req) => {
             </table>
             <p>Die vollständige Selbstauskunft sowie alle hochgeladenen Dokumente finden Sie direkt in Ihrem Vermietungscockpit oder im Objektordner in der Cloud.</p>
             <div style="text-align: center; margin: 30px 0;">
-              <a href="https://app.immocontrol360.de/app/letting" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Zum Vermietungscockpit</a>
+              <a href="https://app.immocontrol360.de/letting" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Zum Vermietungscockpit</a>
             </div>
           </div>
         </div>
