@@ -20,7 +20,6 @@ const CloudExplorer = () => {
     const [isLoadingFiles, setIsLoadingFiles] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [fetchError, setFetchError] = useState(null);
-    const [syncedProperties, setSyncedProperties] = useState(new Set());
     const fileInputRef = useRef(null);
     
     const getErrorMessage = async (err) => {
@@ -162,14 +161,58 @@ const CloudExplorer = () => {
             const subPath = pathArray.map(p => p.name).join('/');
             const fullPath = property.displayFolderName + (subPath ? '/' + subPath : '');
             
-            const { data, error } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
-            });
-            
-            if (error) throw error;
-            if (data && data.error) throw new Error(data.error);
-            
-            setFiles(data.files || []);
+            let data = null;
+            let fetchErr = null;
+            try {
+                const res = await supabase.functions.invoke('cloud-drive', {
+                    body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
+                });
+                data = res.data;
+                fetchErr = res.error;
+            } catch (invokeErr) {
+                fetchErr = invokeErr;
+            }
+
+            let fetchedFiles = data?.files || [];
+
+            // Get detailed error message if an error occurred
+            const detailedErrMsg = fetchErr ? await getErrorMessage(fetchErr) : "";
+
+            // Check if we need to sync:
+            // 1. If we got an error indicating the folder was not found, OR
+            // 2. If we are at the root level and the folder is empty (it should contain the default subfolders like Rechnungen)
+            const isFolderNotFound = fetchErr && (
+                detailedErrMsg.includes("nicht gefunden") ||
+                detailedErrMsg.includes("not found") ||
+                detailedErrMsg.includes("404")
+            );
+
+            if (isFolderNotFound || (pathArray.length === 0 && fetchedFiles.length === 0)) {
+                // Run sync on demand!
+                const { data: checkData } = await supabase.functions.invoke('cloud-sync', {
+                    body: { provider: property.provider || 'onedrive', action: 'check', propertyId: property.id }
+                });
+                
+                const missingFolders = checkData?.missingFolders || [];
+                if (missingFolders.length > 0) {
+                    await supabase.functions.invoke('cloud-sync', {
+                        body: { provider: property.provider || 'onedrive', action: 'create', propertyId: property.id, foldersToCreate: missingFolders }
+                    });
+                }
+                
+                // Re-fetch files after creating the folders
+                const refetchRes = await supabase.functions.invoke('cloud-drive', {
+                    body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
+                });
+                if (refetchRes.error) throw refetchRes.error;
+                if (refetchRes.data && refetchRes.data.error) throw new Error(refetchRes.data.error);
+                fetchedFiles = refetchRes.data.files || [];
+            } else if (fetchErr) {
+                // If it is any other error (e.g. auth, network), throw it
+                throw fetchErr;
+            }
+
+            setFiles(fetchedFiles);
         } catch (err) {
             console.error("Error fetching files:", err);
             const errMsg = await getErrorMessage(err);
@@ -181,55 +224,15 @@ const CloudExplorer = () => {
     };
 
     useEffect(() => {
-        if (selectedProperty && status === 'ready' && syncedProperties.has(selectedProperty.id)) {
+        if (selectedProperty && status === 'ready') {
             fetchFiles(selectedProperty, currentPath);
         }
-    }, [selectedProperty, currentPath, status, syncedProperties]);
+    }, [selectedProperty, currentPath, status]);
 
-    const handleSelectProperty = async (prop) => {
+    const handleSelectProperty = (prop) => {
         setSelectedProperty(prop);
         setCurrentPath([]);
         setFetchError(null);
-
-        if (!prop) return;
-
-        // If this property has not been synced in the current session
-        if (!syncedProperties.has(prop.id)) {
-            setIsLoadingFiles(true);
-            setFetchError(null);
-            try {
-                // Check missing folders for the selected property
-                const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
-                    body: { provider: prop.provider || 'onedrive', action: 'check', propertyId: prop.id }
-                });
-                
-                if (checkError) throw checkError;
-                if (checkData && checkData.error) throw new Error(checkData.error);
-                
-                const missingFolders = checkData.missingFolders || [];
-                if (missingFolders.length > 0) {
-                    // Create missing folders only
-                    const { data: createData, error: createError } = await supabase.functions.invoke('cloud-sync', {
-                        body: { provider: prop.provider || 'onedrive', action: 'create', propertyId: prop.id, foldersToCreate: missingFolders }
-                    });
-                    if (createError) throw createError;
-                    if (createData && createData.error) throw new Error(createData.error);
-                }
-                
-                // Add to synced set
-                setSyncedProperties(prev => {
-                    const next = new Set(prev);
-                    next.add(prop.id);
-                    return next;
-                });
-            } catch (err) {
-                console.error("Error syncing property folders:", err);
-                const errMsg = await getErrorMessage(err);
-                setFetchError("Ordnerstruktur konnte nicht überprüft werden: " + errMsg);
-            } finally {
-                setIsLoadingFiles(false);
-            }
-        }
     };
 
     const handleItemClick = (item) => {

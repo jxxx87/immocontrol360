@@ -160,6 +160,8 @@ function App() {
                       <Route path="tenant/announcements" element={<TenantAnnouncements />} />
                       <Route path="tenant/documents" element={<TenantDocuments />} />
                     </Route>
+                    {/* Catch-all route to redirect back to main index */}
+                    <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                   <ToastContainer />
                 </NotificationProvider>
