@@ -14,6 +14,8 @@ export const EmailSettings = () => {
     const [testEmail, setTestEmail] = useState('');
     const [isTestModalOpen, setIsTestModalOpen] = useState(false);
     const [statusMessage, setStatusMessage] = useState(null);
+    const [isConfiguredInDb, setIsConfiguredInDb] = useState(false);
+    const [dbSender, setDbSender] = useState('');
 
     const [form, setForm] = useState({
         smtp_host: '',
@@ -47,6 +49,11 @@ export const EmailSettings = () => {
                     smtp_pass: data.smtp_pass || '',
                     smtp_sender: data.smtp_sender || ''
                 });
+                setIsConfiguredInDb(!!data.smtp_host && !!data.smtp_user);
+                setDbSender(data.smtp_sender || data.smtp_user || '');
+            } else {
+                setIsConfiguredInDb(false);
+                setDbSender('');
             }
         } catch (err) {
             console.error('Failed to load SMTP settings:', err);
@@ -78,6 +85,8 @@ export const EmailSettings = () => {
                 .upsert(payload, { onConflict: 'user_id' });
 
             if (error) throw error;
+            setIsConfiguredInDb(true);
+            setDbSender(form.smtp_sender || form.smtp_user);
             window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail Server-Einstellungen erfolgreich gespeichert.');
         } catch (err) {
@@ -108,6 +117,8 @@ export const EmailSettings = () => {
                 smtp_pass: '',
                 smtp_sender: ''
             });
+            setIsConfiguredInDb(false);
+            setDbSender('');
 
             window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail-Verbindung erfolgreich aufgehoben.');
@@ -185,7 +196,7 @@ export const EmailSettings = () => {
                         Richten Sie hier Ihren eigenen E-Mail-Server (SMTP) ein. Nach der Einrichtung werden alle automatischen Benachrichtigungen, Bewerbungsbestätigungen, Terminbestätigungen und Mieter-Einladungen direkt von Ihrer E-Mail-Adresse aus versendet.
                     </p>
 
-                    {hasConfigured ? (
+                    {isConfiguredInDb ? (
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -198,7 +209,7 @@ export const EmailSettings = () => {
                         }}>
                             <CheckCircle2 size={20} />
                             <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>
-                                E-Mail-Verbindung ist eingerichtet und aktiv. (Absender: {form.smtp_sender})
+                                E-Mail-Verbindung ist eingerichtet und aktiv. (Absender: {dbSender})
                             </span>
                         </div>
                     ) : (
@@ -270,7 +281,7 @@ export const EmailSettings = () => {
                             >
                                 Verbindung testen
                             </Button>
-                            {hasConfigured && (
+                            {isConfiguredInDb && (
                                 <Button
                                     variant="danger"
                                     onClick={handleUnlink}
