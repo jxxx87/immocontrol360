@@ -645,6 +645,20 @@ const Properties = () => {
             if (weError) throw weError;
             setEconomicUnits(weData || []);
 
+            // Fetch cloud connections & links to map providers
+            const { data: connData } = await supabase.from('cloud_connections').select('id, provider');
+            const { data: linkData } = await supabase.from('portfolio_cloud_links').select('portfolio_id, cloud_connection_id');
+            const providerMap = {};
+            const defaultProvider = connData && connData.length > 0 ? connData[0].provider : 'onedrive';
+            if (linkData && connData) {
+                linkData.forEach(link => {
+                    const conn = connData.find(c => c.id === link.cloud_connection_id);
+                    if (conn) {
+                        providerMap[link.portfolio_id] = conn.provider;
+                    }
+                });
+            }
+
             // Calculate Aggregations
             const propertiesWithStats = data.map(p => {
                 const units = p.units || [];
@@ -666,6 +680,7 @@ const Properties = () => {
 
                 return {
                     ...p,
+                    cloud_provider: providerMap[p.portfolio_id] || defaultProvider,
                     remaining_debt: remainingDebt,
                     monthly_loan_payment: monthlyLoanPayment,
                     stats: {
@@ -1879,10 +1894,9 @@ const Properties = () => {
                                 </table>
                             </div>
                         ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${isMobile ? '100%' : '300px'}, 1fr))`, gap: 'var(--spacing-md)' }}>
                                 {filteredProperties.map(property => {
                                     const totalSqm = property.units?.reduce((sum, u) => sum + (parseFloat(u.sqm) || 0), 0) || 0;
-                                    // Calculate unit details for quick view
                                     const unitCount = property.units?.length || 0;
                                     const rentedUnits = property.units?.filter(u => u.status === 'rented').length || 0;
 
@@ -1891,50 +1905,88 @@ const Properties = () => {
                                             onClick={() => handleEditProperty(property)}
                                             style={{
                                                 border: '1px solid var(--border-color)',
-                                                borderRadius: 'var(--radius-md)',
-                                                padding: 'var(--spacing-md)',
+                                                borderRadius: 'var(--radius-lg)',
                                                 backgroundColor: 'var(--surface-color)',
-                                                cursor: 'pointer'
-                                            }}>
-
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                                                <div>
-                                                    <div style={{ fontWeight: 600, fontSize: '1rem' }}>{property.street} {property.house_number}</div>
-                                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{property.zip} {property.city}</div>
-                                                </div>
+                                                cursor: 'pointer',
+                                                overflow: 'hidden',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                height: '100%',
+                                                transition: 'all 0.2s ease-in-out',
+                                                boxShadow: 'var(--shadow-sm)'
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.transform = 'translateY(-2px)';
+                                                e.currentTarget.style.borderColor = 'var(--primary-color)';
+                                                e.currentTarget.style.boxShadow = 'var(--glass-shadow)';
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.transform = 'none';
+                                                e.currentTarget.style.borderColor = 'var(--border-color)';
+                                                e.currentTarget.style.boxShadow = 'var(--shadow-sm)';
+                                            }}
+                                        >
+                                            {/* Cover Image Section */}
+                                            <div style={{ position: 'relative', height: '140px', width: '100%', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                                                <CloudImage 
+                                                    provider={property.cloud_provider} 
+                                                    itemId={property.thumbnail_image} 
+                                                    fallbackIcon={Building2} 
+                                                />
+                                                {/* Property type badge */}
                                                 <div style={{
-                                                    padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 600,
-                                                    backgroundColor: property.property_type === 'commercial' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-                                                    color: property.property_type === 'commercial' ? 'var(--warning-color)' : 'var(--primary-color)'
+                                                    position: 'absolute',
+                                                    top: '12px',
+                                                    right: '12px',
+                                                    padding: '4px 10px',
+                                                    borderRadius: '20px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 700,
+                                                    letterSpacing: '0.05em',
+                                                    textTransform: 'uppercase',
+                                                    backdropFilter: 'blur(8px)',
+                                                    backgroundColor: property.property_type === 'commercial' ? 'rgba(245, 158, 11, 0.85)' : 'rgba(59, 130, 246, 0.85)',
+                                                    color: 'white',
+                                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
                                                 }}>
                                                     {property.property_type === 'commercial' ? 'Gewerbe' : 'Wohnen'}
                                                 </div>
                                             </div>
 
-                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px', fontSize: '0.85rem' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    <Home size={14} className="text-secondary" />
-                                                    <span>
-                                                        {unitCount === 0 ? 'Keine Einheiten' : `${rentedUnits}/${unitCount} Vermietet`}
-                                                    </span>
+                                            {/* Card Content */}
+                                            <div style={{ padding: 'var(--spacing-md)', display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 700, fontSize: '1.05rem', color: 'var(--text-primary)', marginBottom: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                        {property.street} {property.house_number}
+                                                    </div>
+                                                    <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: 'var(--spacing-md)' }}>
+                                                        {property.zip} {property.city}
+                                                    </div>
+                                                    
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-sm)', marginBottom: 'var(--spacing-md)' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                                                            <Home size={14} style={{ color: 'var(--primary-color)' }} />
+                                                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{unitCount} {unitCount === 1 ? 'Einheit' : 'Einheiten'}</span>
+                                                        </div>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                                                            <LayoutGrid size={14} style={{ color: 'var(--primary-color)' }} />
+                                                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    <LayoutGrid size={14} className="text-secondary" />
-                                                    <span>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
-                                                </div>
-                                            </div>
 
-                                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', gap: '8px' }}>
-                                                <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); handleEditProperty(property); }}>
-                                                    <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
-                                                </Button>
-                                                <Button size="sm" variant="secondary" style={{ flex: 1 }} onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    if (!checkGlobalAccess()) return;
-                                                    handleOpenUnitModal(property);
-                                                }}>
-                                                    <Plus size={14} style={{ marginRight: '6px' }} /> Einheit
-                                                </Button>
+                                                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-sm)', display: 'flex', gap: '8px', marginTop: 'auto' }}>
+                                                    <Button size="sm" variant="secondary" style={{ flex: 1, minHeight: '36px' }} onClick={(e) => { e.stopPropagation(); handleEditProperty(property); }}>
+                                                        <Edit3 size={14} style={{ marginRight: '6px' }} /> Bearbeiten
+                                                    </Button>
+                                                    <Button size="sm" variant="secondary" style={{ flex: 1, minHeight: '36px' }} onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        if (!checkGlobalAccess()) return;
+                                                        handleOpenUnitModal(property);
+                                                    }}>
+                                                        <Plus size={14} style={{ marginRight: '6px' }} /> Einheit
+                                                    </Button>
+                                                </div>
                                             </div>
                                         </div>
                                     );

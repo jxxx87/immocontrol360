@@ -401,6 +401,61 @@ const Documents = () => {
     );
 };
 
+// ── DOCUMENT THUMBNAIL COMPONENT ─────────────────────────────────────────
+const DocumentThumbnail = ({ doc, getFileIcon }) => {
+    const [imgUrl, setImgUrl] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const ext = doc.file_name?.split('.').pop().toLowerCase();
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+
+    useEffect(() => {
+        if (!isImage) return;
+        let active = true;
+        const getSignedUrl = async () => {
+            setLoading(true);
+            try {
+                const { data } = await supabase.storage
+                    .from('documents')
+                    .createSignedUrl(doc.file_path, 3600);
+                if (active && data?.signedUrl) {
+                    setImgUrl(data.signedUrl);
+                }
+            } catch (err) {
+                console.error(err);
+            } finally {
+                if (active) setLoading(false);
+            }
+        };
+        getSignedUrl();
+        return () => { active = false; };
+    }, [doc.file_path, isImage]);
+
+    if (isImage) {
+        if (loading) {
+            return (
+                <div style={{ width: '36px', height: '36px', borderRadius: '4px', backgroundColor: 'rgba(255,255,255,0.03)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border-color)' }}>
+                    <Loader size={12} className="animate-spin" style={{ color: 'var(--text-secondary)' }} />
+                </div>
+            );
+        }
+        if (imgUrl) {
+            return (
+                <img 
+                    src={imgUrl} 
+                    alt={doc.file_name} 
+                    style={{ width: '36px', height: '36px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--border-color)' }} 
+                />
+            );
+        }
+    }
+
+    return (
+        <div style={{ width: '36px', height: '36px', borderRadius: '4px', backgroundColor: 'rgba(255,255,255,0.03)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border-color)' }}>
+            {getFileIcon(doc.file_name)}
+        </div>
+    );
+};
+
 // ── DOCUMENT LIST COMPONENT ──────────────────────────────────────────
 const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, formatDate }) => {
     if (docs.length === 0) {
@@ -444,7 +499,7 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                         onMouseLeave={(e) => e.currentTarget.style.backgroundColor = ''}
                     >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1, minWidth: 0 }}>
-                            {getFileIcon(doc.file_name)}
+                            <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} />
                             <div style={{ minWidth: 0 }}>
                                 <div style={{
                                     fontSize: '0.9rem', fontWeight: 500,
@@ -508,8 +563,8 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                         position: 'relative'
                     }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '12px' }}>
-                            <div style={{ flexShrink: 0, marginTop: '2px' }}>
-                                {getFileIcon(doc.file_name)}
+                            <div style={{ flexShrink: 0 }}>
+                                <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} />
                             </div>
                             <div style={{ minWidth: 0, flex: 1 }}>
                                 <div style={{ fontWeight: 600, fontSize: '0.95rem', wordBreak: 'break-all' }}>{doc.file_name}</div>
