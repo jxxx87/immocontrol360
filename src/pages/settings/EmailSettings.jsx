@@ -4,7 +4,7 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Mail, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
+import { Mail, CheckCircle2, AlertTriangle, Loader2, Trash2 } from 'lucide-react';
 
 export const EmailSettings = () => {
     const { user } = useAuth();
@@ -78,9 +78,41 @@ export const EmailSettings = () => {
                 .upsert(payload, { onConflict: 'user_id' });
 
             if (error) throw error;
+            window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail Server-Einstellungen erfolgreich gespeichert.');
         } catch (err) {
             alert('Fehler beim Speichern: ' + err.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleUnlink = async () => {
+        if (!window.confirm('Möchten Sie die E-Mail-Verbindung wirklich aufheben? Alle SMTP-Einstellungen werden unwiderruflich gelöscht.')) {
+            return;
+        }
+
+        try {
+            setSaving(true);
+            const { error } = await supabase
+                .from('user_smtp_settings')
+                .delete()
+                .eq('user_id', user.id);
+
+            if (error) throw error;
+
+            setForm({
+                smtp_host: '',
+                smtp_port: '587',
+                smtp_user: '',
+                smtp_pass: '',
+                smtp_sender: ''
+            });
+
+            window.dispatchEvent(new Event('smtp-changed'));
+            alert('E-Mail-Verbindung erfolgreich aufgehoben.');
+        } catch (err) {
+            alert('Fehler beim Aufheben der Verbindung: ' + err.message);
         } finally {
             setSaving(false);
         }
@@ -226,17 +258,29 @@ export const EmailSettings = () => {
                         placeholder="Max Mustermann <info@ihredomain.de>"
                     />
 
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px' }}>
-                        <Button
-                            variant="secondary"
-                            onClick={() => {
-                                setStatusMessage(null);
-                                setIsTestModalOpen(true);
-                            }}
-                            icon={Mail}
-                        >
-                            Verbindung testen
-                        </Button>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginTop: '10px' }}>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <Button
+                                variant="secondary"
+                                onClick={() => {
+                                    setStatusMessage(null);
+                                    setIsTestModalOpen(true);
+                                }}
+                                icon={Mail}
+                            >
+                                Verbindung testen
+                            </Button>
+                            {hasConfigured && (
+                                <Button
+                                    variant="danger"
+                                    onClick={handleUnlink}
+                                    disabled={saving}
+                                    icon={Trash2}
+                                >
+                                    Verbindung trennen
+                                </Button>
+                            )}
+                        </div>
                         <Button
                             onClick={handleSave}
                             disabled={saving}

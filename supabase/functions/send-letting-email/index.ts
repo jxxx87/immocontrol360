@@ -50,7 +50,7 @@ async function getSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpCo
   return null;
 }
 
-async function sendMail(config: SmtpConfig, to: string, subject: string, html: string) {
+async function sendMail(config: SmtpConfig, to: string, subject: string, html: string, attachments?: any[]) {
   const transporter = nodemailer.createTransport({
     host: config.host,
     port: config.port,
@@ -66,6 +66,7 @@ async function sendMail(config: SmtpConfig, to: string, subject: string, html: s
     to,
     subject,
     html,
+    attachments,
     envelope: {
       from: config.user, // Force envelope sender to match SMTP auth user (resolves SPF/bounce issues)
       to: to
@@ -83,7 +84,7 @@ serve(async (req) => {
 
   try {
     const payload = await req.json();
-    const { action, applicantId, bookingId, settings, test_email, userId, to, subject, html, tenantId, unitId, propertyId, origin } = payload;
+    const { action, applicantId, bookingId, settings, test_email, userId, to, subject, html, tenantId, unitId, propertyId, origin, attachments } = payload;
 
     // Create Supabase Admin client
     const supabaseAdmin = createClient(
@@ -240,7 +241,7 @@ serve(async (req) => {
       if (!config) {
         throw new Error('No email configuration found (neither user-specific nor platform fallback)');
       }
-      await sendMail(config, to, subject, html);
+      await sendMail(config, to, subject, html, attachments);
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,

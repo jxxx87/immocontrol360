@@ -5,7 +5,7 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
-import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare, FileText } from 'lucide-react';
+import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare, FileText, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
@@ -132,6 +132,7 @@ const Contacts = () => {
     const [emailSubject, setEmailSubject] = useState('');
     const [emailContent, setEmailContent] = useState('');
     const [sendingMessage, setSendingMessage] = useState(false);
+    const [attachments, setAttachments] = useState([]);
     const [smtpConfigured, setSmtpConfigured] = useState(true);
 
     // Form State
@@ -316,11 +317,39 @@ const Contacts = () => {
         }
     };
 
+    const handleFileChange = (e) => {
+        const files = Array.from(e.target.files);
+        if (!files.length) return;
+
+        files.forEach(file => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const base64Content = reader.result.split(',')[1];
+                setAttachments(prev => [
+                    ...prev,
+                    {
+                        filename: file.name,
+                        content: base64Content,
+                        encoding: 'base64',
+                        contentType: file.type,
+                        size: file.size
+                    }
+                ]);
+            };
+            reader.readAsDataURL(file);
+        });
+    };
+
+    const handleRemoveAttachment = (index) => {
+        setAttachments(prev => prev.filter((_, i) => i !== index));
+    };
+
     // ===== HANDLE MESSAGE =====
     const handleMessage = (contact) => {
         setActiveContactForMessage(contact);
         setEmailSubject('');
         setEmailContent('');
+        setAttachments([]);
         // For tenants, support portal channel, else only email
         if (contact.contact_type === 'tenant') {
             setMessageChannel('portal');
@@ -409,6 +438,12 @@ const Contacts = () => {
                         userId: user.id,
                         to: activeContactForMessage.email,
                         subject: emailSubject,
+                        attachments: attachments.map(att => ({
+                            filename: att.filename,
+                            content: att.content,
+                            encoding: att.encoding,
+                            contentType: att.contentType
+                        })),
                         html: `
                             <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
                                 <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
@@ -986,6 +1021,71 @@ const Contacts = () => {
                                             onChange={e => setEmailContent(e.target.value)}
                                             required
                                         />
+                                    </div>
+
+                                    {/* Attachments Section */}
+                                    <div style={{ marginTop: '12px' }}>
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.875rem', fontWeight: 500, marginBottom: '6px', color: 'var(--text-primary)' }}>
+                                            Anhänge
+                                        </label>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
+                                            {attachments.map((file, idx) => (
+                                                <div key={idx} style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '8px',
+                                                    padding: '4px 10px',
+                                                    borderRadius: '16px',
+                                                    backgroundColor: 'rgba(14, 165, 233, 0.08)',
+                                                    border: '1px solid rgba(14, 165, 233, 0.2)',
+                                                    fontSize: '0.78rem',
+                                                    color: 'var(--primary-color)'
+                                                }}>
+                                                    <span style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {file.filename} ({(file.size / 1024).toFixed(1)} KB)
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveAttachment(idx)}
+                                                        style={{
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            color: '#EF4444',
+                                                            cursor: 'pointer',
+                                                            fontWeight: 'bold',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            padding: '2px'
+                                                        }}
+                                                    >
+                                                        <X size={12} />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <label style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            padding: '8px 12px',
+                                            borderRadius: 'var(--radius-md)',
+                                            border: '1px dashed var(--border-color)',
+                                            backgroundColor: 'rgba(255,255,255,0.4)',
+                                            color: 'var(--text-secondary)',
+                                            fontSize: '0.8rem',
+                                            fontWeight: 600,
+                                            cursor: 'pointer',
+                                            transition: 'all 0.2s',
+                                        }}>
+                                            <Plus size={14} /> Datei anhängen...
+                                            <input
+                                                type="file"
+                                                multiple
+                                                onChange={handleFileChange}
+                                                style={{ display: 'none' }}
+                                            />
+                                        </label>
                                     </div>
                                 </>
                             )}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { User, LogOut, Plus, Clock } from 'lucide-react';
+import { User, LogOut, Plus, Clock, Crown, Mail, Cloud, Check, X, AlertCircle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useNavigate } from 'react-router-dom';
@@ -7,7 +7,6 @@ import NotificationBell from '../ui/NotificationBell';
 import { supabase } from '../../lib/supabase';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useSubscription } from '../../context/SubscriptionContext';
-import { Crown } from 'lucide-react';
 
 const Topbar = ({ onboardingLocked }) => {
     const { user, signOut, isInvestor, isTenant, roleData } = useAuth();
@@ -22,6 +21,69 @@ const Topbar = ({ onboardingLocked }) => {
     const trialDaysLeft = subscription?.trial_ends_at
         ? Math.ceil((new Date(subscription.trial_ends_at) - new Date()) / (1000 * 60 * 60 * 24))
         : 0; // Default fallback
+
+    const [emailStatus, setEmailStatus] = React.useState({ connected: false });
+    const [cloudStatus, setCloudStatus] = React.useState({ connected: false, connections: [] });
+    const [activePopup, setActivePopup] = React.useState(null); // 'email' | 'cloud' | null
+
+    const emailRef = React.useRef(null);
+    const cloudRef = React.useRef(null);
+
+    const fetchConnectionStatuses = React.useCallback(async () => {
+        if (!user) return;
+        try {
+            // Fetch SMTP settings
+            const { data: smtpData } = await supabase
+                .from('user_smtp_settings')
+                .select('*')
+                .eq('user_id', user.id)
+                .maybeSingle();
+            
+            setEmailStatus({
+                connected: !!smtpData?.smtp_host && !!smtpData?.smtp_user,
+                email: smtpData?.smtp_sender || smtpData?.smtp_user || ''
+            });
+
+            // Fetch Cloud connections
+            const { data: cloudData } = await supabase
+                .from('cloud_connections')
+                .select('*');
+
+            setCloudStatus({
+                connected: (cloudData || []).length > 0,
+                connections: cloudData || []
+            });
+        } catch (err) {
+            console.error('Error fetching connection statuses in Topbar:', err);
+        }
+    }, [user]);
+
+    React.useEffect(() => {
+        if (user) {
+            fetchConnectionStatuses();
+            
+            const handleUpdate = () => fetchConnectionStatuses();
+            window.addEventListener('smtp-changed', handleUpdate);
+            window.addEventListener('cloud-changed', handleUpdate);
+            return () => {
+                window.removeEventListener('smtp-changed', handleUpdate);
+                window.removeEventListener('cloud-changed', handleUpdate);
+            };
+        }
+    }, [user, fetchConnectionStatuses]);
+
+    React.useEffect(() => {
+        const handleClickOutside = (e) => {
+            if (
+                (emailRef.current && !emailRef.current.contains(e.target)) &&
+                (cloudRef.current && !cloudRef.current.contains(e.target))
+            ) {
+                setActivePopup(null);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
 
 
 
@@ -198,6 +260,202 @@ const Topbar = ({ onboardingLocked }) => {
                                         : 'Upgrade'
                                     }
                                 </button>
+                            )}
+                        </div>
+
+                        {/* E-Mail connection status */}
+                        <div ref={emailRef} style={{ position: 'relative', display: 'flex', alignItems: 'center', ...(onboardingLocked ? { pointerEvents: 'none', opacity: 0.5 } : {}) }}>
+                            <button
+                                onClick={() => setActivePopup(activePopup === 'email' ? null : 'email')}
+                                className="glass-icon-btn"
+                                style={{
+                                    width: '36px',
+                                    height: '36px',
+                                    borderRadius: 'var(--radius-md)',
+                                    position: 'relative',
+                                    backgroundColor: activePopup === 'email' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                }}
+                                title="E-Mail Server Status"
+                            >
+                                <Mail size={18} color={emailStatus.connected ? "var(--primary-color)" : "var(--text-secondary)"} />
+                                <span style={{
+                                    position: 'absolute',
+                                    top: '6px',
+                                    right: '6px',
+                                    width: '8px',
+                                    height: '8px',
+                                    borderRadius: '50%',
+                                    backgroundColor: emailStatus.connected ? '#10B981' : '#EF4444',
+                                    border: '1.5px solid var(--surface-color, white)'
+                                }} />
+                            </button>
+
+                            {activePopup === 'email' && (
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '44px',
+                                    right: 0,
+                                    width: '280px',
+                                    backgroundColor: 'var(--surface-color, white)',
+                                    borderRadius: '12px',
+                                    border: '1px solid var(--border-color)',
+                                    boxShadow: '0 10px 30px rgba(0,0,0,0.1)',
+                                    padding: '16px',
+                                    zIndex: 100,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '12px'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>
+                                        <Mail size={16} color="var(--primary-color)" />
+                                        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-primary)' }}>E-Mail-Einrichtung</span>
+                                    </div>
+                                    {emailStatus.connected ? (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#166534', fontSize: '0.85rem', fontWeight: 600 }}>
+                                                <Check size={14} /> Verbunden
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                Absender: {emailStatus.email}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#991B1B', fontSize: '0.85rem', fontWeight: 600 }}>
+                                                <AlertCircle size={14} /> Nicht verbunden
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                                E-Mails werden über die Plattform-Fallbacks versendet.
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={() => {
+                                            setActivePopup(null);
+                                            navigate('/settings', { state: { activeTab: 'email-settings' } });
+                                        }}
+                                        style={{
+                                            width: '100%',
+                                            padding: '8px',
+                                            borderRadius: '6px',
+                                            border: 'none',
+                                            backgroundColor: 'var(--primary-color)',
+                                            color: 'white',
+                                            fontSize: '0.8rem',
+                                            fontWeight: 600,
+                                            cursor: 'pointer',
+                                            textAlign: 'center'
+                                        }}
+                                    >
+                                        {emailStatus.connected ? 'Einstellungen verwalten' : 'Jetzt einrichten'}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Cloud connection status */}
+                        <div ref={cloudRef} style={{ position: 'relative', display: 'flex', alignItems: 'center', ...(onboardingLocked ? { pointerEvents: 'none', opacity: 0.5 } : {}) }}>
+                            <button
+                                onClick={() => setActivePopup(activePopup === 'cloud' ? null : 'cloud')}
+                                className="glass-icon-btn"
+                                style={{
+                                    width: '36px',
+                                    height: '36px',
+                                    borderRadius: 'var(--radius-md)',
+                                    position: 'relative',
+                                    backgroundColor: activePopup === 'cloud' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                }}
+                                title="Cloud-Speicher Status"
+                            >
+                                <Cloud size={18} color={cloudStatus.connected ? "var(--primary-color)" : "var(--text-secondary)"} />
+                                <span style={{
+                                    position: 'absolute',
+                                    top: '6px',
+                                    right: '6px',
+                                    width: '8px',
+                                    height: '8px',
+                                    borderRadius: '50%',
+                                    backgroundColor: cloudStatus.connected ? '#10B981' : '#64748B',
+                                    border: '1.5px solid var(--surface-color, white)'
+                                }} />
+                            </button>
+
+                            {activePopup === 'cloud' && (
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '44px',
+                                    right: 0,
+                                    width: '280px',
+                                    backgroundColor: 'var(--surface-color, white)',
+                                    borderRadius: '12px',
+                                    border: '1px solid var(--border-color)',
+                                    boxShadow: '0 10px 30px rgba(0,0,0,0.1)',
+                                    padding: '16px',
+                                    zIndex: 100,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '12px'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>
+                                        <Cloud size={16} color="var(--primary-color)" />
+                                        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-primary)' }}>Cloud-Verbindungen</span>
+                                    </div>
+                                    {cloudStatus.connected ? (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#166534', fontSize: '0.85rem', fontWeight: 600 }}>
+                                                <Check size={14} /> Verbunden
+                                            </div>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '100px', overflowY: 'auto' }}>
+                                                {cloudStatus.connections.map(c => (
+                                                    <div key={c.id} style={{ fontSize: '0.75rem', color: 'var(--text-primary)', borderBottom: '1px solid #f1f5f9', paddingBottom: '2px' }}>
+                                                        <strong>{c.provider === 'onedrive' ? 'OneDrive' : 'Google Drive'}:</strong>
+                                                        <br />
+                                                        {c.account_email}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#64748B', fontSize: '0.85rem', fontWeight: 600 }}>
+                                                <AlertCircle size={14} /> Keine Verbindung
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                                Kein OneDrive oder Google Drive Account verbunden.
+                                            </div>
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={() => {
+                                            setActivePopup(null);
+                                            navigate('/settings', { state: { activeTab: 'cloud' } });
+                                        }}
+                                        style={{
+                                            width: '100%',
+                                            padding: '8px',
+                                            borderRadius: '6px',
+                                            border: 'none',
+                                            backgroundColor: 'var(--primary-color)',
+                                            color: 'white',
+                                            fontSize: '0.8rem',
+                                            fontWeight: 600,
+                                            cursor: 'pointer',
+                                            textAlign: 'center'
+                                        }}
+                                    >
+                                        {cloudStatus.connected ? 'Verbindungen verwalten' : 'Jetzt einrichten'}
+                                    </button>
+                                </div>
                             )}
                         </div>
 

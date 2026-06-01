@@ -70,6 +70,7 @@ export const CloudSettings = ({ portfolios }) => {
             const { error } = await supabase.from('cloud_connections').delete().eq('id', id);
             if (error) throw error;
             await fetchCloudData();
+            window.dispatchEvent(new Event('cloud-changed'));
         } catch (error) {
             alert(translateError(error));
         }
@@ -104,6 +105,7 @@ export const CloudSettings = ({ portfolios }) => {
             }
             
             await fetchCloudData();
+            window.dispatchEvent(new Event('cloud-changed'));
         } catch (error) {
             alert(translateError(error));
         }
