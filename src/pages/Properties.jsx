@@ -73,7 +73,7 @@ const calculateMonthlyPayment = (loan) => {
 
 
 // CloudImage Component
-const CloudImage = ({ provider, itemId, fallbackIcon: FallbackIcon, style }) => {
+const CloudImage = ({ provider, itemId, fallbackIcon: FallbackIcon, style, premiumView = false }) => {
     const [imgSrc, setImgSrc] = useState(null);
     const [loading, setLoading] = useState(true);
 
@@ -117,6 +117,41 @@ const CloudImage = ({ provider, itemId, fallbackIcon: FallbackIcon, style }) => 
         return (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)', color: 'var(--text-secondary)', borderRadius: 'var(--radius-sm)', ...style }}>
                 <FallbackIcon size={24} strokeWidth={1.5} />
+            </div>
+        );
+    }
+
+    if (premiumView) {
+        return (
+            <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', borderRadius: 'var(--radius-sm)', ...style }}>
+                {/* Blurred background glow */}
+                <img 
+                    src={imgSrc} 
+                    alt="" 
+                    style={{ 
+                        position: 'absolute', 
+                        top: '-10px', 
+                        left: '-10px', 
+                        width: 'calc(100% + 20px)', 
+                        height: 'calc(100% + 20px)', 
+                        objectFit: 'cover', 
+                        filter: 'blur(8px) brightness(0.6)', 
+                        zIndex: 1 
+                    }} 
+                />
+                {/* Main uncropped image */}
+                <img 
+                    src={imgSrc} 
+                    alt="Vorschau" 
+                    style={{ 
+                        position: 'relative', 
+                        width: '100%', 
+                        height: '100%', 
+                        objectFit: 'contain', 
+                        zIndex: 2 
+                    }} 
+                    onError={() => setImgSrc(null)}
+                />
             </div>
         );
     }
@@ -542,7 +577,7 @@ const Properties = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
     const [searchTerm, setSearchTerm] = useState('');
-    const [viewMode, setViewMode] = useState(isMobile ? 'grid' : 'table');
+    const [viewMode, setViewMode] = useState('grid');
     const [newPropertyImages, setNewPropertyImages] = useState([]);
     const [newUnitImages, setNewUnitImages] = useState([]);
     const [pendingPropertyThumbnailIndex, setPendingPropertyThumbnailIndex] = useState(null);
@@ -711,9 +746,7 @@ const Properties = () => {
         }
     }, [user, selectedPortfolioID]);
 
-    useEffect(() => {
-        setViewMode(isMobile ? 'grid' : 'table');
-    }, [isMobile]);
+
 
     // Fetch Units for a Property
     const fetchUnitsForProperty = async (propertyId) => {
@@ -1324,7 +1357,7 @@ const Properties = () => {
         {
             header: 'Fläche',
             accessor: 'stats.totalArea',
-            render: (row) => <span>{row.stats?.totalArea?.toFixed(1) || '0'} m²</span>
+            render: (row) => <span>{row.stats?.totalArea ? (parseFloat(row.stats.totalArea) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '0'} m²</span>
         },
         {
             header: 'Soll',
@@ -1652,7 +1685,7 @@ const Properties = () => {
                                                                                                 <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
                                                                                                     <td style={{ padding: '8px' }}>{unit.unit_name}</td>
                                                                                                     <td style={{ padding: '8px' }}>{unit.floor}</td>
-                                                                                                    <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                                    <td style={{ padding: '8px' }}>{unit.sqm ? (parseFloat(unit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '—'} m²</td>
                                                                                                     <td style={{ padding: '8px' }}>{unit.rooms}</td>
                                                                                                     <td style={{ padding: '8px' }}>
                                                                                                         {unit.status === 'vacation_rental' ? (
@@ -1795,7 +1828,7 @@ const Properties = () => {
                                                                                 <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
                                                                                     <td style={{ padding: '8px' }}>{unit.unit_name}</td>
                                                                                     <td style={{ padding: '8px' }}>{unit.floor}</td>
-                                                                                    <td style={{ padding: '8px' }}>{unit.sqm} m²</td>
+                                                                                    <td style={{ padding: '8px' }}>{unit.sqm ? (parseFloat(unit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '—'} m²</td>
                                                                                     <td style={{ padding: '8px' }}>{unit.rooms}</td>
                                                                                     <td style={{ padding: '8px' }}>
                                                                                         {unit.status === 'vacation_rental' ? (
@@ -1940,6 +1973,7 @@ const Properties = () => {
                                                     provider={property.cloud_provider} 
                                                     itemId={property.thumbnail_image} 
                                                     fallbackIcon={Building2} 
+                                                    premiumView={true}
                                                 />
                                                 {/* Property type badge */}
                                                 <div style={{
@@ -1978,7 +2012,7 @@ const Properties = () => {
                                                         </div>
                                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
                                                             <LayoutGrid size={14} style={{ color: 'var(--primary-color)' }} />
-                                                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{totalSqm > 0 ? `${totalSqm} m²` : '—'}</span>
+                                                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{totalSqm > 0 ? `${totalSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` : '—'}</span>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -2112,7 +2146,10 @@ const Properties = () => {
                 </div>
                 
                 <div style={{ marginTop: 'var(--spacing-md)', borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-md)' }}>
-                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Bilder & Titelbild</h4>
+                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '2px' }}>Bilder & Titelbild</h4>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 'var(--spacing-sm)' }}>
+                        Klicken Sie auf ein Bild, um es als Titelbild festzulegen.
+                    </p>
                     <CloudImageManager 
                         provider={propertyProvider}
                         propertyFolderName={editingPropertyId ? getPropertyFolderName(properties.find(p => p.id === editingPropertyId), properties) : ''}
@@ -2177,7 +2214,10 @@ const Properties = () => {
                 </div>
 
                 <div style={{ marginTop: 'var(--spacing-md)', borderTop: '1px solid var(--border-color)', paddingTop: 'var(--spacing-md)' }}>
-                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--spacing-sm)' }}>Bilder & Titelbild</h4>
+                    <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '2px' }}>Bilder & Titelbild</h4>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 'var(--spacing-sm)' }}>
+                        Klicken Sie auf ein Bild, um es als Titelbild festzulegen.
+                    </p>
                     <CloudImageManager 
                         provider={unitProvider}
                         propertyFolderName={currentPropertyForUnit ? getPropertyFolderName(currentPropertyForUnit, properties) : ''}

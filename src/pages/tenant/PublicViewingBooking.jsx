@@ -356,7 +356,7 @@ const PublicViewingBooking = () => {
             </div>
             <div>
               <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.85)' }}>Größe</div>
-              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{processInfo.sqm} m²</div>
+              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{processInfo.sqm ? (parseFloat(processInfo.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '—'} m²</div>
             </div>
           </div>
         </Card>

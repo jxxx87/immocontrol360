@@ -1166,7 +1166,7 @@ const UtilityCosts = () => {
                                                     <div style={{ fontWeight: 500 }}>{unit.unit_name}</div>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                                         {tenant}
-                                                        {unit.sqm ? ` · ${unit.sqm} m²` : ''}
+                                                        {unit.sqm ? ` · ${(parseFloat(unit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` : ''}
                                                     </div>
                                                 </div>
                                             </div>
@@ -1447,7 +1447,7 @@ const UtilityCosts = () => {
                                                     <div style={{ fontWeight: 600, fontSize: '1.05rem' }}>{activeUnit.unit_name}</div>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                                         {activeTenant || 'Leerstand'}
-                                                        {activeUnit.sqm ? ` · ${activeUnit.sqm} m²` : ''}
+                                                        {activeUnit.sqm ? ` · ${(parseFloat(activeUnit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` : ''}
                                                         {activeLease?.tenant?.occupants ? ` · ${activeLease.tenant.occupants} Person(en)` : ''}
                                                     </div>
                                                 </div>

@@ -286,7 +286,7 @@ const FurnitureMesh = ({ item, yOffset = 0 }) => {
 
 const RoomLabel3D = ({ room, yOffset = 0 }) => {
     const centroid = polygonCentroid(room.polygon);
-    const area = (room.area_mm2 / 1000000).toFixed(1);
+    const area = (room.area_mm2 / 1000000).toLocaleString('de-DE', { maximumFractionDigits: 2 });
     return (
         <Text
             position={[centroid.x * MM, yOffset + 0.01, centroid.y * MM]}

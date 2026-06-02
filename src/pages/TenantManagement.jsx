@@ -26,6 +26,7 @@ const TenantManagement = () => {
     const [properties, setProperties] = useState([]);
     const [leases, setLeases] = useState([]);
     const [verificationLinks, setVerificationLinks] = useState([]);
+    const [tenantAuthInfo, setTenantAuthInfo] = useState([]);
     const [loading, setLoading] = useState(true);
     
     // Invite portal access states
@@ -54,14 +55,15 @@ const TenantManagement = () => {
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [invRes, roleRes, tenantRes, unitRes, propRes, leasesRes, linksRes] = await Promise.all([
+            const [invRes, roleRes, tenantRes, unitRes, propRes, leasesRes, linksRes, authInfoRes] = await Promise.all([
                 supabase.from('tenant_invitations').select('*').order('created_at', { ascending: false }),
                 supabase.from('user_roles').select('*').eq('role', 'tenant'),
                 supabase.from('tenants').select('*').order('last_name'),
                 supabase.from('units').select('*, property:properties(*)').order('unit_name'),
                 supabase.from('properties').select('*').order('street'),
                 supabase.from('leases').select('*'),
-                supabase.from('tenant_verification_links').select('*').order('created_at', { ascending: false })
+                supabase.from('tenant_verification_links').select('*').order('created_at', { ascending: false }),
+                supabase.from('tenant_auth_info').select('*')
             ]);
 
             setInvitations(invRes.data || []);
@@ -71,6 +73,7 @@ const TenantManagement = () => {
             setProperties(propRes.data || []);
             setLeases(leasesRes.data || []);
             setVerificationLinks(linksRes.data || []);
+            setTenantAuthInfo(authInfoRes.data || []);
         } catch (err) {
             console.error('Error fetching data:', err);
         } finally {
@@ -180,6 +183,31 @@ const TenantManagement = () => {
         } catch (err) {
             console.error('Error cancelling invitation:', err);
             alert('Fehler beim Stornieren der Einladung: ' + err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteTenantCompletely = async (tenantId) => {
+        const tenantName = getTenantName(tenantId);
+        if (!window.confirm(`Möchten Sie den Mieter ${tenantName} wirklich komplett aus dem Portal und der Mieterliste entfernen? Dabei werden der Supabase-Account, die Rollenzuordnung, alle Einladungen und die Mieterdaten dauerhaft gelöscht.`)) {
+            return;
+        }
+
+        try {
+            setLoading(true);
+            const { error } = await supabase.rpc('delete_tenant_completely', { p_tenant_id: tenantId });
+            if (error) throw error;
+            
+            addNotification({
+                type: 'success',
+                title: 'Mieter gelöscht',
+                body: `Der Mieter ${tenantName} wurde erfolgreich entfernt.`
+            });
+            fetchData();
+        } catch (err) {
+            console.error('Error deleting tenant completely:', err);
+            alert('Fehler beim Löschen des Mieters: ' + err.message);
         } finally {
             setLoading(false);
         }
@@ -471,13 +499,18 @@ const TenantManagement = () => {
 
     // Combine invitations + registered tenants for Tab 1
     const allTenantEntries = [
-        ...tenantRoles.map(r => ({
-            type: 'registered',
-            tenantId: r.tenant_id,
-            unitId: r.unit_id,
-            userId: r.user_id,
-            createdAt: r.created_at
-        })),
+        ...tenantRoles.map(r => {
+            const info = (tenantAuthInfo || []).find(a => a.tenant_user_id === r.user_id);
+            return {
+                type: 'registered',
+                tenantId: r.tenant_id,
+                unitId: r.unit_id,
+                userId: r.user_id,
+                createdAt: r.created_at,
+                email: info?.registered_email || '—',
+                lastSignIn: info?.last_sign_in_at || null
+            };
+        }),
         ...invitations
             .filter(inv => !tenantRoles.find(r => r.tenant_id === inv.tenant_id))
             .map(inv => ({
@@ -486,7 +519,8 @@ const TenantManagement = () => {
                 tenantId: inv.tenant_id,
                 unitId: inv.unit_id,
                 email: inv.email,
-                createdAt: inv.created_at
+                createdAt: inv.created_at,
+                lastSignIn: null
             }))
     ];
 
@@ -618,8 +652,9 @@ const TenantManagement = () => {
                                 <tr>
                                     <th>MIETER</th>
                                     <th>EINHEIT</th>
-                                    <th>E-MAIL</th>
+                                    <th>REGISTRIERTE E-MAIL</th>
                                     <th>STATUS</th>
+                                    <th>ZULETZT ONLINE</th>
                                     <th>EINGELADEN AM</th>
                                     <th style={{ textAlign: 'right' }}>AKTIONEN</th>
                                 </tr>
@@ -627,7 +662,7 @@ const TenantManagement = () => {
                             <tbody>
                                 {allTenantEntries.length === 0 ? (
                                     <tr>
-                                        <td colSpan="6" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
+                                        <td colSpan="7" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
                                             Noch keine Mieter eingeladen. Klicken Sie auf "Mieter einladen".
                                         </td>
                                     </tr>
@@ -660,6 +695,11 @@ const TenantManagement = () => {
                                                     ) : (
                                                         <><Clock size={12} /> Eingeladen</>
                                                     )}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                    {entry.lastSignIn ? new Date(entry.lastSignIn).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Nie'}
                                                 </span>
                                             </td>
                                             <td>
@@ -722,6 +762,30 @@ const TenantManagement = () => {
                                                             </button>
                                                         </>
                                                     )}
+                                                    {entry.type === 'registered' && (
+                                                        <button
+                                                            onClick={() => handleDeleteTenantCompletely(entry.tenantId)}
+                                                            style={{
+                                                                background: 'none',
+                                                                border: 'none',
+                                                                color: '#EF4444',
+                                                                cursor: 'pointer',
+                                                                padding: '4px',
+                                                                borderRadius: '4px',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '4px',
+                                                                fontSize: '0.8rem',
+                                                                fontWeight: 600,
+                                                                transition: 'color 0.2s'
+                                                            }}
+                                                            title="Mieter komplett löschen"
+                                                            onMouseEnter={(e) => e.currentTarget.style.color = '#B91C1C'}
+                                                            onMouseLeave={(e) => e.currentTarget.style.color = '#EF4444'}
+                                                        >
+                                                            <Trash2 size={14} /> Entfernen
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </td>
                                         </tr>
@@ -760,7 +824,7 @@ const TenantManagement = () => {
                                             whiteSpace: 'nowrap'
                                         }}>
                                             {entry.type === 'registered' ? <CheckCircle2 size={10} /> : <Clock size={10} />}
-                                            {entry.type === 'registered' ? 'Registriert' : 'Invited'}
+                                            {entry.type === 'registered' ? 'Registriert' : 'Eingeladen'}
                                         </span>
                                     </div>
 
@@ -768,14 +832,19 @@ const TenantManagement = () => {
                                         {getUnitLabel(entry.unitId)}
                                     </div>
 
+                                    <div style={{ marginBottom: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                        <strong>E-Mail:</strong> {entry.email || '—'}
+                                    </div>
+
+                                    <div style={{ marginBottom: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                        <strong>Zuletzt online:</strong> {entry.lastSignIn ? new Date(entry.lastSignIn).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Nie'}
+                                    </div>
+
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
-                                        <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                            {entry.email || '—'}
+                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                            Geladen: {formatDate(entry.createdAt)}
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                                {formatDate(entry.createdAt)}
-                                            </div>
                                             {entry.type === 'invited' && (
                                                 <>
                                                     <button
@@ -817,6 +886,24 @@ const TenantManagement = () => {
                                                         <Trash2 size={16} />
                                                     </button>
                                                 </>
+                                            )}
+                                            {entry.type === 'registered' && (
+                                                <button
+                                                    onClick={() => handleDeleteTenantCompletely(entry.tenantId)}
+                                                    style={{
+                                                        background: 'none',
+                                                        border: 'none',
+                                                        color: '#EF4444',
+                                                        cursor: 'pointer',
+                                                        padding: '4px',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                    }}
+                                                    title="Mieter komplett löschen"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
                                             )}
                                         </div>
                                     </div>

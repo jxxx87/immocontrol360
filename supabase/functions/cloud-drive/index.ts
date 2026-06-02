@@ -272,53 +272,67 @@ serve(async (req) => {
          
          return new Response(JSON.stringify({ success: true, file: data }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
       }
-            if (action === 'get_download_link') {
-          let endpoint = '';
-          if (itemId) {
-            endpoint = `/me/drive/items/${itemId}`;
-          } else if (path) {
-            const cleanPath = path ? `/${sanitizePath(path)}` : '';
-            endpoint = `/me/drive/root:/ImmoControlpro360${cleanPath}`;
-          } else {
-            throw new Error('Missing itemId or path');
-          }
-          const data = await msGraphCall(endpoint + '?$select=id,webUrl,@microsoft.graph.downloadUrl');
-          return new Response(JSON.stringify({ 
-            downloadUrl: data?.["@microsoft.graph.downloadUrl"] || null 
-          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-       }
+      if (action === 'get_download_link') {
+        let endpoint = '';
+        if (itemId) {
+          endpoint = `/me/drive/items/${itemId}`;
+        } else if (path) {
+          const cleanPath = path ? `/${sanitizePath(path)}` : '';
+          endpoint = `/me/drive/root:/ImmoControlpro360${cleanPath}`;
+        } else {
+          throw new Error('Missing itemId or path');
+        }
+        
+        // Fetch metadata to resolve ID and get fallback URL
+        const data = await msGraphCall(endpoint + '?$select=id,webUrl,@microsoft.graph.downloadUrl');
+        const resolvedId = itemId || data?.id;
+        
+        let downloadUrl = null;
 
-       if (action === 'get_download_link') {
-          let fileId = itemId;
-          if (!fileId && path) {
-            const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
-            fileId = await getGoogleFolderIdByPath(cleanPath);
+        if (resolvedId) {
+          try {
+            // 1. Try to fetch pre-authenticated optimized thumbnail URL (highly preferred for speed)
+            const thumbUrl = `https://graph.microsoft.com/v1.0/me/drive/items/${resolvedId}/thumbnails`;
+            const thumbRes = await fetch(thumbUrl, {
+              headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            if (thumbRes.ok) {
+              const thumbData = await thumbRes.json();
+              const largeThumb = thumbData?.value?.[0]?.large?.url;
+              if (largeThumb) {
+                downloadUrl = largeThumb;
+              }
+            }
+          } catch (err) {
+            console.error("Error getting OneDrive thumbnail:", err);
           }
-          if (!fileId) throw new Error('Missing itemId or path');
-          
-          const data = await googleDriveCall(`/files/${fileId}`, 'GET', null, {
-            fields: 'webContentLink, thumbnailLink'
-          });
-          return new Response(JSON.stringify({ 
-            downloadUrl: data?.thumbnailLink || data?.webContentLink || null 
-          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-       }
+        }
 
-       if (action === 'get_download_link') {
-          let fileId = itemId;
-          if (!fileId && path) {
-            const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
-            fileId = await getGoogleFolderIdByPath(cleanPath);
+        // 2. Fallback to metadata downloadUrl if thumbnail fetch failed or returned nothing
+        if (!downloadUrl) {
+          downloadUrl = data?.["@microsoft.graph.downloadUrl"] || null;
+        }
+
+        // 3. Fallback to /content redirect location if metadata URL is also empty
+        if (!downloadUrl && resolvedId) {
+          try {
+            const contentUrl = `https://graph.microsoft.com/v1.0/me/drive/items/${resolvedId}/content`;
+            const contentRes = await fetch(contentUrl, {
+              headers: { 'Authorization': `Bearer ${accessToken}` },
+              redirect: 'manual'
+            });
+            if (contentRes.status === 302 || contentRes.status === 301) {
+              downloadUrl = contentRes.headers.get('location');
+            }
+          } catch (err) {
+            console.error("Error getting OneDrive content redirect link:", err);
           }
-          if (!fileId) throw new Error('Missing itemId or path');
-          
-          const data = await googleDriveCall(`/files/${fileId}`, 'GET', null, {
-            fields: 'webContentLink, thumbnailLink'
-          });
-          return new Response(JSON.stringify({ 
-            downloadUrl: data?.thumbnailLink || data?.webContentLink || null 
-          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-       }
+        }
+
+        return new Response(JSON.stringify({ 
+          downloadUrl: downloadUrl 
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+      }
 
        if (action === 'delete' && itemId) {
          await msGraphCall(`/me/drive/items/${itemId}`, 'DELETE');

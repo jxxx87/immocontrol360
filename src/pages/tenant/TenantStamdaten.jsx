@@ -41,38 +41,38 @@ const TenantStamdaten = () => {
             }
 
             try {
-                // 1. Fetch Tenant master data
-                const { data: tenant, error: tenantErr } = await supabase
-                    .from('tenants')
-                    .select('*')
-                    .eq('id', roleData.tenant_id)
-                    .maybeSingle();
+                // Fetch tenant and lease data in parallel
+                const [tenantRes, leaseRes] = await Promise.all([
+                    supabase.from('tenants').select('*').eq('id', roleData.tenant_id).maybeSingle(),
+                    supabase.from('leases').select('*, unit:units(*, property:properties(*))').eq('tenant_id', roleData.tenant_id).eq('status', 'active').maybeSingle()
+                ]);
 
-                if (tenantErr) throw tenantErr;
+                if (tenantRes.error) throw tenantRes.error;
+                if (leaseRes.error) throw leaseRes.error;
+
+                const tenant = tenantRes.data;
+                const lease = leaseRes.data;
+
+                if (lease) {
+                    setLeaseData(lease);
+                }
+
                 if (tenant) {
+                    const propStreet = lease?.unit?.property?.street || '';
+                    const propHouseNumber = lease?.unit?.property?.house_number || '';
+                    const propZip = lease?.unit?.property?.zip_code || lease?.unit?.property?.zip || '';
+                    const propCity = lease?.unit?.property?.city || '';
+
                     setTenantData({
                         first_name: tenant.first_name || '',
                         last_name: tenant.last_name || '',
                         phone: tenant.phone || '',
                         email: tenant.email || '',
-                        street: tenant.street || '',
-                        house_number: tenant.house_number || '',
-                        postal_code: tenant.postal_code || '',
-                        city: tenant.city || ''
+                        street: tenant.street || propStreet,
+                        house_number: tenant.house_number || propHouseNumber,
+                        postal_code: tenant.postal_code || propZip,
+                        city: tenant.city || propCity
                     });
-                }
-
-                // 2. Fetch Lease & Unit details
-                const { data: lease, error: leaseErr } = await supabase
-                    .from('leases')
-                    .select('*, unit:units(*, property:properties(*))')
-                    .eq('tenant_id', roleData.tenant_id)
-                    .eq('status', 'active')
-                    .maybeSingle();
-
-                if (leaseErr) throw leaseErr;
-                if (lease) {
-                    setLeaseData(lease);
                 }
             } catch (err) {
                 console.error('Error fetching tenant details:', err);
@@ -550,7 +550,7 @@ const TenantStamdaten = () => {
                         <ul style={{ paddingLeft: '20px', margin: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
                             <li>Verwenden Sie ein sicheres Passwort mit mindestens 6 Zeichen (idealerweise bestehend aus Groß-/Kleinschreibung, Zahlen und Sonderzeichen).</li>
                             <li>Geben Sie Ihre Zugangsdaten niemals an Dritte weiter.</li>
-                            <li>Ihr Passwort wird verschlüsselt in unserem sicheren Datenzentrum (Supabase) gespeichert und ist für niemanden (auch nicht für Ihren Vermieter) einsehbar.</li>
+                            <li>Ihr Passwort wird verschlüsselt in unserem sicheren Datenzentrum gespeichert und ist für niemanden (auch nicht für Ihren Vermieter) einsehbar.</li>
                             <li>Nachdem Sie das Passwort eingerichtet haben, können Sie sich jederzeit regulär über die Anmeldeseite einloggen.</li>
                         </ul>
                     </div>

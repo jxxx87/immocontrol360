@@ -143,7 +143,7 @@ serve(async (req) => {
       if (baseOrigin.endsWith('/')) {
         baseOrigin = baseOrigin.slice(0, -1);
       }
-      const redirectTo = `${baseOrigin}/tenant`;
+      const redirectTo = `${baseOrigin}/tenant/stammdaten`;
       console.log(`Generating link for ${to} redirecting to ${redirectTo}...`);
       
       let linkData;

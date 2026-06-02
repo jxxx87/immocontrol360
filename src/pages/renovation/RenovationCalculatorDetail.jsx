@@ -979,8 +979,8 @@ const RenovationCalculatorDetail = () => {
                                     { label: 'Zimmer', value: allRoomsCount },
                                     { label: 'Bäder', value: allBathsCount },
                                     { label: 'Fenster', value: allWindowsCount },
-                                    { label: 'Wohnfläche', value: `${totalRoomSqm.toFixed(1)} m²` },
-                                    { label: 'Badfläche', value: `${totalBathSqm.toFixed(1)} m²` },
+                                    { label: 'Wohnfläche', value: `${totalRoomSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` },
+                                    { label: 'Badfläche', value: `${totalBathSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` },
                                     { label: 'Dachform', value: ROOF_TYPES.find(r => r.key === roofType)?.label || '–' },
                                     isEfhMfh ? { label: 'Gebäude', value: `${houseWidth}×${houseLength} m` } : { label: 'Gauben', value: gaubenCount },
                                 ].map((item, i) => (
