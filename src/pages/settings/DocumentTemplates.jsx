@@ -774,94 +774,103 @@ export const DocumentTemplates = () => {
             const page = pages[i];
             const domPage = domPages[i];
             const domBody = domPage.querySelector('.letter-body');
-            if (!domBody) continue;
+            if (!domBody || !domBody.children.length) continue;
             
-            // Check if page overflows
-            const isOverflowing = domBody.scrollHeight > domBody.clientHeight + 4;
-            
-            if (isOverflowing && page.bodyNode && page.bodyNode.childCount >= 1) {
+            // ── Overflow-Grenze berechnen: Fußzeilen-Oberkante als absolute Grenze ──
+            const domFooter = domPage.querySelector('.letter-footer');
+            let maxBodyBottom;
+            if (domFooter) {
+                // 6px Sicherheitsabstand über der Fußzeile
+                maxBodyBottom = domFooter.getBoundingClientRect().top - 6;
+            } else {
+                // Fallback: Body clientHeight verwenden
                 const bodyRect = domBody.getBoundingClientRect();
-                const maxBottom = bodyRect.top + domBody.clientHeight;
-                let overflowChildElement = null;
-                let overflowChildIndex = -1;
-                
-                for (let j = 0; j < domBody.children.length; j++) {
-                    const child = domBody.children[j];
-                    const rect = child.getBoundingClientRect();
-                    if (rect.bottom > maxBottom - 2) {
-                        overflowChildElement = child;
-                        overflowChildIndex = j;
-                        break;
-                    }
-                }
-                
-                // Falls kein Kind gefunden wird das überläuft, aber scrollHeight > clientHeight,
-                // nehmen wir das letzte Kind (es ragt durch margin/padding über)
-                if (!overflowChildElement && domBody.children.length > 0) {
-                    overflowChildElement = domBody.lastElementChild;
-                    overflowChildIndex = domBody.children.length - 1;
-                }
-                
-                // Nur verschieben wenn mindestens ein Kind auf der Seite bleibt
-                // ODER wenn es das einzige Kind ist (dann auf neue Seite schieben)
-                if (overflowChildElement) {
-                    // Wenn das erste Kind selbst überläuft und es das einzige ist, Seite behalten
-                    if (overflowChildIndex === 0 && page.bodyNode.childCount === 1) {
-                        // Einzelnes Kind überläuft - Seite beibehalten (kein Split möglich)
-                        continue;
-                    }
-                    
-                    // Wenn das erste Kind überläuft aber es mehr gibt, ab dem 2. verschieben
-                    if (overflowChildIndex === 0 && page.bodyNode.childCount > 1) {
-                        overflowChildElement = domBody.children[1];
-                        overflowChildIndex = 1;
-                    }
-                    
-                    try {
-                        const overflowPos = editor.view.posAtDOM(overflowChildElement, 0);
-                        if (overflowPos >= page.bodyPos + 1 && overflowPos < page.bodyEnd - 1) {
-                            const nextPageIndex = i + 1;
-                            if (nextPageIndex >= pages.length) {
-                                // Create new page with footer clone
-                                const newPageNode = editor.schema.nodes.letterPage.create(null, [
-                                    editor.schema.nodes.letterBody.create(null, []),
-                                    page.footerNode 
-                                        ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
-                                        : editor.schema.nodes.letterFooter.create(null, [])
-                                ]);
-                                const tr = editor.state.tr.insert(page.end, newPageNode);
-                                editor.view.dispatch(tr);
-                                return true;
-                            } else {
-                                // Move overflowing content to next page
-                                const slice = doc.slice(overflowPos, page.bodyEnd - 1);
-                                const tr = editor.state.tr;
-                                tr.insert(pages[nextPageIndex].bodyPos + 1, slice.content);
-                                tr.delete(overflowPos, page.bodyEnd - 1);
-                                editor.view.dispatch(tr);
-                                return true;
-                            }
-                        }
-                    } catch (e) {
-                        console.error('Error during overflow pagination:', e);
-                    }
+                maxBodyBottom = bodyRect.top + domBody.clientHeight;
+            }
+            
+            // ── Overflow-Erkennung: Prüfe ob irgendein Kind die Fußzeile erreicht ──
+            let overflowChildElement = null;
+            let overflowChildIndex = -1;
+            
+            for (let j = 0; j < domBody.children.length; j++) {
+                const child = domBody.children[j];
+                const rect = child.getBoundingClientRect();
+                if (rect.bottom > maxBodyBottom) {
+                    overflowChildElement = child;
+                    overflowChildIndex = j;
+                    break;
                 }
             }
             
-            // Check if next page first element can fit here (underflow)
+            // Zusätzliche Prüfung: scrollHeight > clientHeight (für geclippten Content)
+            if (!overflowChildElement && domBody.scrollHeight > domBody.clientHeight + 2) {
+                // Content ist geclippt aber kein Kind hat rect.bottom > maxBodyBottom
+                // → letztes Kind nehmen (es ist durch overflow:hidden versteckt)
+                overflowChildElement = domBody.lastElementChild;
+                overflowChildIndex = domBody.children.length - 1;
+            }
+            
+            if (overflowChildElement && page.bodyNode && page.bodyNode.childCount >= 1) {
+                // Wenn das erste Kind selbst überläuft und es das einzige ist → kein Split möglich
+                if (overflowChildIndex === 0 && page.bodyNode.childCount === 1) {
+                    continue;
+                }
+                
+                // Wenn das erste Kind überläuft aber es mehr gibt → ab dem 2. verschieben
+                if (overflowChildIndex === 0 && page.bodyNode.childCount > 1) {
+                    overflowChildElement = domBody.children[1];
+                    overflowChildIndex = 1;
+                }
+                
+                try {
+                    const overflowPos = editor.view.posAtDOM(overflowChildElement, 0);
+                    if (overflowPos >= page.bodyPos + 1 && overflowPos < page.bodyEnd - 1) {
+                        const nextPageIndex = i + 1;
+                        if (nextPageIndex >= pages.length) {
+                            // Neue Seite erstellen mit Fußzeilen-Klon
+                            const newPageNode = editor.schema.nodes.letterPage.create(null, [
+                                editor.schema.nodes.letterBody.create(null, []),
+                                page.footerNode 
+                                    ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
+                                    : editor.schema.nodes.letterFooter.create(null, [])
+                            ]);
+                            const tr = editor.state.tr.insert(page.end, newPageNode);
+                            editor.view.dispatch(tr);
+                            return true;
+                        } else {
+                            // Überlaufenden Content auf nächste Seite verschieben
+                            const slice = doc.slice(overflowPos, page.bodyEnd - 1);
+                            const tr = editor.state.tr;
+                            tr.insert(pages[nextPageIndex].bodyPos + 1, slice.content);
+                            tr.delete(overflowPos, page.bodyEnd - 1);
+                            editor.view.dispatch(tr);
+                            return true;
+                        }
+                    }
+                } catch (e) {
+                    console.error('Pagination overflow error:', e);
+                }
+            }
+            
+            // ── Underflow: Prüfe ob vom nächsten Seiteninhalt etwas zurückgeholt werden kann ──
             const nextPageIndex = i + 1;
             if (nextPageIndex < pages.length) {
                 const nextPage = pages[nextPageIndex];
                 const domNextPage = domPages[nextPageIndex];
-                const domNextBody = domNextPage.querySelector('.letter-body');
+                const domNextBody = domNextPage?.querySelector('.letter-body');
                 
                 if (domNextBody && nextPage.bodyNode && nextPage.bodyNode.childCount > 0) {
                     const firstChild = domNextBody.firstElementChild;
                     if (firstChild) {
                         const childHeight = firstChild.getBoundingClientRect().height;
-                        const remainingHeight = domBody.clientHeight - domBody.scrollHeight;
+                        // Prüfe ob das erste Kind der nächsten Seite auf diese Seite passt
+                        const lastBodyChild = domBody.lastElementChild;
+                        const currentBottom = lastBodyChild 
+                            ? lastBodyChild.getBoundingClientRect().bottom 
+                            : domBody.getBoundingClientRect().top;
+                        const remainingSpace = maxBodyBottom - currentBottom;
                         
-                        if (childHeight > 0 && childHeight + 6 < remainingHeight) {
+                        if (childHeight > 0 && childHeight + 4 < remainingSpace) {
                             try {
                                 const firstChildNode = nextPage.bodyNode.child(0);
                                 const slice = doc.slice(nextPage.bodyPos + 1, nextPage.bodyPos + 1 + firstChildNode.nodeSize);
@@ -872,12 +881,12 @@ export const DocumentTemplates = () => {
                                 editor.view.dispatch(tr);
                                 return true;
                             } catch (e) {
-                                console.error('Error during underflow pagination:', e);
+                                console.error('Pagination underflow error:', e);
                             }
                         }
                     }
                 } else if (nextPage.bodyNode && nextPage.bodyNode.childCount === 0) {
-                    // Next page is empty, delete it
+                    // Leere nächste Seite löschen
                     try {
                         const tr = editor.state.tr.delete(nextPage.pos, nextPage.end);
                         editor.view.dispatch(tr);
@@ -917,7 +926,9 @@ export const DocumentTemplates = () => {
         
         const onUpdateOrSelection = () => {
             if (timeoutId) clearTimeout(timeoutId);
-            timeoutId = setTimeout(handlePagination, 150);
+            // Schnelles Debounce (30ms) damit der Text sofort vor der Fußzeile
+            // auf die nächste Seite springt – kein sichtbares Überlappen
+            timeoutId = setTimeout(handlePagination, 30);
         };
         
         editor.on('update', onUpdateOrSelection);
