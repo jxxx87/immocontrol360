@@ -788,6 +788,11 @@ input.search-input-padding {
   text-align: left;
 }
 
+.letter-page > p {
+  min-height: 1.2em;
+  margin: 0;
+}
+
 /* Dark mode compatibility for letter page sheet - keep white background for letter-page always so print view matches editor! */
 [data-theme="dark"] .letter-page {
   background: #ffffff !important;
@@ -926,16 +931,18 @@ input.search-input-padding {
 
 /* LayoutDiv Container Border in Editor to make sections visually editable */
 .tiptap .layout-div {
-  border: 1px dashed #cbd5e1;
-  padding: 8px;
-  margin: 8px 0;
-  border-radius: 4px;
+  outline: 1px dashed #cbd5e1;
+  outline-offset: 1px;
   position: relative;
-  transition: border-color 0.2s;
+  transition: outline-color 0.2s;
 }
 
 .tiptap .layout-div:hover {
-  border-color: #0ea5e9;
+  outline-color: #0ea5e9;
+}
+
+.tiptap .layout-div:empty, .tiptap .layout-div:has(> br:only-child) {
+  min-height: 1.5rem;
 }
 
 .tiptap .layout-div::before {

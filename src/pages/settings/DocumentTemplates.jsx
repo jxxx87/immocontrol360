@@ -1173,6 +1173,11 @@ export const DocumentTemplates = () => {
             text-align: left;
         }
         
+        .letter-page > p {
+            min-height: 1.2em;
+            margin: 0;
+        }
+        
         .letter-sender {
             font-size: 8pt;
             color: #555555;

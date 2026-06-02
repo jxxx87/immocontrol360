@@ -554,6 +554,10 @@ const Invoices = () => {
                 page-break-after: always;
                 page-break-inside: avoid;
             }
+            .letter-page > p {
+                min-height: 1.2em;
+                margin: 0;
+            }
             .letter-sender {
                 font-size: 8pt;
                 color: #555555;
