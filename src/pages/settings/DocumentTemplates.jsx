@@ -1500,7 +1500,7 @@ export const DocumentTemplates = () => {
                 box-shadow: none !important;
                 border: none !important;
                 margin: 0 !important;
-                padding: 20mm 20mm 20mm 25mm !important;
+                padding: 20mm 20mm 35mm 25mm !important;
                 width: 210mm !important;
                 height: 297mm !important;
                 overflow: hidden !important;
@@ -1528,7 +1528,7 @@ export const DocumentTemplates = () => {
             height: 297mm;
             min-height: 297mm;
             max-height: 297mm;
-            padding: 20mm 20mm 20mm 25mm;
+            padding: 20mm 20mm 35mm 25mm;
             background: #ffffff !important;
             color: #000000 !important;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
@@ -1625,15 +1625,22 @@ export const DocumentTemplates = () => {
         }
         
         .letter-footer {
-            display: flex;
-            justify-content: space-between;
-            border-top: 1px solid #dddddd;
-            padding-top: 5mm;
-            margin-top: 10mm;
-            font-size: 8pt;
-            color: #666666;
-            line-height: 1.4;
-            text-align: left;
+            position: absolute !important;
+            bottom: 10mm !important;
+            left: 25mm !important;
+            right: 20mm !important;
+            height: 18mm !important;
+            margin-top: 0 !important;
+            display: flex !important;
+            justify-content: space-between !important;
+            border-top: 1px solid #dddddd !important;
+            padding-top: 3mm !important;
+            font-size: 8pt !important;
+            color: #666666 !important;
+            line-height: 1.4 !important;
+            text-align: left !important;
+            box-sizing: border-box !important;
+            background-color: #ffffff !important;
         }
         
         .footer-col {
