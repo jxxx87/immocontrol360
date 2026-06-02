@@ -126,9 +126,11 @@ const TenantDetail = () => {
 
             if (isFolderNotFound) {
                 // Trigger cloud sync to create the missing folder structure
-                await supabase.functions.invoke('cloud-sync', {
+                const syncRes = await supabase.functions.invoke('cloud-sync', {
                     body: { provider, action: 'create', propertyId }
                 });
+                if (syncRes.error) throw syncRes.error;
+                if (syncRes.data?.error) throw new Error(syncRes.data.error);
                 
                 // Retry listing files once
                 const retryRes = await supabase.functions.invoke('cloud-drive', {

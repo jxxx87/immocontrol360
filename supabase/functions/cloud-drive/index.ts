@@ -194,41 +194,20 @@ serve(async (req) => {
       const segments = p.split('/').filter(s => s.length > 0);
       if (segments.length === 0) return 'root';
       
-      const allFolders: any[] = []
-      let nextPageToken: string | undefined = undefined
-      do {
-        const queryParams: any = {
-          q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-          fields: 'nextPageToken, files(id, name, parents)',
-          pageSize: 1000
-        }
-        if (nextPageToken) {
-          queryParams.pageToken = nextPageToken
-        }
-        const pageResult = await googleDriveCall('/files', 'GET', null, queryParams)
-        if (pageResult?.files) {
-          allFolders.push(...pageResult.files)
-        }
-        nextPageToken = pageResult?.nextPageToken
-      } while (nextPageToken)
-
       const rootMeta = await googleDriveCall('/files/root', 'GET', null, { fields: 'id' });
-      const realRootId = rootMeta?.id || 'root';
+      let currentParentId = rootMeta?.id || 'root';
 
-      let currentParentId = realRootId;
       for (const segment of segments) {
-        let found = false;
-        for (const f of allFolders) {
-          if (f.name === segment && f.parents && f.parents.includes(currentParentId)) {
-            currentParentId = f.id;
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
+        const search = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: 'files(id)'
+        });
+        const folder = search?.files?.[0];
+        if (!folder) {
           console.error(`Segment '${segment}' not found under parent ID '${currentParentId}'`);
           return null;
         }
+        currentParentId = folder.id;
       }
       return currentParentId;
     }

@@ -212,15 +212,23 @@ serve(async (req) => {
     const { data: units, error: unitsError } = await unitsQuery
     if (unitsError) throw unitsError
 
+    console.log("Found properties for sync:", JSON.stringify(props))
+    console.log("Found units for sync:", JSON.stringify(units))
+
     // Fetch all leases (active and ended) with tenant names for the units
     let leases: any[] = []
     if (units && units.length > 0) {
       const unitIds = units.map((u: any) => u.id)
-      const { data: leasesData } = await supabaseClient
+      const { data: leasesData, error: leasesError } = await supabaseClient
         .from('leases')
         .select('id, unit_id, status, tenant:tenants(first_name, last_name)')
         .in('unit_id', unitIds)
+      
+      if (leasesError) {
+        console.error("Error fetching leases in cloud-sync:", leasesError)
+      }
       leases = leasesData || []
+      console.log(`Fetched ${leases.length} leases for sync:`, JSON.stringify(leases))
     }
 
     // 2. Group properties and generate folder names
@@ -302,6 +310,8 @@ serve(async (req) => {
         }
       })
     })
+
+    console.log("Generated expected folder paths for sync:", JSON.stringify(expectedPaths))
 
     const appFolderName = "ImmoControlpro360"
 
@@ -409,7 +419,9 @@ serve(async (req) => {
       }
 
       const pathsToCreate = foldersToCreate || expectedPaths
+      console.log(`[OneDrive] Creating/ensuring ${pathsToCreate.length} paths:`, JSON.stringify(pathsToCreate))
       for (const path of pathsToCreate) {
+        console.log(`[OneDrive] Ensuring path: '${path}'`)
         await ensurePathOneDrive(path)
       }
 
@@ -491,47 +503,39 @@ serve(async (req) => {
         }
 
         const missingPaths: string[] = []
-        
-        // Retrieve all folders in the drive to build an in-memory tree.
-        const allFolders: any[] = []
-        let nextPageToken: string | undefined = undefined
-        do {
-          const queryParams: any = {
-            q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-            fields: 'nextPageToken, files(id, name, parents)',
-            pageSize: 1000
-          }
-          if (nextPageToken) {
-            queryParams.pageToken = nextPageToken
-          }
-          const pageResult = await googleDriveCall('/files', 'GET', null, queryParams)
-          if (pageResult?.files) {
-            allFolders.push(...pageResult.files)
-          }
-          nextPageToken = pageResult?.nextPageToken
-        } while (nextPageToken)
+        const folderCache: Record<string, string | null> = {}
 
-        // Helper to check path existence recursively in-memory
-        const checkPathInMemory = (path: string): boolean => {
+        const checkPathGoogle = async (path: string): Promise<boolean> => {
           const segments = path.split('/').filter(s => s.length > 0)
           let currentParentId = rootFolder.id
-          
+
           for (const segment of segments) {
-            let found = false
-            for (const f of allFolders) {
-              if (f.name === segment && f.parents && f.parents.includes(currentParentId)) {
-                currentParentId = f.id
-                found = true
-                break
-              }
+            const cacheKey = `${currentParentId}:${segment}`
+            if (folderCache[cacheKey] !== undefined) {
+              const cachedId = folderCache[cacheKey]
+              if (cachedId === null) return false
+              currentParentId = cachedId
+              continue
             }
-            if (!found) return false
+
+            const search = await googleDriveCall('/files', 'GET', null, {
+              q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+              fields: 'files(id)'
+            })
+            const folder = search?.files?.[0]
+            if (!folder) {
+              folderCache[cacheKey] = null
+              return false
+            }
+            folderCache[cacheKey] = folder.id
+            currentParentId = folder.id
           }
           return true
         }
 
         for (const path of expectedPaths) {
-          if (!checkPathInMemory(path)) {
+          const exists = await checkPathGoogle(path)
+          if (!exists) {
             missingPaths.push(path)
           }
         }
@@ -601,7 +605,9 @@ serve(async (req) => {
       }
 
       const pathsToCreate = foldersToCreate || expectedPaths
+      console.log(`[Google Drive] Creating/ensuring ${pathsToCreate.length} paths:`, JSON.stringify(pathsToCreate))
       for (const path of pathsToCreate) {
+        console.log(`[Google Drive] Ensuring path: '${path}'`)
         await ensurePathGoogle(path)
       }
 

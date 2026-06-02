@@ -190,26 +190,29 @@ const CloudExplorer = () => {
                 detailedErrMsg.includes("non-2xx")
             );
 
-            if (isFolderNotFound || (pathArray.length === 0 && fetchedFiles.length === 0)) {
+            if (isFolderNotFound || pathArray.length === 0) {
                 // Run sync on demand!
-                const { data: checkData } = await supabase.functions.invoke('cloud-sync', {
+                const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
                     body: { provider: property.provider || 'onedrive', action: 'check', propertyId: property.id }
                 });
+                if (checkError) throw checkError;
+                if (checkData?.error) throw new Error(checkData.error);
                 
                 const missingFolders = checkData?.missingFolders || [];
                 if (missingFolders.length > 0) {
-                    await supabase.functions.invoke('cloud-sync', {
+                    const { error: createError } = await supabase.functions.invoke('cloud-sync', {
                         body: { provider: property.provider || 'onedrive', action: 'create', propertyId: property.id, foldersToCreate: missingFolders }
                     });
+                    if (createError) throw createError;
+                    
+                    // Re-fetch files after creating the folders
+                    const refetchRes = await supabase.functions.invoke('cloud-drive', {
+                        body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
+                    });
+                    if (refetchRes.error) throw refetchRes.error;
+                    if (refetchRes.data && refetchRes.data.error) throw new Error(refetchRes.data.error);
+                    fetchedFiles = refetchRes.data.files || [];
                 }
-                
-                // Re-fetch files after creating the folders
-                const refetchRes = await supabase.functions.invoke('cloud-drive', {
-                    body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
-                });
-                if (refetchRes.error) throw refetchRes.error;
-                if (refetchRes.data && refetchRes.data.error) throw new Error(refetchRes.data.error);
-                fetchedFiles = refetchRes.data.files || [];
             } else if (fetchErr) {
                 // If it is any other error (e.g. auth, network), throw it
                 throw fetchErr;
