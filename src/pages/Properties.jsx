@@ -1065,7 +1065,13 @@ const Properties = () => {
                     // Upload local files selected during creation
                     if (newUnitImages.length > 0) {
                         const propFolderName = getPropertyFolderName(currentPropertyForUnit, properties);
-                        const targetPath = `${propFolderName}/Neuvermietung/${unitForm.unit_name}/Bilder`;
+                        let targetPath = '';
+                        if (currentPropertyForUnit?.economic_unit_id) {
+                            const houseNumber = currentPropertyForUnit.house_number || 'Ohne Hausnummer';
+                            targetPath = `${propFolderName}/${houseNumber}/Einheiten/${unitForm.unit_name}/Bilder`;
+                        } else {
+                            targetPath = `${propFolderName}/Einheiten/${unitForm.unit_name}/Bilder`;
+                        }
                         let uploadedThumbnailId = null;
 
                         for (let i = 0; i < newUnitImages.length; i++) {
@@ -2225,7 +2231,13 @@ const Properties = () => {
                     <CloudImageManager 
                         provider={unitProvider}
                         propertyFolderName={currentPropertyForUnit ? getPropertyFolderName(currentPropertyForUnit, properties) : ''}
-                        relativePath={unitForm.unit_name ? `Neuvermietung/${unitForm.unit_name}/Bilder` : ''}
+                        relativePath={
+                            unitForm.unit_name && currentPropertyForUnit
+                                ? (currentPropertyForUnit.economic_unit_id
+                                    ? `${currentPropertyForUnit.house_number || 'Ohne Hausnummer'}/Einheiten/${unitForm.unit_name}/Bilder`
+                                    : `Einheiten/${unitForm.unit_name}/Bilder`)
+                                : ''
+                        }
                         currentThumbnailId={unitForm.thumbnail_image}
                         onSelectThumbnail={(id) => setUnitForm(prev => ({ ...prev, thumbnail_image: id }))}
                         isNewEntity={!editingUnitId}

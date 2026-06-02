@@ -316,9 +316,15 @@ const TenantDetail = () => {
 
             const tenantFolderName = `${leaseData.tenant?.first_name || ''} ${leaseData.tenant?.last_name || ''}`.trim();
             const unitName = leaseData.unit?.unit_name || '';
-            const fullCloudPath = displayFolderName && unitName && tenantFolderName
-                ? `${displayFolderName}/${unitName}/Mietverhältnisse/${tenantFolderName}`
-                : '';
+            let fullCloudPath = '';
+            if (displayFolderName && unitName && tenantFolderName) {
+                if (prop?.economic_unit_id) {
+                    const houseNumber = prop.house_number || 'Ohne Hausnummer';
+                    fullCloudPath = `${displayFolderName}/${houseNumber}/Einheiten/${unitName}/Mietverhältnisse/${tenantFolderName}`;
+                } else {
+                    fullCloudPath = `${displayFolderName}/Einheiten/${unitName}/Mietverhältnisse/${tenantFolderName}`;
+                }
+            }
             
             setTenantCloudPath(fullCloudPath);
 
