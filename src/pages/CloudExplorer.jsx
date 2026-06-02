@@ -583,7 +583,8 @@ const CloudExplorer = () => {
                                         "Nebenkosten",
                                         "Versicherungen",
                                         "Energieausweise",
-                                        "Einheiten"
+                                        "Einheiten",
+                                        "Neuvermietung"
                                     ];
                                     
                                     let isProtected = isLoadingFiles;

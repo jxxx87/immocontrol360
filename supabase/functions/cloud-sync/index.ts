@@ -11,7 +11,8 @@ const DEFAULT_SUBFOLDERS = [
   "Bilder",
   "Nebenkosten",
   "Versicherungen",
-  "Energieausweise"
+  "Energieausweise",
+  "Neuvermietung"
 ]
 
 serve(async (req) => {
@@ -393,7 +394,7 @@ serve(async (req) => {
       // Action 'create'
       for (const item of finalGrouped) {
         const folderName = item.displayFolderName;
-        const oldFolders = ["Mietverträge", "Schriftverkehr", "Neuvermietung"];
+        const oldFolders = ["Mietverträge", "Schriftverkehr"];
         for (const old of oldFolders) {
           const pathToDelete = `${folderName}/${old}`;
           const sanitizedPath = pathToDelete.split('/').map(s => s.replace(/["*:<>?\/\\|]/g, '')).join('/');
@@ -565,7 +566,7 @@ serve(async (req) => {
           });
           const propFolder = propSearch?.files?.[0];
           if (propFolder) {
-            const oldFolders = ["Mietverträge", "Schriftverkehr", "Neuvermietung"];
+            const oldFolders = ["Mietverträge", "Schriftverkehr"];
             for (const old of oldFolders) {
               const oldSearch = await googleDriveCall('/files', 'GET', null, {
                 q: `name = '${old}' and '${propFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
