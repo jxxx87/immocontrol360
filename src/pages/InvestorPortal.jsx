@@ -1700,7 +1700,7 @@ const InvestorPortal = () => {
                                                     </td>
                                                     <td style={{ padding: '14px 16px' }}>
                                                         <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '0.9rem', color: p.isGroup ? 'var(--accent-color)' : 'inherit' }}>{p.street} {p.house_number}</div>
-                                                        {!p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                        {!p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` : ''}</div>}
                                                         {p.isGroup && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{p.properties.length} Gebäude verknüpft</div>}
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
@@ -1882,7 +1882,7 @@ const InvestorPortal = () => {
                                                 )}
                                                 <div>
                                                     <div style={{ fontWeight: p.isGroup ? 700 : 600, fontSize: '1rem', color: p.isGroup ? 'var(--accent-color, #8B5CF6)' : 'var(--text-primary)' }}>{p.street} {p.house_number}</div>
-                                                    {!p.isGroup && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm} m²` : ''}</div>}
+                                                    {!p.isGroup && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.zip} {p.city}{totalSqm > 0 ? ` • ${totalSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²` : ''}</div>}
                                                     {p.isGroup && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{p.properties.length} Gebäude verknüpft</div>}
                                                 </div>
                                             </div>
@@ -2256,7 +2256,7 @@ const InvestorPortal = () => {
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', fontSize: '0.9rem' }}>
                             <div><span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Adresse</span><div>{p.street} {p.house_number}, {p.zip} {p.city}</div></div>
                             <div><span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Einheiten</span><div>{p.units?.length || 0}</div></div>
-                            <div><span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Fläche</span><div>{totalSqm} m²</div></div>
+                            <div><span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Fläche</span><div>{totalSqm.toLocaleString('de-DE', { maximumFractionDigits: 2 })} m²</div></div>
                         </div>
                     </div>
 

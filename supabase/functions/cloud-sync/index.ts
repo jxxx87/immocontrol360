@@ -214,6 +214,17 @@ serve(async (req) => {
     const { data: units, error: unitsError } = await unitsQuery
     if (unitsError) throw unitsError
 
+    // Fetch all leases (active and ended) with tenant names for the units
+    let leases: any[] = []
+    if (units && units.length > 0) {
+      const unitIds = units.map((u: any) => u.id)
+      const { data: leasesData } = await supabaseClient
+        .from('leases')
+        .select('id, unit_id, status, tenant:tenants(first_name, last_name)')
+        .in('unit_id', unitIds)
+      leases = leasesData || []
+    }
+
     // 2. Group properties and generate folder names
     const groups: Record<string, any> = {}
     const ungrouped: any[] = []
@@ -280,6 +291,16 @@ serve(async (req) => {
       relatedUnits.forEach((unit: any) => {
         if (unit.unit_name) {
           expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Bilder`)
+          expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Mietverhältnisse`)
+          
+          // Find leases for this unit
+          const unitLeases = leases.filter((l: any) => l.unit_id === unit.id)
+          unitLeases.forEach((lease: any) => {
+            const tenantName = `${lease.tenant?.first_name || ''} ${lease.tenant?.last_name || ''}`.trim()
+            if (tenantName) {
+              expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Mietverhältnisse/${tenantName}`)
+            }
+          })
         }
       })
     })

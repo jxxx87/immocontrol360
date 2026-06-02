@@ -929,7 +929,7 @@ const Letting = () => {
                   <Building2 size={16} /> Einheitendetails
                 </h4>
                 <div style={{ fontSize: '0.8rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                  <div><strong>Fläche:</strong> {selectedUnit.sqm} m²</div>
+                  <div><strong>Fläche:</strong> {selectedUnit.sqm ? (parseFloat(selectedUnit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '—'} m²</div>
                   <div><strong>Zimmer:</strong> {selectedUnit.rooms}</div>
                   <div><strong>Balkon:</strong> {selectedUnit.balcony ? 'Ja' : 'Nein'}</div>
                   <div><strong>Einbauküche:</strong> {selectedUnit.fitted_kitchen ? 'Ja' : 'Nein'}</div>

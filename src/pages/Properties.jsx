@@ -577,7 +577,7 @@ const Properties = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
     const [searchTerm, setSearchTerm] = useState('');
-    const [viewMode, setViewMode] = useState('grid');
+    const [viewMode, setViewMode] = useState(() => localStorage.getItem('properties_view_mode') || 'grid');
     const [newPropertyImages, setNewPropertyImages] = useState([]);
     const [newUnitImages, setNewUnitImages] = useState([]);
     const [pendingPropertyThumbnailIndex, setPendingPropertyThumbnailIndex] = useState(null);
@@ -630,6 +630,10 @@ const Properties = () => {
     const [openPropertyActionMenuId, setOpenPropertyActionMenuId] = useState(null);
     const [propertyMenuPos, setPropertyMenuPos] = useState({ top: 0, left: 0 });
     const [editingPropertyId, setEditingPropertyId] = useState(null);
+
+    useEffect(() => {
+        localStorage.setItem('properties_view_mode', viewMode);
+    }, [viewMode]);
 
     // Fetch Properties with Aggregated Data
     const fetchProperties = async () => {

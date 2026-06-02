@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useEditor, EditorContent } from '@tiptap/react';
 import { Node } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
@@ -287,7 +288,10 @@ export const DocumentTemplates = () => {
     const selectedPortfolioBank = activePortfolio?.bank_name || 'Musterbank AG';
     const selectedPortfolioTax = activePortfolio?.tax_number || '09/123/45678';
     const selectedPortfolioVat = activePortfolio?.vat_id || 'DE 987654321';
-    const [activeType, setActiveType] = useState('payment_reminder');
+    const location = useLocation();
+    const [activeType, setActiveType] = useState(() => {
+        return location.state?.templateId || 'payment_reminder';
+    });
     const [previewPage, setPreviewPage] = useState(1);
     const [pageCount, setPageCount] = useState(1);
     const [subject, setSubject] = useState('');
@@ -834,6 +838,33 @@ export const DocumentTemplates = () => {
             storno_nummer: "ST-2026-0001",
             kaution_betrag: "1.950,00 €"
         };
+
+        if (location.state?.tenant) {
+            const t = location.state.tenant;
+            const fullName = `${t.first_name || ''} ${t.last_name || ''}`.trim();
+            if (fullName) {
+                mockData.mieter_name = fullName;
+                mockData.mieter_nachname = t.last_name || mockData.mieter_nachname;
+                const salute = t.gender === 'female' ? 'Sehr geehrte Frau' : t.gender === 'male' ? 'Sehr geehrter Herr' : 'Sehr geehrte(r) Frau/Herr';
+                mockData.mieter_anrede = t.last_name ? `${salute} ${t.last_name}` : mockData.mieter_anrede;
+            }
+            if (t.street) {
+                mockData.mieter_adresse = `${t.street} ${t.house_number || ''}<br/>${t.zip || ''} ${t.city || ''}`;
+            }
+            mockData.objekt_name = t.objekt_name || mockData.objekt_name;
+            mockData.einheit_name = t.einheit_name || mockData.einheit_name;
+            if (t.street) {
+                mockData.objekt_adresse = `${t.street} ${t.house_number || ''}, ${t.zip || ''} ${t.city || ''}`.trim();
+            }
+            if (t.cold_rent) {
+                const rentVal = parseFloat(t.cold_rent) || 0;
+                mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+                const increaseVal = rentVal * 0.15;
+                const newRentVal = rentVal + increaseVal;
+                mockData.neue_miete = newRentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+                mockData.erhoehungs_betrag = increaseVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+            }
+        }
 
         // Realistische Tabellenvorlagen definieren
         const mockTables = {
