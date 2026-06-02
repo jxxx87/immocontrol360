@@ -300,7 +300,7 @@ serve(async (req) => {
           if (item.isGroup) {
             const prop = item.members.find((m: any) => m.id === unit.property_id)
             const houseNumber = prop?.house_number || 'Ohne Hausnummer'
-            unitFolderPath = `${folderName}/${houseNumber}/Einheiten/${unit.unit_name}`
+            unitFolderPath = `${folderName}/Einheiten/${houseNumber}/${unit.unit_name}`
           } else {
             unitFolderPath = `${folderName}/Einheiten/${unit.unit_name}`
           }

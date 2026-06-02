@@ -1068,7 +1068,7 @@ const Properties = () => {
                         let targetPath = '';
                         if (currentPropertyForUnit?.economic_unit_id) {
                             const houseNumber = currentPropertyForUnit.house_number || 'Ohne Hausnummer';
-                            targetPath = `${propFolderName}/${houseNumber}/Einheiten/${unitForm.unit_name}/Bilder`;
+                            targetPath = `${propFolderName}/Einheiten/${houseNumber}/${unitForm.unit_name}/Bilder`;
                         } else {
                             targetPath = `${propFolderName}/Einheiten/${unitForm.unit_name}/Bilder`;
                         }
@@ -2234,7 +2234,7 @@ const Properties = () => {
                         relativePath={
                             unitForm.unit_name && currentPropertyForUnit
                                 ? (currentPropertyForUnit.economic_unit_id
-                                    ? `${currentPropertyForUnit.house_number || 'Ohne Hausnummer'}/Einheiten/${unitForm.unit_name}/Bilder`
+                                    ? `Einheiten/${currentPropertyForUnit.house_number || 'Ohne Hausnummer'}/${unitForm.unit_name}/Bilder`
                                     : `Einheiten/${unitForm.unit_name}/Bilder`)
                                 : ''
                         }

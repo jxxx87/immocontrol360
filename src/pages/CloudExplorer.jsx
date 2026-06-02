@@ -595,37 +595,39 @@ const CloudExplorer = () => {
                                             if (PROTECTED_FOLDERS.includes(file.name)) {
                                                 isProtected = true;
                                             }
-                                            if (selectedProperty?.isGroup) {
-                                                const hasMatchingHouseNumber = selectedProperty.members?.some(m => m.house_number === file.name);
-                                                if (hasMatchingHouseNumber) {
+                                        } else if (pathNames.length === 1) {
+                                            const parentName = pathNames[0];
+                                            if (parentName === 'Einheiten') {
+                                                if (selectedProperty?.isGroup) {
+                                                    const hasMatchingHouseNumber = selectedProperty.members?.some(m => m.house_number === file.name);
+                                                    if (hasMatchingHouseNumber) {
+                                                        isProtected = true;
+                                                    }
+                                                } else {
                                                     isProtected = true;
                                                 }
                                             }
-                                        } else if (pathNames.length === 1) {
-                                            const parentName = pathNames[0];
-                                            const isHouseNumberParent = selectedProperty?.isGroup && selectedProperty.members?.some(m => m.house_number === parentName);
-                                            if (isHouseNumberParent && file.name === 'Einheiten') {
-                                                isProtected = true;
-                                            }
                                         } else if (pathNames.length === 2) {
-                                            const [grandParent, parent] = pathNames;
-                                            const isWGUnitFolder = selectedProperty?.isGroup && parent === 'Einheiten' && selectedProperty.members?.some(m => m.house_number === grandParent);
-                                            const isNormalUnitFolder = !selectedProperty?.isGroup && grandParent === 'Einheiten';
-                                            if (isWGUnitFolder || isNormalUnitFolder) {
-                                                isProtected = true;
+                                            const [p0, p1] = pathNames;
+                                            if (p0 === 'Einheiten') {
+                                                if (selectedProperty?.isGroup) {
+                                                    isProtected = true;
+                                                } else {
+                                                    isProtected = file.name === 'Bilder' || file.name === 'Mietverhältnisse';
+                                                }
                                             }
                                         } else if (pathNames.length === 3) {
                                             const [p0, p1, p2] = pathNames;
-                                            const isWGUnderUnit = selectedProperty?.isGroup && p1 === 'Einheiten' && (file.name === 'Bilder' || file.name === 'Mietverhältnisse');
-                                            const isNormalUnderUnit = !selectedProperty?.isGroup && p0 === 'Einheiten' && (file.name === 'Bilder' || file.name === 'Mietverhältnisse');
-                                            if (isWGUnderUnit || isNormalUnderUnit) {
-                                                isProtected = true;
+                                            if (p0 === 'Einheiten') {
+                                                if (selectedProperty?.isGroup) {
+                                                    isProtected = file.name === 'Bilder' || file.name === 'Mietverhältnisse';
+                                                } else if (p2 === 'Mietverhältnisse') {
+                                                    isProtected = true;
+                                                }
                                             }
                                         } else if (pathNames.length === 4) {
                                             const [p0, p1, p2, p3] = pathNames;
-                                            const isWGUnderMiet = selectedProperty?.isGroup && p1 === 'Einheiten' && p3 === 'Mietverhältnisse';
-                                            const isNormalUnderMiet = !selectedProperty?.isGroup && p0 === 'Einheiten' && p2 === 'Mietverhältnisse';
-                                            if (isWGUnderMiet || isNormalUnderMiet) {
+                                            if (p0 === 'Einheiten' && selectedProperty?.isGroup && p3 === 'Mietverhältnisse') {
                                                 isProtected = true;
                                             }
                                         }
