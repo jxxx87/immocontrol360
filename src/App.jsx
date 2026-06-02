@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard';
 import Properties from './pages/Properties';
 
 import Tenants from './pages/Tenants';
+import TenantDetail from './pages/TenantDetail';
 import Finance from './pages/Finance';
 import BankReconciliation from './pages/BankReconciliation';
 import UtilityCosts from './pages/UtilityCosts';
@@ -110,6 +111,7 @@ function App() {
                       <Route path="properties" element={<Properties />} />
 
                       <Route path="tenants" element={<Tenants />} />
+                      <Route path="tenants/:id" element={<TenantDetail />} />
                       <Route path="forderungen" element={<Claims />} />
                       <Route path="forderungen/:claimId" element={<ClaimDetail />} />
                       <Route path="finance" element={<Finance />} />

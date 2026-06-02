@@ -239,11 +239,7 @@ const Tenants = () => {
         if (urlUnitId && action !== 'create' && units.length > 0) {
             const targetUnit = units.find(u => u.id === urlUnitId);
             if (targetUnit && targetUnit.activeLease) {
-                setSelectedLease(targetUnit.activeLease);
-                setEditTenantForm({ ...targetUnit.activeLease.tenant });
-                setEditLeaseForm({ ...targetUnit.activeLease });
-                setIsEditingDetails(false);
-                setIsDetailModalOpen(true);
+                navigate(`/tenants/${targetUnit.activeLease.id}`);
             }
         }
     }, [location.search, units]);
@@ -618,50 +614,27 @@ const Tenants = () => {
         return disp;
     }, [units, showEndedLeases]);
 
-    // Group displayedUnits
+    // Group displayedUnits by Property (Objekt)
     const groupedUnits = React.useMemo(() => {
         const groups = {};
-        const result = [];
 
         displayedUnits.forEach(unit => {
             const p = unit.property;
-            if (p && p.economic_unit_id) {
-                if (!groups[p.economic_unit_id]) {
-                    groups[p.economic_unit_id] = {
-                        id: 'we_' + p.economic_unit_id,
-                        isGroup: true,
-                        economic_unit_id: p.economic_unit_id,
-                        street: 'Wirtschaftseinheit',
-                        house_number: '',
-                        city: '',
-                        units: []
-                    };
-                }
-                groups[p.economic_unit_id].units.push(unit);
-            } else {
-                result.push(unit);
+            const key = p ? p.id : 'no-property';
+            if (!groups[key]) {
+                groups[key] = {
+                    id: key,
+                    isGroup: true,
+                    street: p ? p.street : 'Keine Immobilie zugeordnet',
+                    house_number: p ? (p.house_number || '') : '',
+                    city: p ? (p.city || '') : '',
+                    units: []
+                };
             }
+            groups[key].units.push(unit);
         });
 
-        Object.values(groups).forEach(g => {
-            if (g.units.length > 0) {
-                const uniqueProps = Array.from(new Set(g.units.map(u => u.property?.id)));
-                if (uniqueProps.length === 1) {
-                    // Only one property from this group is visible (maybe filtered), so just add the units directly
-                    g.units.forEach(u => result.push(u));
-                } else {
-                    const streets = Array.from(new Set(g.units.map(u => u.property?.street).filter(Boolean)));
-                    g.street = `Wirtschaftseinheit: ${streets.length > 0 ? streets.join(', ') : 'Diverse'}`;
-                    g.house_number = Array.from(new Set(g.units.map(u => u.property?.house_number).filter(Boolean))).join(' & ');
-                    const cities = Array.from(new Set(g.units.map(u => u.property?.city).filter(Boolean)));
-                    g.city = cities.join(', ');
-                    result.push(g);
-                }
-            }
-        });
-
-        const getStreet = (item) => item.isGroup ? item.street : (item.property?.street || '');
-        return result.sort((a, b) => getStreet(a).localeCompare(getStreet(b)));
+        return Object.values(groups).sort((a, b) => a.street.localeCompare(b.street));
     }, [displayedUnits]);
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
@@ -784,11 +757,7 @@ const Tenants = () => {
                 {row.activeLease ? (
                     <>
                         <Button variant="ghost" size="sm" onClick={() => {
-                            setSelectedLease(row.activeLease);
-                            setEditTenantForm({ ...row.activeLease.tenant });
-                            setEditLeaseForm({ ...row.activeLease });
-                            setIsEditingDetails(false);
-                            setIsDetailModalOpen(true);
+                            navigate(`/tenants/${row.activeLease.id}`);
                         }} title="Details anzeigen" style={{ flex: 1 }}>
                             <Eye size={16} style={{ marginRight: '4px' }} /> Details
                         </Button>
@@ -1334,30 +1303,7 @@ const Tenants = () => {
                                 const l = row.activeLease;
                                 setOpenActionMenuId(null);
                                 setSelectedActionRow(null);
-                                setSelectedLease({ ...l, unit: row });
-                                setEditTenantForm({
-                                    id: l.tenant.id,
-                                    first_name: l.tenant.first_name,
-                                    last_name: l.tenant.last_name,
-                                    email: l.tenant.email,
-                                    phone: l.tenant.phone,
-                                    occupants: l.tenant.occupants
-                                });
-                                setEditLeaseForm({
-                                    id: l.id,
-                                    start_date: l.start_date,
-                                    end_date: l.end_date,
-                                    cold_rent: l.cold_rent,
-                                    service_charge: l.service_charge,
-                                    heating_cost: l.heating_cost,
-                                    other_costs: l.other_costs,
-                                    deposit: l.deposit,
-                                    payment_due_day: l.payment_due_day,
-                                    last_rent_increase: l.last_rent_increase,
-                                    lease_type: l.lease_type
-                                });
-                                setIsEditingDetails(false);
-                                setIsDetailModalOpen(true);
+                                navigate(`/tenants/${l.id}`);
                             }}
                         >
                             <Eye size={14} /> Details
@@ -1371,30 +1317,7 @@ const Tenants = () => {
                                 const l = row.activeLease;
                                 setOpenActionMenuId(null);
                                 setSelectedActionRow(null);
-                                setSelectedLease({ ...l, unit: row });
-                                setEditTenantForm({
-                                    id: l.tenant.id,
-                                    first_name: l.tenant.first_name,
-                                    last_name: l.tenant.last_name,
-                                    email: l.tenant.email,
-                                    phone: l.tenant.phone,
-                                    occupants: l.tenant.occupants
-                                });
-                                setEditLeaseForm({
-                                    id: l.id,
-                                    start_date: l.start_date,
-                                    end_date: l.end_date,
-                                    cold_rent: l.cold_rent,
-                                    service_charge: l.service_charge,
-                                    heating_cost: l.heating_cost,
-                                    other_costs: l.other_costs,
-                                    deposit: l.deposit,
-                                    payment_due_day: l.payment_due_day,
-                                    last_rent_increase: l.last_rent_increase,
-                                    lease_type: l.lease_type
-                                });
-                                setIsEditingDetails(true);
-                                setIsDetailModalOpen(true);
+                                navigate(`/tenants/${l.id}`);
                             }}
                         >
                             <Edit size={14} /> Bearbeiten
