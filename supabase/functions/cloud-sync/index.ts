@@ -8,9 +8,7 @@ const corsHeaders = {
 
 const DEFAULT_SUBFOLDERS = [
   "Rechnungen",
-  "Mietverträge",
   "Bilder",
-  "Schriftverkehr",
   "Nebenkosten",
   "Versicherungen",
   "Energieausweise"
@@ -291,14 +289,14 @@ serve(async (req) => {
       relatedUnits.forEach((unit: any) => {
         if (unit.unit_name) {
           expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Bilder`)
-          expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Mietverhältnisse`)
+          expectedPaths.push(`${folderName}/${unit.unit_name}/Mietverhältnisse`)
           
           // Find leases for this unit
           const unitLeases = leases.filter((l: any) => l.unit_id === unit.id)
           unitLeases.forEach((lease: any) => {
             const tenantName = `${lease.tenant?.first_name || ''} ${lease.tenant?.last_name || ''}`.trim()
             if (tenantName) {
-              expectedPaths.push(`${folderName}/Neuvermietung/${unit.unit_name}/Mietverhältnisse/${tenantName}`)
+              expectedPaths.push(`${folderName}/${unit.unit_name}/Mietverhältnisse/${tenantName}`)
             }
           })
         }

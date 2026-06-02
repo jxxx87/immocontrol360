@@ -307,7 +307,7 @@ const TenantDetail = () => {
             const tenantFolderName = `${leaseData.tenant?.first_name || ''} ${leaseData.tenant?.last_name || ''}`.trim();
             const unitName = leaseData.unit?.unit_name || '';
             const fullCloudPath = displayFolderName && unitName && tenantFolderName
-                ? `${displayFolderName}/Neuvermietung/${unitName}/Mietverhältnisse/${tenantFolderName}`
+                ? `${displayFolderName}/${unitName}/Mietverhältnisse/${tenantFolderName}`
                 : '';
             
             setTenantCloudPath(fullCloudPath);
