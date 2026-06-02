@@ -762,30 +762,33 @@ input.search-input-padding {
 
 /* ── TIPTAP & LETTER TEMPLATE WRAPPER STYLING ────────────────── */
 .tiptap {
-  min-height: 297mm;
-  outline: none;
-  background: white;
-  padding: 10px;
+  outline: none !important;
+  background: transparent !important;
+  padding: 0 !important;
 }
 
 /* DIN 5008 A4 Page Style */
 .letter-page {
-  width: 210mm;
-  min-height: 297mm;
-  padding: 20mm 20mm 20mm 25mm;
-  margin: 0 auto;
+  width: 210mm !important;
+  height: 297mm !important;
+  min-height: 297mm !important;
+  max-height: 297mm !important;
+  padding: 20mm 20mm 20mm 25mm !important;
+  margin: 0 auto !important;
   background: #ffffff !important;
   color: #000000 !important;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  border-radius: 4px;
-  font-family: 'Arial', 'Helvetica', sans-serif;
-  font-size: 11pt;
-  line-height: 1.5;
-  box-sizing: border-box;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  text-align: left;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08) !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 4px !important;
+  font-family: 'Arial', 'Helvetica', sans-serif !important;
+  font-size: 11pt !important;
+  line-height: 1.5 !important;
+  box-sizing: border-box !important;
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  text-align: left !important;
+  overflow: hidden !important;
 }
 
 .letter-page > p {

@@ -23,7 +23,7 @@ import {
     List, ListOrdered, Undo, Redo, 
     Save, RotateCcw, FileText, ChevronLeft, ChevronRight, 
     HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2,
-    ArrowLeft, ArrowRight, Minus, Strikethrough, Sliders
+    ArrowLeft, ArrowRight, Minus, Strikethrough, Sliders, Eye, EyeOff
 } from 'lucide-react';
 
 // Deutsche Variablen für globale Verwendung
@@ -299,6 +299,7 @@ export const DocumentTemplates = () => {
     const [saving, setSaving] = useState(false);
     const [selectedVariable, setSelectedVariable] = useState(null);
     const [selectedNodeType, setSelectedNodeType] = useState(null);
+    const [showLivePreview, setShowLivePreview] = useState(false);
     const [diagnostics, setDiagnostics] = useState({
         lastError: null,
         loadSource: 'Initial',
@@ -488,6 +489,7 @@ export const DocumentTemplates = () => {
 
     useEffect(() => {
         setPreviewPage(1);
+        setShowLivePreview(false);
         if (editor) {
             let count = 0;
             editor.state.doc.descendants(node => {
@@ -844,6 +846,313 @@ export const DocumentTemplates = () => {
         }
     };
 
+    // Get resolved content with mock data filled in
+    const getResolvedHtml = (contentHtml) => {
+        if (!contentHtml) return '';
+        
+        const mockData = {
+            mieter_name: "Max Mustermann",
+            mieter_anrede: "Sehr geehrter Herr Mustermann",
+            mieter_adresse: "Musterweg 12<br/>12345 Musterstadt",
+            objekt_name: "Wohnpark Sonnenseite",
+            einheit_name: "Wohnung EG links",
+            objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
+            vermieter_name: selectedPortfolioCompany || selectedPortfolioName || "ImmoControlpro Vermieter GmbH",
+            vermieter_bankverbindung: selectedPortfolioBank && selectedPortfolioIban && selectedPortfolioBic
+                ? `${selectedPortfolioBank}<br/>IBAN: ${selectedPortfolioIban}<br/>BIC: ${selectedPortfolioBic}`
+                : "Sparkasse Musterstadt<br/>IBAN: DE89 5005 0400 1122 3344 55<br/>BIC: SOLODEM1MUC",
+            offener_betrag: "908,70 €",
+            zahlungsfrist_datum: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('de-DE'),
+            verzugstage: "14",
+            mahnstufe: "2",
+            zinsbetrag: "3,70 €",
+            abrechnungsjahr: "2025",
+            abrechnungszeitraum: "01.01.2025 - 31.12.2025",
+            nutzungszeitraum: "01.01.2025 - 31.12.2025",
+            gesamtkosten_mieter: "550,00 €",
+            vorauszahlungs_betrag: "400,00 €",
+            saldo_betrag: "150,00 €",
+            saldo_art: "Nachzahlung",
+            gast_name: "Dr. Sabine Sommer",
+            gast_adresse: "Lindenallee 7<br/>50667 Köln",
+            buchungszeitraum: "15.05.2026 - 22.05.2026",
+            gaeste_anzahl: "2",
+            rechnungsnummer: "RE-2026-0412",
+            rechnungsdatum: new Date().toLocaleDateString('de-DE'),
+            netto_betrag: "560,75 €",
+            mwst_betrag: "39,25 €",
+            brutto_betrag: "600,00 €",
+            original_rechnungsnummer: "RE-2026-0399",
+            aktuelle_miete: "650,00 €",
+            neue_miete: "715,00 €",
+            erhoehungs_betrag: "65,00 €",
+            erhoehungs_datum: "01.08.2026",
+            zustimmungs_frist: "31.07.2026",
+            einzug_datum: "01.06.2026",
+            vermieter_adresse: selectedPortfolioAddress || "Musterstraße 42, 12345 Musterstadt",
+            vermieter_email: selectedPortfolioEmail,
+            vermieter_telefon: selectedPortfolioPhone,
+            vermieter_steuernummer: selectedPortfolioTax || "123/456/78901",
+            vermieter_ust_id: selectedPortfolioVat || "DE123456789",
+            rechnungs_datum: new Date().toLocaleDateString('de-DE'),
+            erstellungsdatum: new Date().toLocaleDateString('de-DE'),
+            mieter_nachname: "Mustermann",
+            storno_nummer: "ST-2026-0001",
+            kaution_betrag: "1.950,00 €"
+        };
+
+        if (location.state?.tenant) {
+            const t = location.state.tenant;
+            const fullName = `${t.first_name || ''} ${t.last_name || ''}`.trim();
+            if (fullName) {
+                mockData.mieter_name = fullName;
+                mockData.mieter_nachname = t.last_name || mockData.mieter_nachname;
+                const salute = t.gender === 'female' ? 'Sehr geehrte Frau' : t.gender === 'male' ? 'Sehr geehrter Herr' : 'Sehr geehrte(r) Frau/Herr';
+                mockData.mieter_anrede = t.last_name ? `${salute} ${t.last_name}` : mockData.mieter_anrede;
+            }
+            if (t.street) {
+                mockData.mieter_adresse = `${t.street} ${t.house_number || ''}<br/>${t.zip || ''} ${t.city || ''}`;
+            }
+            mockData.objekt_name = t.objekt_name || mockData.objekt_name;
+            mockData.einheit_name = t.einheit_name || mockData.einheit_name;
+            if (t.street) {
+                mockData.objekt_adresse = `${t.street} ${t.house_number || ''}, ${t.zip || ''} ${t.city || ''}`.trim();
+            }
+            if (t.cold_rent) {
+                const rentVal = parseFloat(t.cold_rent) || 0;
+                mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+                const increaseVal = rentVal * 0.15;
+                const newRentVal = rentVal + increaseVal;
+                mockData.neue_miete = newRentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+                mockData.erhoehungs_betrag = increaseVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+            }
+        }
+
+        const mockTables = {
+            forderungs_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Fälligkeit</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Bezeichnung</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Soll-Betrag</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ist-Betrag</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundmiete + NK-Vorauszahlung Mai 2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">850,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="4" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamtrückstand:</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">855,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            forderungs_detail_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Datum / Zeitraum</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Posten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Soll</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Haben</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinssatz</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinsen</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">01.05.2026 - 31.05.2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miete Mai 2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,12% p.a.</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">3,70 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">853,70 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">12.05.2026</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; -"></td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="6" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme inkl. Zinsen:</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">858,70 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            nebenkosten_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Kostenart</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Gesamtkosten</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
+                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundsteuer</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1.200,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Müllabfuhr & Straßenreinigung</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">800,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">100,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Heizkosten (Schätzung)</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2.400,00 €</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohnfläche (m²)</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">300,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="3" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
+                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">550,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            nebenkosten_detail_tabelle: `
+                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+                  <thead>
+                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Betriebskostenart</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtkosten</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
+                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Abwasser</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">600,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Personenmonate</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">75,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Frischwasser</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">900,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wassermesser (m³)</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">125,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Allgemeinstrom</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">350,00 €</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">45,00 €</td>
+                    </tr>
+                    <tr style="font-weight: bold; background-color: #f1f5f9;">
+                      <td colspan="3" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
+                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">245,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>`,
+            
+            positions_tabelle: `
+                <table class="invoice-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 5%; text-align: center;">Pos</th>
+                      <th style="width: 55%;">Beschreibung</th>
+                      <th style="width: 10%; text-align: right;">Menge</th>
+                      <th style="width: 15%; text-align: right;">Einzel</th>
+                      <th style="width: 15%; text-align: right;">MwSt</th>
+                      <th style="width: 15%; text-align: right;">Gesamt</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">1</td>
+                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Übernachtungskosten FEWO (7 Nächte)</td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">1</td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">420,56 €</td>
+                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">450,00 €</td>
+                    </tr>
+                    <tr style="background-color: #f8fafc;">
+                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">2</td>
+                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Endreinigung Pauschal</td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">74,77 €</td>
+                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">80,00 €</td>
+                    </tr>
+                    <tr>
+                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">3</td>
+                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Kurbeitrag (Gästetax) Erwachsen</td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
+                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">65,42 €</td>
+                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">70,00 €</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="totals" style="display: flex; justify-content: flex-end; margin-bottom: 20mm;">
+                  <div class="totals-box" style="width: 80mm;">
+                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span>Summe Netto</span>
+                      <span>560,75 €</span>
+                    </div>
+                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span>zzgl. 7% MwSt</span>
+                      <span>39,25 €</span>
+                    </div>
+                    <div class="t-row final" style="display: flex; justify-content: space-between; margin-bottom: 4px; border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt;">
+                      <span>Gesamtbetrag</span>
+                      <span>600,00 €</span>
+                    </div>
+                  </div>
+                </div>`
+        };
+
+        let res = contentHtml;
+        
+        // 1. Tabellen-Platzhalter
+        Object.keys(mockTables).forEach(key => {
+            const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
+            res = res.replace(mentionRegex, mockTables[key]);
+            
+            const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+            res = res.replace(textRegex, mockTables[key]);
+        });
+
+        // 2. Reguläre Platzhalter
+        Object.keys(mockData).forEach(key => {
+            const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
+            res = res.replace(mentionRegex, mockData[key]);
+            
+            const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+            res = res.replace(textRegex, mockData[key]);
+        });
+
+        return res;
+    };
+
     // Open A4 print preview window with replaced placeholders and tables
     const handlePrintPreview = () => {
         if (!editor) return;
@@ -1151,27 +1460,7 @@ export const DocumentTemplates = () => {
 
         // Ersetzungsmethode für Mentions & Text-Platzhalter
         const replacePlaceholders = (htmlStr) => {
-            let res = htmlStr;
-            
-            // 1. Tabellen-Platzhalter
-            Object.keys(mockTables).forEach(key => {
-                const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
-                res = res.replace(mentionRegex, mockTables[key]);
-                
-                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-                res = res.replace(textRegex, mockTables[key]);
-            });
-
-            // 2. Reguläre Platzhalter
-            Object.keys(mockData).forEach(key => {
-                const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
-                res = res.replace(mentionRegex, mockData[key]);
-                
-                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-                res = res.replace(textRegex, mockData[key]);
-            });
-
-            return res;
+            return getResolvedHtml(htmlStr);
         };
 
         const previewHtml = replacePlaceholders(contentHtml);
@@ -1199,12 +1488,24 @@ export const DocumentTemplates = () => {
         }
         @media print {
             .no-print { display: none !important; }
-            body { padding: 0; background: #ffffff; }
+            html, body {
+                width: 210mm;
+                height: 297mm;
+                margin: 0 !important;
+                padding: 0 !important;
+                overflow: hidden;
+                background: #ffffff;
+            }
             .letter-page {
                 box-shadow: none !important;
                 border: none !important;
-                margin: 0 auto !important;
+                margin: 0 !important;
+                padding: 20mm 20mm 20mm 25mm !important;
+                width: 210mm !important;
+                height: 297mm !important;
+                overflow: hidden !important;
                 page-break-after: always !important;
+                page-break-inside: avoid !important;
             }
             .letter-page:last-child {
                 page-break-after: avoid !important;
@@ -1217,13 +1518,16 @@ export const DocumentTemplates = () => {
             }
             .letter-page {
                 margin: 0 auto 30px;
+                border-radius: 4px;
             }
         }
         
         /* DIN 5008 A4 Page Style */
         .letter-page {
             width: 210mm;
+            height: 297mm;
             min-height: 297mm;
+            max-height: 297mm;
             padding: 20mm 20mm 20mm 25mm;
             background: #ffffff !important;
             color: #000000 !important;
@@ -1235,6 +1539,8 @@ export const DocumentTemplates = () => {
             display: flex;
             flex-direction: column;
             text-align: left;
+            overflow: hidden;
+            box-sizing: border-box;
         }
         
         .letter-page > p {
@@ -1485,6 +1791,12 @@ export const DocumentTemplates = () => {
                     display: none !important;
                 }
                 .ProseMirror > .letter-page:nth-of-type(${activePage}) {
+                    display: flex !important;
+                }
+                .preview-live-container > .letter-page {
+                    display: none !important;
+                }
+                .preview-live-container > .letter-page:nth-of-type(${activePage}) {
                     display: flex !important;
                 }
                 @media (max-width: 1450px) {
@@ -2033,6 +2345,15 @@ export const DocumentTemplates = () => {
                                     </button>
 
                                     <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                                        <Button 
+                                            variant={showLivePreview ? "primary" : "secondary"} 
+                                            size="sm" 
+                                            icon={showLivePreview ? EyeOff : Eye} 
+                                            onClick={() => setShowLivePreview(!showLivePreview)}
+                                            style={{ marginRight: '4px' }}
+                                        >
+                                            {showLivePreview ? "Entwurf" : "Live-Vorschau"}
+                                        </Button>
                                         <Button variant="secondary" size="sm" icon={FileText} onClick={handlePrintPreview}>
                                             PDF-Vorschau
                                         </Button>
@@ -2269,7 +2590,11 @@ export const DocumentTemplates = () => {
                                              </button>
                                          </div>
                                      )}
-                                     <EditorContent editor={editor} />
+                                     {showLivePreview ? (
+                                         <div className="preview-live-container" dangerouslySetInnerHTML={{ __html: getResolvedHtml(editor ? editor.getHTML() : '') }} />
+                                     ) : (
+                                         <EditorContent editor={editor} />
+                                     )}
                                  </div>
                             </div>
                         </>
