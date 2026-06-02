@@ -798,6 +798,15 @@ input.search-input-padding {
   margin-bottom: 1em;
 }
 
+/* Leerzeilen (empty paragraphs): gleiche Höhe wie gefüllte Absätze */
+.letter-page p:empty,
+.letter-page p:has(> br:only-child),
+.letter-body p:empty,
+.letter-body p:has(> br:only-child) {
+  min-height: 1.6em;
+  margin-bottom: 1em !important;
+}
+
 /* Dark mode compatibility for letter page sheet - keep white background for letter-page always so print view matches editor! */
 [data-theme="dark"] .letter-page {
   background: #ffffff !important;
@@ -887,6 +896,7 @@ input.search-input-padding {
 
 .letter-body p {
   margin-bottom: 1em !important;
+  min-height: 1.6em;
 }
 
 /* Footer Section - absolut verankert am Seitenende (wie Word) */
@@ -933,9 +943,10 @@ input.search-input-padding {
   color: #0369a1 !important;
 }
 
-/* TipTap Editor Elements styling */
+/* TipTap Editor Elements styling - identische Abstände wie Live/PDF-Vorschau */
 .tiptap p {
   margin-bottom: 1em;
+  min-height: 1.6em;
 }
 
 .tiptap table {

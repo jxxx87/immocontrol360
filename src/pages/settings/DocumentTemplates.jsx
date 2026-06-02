@@ -702,27 +702,50 @@ export const DocumentTemplates = () => {
             // Check if page overflows
             const isOverflowing = domBody.scrollHeight > domBody.clientHeight + 4;
             
-            if (isOverflowing && page.bodyNode && page.bodyNode.childCount > 1) {
+            if (isOverflowing && page.bodyNode && page.bodyNode.childCount >= 1) {
                 const bodyRect = domBody.getBoundingClientRect();
                 const maxBottom = bodyRect.top + domBody.clientHeight;
                 let overflowChildElement = null;
+                let overflowChildIndex = -1;
                 
                 for (let j = 0; j < domBody.children.length; j++) {
                     const child = domBody.children[j];
                     const rect = child.getBoundingClientRect();
                     if (rect.bottom > maxBottom - 2) {
                         overflowChildElement = child;
+                        overflowChildIndex = j;
                         break;
                     }
                 }
                 
-                if (overflowChildElement && overflowChildElement !== domBody.firstElementChild) {
+                // Falls kein Kind gefunden wird das überläuft, aber scrollHeight > clientHeight,
+                // nehmen wir das letzte Kind (es ragt durch margin/padding über)
+                if (!overflowChildElement && domBody.children.length > 0) {
+                    overflowChildElement = domBody.lastElementChild;
+                    overflowChildIndex = domBody.children.length - 1;
+                }
+                
+                // Nur verschieben wenn mindestens ein Kind auf der Seite bleibt
+                // ODER wenn es das einzige Kind ist (dann auf neue Seite schieben)
+                if (overflowChildElement) {
+                    // Wenn das erste Kind selbst überläuft und es das einzige ist, Seite behalten
+                    if (overflowChildIndex === 0 && page.bodyNode.childCount === 1) {
+                        // Einzelnes Kind überläuft - Seite beibehalten (kein Split möglich)
+                        continue;
+                    }
+                    
+                    // Wenn das erste Kind überläuft aber es mehr gibt, ab dem 2. verschieben
+                    if (overflowChildIndex === 0 && page.bodyNode.childCount > 1) {
+                        overflowChildElement = domBody.children[1];
+                        overflowChildIndex = 1;
+                    }
+                    
                     try {
                         const overflowPos = editor.view.posAtDOM(overflowChildElement, 0);
                         if (overflowPos >= page.bodyPos + 1 && overflowPos < page.bodyEnd - 1) {
                             const nextPageIndex = i + 1;
                             if (nextPageIndex >= pages.length) {
-                                // Create new page
+                                // Create new page with footer clone
                                 const newPageNode = editor.schema.nodes.letterPage.create(null, [
                                     editor.schema.nodes.letterBody.create(null, []),
                                     page.footerNode 
@@ -733,7 +756,7 @@ export const DocumentTemplates = () => {
                                 editor.view.dispatch(tr);
                                 return true;
                             } else {
-                                // Move to next page
+                                // Move overflowing content to next page
                                 const slice = doc.slice(overflowPos, page.bodyEnd - 1);
                                 const tr = editor.state.tr;
                                 tr.insert(pages[nextPageIndex].bodyPos + 1, slice.content);
@@ -806,6 +829,7 @@ export const DocumentTemplates = () => {
         if (!editor || loading) return;
         
         let timeoutId = null;
+        let rafId = null;
         
         const handlePagination = () => {
             const changed = runPaginationStep(editor);
@@ -822,8 +846,14 @@ export const DocumentTemplates = () => {
         editor.on('update', onUpdateOrSelection);
         editor.on('selectionUpdate', onUpdateOrSelection);
         
+        // Initial pagination after content is loaded (DOM muss fertig sein)
+        rafId = requestAnimationFrame(() => {
+            timeoutId = setTimeout(handlePagination, 200);
+        });
+        
         return () => {
             if (timeoutId) clearTimeout(timeoutId);
+            if (rafId) cancelAnimationFrame(rafId);
             editor.off('update', onUpdateOrSelection);
             editor.off('selectionUpdate', onUpdateOrSelection);
         };
@@ -1911,6 +1941,14 @@ export const DocumentTemplates = () => {
             min-height: 1.2em;
             margin-bottom: 1em;
         }
+        /* Leerzeilen: gleiche Höhe wie gefüllte Absätze */
+        .letter-page p:empty,
+        .letter-page p:has(> br:only-child),
+        .letter-body p:empty,
+        .letter-body p:has(> br:only-child) {
+            min-height: 1.6em;
+            margin-bottom: 1em !important;
+        }
         
         .letter-sender {
             font-size: 8pt;
@@ -1989,6 +2027,7 @@ export const DocumentTemplates = () => {
         
         .letter-body p {
             margin-bottom: 1em !important;
+            min-height: 1.6em;
         }
         
         .letter-footer {
