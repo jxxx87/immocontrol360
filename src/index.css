@@ -790,7 +790,7 @@ input.search-input-padding {
 
 .letter-page > p {
   min-height: 1.2em;
-  margin: 0;
+  margin-bottom: 1em;
 }
 
 /* Dark mode compatibility for letter page sheet - keep white background for letter-page always so print view matches editor! */
@@ -808,6 +808,25 @@ input.search-input-padding {
   margin-bottom: 5mm;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+/* Fallback: Wenn ein HR direkt folgt, entfernen wir den Rahmen von .letter-sender, damit der HR die Linie zeichnet */
+.letter-sender:has(+ hr),
+.letter-sender:has(+ .editor-hr) {
+  border-bottom: none !important;
+  padding-bottom: 0 !important;
+  margin-bottom: 3mm !important;
+}
+
+/* Trennlinie im Dokument/Editor */
+.editor-hr,
+.letter-page hr {
+  border: none;
+  border-top: 1px solid #cccccc;
+  margin: 2mm 0 5mm 0;
+  width: 100%;
+  display: block;
+  height: 0;
 }
 
 /* Header Row for Recipient & Date/Metadata */
