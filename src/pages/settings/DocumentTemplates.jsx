@@ -758,7 +758,8 @@ export const DocumentTemplates = () => {
         return pages;
     };
 
-    // Pagination runner to handle page splits and merges
+    // Word-like Pagination: overflow:hidden + scrollHeight check
+    // Overflow → move LAST child to next page. Underflow → pull FIRST child back.
     const runPaginationStep = (editor) => {
         if (!editor || !editor.view || !editor.view.dom) return false;
         
@@ -766,118 +767,73 @@ export const DocumentTemplates = () => {
         const pages = getPagesFromDoc(doc);
         const domPages = document.querySelectorAll('.ProseMirror > .letter-page');
         
-        if (pages.length === 0 || domPages.length !== pages.length) {
-            return false;
-        }
+        if (pages.length === 0 || domPages.length !== pages.length) return false;
         
         for (let i = 0; i < pages.length; i++) {
             const page = pages[i];
             const domPage = domPages[i];
             const domBody = domPage.querySelector('.letter-body');
-            if (!domBody || !domBody.children.length) continue;
+            if (!domBody) continue;
             
-            // ── Overflow-Grenze berechnen: Fußzeilen-Oberkante als absolute Grenze ──
-            const domFooter = domPage.querySelector('.letter-footer');
-            let maxBodyBottom;
-            if (domFooter) {
-                // 6px Sicherheitsabstand über der Fußzeile
-                maxBodyBottom = domFooter.getBoundingClientRect().top - 6;
-            } else {
-                // Fallback: Body clientHeight verwenden
-                const bodyRect = domBody.getBoundingClientRect();
-                maxBodyBottom = bodyRect.top + domBody.clientHeight;
-            }
+            // OVERFLOW: scrollHeight > clientHeight = Content ist geclippt
+            const isOverflowing = domBody.scrollHeight > domBody.clientHeight + 2;
             
-            // ── Overflow-Erkennung: Prüfe ob irgendein Kind die Fußzeile erreicht ──
-            let overflowChildElement = null;
-            let overflowChildIndex = -1;
-            
-            for (let j = 0; j < domBody.children.length; j++) {
-                const child = domBody.children[j];
-                const rect = child.getBoundingClientRect();
-                if (rect.bottom > maxBodyBottom) {
-                    overflowChildElement = child;
-                    overflowChildIndex = j;
-                    break;
-                }
-            }
-            
-            // Zusätzliche Prüfung: scrollHeight > clientHeight (für geclippten Content)
-            if (!overflowChildElement && domBody.scrollHeight > domBody.clientHeight + 2) {
-                // Content ist geclippt aber kein Kind hat rect.bottom > maxBodyBottom
-                // → letztes Kind nehmen (es ist durch overflow:hidden versteckt)
-                overflowChildElement = domBody.lastElementChild;
-                overflowChildIndex = domBody.children.length - 1;
-            }
-            
-            if (overflowChildElement && page.bodyNode && page.bodyNode.childCount >= 1) {
-                // Wenn das erste Kind selbst überläuft und es das einzige ist → kein Split möglich
-                if (overflowChildIndex === 0 && page.bodyNode.childCount === 1) {
-                    continue;
-                }
-                
-                // Wenn das erste Kind überläuft aber es mehr gibt → ab dem 2. verschieben
-                if (overflowChildIndex === 0 && page.bodyNode.childCount > 1) {
-                    overflowChildElement = domBody.children[1];
-                    overflowChildIndex = 1;
-                }
+            if (isOverflowing && page.bodyNode && page.bodyNode.childCount > 1) {
+                const lastChild = page.bodyNode.lastChild;
+                const lastChildEnd = page.bodyEnd - 1;
+                const lastChildStart = lastChildEnd - lastChild.nodeSize;
+                const nextIdx = i + 1;
                 
                 try {
-                    const overflowPos = editor.view.posAtDOM(overflowChildElement, 0);
-                    if (overflowPos >= page.bodyPos + 1 && overflowPos < page.bodyEnd - 1) {
-                        const nextPageIndex = i + 1;
-                        if (nextPageIndex >= pages.length) {
-                            // Neue Seite erstellen mit Fußzeilen-Klon
-                            const newPageNode = editor.schema.nodes.letterPage.create(null, [
-                                editor.schema.nodes.letterBody.create(null, []),
-                                page.footerNode 
-                                    ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
-                                    : editor.schema.nodes.letterFooter.create(null, [])
-                            ]);
-                            const tr = editor.state.tr.insert(page.end, newPageNode);
-                            editor.view.dispatch(tr);
-                            return true;
-                        } else {
-                            // Überlaufenden Content auf nächste Seite verschieben
-                            const slice = doc.slice(overflowPos, page.bodyEnd - 1);
-                            const tr = editor.state.tr;
-                            tr.insert(pages[nextPageIndex].bodyPos + 1, slice.content);
-                            tr.delete(overflowPos, page.bodyEnd - 1);
-                            editor.view.dispatch(tr);
-                            return true;
-                        }
+                    if (nextIdx >= pages.length) {
+                        // Neue Seite mit Fußzeilen-Klon
+                        const footerClone = page.footerNode
+                            ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
+                            : editor.schema.nodes.letterFooter.create(null, [editor.schema.nodes.paragraph.create()]);
+                        const newPage = editor.schema.nodes.letterPage.create(null, [
+                            editor.schema.nodes.letterBody.create(null, [lastChild.copy(lastChild.content)]),
+                            footerClone
+                        ]);
+                        const tr = editor.state.tr;
+                        tr.insert(page.end, newPage);
+                        tr.delete(lastChildStart, lastChildEnd);
+                        editor.view.dispatch(tr);
+                        return true;
+                    } else {
+                        const nextPage = pages[nextIdx];
+                        const tr = editor.state.tr;
+                        tr.insert(nextPage.bodyPos + 1, lastChild.copy(lastChild.content));
+                        tr.delete(lastChildStart, lastChildEnd);
+                        editor.view.dispatch(tr);
+                        return true;
                     }
                 } catch (e) {
                     console.error('Pagination overflow error:', e);
                 }
             }
             
-            // ── Underflow: Prüfe ob vom nächsten Seiteninhalt etwas zurückgeholt werden kann ──
-            const nextPageIndex = i + 1;
-            if (nextPageIndex < pages.length) {
-                const nextPage = pages[nextPageIndex];
-                const domNextPage = domPages[nextPageIndex];
-                const domNextBody = domNextPage?.querySelector('.letter-body');
+            if (isOverflowing && page.bodyNode && page.bodyNode.childCount <= 1) continue;
+            
+            // UNDERFLOW: Prüfe ob Content von nächster Seite zurückpasst
+            const nextIdx = i + 1;
+            if (nextIdx < pages.length) {
+                const nextPage = pages[nextIdx];
+                const domNextBody = domPages[nextIdx]?.querySelector('.letter-body');
                 
                 if (domNextBody && nextPage.bodyNode && nextPage.bodyNode.childCount > 0) {
-                    const firstChild = domNextBody.firstElementChild;
-                    if (firstChild) {
-                        const childHeight = firstChild.getBoundingClientRect().height;
-                        // Prüfe ob das erste Kind der nächsten Seite auf diese Seite passt
-                        const lastBodyChild = domBody.lastElementChild;
-                        const currentBottom = lastBodyChild 
-                            ? lastBodyChild.getBoundingClientRect().bottom 
-                            : domBody.getBoundingClientRect().top;
-                        const remainingSpace = maxBodyBottom - currentBottom;
+                    const firstChildDom = domNextBody.firstElementChild;
+                    if (firstChildDom) {
+                        const childHeight = firstChildDom.getBoundingClientRect().height;
+                        const freeSpace = domBody.clientHeight - domBody.scrollHeight;
                         
-                        if (childHeight > 0 && childHeight + 4 < remainingSpace) {
+                        if (childHeight > 0 && childHeight + 4 <= freeSpace) {
                             try {
-                                const firstChildNode = nextPage.bodyNode.child(0);
-                                const slice = doc.slice(nextPage.bodyPos + 1, nextPage.bodyPos + 1 + firstChildNode.nodeSize);
+                                const firstChild = nextPage.bodyNode.firstChild;
+                                const fcStart = nextPage.bodyPos + 1;
+                                const fcEnd = fcStart + firstChild.nodeSize;
                                 const tr = editor.state.tr;
-                                tr.insert(page.bodyEnd - 1, slice.content);
-                                const originalNodeStart = nextPage.bodyPos + 1 + slice.content.size;
-                                tr.delete(originalNodeStart, originalNodeStart + firstChildNode.nodeSize);
+                                tr.insert(page.bodyEnd - 1, firstChild.copy(firstChild.content));
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
                                 editor.view.dispatch(tr);
                                 return true;
                             } catch (e) {
@@ -886,10 +842,8 @@ export const DocumentTemplates = () => {
                         }
                     }
                 } else if (nextPage.bodyNode && nextPage.bodyNode.childCount === 0) {
-                    // Leere nächste Seite löschen
                     try {
-                        const tr = editor.state.tr.delete(nextPage.pos, nextPage.end);
-                        editor.view.dispatch(tr);
+                        editor.view.dispatch(editor.state.tr.delete(nextPage.pos, nextPage.end));
                         return true;
                     } catch (e) {
                         console.error('Error deleting empty page:', e);
