@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap');
+
 @keyframes spin {
   from {
     transform: rotate(0deg);
@@ -780,7 +782,7 @@ input.search-input-padding {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08) !important;
   border: 1px solid #cbd5e1 !important;
   border-radius: 4px !important;
-  font-family: 'Arial', 'Helvetica', sans-serif !important;
+  font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif !important;
   font-size: 11pt !important;
   line-height: 1.5 !important;
   box-sizing: border-box !important;

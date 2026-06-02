@@ -487,6 +487,212 @@ export const DocumentTemplates = () => {
         }
     };
 
+    // Helper function to extract page nodes and positions
+    const getPagesFromDoc = (doc) => {
+        const pages = [];
+        doc.forEach((node, pos) => {
+            if (node.type.name === 'letterPage') {
+                let bodyNode = null;
+                let bodyPos = -1;
+                let footerNode = null;
+                let footerPos = -1;
+                
+                node.forEach((child, offset) => {
+                    const childPos = pos + 1 + offset;
+                    if (child.type.name === 'letterBody') {
+                        bodyNode = child;
+                        bodyPos = childPos;
+                    } else if (child.type.name === 'letterFooter') {
+                        footerNode = child;
+                        footerPos = childPos;
+                    }
+                });
+                
+                pages.push({
+                    node,
+                    pos,
+                    end: pos + node.nodeSize,
+                    bodyNode,
+                    bodyPos,
+                    bodyEnd: bodyPos !== -1 ? bodyPos + bodyNode.nodeSize : -1,
+                    footerNode,
+                    footerPos
+                });
+            }
+        });
+        return pages;
+    };
+
+    // Pagination runner to handle page splits and merges
+    const runPaginationStep = (editor) => {
+        if (!editor || !editor.view || !editor.view.dom) return false;
+        
+        const doc = editor.state.doc;
+        const pages = getPagesFromDoc(doc);
+        const domPages = document.querySelectorAll('.ProseMirror > .letter-page');
+        
+        if (pages.length === 0 || domPages.length !== pages.length) {
+            return false;
+        }
+        
+        for (let i = 0; i < pages.length; i++) {
+            const page = pages[i];
+            const domPage = domPages[i];
+            const domBody = domPage.querySelector('.letter-body');
+            if (!domBody) continue;
+            
+            // Check if page overflows
+            const isOverflowing = domBody.scrollHeight > domBody.clientHeight + 4;
+            
+            if (isOverflowing && page.bodyNode && page.bodyNode.childCount > 1) {
+                const bodyRect = domBody.getBoundingClientRect();
+                const maxBottom = bodyRect.top + domBody.clientHeight;
+                let overflowChildElement = null;
+                
+                for (let j = 0; j < domBody.children.length; j++) {
+                    const child = domBody.children[j];
+                    const rect = child.getBoundingClientRect();
+                    if (rect.bottom > maxBottom - 2) {
+                        overflowChildElement = child;
+                        break;
+                    }
+                }
+                
+                if (overflowChildElement && overflowChildElement !== domBody.firstElementChild) {
+                    try {
+                        const overflowPos = editor.view.posAtDOM(overflowChildElement, 0);
+                        if (overflowPos >= page.bodyPos + 1 && overflowPos < page.bodyEnd - 1) {
+                            const nextPageIndex = i + 1;
+                            if (nextPageIndex >= pages.length) {
+                                // Create new page
+                                const newPageNode = editor.schema.nodes.letterPage.create(null, [
+                                    editor.schema.nodes.letterBody.create(null, []),
+                                    page.footerNode 
+                                        ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
+                                        : editor.schema.nodes.letterFooter.create(null, [])
+                                ]);
+                                const tr = editor.state.tr.insert(page.end, newPageNode);
+                                editor.view.dispatch(tr);
+                                return true;
+                            } else {
+                                // Move to next page
+                                const slice = doc.slice(overflowPos, page.bodyEnd - 1);
+                                const tr = editor.state.tr;
+                                tr.insert(pages[nextPageIndex].bodyPos + 1, slice.content);
+                                tr.delete(overflowPos, page.bodyEnd - 1);
+                                editor.view.dispatch(tr);
+                                return true;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error during overflow pagination:', e);
+                    }
+                }
+            }
+            
+            // Check if next page first element can fit here (underflow)
+            const nextPageIndex = i + 1;
+            if (nextPageIndex < pages.length) {
+                const nextPage = pages[nextPageIndex];
+                const domNextPage = domPages[nextPageIndex];
+                const domNextBody = domNextPage.querySelector('.letter-body');
+                
+                if (domNextBody && nextPage.bodyNode && nextPage.bodyNode.childCount > 0) {
+                    const firstChild = domNextBody.firstElementChild;
+                    if (firstChild) {
+                        const childHeight = firstChild.getBoundingClientRect().height;
+                        const remainingHeight = domBody.clientHeight - domBody.scrollHeight;
+                        
+                        if (childHeight > 0 && childHeight + 6 < remainingHeight) {
+                            try {
+                                const firstChildNode = nextPage.bodyNode.child(0);
+                                const slice = doc.slice(nextPage.bodyPos + 1, nextPage.bodyPos + 1 + firstChildNode.nodeSize);
+                                const tr = editor.state.tr;
+                                tr.insert(page.bodyEnd - 1, slice.content);
+                                const originalNodeStart = nextPage.bodyPos + 1 + slice.content.size;
+                                tr.delete(originalNodeStart, originalNodeStart + firstChildNode.nodeSize);
+                                editor.view.dispatch(tr);
+                                return true;
+                            } catch (e) {
+                                console.error('Error during underflow pagination:', e);
+                            }
+                        }
+                    }
+                } else if (nextPage.bodyNode && nextPage.bodyNode.childCount === 0) {
+                    // Next page is empty, delete it
+                    try {
+                        const tr = editor.state.tr.delete(nextPage.pos, nextPage.end);
+                        editor.view.dispatch(tr);
+                        return true;
+                    } catch (e) {
+                        console.error('Error deleting empty page:', e);
+                    }
+                }
+            }
+        }
+        
+        return false;
+    };
+
+    // Scroll corresponding page into view
+    const scrollToPage = (pageNumber) => {
+        setPreviewPage(pageNumber);
+        const domPages = document.querySelectorAll(showLivePreview ? '.preview-live-container > .letter-page' : '.ProseMirror > .letter-page');
+        if (domPages && domPages[pageNumber - 1]) {
+            domPages[pageNumber - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    };
+
+    // Pagination side-effect hooks
+    useEffect(() => {
+        if (!editor || loading) return;
+        
+        let timeoutId = null;
+        
+        const handlePagination = () => {
+            const changed = runPaginationStep(editor);
+            if (changed) {
+                timeoutId = setTimeout(handlePagination, 50);
+            }
+        };
+        
+        const onUpdateOrSelection = () => {
+            if (timeoutId) clearTimeout(timeoutId);
+            timeoutId = setTimeout(handlePagination, 150);
+        };
+        
+        editor.on('update', onUpdateOrSelection);
+        editor.on('selectionUpdate', onUpdateOrSelection);
+        
+        return () => {
+            if (timeoutId) clearTimeout(timeoutId);
+            editor.off('update', onUpdateOrSelection);
+            editor.off('selectionUpdate', onUpdateOrSelection);
+        };
+    }, [editor, loading, showLivePreview]);
+
+    useEffect(() => {
+        if (!editor || loading) return;
+        
+        const handleSelectionUpdate = () => {
+            const pos = editor.state.selection.from;
+            const doc = editor.state.doc;
+            const pages = getPagesFromDoc(doc);
+            
+            for (let i = 0; i < pages.length; i++) {
+                if (pos >= pages[i].pos && pos <= pages[i].end) {
+                    setPreviewPage(i + 1);
+                    break;
+                }
+            }
+        };
+        
+        editor.on('selectionUpdate', handleSelectionUpdate);
+        return () => {
+            editor.off('selectionUpdate', handleSelectionUpdate);
+        };
+    }, [editor, loading]);
+
     useEffect(() => {
         setPreviewPage(1);
         setShowLivePreview(false);
@@ -1473,7 +1679,7 @@ export const DocumentTemplates = () => {
 <head>
     <meta charset="UTF-8">
     <title>PDF Vorschau - ${activeConfig.label || activeConfig.name || 'Dokument'}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         @page {
             size: A4;
@@ -1481,7 +1687,7 @@ export const DocumentTemplates = () => {
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Arial', 'Helvetica', sans-serif;
+            font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif;
             color: #000000;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
@@ -1795,16 +2001,12 @@ export const DocumentTemplates = () => {
                     width: 100%;
                 }
                 .ProseMirror > .letter-page {
-                    display: none !important;
-                }
-                .ProseMirror > .letter-page:nth-of-type(${activePage}) {
                     display: flex !important;
+                    margin: 0 auto 20px auto !important;
                 }
                 .preview-live-container > .letter-page {
-                    display: none !important;
-                }
-                .preview-live-container > .letter-page:nth-of-type(${activePage}) {
                     display: flex !important;
+                    margin: 0 auto 20px auto !important;
                 }
                 @media (max-width: 1450px) {
                     .letter-page {
@@ -2552,7 +2754,7 @@ export const DocumentTemplates = () => {
                                          }}>
                                              <button
                                                  type="button"
-                                                 onClick={() => setPreviewPage(prev => Math.max(1, prev - 1))}
+                                                 onClick={() => scrollToPage(Math.max(1, activePage - 1))}
                                                  disabled={activePage === 1}
                                                  style={{
                                                      display: 'flex',
@@ -2576,7 +2778,7 @@ export const DocumentTemplates = () => {
                                              </span>
                                              <button
                                                  type="button"
-                                                 onClick={() => setPreviewPage(prev => Math.min(pageCount, prev + 1))}
+                                                 onClick={() => scrollToPage(Math.min(pageCount, activePage + 1))}
                                                  disabled={activePage === pageCount}
                                                  style={{
                                                      display: 'flex',
