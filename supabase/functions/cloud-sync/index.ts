@@ -373,6 +373,41 @@ serve(async (req) => {
       }
 
       // Action 'create'
+      for (const item of finalGrouped) {
+        const folderName = item.displayFolderName;
+        const oldFolders = ["Mietverträge", "Schriftverkehr"];
+        for (const old of oldFolders) {
+          const pathToDelete = `${folderName}/${old}`;
+          const sanitizedPath = pathToDelete.split('/').map(s => s.replace(/["*:<>?\/\\|]/g, '')).join('/');
+          try {
+            const folder = await msGraphCall(`/me/drive/root:/${appFolderName}/${sanitizedPath}`);
+            if (folder && folder.id) {
+              await msGraphCall(`/me/drive/items/${folder.id}`, 'DELETE');
+            }
+          } catch (e) {
+            console.error(`Error deleting old folder ${pathToDelete}:`, e);
+          }
+        }
+        
+        // Also delete old unit-level Mietverhältnisse folders inside Neuvermietung if they exist
+        const propertyIds = item.isGroup ? item.members.map((m: any) => m.id) : [item.id];
+        const relatedUnits = (units || []).filter((u: any) => propertyIds.includes(u.property_id));
+        for (const unit of relatedUnits) {
+          if (unit.unit_name) {
+            const oldUnitPath = `${folderName}/Neuvermietung/${unit.unit_name}/Mietverhältnisse`;
+            const sanitizedPath = oldUnitPath.split('/').map(s => s.replace(/["*:<>?\/\\|]/g, '')).join('/');
+            try {
+              const folder = await msGraphCall(`/me/drive/root:/${appFolderName}/${sanitizedPath}`);
+              if (folder && folder.id) {
+                await msGraphCall(`/me/drive/items/${folder.id}`, 'DELETE');
+              }
+            } catch (e) {
+              console.error(`Error deleting old unit folder ${oldUnitPath}:`, e);
+            }
+          }
+        }
+      }
+
       const pathsToCreate = foldersToCreate || expectedPaths
       for (const path of pathsToCreate) {
         await ensurePathOneDrive(path)
@@ -508,6 +543,63 @@ serve(async (req) => {
       }
 
       // Action 'create'
+      const rootId = await getGoogleRootId();
+      for (const item of finalGrouped) {
+        const folderName = item.displayFolderName;
+        try {
+          const propSearch = await googleDriveCall('/files', 'GET', null, {
+            q: `name = '${folderName.replace(/'/g, "\\'")}' and '${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+            fields: 'files(id)'
+          });
+          const propFolder = propSearch?.files?.[0];
+          if (propFolder) {
+            const oldFolders = ["Mietverträge", "Schriftverkehr"];
+            for (const old of oldFolders) {
+              const oldSearch = await googleDriveCall('/files', 'GET', null, {
+                q: `name = '${old}' and '${propFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+                fields: 'files(id)'
+              });
+              const oldFolder = oldSearch?.files?.[0];
+              if (oldFolder) {
+                await googleDriveCall(`/files/${oldFolder.id}`, 'DELETE');
+              }
+            }
+            
+            // Also delete old unit-level Mietverhältnisse folders inside Neuvermietung if they exist
+            const neuSearch = await googleDriveCall('/files', 'GET', null, {
+              q: `name = 'Neuvermietung' and '${propFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+              fields: 'files(id)'
+            });
+            const neuFolder = neuSearch?.files?.[0];
+            if (neuFolder) {
+              const propertyIds = item.isGroup ? item.members.map((m: any) => m.id) : [item.id];
+              const relatedUnits = (units || []).filter((u: any) => propertyIds.includes(u.property_id));
+              for (const unit of relatedUnits) {
+                if (unit.unit_name) {
+                  const unitSearch = await googleDriveCall('/files', 'GET', null, {
+                    q: `name = '${unit.unit_name.replace(/'/g, "\\'")}' and '${neuFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+                    fields: 'files(id)'
+                  });
+                  const unitFolder = unitSearch?.files?.[0];
+                  if (unitFolder) {
+                    const oldMietSearch = await googleDriveCall('/files', 'GET', null, {
+                      q: `name = 'Mietverhältnisse' and '${unitFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+                      fields: 'files(id)'
+                    });
+                    const oldMietFolder = oldMietSearch?.files?.[0];
+                    if (oldMietFolder) {
+                      await googleDriveCall(`/files/${oldMietFolder.id}`, 'DELETE');
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`Error checking/deleting old Google Drive folders:`, e);
+        }
+      }
+
       const pathsToCreate = foldersToCreate || expectedPaths
       for (const path of pathsToCreate) {
         await ensurePathGoogle(path)

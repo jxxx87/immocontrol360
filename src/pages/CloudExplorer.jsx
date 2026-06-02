@@ -392,7 +392,7 @@ const CloudExplorer = () => {
                 </h2>
                 {status === 'creating' && (
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', maxWidth: '400px', textAlign: 'center' }}>
-                        Bitte haben Sie einen Moment Geduld. Wir legen automatisch die korrekte Struktur (Rechnungen, Mietverträge etc.) in Ihrer verknüpften Cloud an.
+                        Bitte haben Sie einen Moment Geduld. Wir legen automatisch die korrekte Struktur (Rechnungen, Mietverhältnisse etc.) in Ihrer verknüpften Cloud an.
                     </p>
                 )}
             </div>
@@ -565,9 +565,8 @@ const CloudExplorer = () => {
                                     
                                     const PROTECTED_FOLDERS = [
                                         "Rechnungen",
-                                        "Mietverträge",
                                         "Bilder",
-                                        "Schriftverkehr",
+                                        "Mietverhältnisse",
                                         "Nebenkosten",
                                         "Versicherungen",
                                         "Energieausweise",
