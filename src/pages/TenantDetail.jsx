@@ -316,6 +316,7 @@ const TenantDetail = () => {
 
             const tenantFolderName = `${leaseData.tenant?.first_name || ''} ${leaseData.tenant?.last_name || ''}`.trim();
             const unitName = leaseData.unit?.unit_name || '';
+            let fullCloudPath = '';
             if (displayFolderName && unitName && tenantFolderName) {
                 if (prop?.economic_unit_id) {
                     const houseNumber = prop.house_number || 'Ohne Hausnummer';

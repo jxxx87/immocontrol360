@@ -883,6 +883,9 @@ const UtilityCosts = () => {
             }
             .letter-body {
                 flex-grow: 1;
+                flex-shrink: 1;
+                min-height: 0;
+                overflow: hidden;
                 font-size: 11pt;
                 line-height: 1.6;
                 text-align: left;
