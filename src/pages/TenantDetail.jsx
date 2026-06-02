@@ -116,9 +116,12 @@ const TenantDetail = () => {
             }
 
             const isFolderNotFound = fetchErr && (
+                fetchErr.status === 404 ||
+                (typeof fetchErr.message === 'string' && fetchErr.message.includes('404')) ||
                 detailedErrMsg.includes("nicht gefunden") ||
                 detailedErrMsg.includes("not found") ||
-                detailedErrMsg.includes("404")
+                detailedErrMsg.includes("404") ||
+                detailedErrMsg.includes("non-2xx")
             );
 
             if (isFolderNotFound) {

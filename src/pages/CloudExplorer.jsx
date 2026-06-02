@@ -182,9 +182,12 @@ const CloudExplorer = () => {
             // 1. If we got an error indicating the folder was not found, OR
             // 2. If we are at the root level and the folder is empty (it should contain the default subfolders like Rechnungen)
             const isFolderNotFound = fetchErr && (
+                fetchErr.status === 404 ||
+                (typeof fetchErr.message === 'string' && fetchErr.message.includes('404')) ||
                 detailedErrMsg.includes("nicht gefunden") ||
                 detailedErrMsg.includes("not found") ||
-                detailedErrMsg.includes("404")
+                detailedErrMsg.includes("404") ||
+                detailedErrMsg.includes("non-2xx")
             );
 
             if (isFolderNotFound || (pathArray.length === 0 && fetchedFiles.length === 0)) {

@@ -246,7 +246,14 @@ serve(async (req) => {
         let data = await msGraphCall(endpoint);
         
         // If the folder itself is requested but empty/doesn't have children directly (sometimes graph api weirdness), or 404
-        if (!data) return new Response(JSON.stringify({ files: [] }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+        if (!data) {
+          return new Response(JSON.stringify({ 
+            error: `Der Ordnerpfad '${cleanPath}' konnte in OneDrive nicht gefunden werden.` 
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 404,
+          });
+        }
         
         const files = data.value.map((f: any) => ({
             id: f.id,
@@ -363,7 +370,12 @@ serve(async (req) => {
         const cleanPath = path ? `ImmoControlpro360/${path}` : 'ImmoControlpro360';
         const folderId = await getGoogleFolderIdByPath(cleanPath);
         if (!folderId) {
-          throw new Error(`Der Ordnerpfad '${cleanPath}' konnte in Google Drive nicht gefunden werden.`);
+          return new Response(JSON.stringify({ 
+            error: `Der Ordnerpfad '${cleanPath}' konnte in Google Drive nicht gefunden werden.` 
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 404,
+          });
         }
 
         const data = await googleDriveCall('/files', 'GET', null, {
