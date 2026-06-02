@@ -409,8 +409,85 @@ const LetterRecipient = createLayoutNode('letterRecipient', 'letter-recipient', 
 const LetterDate = createLayoutNode('letterDate', 'letter-date', 'inline*');
 const LetterSubject = createLayoutNode('letterSubject', 'letter-subject', 'inline*');
 const LetterObject = createLayoutNode('letterObject', 'letter-object', 'inline*');
-const LetterBody = createLayoutNode('letterBody', 'letter-body', 'block+');
-const LetterFooter = createLayoutNode('letterFooter', 'letter-footer', 'block+');
+
+// LetterBody: isolating = true verhindert, dass Enter-Drücken Absätze
+// außerhalb des Body in die Seitenebene "auslaufen" lässt.
+const LetterBody = Node.create({
+    name: 'letterBody',
+    group: 'block',
+    content: 'block+',
+    defining: true,
+    isolating: true,
+    addAttributes() {
+        return {
+            class: {
+                default: 'letter-body',
+                parseHTML: element => {
+                    const cls = element.getAttribute('class') || '';
+                    return cls.includes('letter-body') ? 'letter-body' : null;
+                },
+                renderHTML: attributes => {
+                    return { class: `layout-div ${attributes.class || 'letter-body'}` };
+                }
+            },
+            style: {
+                default: null,
+                parseHTML: element => element.getAttribute('style'),
+                renderHTML: attributes => {
+                    if (!attributes.style) return {};
+                    return { style: attributes.style };
+                }
+            }
+        };
+    },
+    parseHTML() {
+        return [{ tag: 'div', getAttrs: node => node.classList.contains('letter-body') && {
+            class: node.getAttribute('class'),
+            style: node.getAttribute('style')
+        }}];
+    },
+    renderHTML({ HTMLAttributes }) { return ['div', HTMLAttributes, 0]; }
+});
+
+// LetterFooter: isolating = true verhindert, dass die Fußzeile
+// durch Cursor-Bewegungen oder Pagination verschoben wird.
+const LetterFooter = Node.create({
+    name: 'letterFooter',
+    group: 'block',
+    content: 'block+',
+    defining: true,
+    isolating: true,
+    addAttributes() {
+        return {
+            class: {
+                default: 'letter-footer',
+                parseHTML: element => {
+                    const cls = element.getAttribute('class') || '';
+                    return cls.includes('letter-footer') ? 'letter-footer' : null;
+                },
+                renderHTML: attributes => {
+                    return { class: `layout-div ${attributes.class || 'letter-footer'}` };
+                }
+            },
+            style: {
+                default: null,
+                parseHTML: element => element.getAttribute('style'),
+                renderHTML: attributes => {
+                    if (!attributes.style) return {};
+                    return { style: attributes.style };
+                }
+            }
+        };
+    },
+    parseHTML() {
+        return [{ tag: 'div', getAttrs: node => node.classList.contains('letter-footer') && {
+            class: node.getAttribute('class'),
+            style: node.getAttribute('style')
+        }}];
+    },
+    renderHTML({ HTMLAttributes }) { return ['div', HTMLAttributes, 0]; }
+});
+
 const FooterCol = createLayoutNode('footerCol', 'footer-col', 'inline*');
 
 export const DocumentTemplates = () => {
