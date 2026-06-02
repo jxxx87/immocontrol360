@@ -963,23 +963,36 @@ input.search-input-padding {
   background-color: transparent !important;
 }
 
-/* LayoutDiv Container Border in Editor to make sections visually editable */
-.tiptap .layout-div {
+/* LayoutDiv Container Border in Editor to make sections visually editable (toggled via .show-outlines) */
+.tiptap.show-outlines .layout-div {
   outline: 1px dashed #cbd5e1;
   outline-offset: 1px;
   position: relative;
   transition: outline-color 0.2s;
 }
 
-.tiptap .layout-div:hover {
+.tiptap.show-outlines .layout-div:hover {
   outline-color: #0ea5e9;
+}
+
+.tiptap .layout-div {
+  position: relative;
+}
+
+.tiptap:not(.show-outlines) .layout-div {
+  outline: none !important;
 }
 
 .tiptap .layout-div:empty, .tiptap .layout-div:has(> br:only-child) {
   min-height: 1.5rem;
 }
 
-.tiptap .layout-div::before {
+/* Hide helper text badges unless outlines are turned on */
+.tiptap:not(.show-outlines) .layout-div::before {
+  display: none !important;
+}
+
+.tiptap.show-outlines .layout-div::before {
   position: absolute;
   top: -8px;
   left: 8px;
@@ -991,15 +1004,16 @@ input.search-input-padding {
   font-family: monospace;
   pointer-events: none;
   opacity: 0.7;
+  z-index: 10;
 }
 
-.tiptap .layout-div.letter-sender::before { content: "Absenderzeile"; }
-.tiptap .layout-div.letter-recipient::before { content: "Empfängeradresse"; }
-.tiptap .layout-div.letter-date::before { content: "Ort / Datum"; }
-.tiptap .layout-div.letter-subject::before { content: "Betreffzeile"; }
-.tiptap .layout-div.letter-object::before { content: "Objekt / Details"; }
-.tiptap .layout-div.letter-body::before { content: "Brieftext / Inhalt"; }
-.tiptap .layout-div.letter-footer::before { content: "Fußzeile"; }
-.tiptap .layout-div.footer-col::before { content: "Spalte Fußzeile"; }
-.tiptap .layout-div.letter-page::before { content: "DIN A4 Seite"; }
-.tiptap .layout-div.letter-header-row::before { content: "Kopfzeile-Spalten"; }
+.tiptap.show-outlines .layout-div.letter-sender::before { content: "Absenderzeile"; }
+.tiptap.show-outlines .layout-div.letter-recipient::before { content: "Empfängeradresse"; }
+.tiptap.show-outlines .layout-div.letter-date::before { content: "Ort / Datum"; }
+.tiptap.show-outlines .layout-div.letter-subject::before { content: "Betreffzeile"; }
+.tiptap.show-outlines .layout-div.letter-object::before { content: "Objekt / Details"; }
+.tiptap.show-outlines .layout-div.letter-body::before { content: "Brieftext / Inhalt"; }
+.tiptap.show-outlines .layout-div.letter-footer::before { content: "Fußzeile"; }
+.tiptap.show-outlines .layout-div.footer-col::before { content: "Spalte Fußzeile"; }
+.tiptap.show-outlines .layout-div.letter-page::before { content: "DIN A4 Seite"; }
+.tiptap.show-outlines .layout-div.letter-header-row::before { content: "Kopfzeile-Spalten"; }

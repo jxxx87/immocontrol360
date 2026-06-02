@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useEditor, EditorContent } from '@tiptap/react';
-import { Node } from '@tiptap/core';
+import { Node, Extension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Mention from '@tiptap/extension-mention';
@@ -215,6 +215,150 @@ const SYSTEM_TEMPLATES = [
     { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' }
 ];
 
+const LetterNavigation = Extension.create({
+    name: 'letterNavigation',
+    addKeyboardShortcuts() {
+        // Collect all logical letter sections in document sequence
+        const getSections = (doc) => {
+            const sections = [];
+            doc.descendants((node, pos) => {
+                const type = node.type.name;
+                if (['letterSender', 'letterRecipient', 'letterDate', 'letterSubject', 'letterObject', 'letterBody'].includes(type)) {
+                    sections.push({
+                        type,
+                        pos,
+                        end: pos + node.nodeSize,
+                        node
+                    });
+                    return false; // don't descend
+                }
+            });
+            return sections;
+        };
+
+        const isAtStartOfSection = ($pos, section) => {
+            if (section.type === 'letterBody') {
+                const parent = $pos.parent;
+                return section.node.firstChild === parent && $pos.parentOffset === 0;
+            }
+            return $pos.parentOffset === 0;
+        };
+
+        const isAtEndOfSection = ($pos, section) => {
+            if (section.type === 'letterBody') {
+                const parent = $pos.parent;
+                return section.node.lastChild === parent && $pos.parentOffset === parent.content.size;
+            }
+            return $pos.parentOffset === $pos.parent.content.size;
+        };
+
+        return {
+            Backspace: ({ editor }) => {
+                const { state, view } = editor;
+                const { selection } = state;
+                if (!selection.empty) return false;
+                
+                const $pos = selection.$anchor;
+                const sections = getSections(state.doc);
+                const activeIndex = sections.findIndex(s => $pos.pos >= s.pos && $pos.pos <= s.end);
+                
+                if (activeIndex > 0) {
+                    const activeSection = sections[activeIndex];
+                    if (isAtStartOfSection($pos, activeSection)) {
+                        const prevSection = sections[activeIndex - 1];
+                        let targetPos = prevSection.type === 'letterBody' 
+                            ? prevSection.end - 2 
+                            : prevSection.end - 1;
+                            
+                        if (targetPos >= 0 && targetPos <= state.doc.content.size) {
+                            const tr = state.tr.setSelection(state.selection.constructor.near(state.doc.resolve(targetPos), -1));
+                            view.dispatch(tr.scrollIntoView());
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+            Enter: ({ editor }) => {
+                const { state, view } = editor;
+                const { selection } = state;
+                const $pos = selection.$anchor;
+                const sections = getSections(state.doc);
+                const activeIndex = sections.findIndex(s => $pos.pos >= s.pos && $pos.pos <= s.end);
+                
+                if (activeIndex !== -1 && activeIndex < sections.length - 1) {
+                    const activeSection = sections[activeIndex];
+                    if (['letterSender', 'letterRecipient', 'letterDate', 'letterSubject', 'letterObject'].includes(activeSection.type)) {
+                        const nextSection = sections[activeIndex + 1];
+                        let targetPos = nextSection.type === 'letterBody'
+                            ? nextSection.pos + 2
+                            : nextSection.pos + 1;
+                            
+                        if (targetPos >= 0 && targetPos <= state.doc.content.size) {
+                            const tr = state.tr.setSelection(state.selection.constructor.near(state.doc.resolve(targetPos), 1));
+                            view.dispatch(tr.scrollIntoView());
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+            ArrowUp: ({ editor }) => {
+                const { state, view } = editor;
+                const { selection } = state;
+                if (!selection.empty) return false;
+                
+                const $pos = selection.$anchor;
+                const sections = getSections(state.doc);
+                const activeIndex = sections.findIndex(s => $pos.pos >= s.pos && $pos.pos <= s.end);
+                
+                if (activeIndex > 0) {
+                    const activeSection = sections[activeIndex];
+                    if (isAtStartOfSection($pos, activeSection)) {
+                        const prevSection = sections[activeIndex - 1];
+                        let targetPos = prevSection.type === 'letterBody' 
+                            ? prevSection.end - 2 
+                            : prevSection.end - 1;
+                            
+                        if (targetPos >= 0 && targetPos <= state.doc.content.size) {
+                            const tr = state.tr.setSelection(state.selection.constructor.near(state.doc.resolve(targetPos), -1));
+                            view.dispatch(tr.scrollIntoView());
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+            ArrowDown: ({ editor }) => {
+                const { state, view } = editor;
+                const { selection } = state;
+                if (!selection.empty) return false;
+                
+                const $pos = selection.$anchor;
+                const sections = getSections(state.doc);
+                const activeIndex = sections.findIndex(s => $pos.pos >= s.pos && $pos.pos <= s.end);
+                
+                if (activeIndex !== -1 && activeIndex < sections.length - 1) {
+                    const activeSection = sections[activeIndex];
+                    if (isAtEndOfSection($pos, activeSection)) {
+                        const nextSection = sections[activeIndex + 1];
+                        let targetPos = nextSection.type === 'letterBody'
+                            ? nextSection.pos + 2
+                            : nextSection.pos + 1;
+                            
+                        if (targetPos >= 0 && targetPos <= state.doc.content.size) {
+                            const tr = state.tr.setSelection(state.selection.constructor.near(state.doc.resolve(targetPos), 1));
+                            view.dispatch(tr.scrollIntoView());
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        };
+    }
+});
+
 const createLayoutNode = (name, className, allowedContent) => Node.create({
     name,
     group: 'block',
@@ -300,6 +444,7 @@ export const DocumentTemplates = () => {
     const [selectedVariable, setSelectedVariable] = useState(null);
     const [selectedNodeType, setSelectedNodeType] = useState(null);
     const [showLivePreview, setShowLivePreview] = useState(false);
+    const [showLayoutOutlines, setShowLayoutOutlines] = useState(false);
     const [diagnostics, setDiagnostics] = useState({
         lastError: null,
         loadSource: 'Initial',
@@ -322,6 +467,7 @@ export const DocumentTemplates = () => {
             StarterKit.configure({
                 horizontalRule: false,
             }),
+            LetterNavigation,
             LetterPage,
             LetterSender,
             LetterHeaderRow,
@@ -442,6 +588,18 @@ export const DocumentTemplates = () => {
             }
         }
     });
+
+    useEffect(() => {
+        if (editor) {
+            editor.setOptions({
+                editorProps: {
+                    attributes: {
+                        class: showLayoutOutlines ? 'show-outlines' : '',
+                    }
+                }
+            });
+        }
+    }, [editor, showLayoutOutlines]);
 
     const getHrStyleValue = (property) => {
         if (!editor) return '';
@@ -2557,6 +2715,16 @@ export const DocumentTemplates = () => {
                                     </button>
 
                                     <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                                        <Button 
+                                            variant={showLayoutOutlines ? "primary" : "secondary"} 
+                                            size="sm" 
+                                            icon={showLayoutOutlines ? Eye : EyeOff} 
+                                            onClick={() => setShowLayoutOutlines(!showLayoutOutlines)}
+                                            style={{ marginRight: '4px' }}
+                                            title="Ausrichtungslinien und Beschriftungen im Editor anzeigen/ausblenden"
+                                        >
+                                            {showLayoutOutlines ? "Hilfslinien aus" : "Hilfslinien ein"}
+                                        </Button>
                                         <Button 
                                             variant={showLivePreview ? "primary" : "secondary"} 
                                             size="sm" 
