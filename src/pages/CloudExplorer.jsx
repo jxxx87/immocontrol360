@@ -18,6 +18,7 @@ const CloudExplorer = () => {
     const [currentPath, setCurrentPath] = useState([]);
     const [files, setFiles] = useState([]);
     const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+    const [loadingMessage, setLoadingMessage] = useState('Dateien werden geladen...');
     const [isUploading, setIsUploading] = useState(false);
     const [fetchError, setFetchError] = useState(null);
     const fileInputRef = useRef(null);
@@ -156,6 +157,7 @@ const CloudExplorer = () => {
 
     const fetchFiles = async (property, pathArray) => {
         setIsLoadingFiles(true);
+        setLoadingMessage('Dateien werden geladen...');
         setFetchError(null);
         try {
             const subPath = pathArray.map(p => p.name).join('/');
@@ -192,6 +194,7 @@ const CloudExplorer = () => {
 
             if (isFolderNotFound || pathArray.length === 0) {
                 // Run sync on demand!
+                setLoadingMessage('Prüfe Ordnerstruktur in der Cloud...');
                 const { data: checkData, error: checkError } = await supabase.functions.invoke('cloud-sync', {
                     body: { provider: property.provider || 'onedrive', action: 'check', propertyId: property.id }
                 });
@@ -200,12 +203,14 @@ const CloudExplorer = () => {
                 
                 const missingFolders = checkData?.missingFolders || [];
                 if (missingFolders.length > 0) {
+                    setLoadingMessage('Erstelle fehlende Cloud-Ordner...');
                     const { error: createError } = await supabase.functions.invoke('cloud-sync', {
                         body: { provider: property.provider || 'onedrive', action: 'create', propertyId: property.id, foldersToCreate: missingFolders }
                     });
                     if (createError) throw createError;
                     
                     // Re-fetch files after creating the folders
+                    setLoadingMessage('Lade aktualisierte Dateien...');
                     const refetchRes = await supabase.functions.invoke('cloud-drive', {
                         body: { action: 'list', provider: property.provider || 'onedrive', path: fullPath }
                     });
@@ -226,6 +231,7 @@ const CloudExplorer = () => {
             setFiles([]);
         } finally {
             setIsLoadingFiles(false);
+            setLoadingMessage('Dateien werden geladen...');
         }
     };
 
@@ -546,8 +552,9 @@ const CloudExplorer = () => {
                             {/* File Grid */}
                             <div style={{ padding: '24px', flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '20px', alignContent: 'start', position: 'relative' }}>
                                 {isLoadingFiles && (
-                                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.7)', zIndex: 10 }}>
+                                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.7)', zIndex: 10, gap: '12px' }}>
                                         <Loader2 size={32} color="var(--primary-color)" className="animate-spin" />
+                                        <div style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>{loadingMessage}</div>
                                     </div>
                                 )}
                                 

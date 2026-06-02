@@ -27,6 +27,7 @@ const TenantDetail = () => {
     const [claims, setClaims] = useState([]);
     const [cloudFiles, setCloudFiles] = useState([]);
     const [loadingCloud, setLoadingCloud] = useState(false);
+    const [cloudLoadingMessage, setCloudLoadingMessage] = useState('Lade Cloud-Dateien...');
     const [cloudError, setCloudError] = useState(null);
     const [tenantCloudPath, setTenantCloudPath] = useState('');
     const [loading, setLoading] = useState(true);
@@ -101,6 +102,7 @@ const TenantDetail = () => {
 
     const loadCloudFiles = async (provider, path, propertyId) => {
         setLoadingCloud(true);
+        setCloudLoadingMessage('Lese Cloud-Ordner...');
         setCloudError(null);
         try {
             const { data, error } = await supabase.functions.invoke('cloud-drive', {
@@ -126,6 +128,7 @@ const TenantDetail = () => {
 
             if (isFolderNotFound) {
                 // Trigger cloud sync to create the missing folder structure
+                setCloudLoadingMessage('Prüfe und erstelle fehlende Cloud-Ordner...');
                 const syncRes = await supabase.functions.invoke('cloud-sync', {
                     body: { provider, action: 'create', propertyId }
                 });
@@ -133,6 +136,7 @@ const TenantDetail = () => {
                 if (syncRes.data?.error) throw new Error(syncRes.data.error);
                 
                 // Retry listing files once
+                setCloudLoadingMessage('Lade aktualisierte Dateien...');
                 const retryRes = await supabase.functions.invoke('cloud-drive', {
                     body: { action: 'list', provider, path }
                 });
@@ -151,6 +155,7 @@ const TenantDetail = () => {
             setCloudError(err.message || String(err));
         } finally {
             setLoadingCloud(false);
+            setCloudLoadingMessage('Lade Cloud-Dateien...');
         }
     };
 
@@ -1203,7 +1208,7 @@ const TenantDetail = () => {
                                     {loadingCloud ? (
                                         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                                             <Loader2 size={24} className="animate-spin" style={{ margin: '0 auto 8px' }} />
-                                            Lade Cloud-Dateien...
+                                            {cloudLoadingMessage}
                                         </div>
                                     ) : cloudError ? (
                                         <div style={{ padding: '16px', borderRadius: 'var(--radius-md)', backgroundColor: 'rgba(239, 68, 68, 0.05)', border: '1px solid rgba(239, 68, 68, 0.15)', fontSize: '0.8rem', color: 'var(--danger-color)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
