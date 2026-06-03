@@ -525,6 +525,7 @@ export const DocumentTemplates = () => {
     const [showLivePreview, setShowLivePreview] = useState(false);
     const [showLayoutOutlines, setShowLayoutOutlines] = useState(false);
     const [layoutPopover, setLayoutPopover] = useState(null);
+    const [editorTick, setEditorTick] = useState(0);
     const [diagnostics, setDiagnostics] = useState({
         lastError: null,
         loadSource: 'Initial',
@@ -765,6 +766,7 @@ export const DocumentTemplates = () => {
                 }
             });
             setPageCount(count > 0 ? count : 1);
+            setEditorTick(prev => prev + 1);
         },
         onSelectionUpdate({ editor }) {
             const node = editor.state.selection?.node;
@@ -1182,9 +1184,9 @@ export const DocumentTemplates = () => {
                 nodeJson.content = [{ type: 'paragraph', content: [{ type: 'text', text: 'Brieftext...' }] }];
             } else if (secClass === 'letter-footer') {
                 nodeJson.content = [
-                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 1' }] }] },
-                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 2' }] }] },
-                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 3' }] }] }
+                    { type: 'footerCol', content: [{ type: 'text', text: 'Anschrift: Vermieter Name' }] },
+                    { type: 'footerCol', content: [{ type: 'text', text: 'Kontakt: info@immocontrol.de' }] },
+                    { type: 'footerCol', content: [{ type: 'text', text: 'Bankverbindung: IBAN' }] }
                 ];
             }
             
@@ -2307,22 +2309,39 @@ export const DocumentTemplates = () => {
                 </div>`
         };
 
-        let res = contentHtml;
+        // Parse the HTML using DOMParser to accurately replace complex components without regex parsing bugs
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(contentHtml, 'text/html');
         
-        // 1. Tabellen-Platzhalter
-        Object.keys(mockTables).forEach(key => {
-            const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
-            res = res.replace(mentionRegex, mockTables[key]);
+        // Find all span tags that represent our mentions/placeholders
+        const mentions = doc.querySelectorAll('span[data-type="mention"]');
+        mentions.forEach(mention => {
+            const id = mention.getAttribute('data-id');
+            if (!id) return;
             
+            if (mockTables[id] !== undefined) {
+                const tempDiv = doc.createElement('div');
+                tempDiv.innerHTML = mockTables[id].trim();
+                const replacementNode = tempDiv.firstElementChild;
+                if (replacementNode) {
+                    mention.parentNode.replaceChild(replacementNode, mention);
+                }
+            } else if (mockData[id] !== undefined) {
+                const tempSpan = doc.createElement('span');
+                tempSpan.innerHTML = mockData[id];
+                mention.parentNode.replaceChild(tempSpan, mention);
+            }
+        });
+        
+        let res = doc.body.innerHTML;
+
+        // Fallback or text-based bracket placeholders: {key}
+        Object.keys(mockTables).forEach(key => {
             const textRegex = new RegExp(`\\{${key}\\}`, 'g');
             res = res.replace(textRegex, mockTables[key]);
         });
 
-        // 2. Reguläre Platzhalter
         Object.keys(mockData).forEach(key => {
-            const mentionRegex = new RegExp(`<span[^>]*data-id=["']${key}["'][^>]*>.*?</span>`, 'gi');
-            res = res.replace(mentionRegex, mockData[key]);
-            
             const textRegex = new RegExp(`\\{${key}\\}`, 'g');
             res = res.replace(textRegex, mockData[key]);
         });
