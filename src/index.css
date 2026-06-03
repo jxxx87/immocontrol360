@@ -1031,4 +1031,33 @@ input.search-input-padding {
 .tiptap.show-outlines .layout-div.letter-footer::before { content: "Fußzeile"; }
 .tiptap.show-outlines .layout-div.footer-col::before { content: "Spalte Fußzeile"; }
 .tiptap.show-outlines .layout-div.letter-page::before { content: "DIN A4 Seite"; }
-.tiptap.show-outlines .layout-div.letter-header-row::before { content: "Kopfzeile-Spalten"; }
+.tiptap.show-outlines .layout-div.letter-header-row::before { content: "Kopfzeile-Spalten"; }
+
+/* Expanded variables styling for realistic sizing in the editor */
+.variable-chip.expanded-variable-table {
+  display: block !important;
+  width: 100% !important;
+  margin: 10px 0 !important;
+  background-color: #f8fafc !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 6px !important;
+  padding: 8px 12px !important;
+  color: #334155 !important;
+  font-weight: normal !important;
+  user-select: none !important;
+}
+
+.variable-chip.multiline-variable {
+  display: inline-block !important;
+  max-width: 100% !important;
+  background-color: #f0fdf4 !important;
+  border: 1px solid #bbf7d0 !important;
+  border-radius: 4px !important;
+  padding: 6px 10px !important;
+  color: #166534 !important;
+  font-weight: normal !important;
+  font-family: inherit !important;
+  white-space: pre-wrap !important;
+  line-height: 1.4 !important;
+  vertical-align: top !important;
+}

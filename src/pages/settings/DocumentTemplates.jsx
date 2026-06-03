@@ -566,14 +566,137 @@ export const DocumentTemplates = () => {
             Color,
             Mention.extend({
                 draggable: true,
-            }).configure({
-                HTMLAttributes: {
-                    class: 'variable-chip',
-                    contenteditable: 'false',
-                },
-                renderLabel({ node }) {
-                    return `${node.attrs.label ?? node.attrs.id}`;
-                },
+                renderHTML({ node, HTMLAttributes }) {
+                    const id = node.attrs.id;
+                    const label = node.attrs.label || id;
+                    
+                    const makeMockTable = (headers, rows, totalLabel, totalVal) => {
+                        const tableStyle = "display: table; width: 100%; border-collapse: collapse; margin: 8px 0; border: 1px solid #cbd5e1; background: #ffffff; color: #334155;";
+                        const headerRowStyle = "display: table-row; background-color: #f1f5f9; font-weight: bold; border-bottom: 2px solid #cbd5e1;";
+                        const rowStyle = "display: table-row; border-bottom: 1px solid #cbd5e1;";
+                        const altRowStyle = "display: table-row; border-bottom: 1px solid #cbd5e1; background-color: #f8fafc;";
+                        const headerCellStyle = "display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: left;";
+                        const cellStyle = "display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: left;";
+                        
+                        const children = [
+                            ['span', { style: headerRowStyle }, 
+                                ...headers.map(h => ['span', { style: headerCellStyle }, h])
+                            ],
+                            ...rows.map((row, idx) => 
+                                ['span', { style: idx % 2 === 1 ? altRowStyle : rowStyle },
+                                    ...row.map((cell, cidx) => {
+                                        const isLastCol = cidx === row.length - 1;
+                                        const align = isLastCol ? 'right' : 'left';
+                                        const font = isLastCol ? 'font-weight: bold;' : '';
+                                        return ['span', { style: cellStyle + ` text-align: ${align}; ${font}` }, cell];
+                                    })
+                                ]
+                            )
+                        ];
+
+                        if (totalLabel && totalVal) {
+                            const totalRowStyle = "display: table-row; font-weight: bold; background-color: #f1f5f9;";
+                            const labelColSpanStyle = `display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: right;`;
+                            const valStyle = `display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: right; color: #dc2626;`;
+                            
+                            children.push(['span', { style: totalRowStyle },
+                                ['span', { style: labelColSpanStyle }, totalLabel],
+                                ...Array(headers.length - 2).fill(null).map(() => ['span', { style: "display: table-cell; border: 1px solid #cbd5e1;" }]),
+                                ['span', { style: valStyle }, totalVal]
+                            ]);
+                        }
+
+                        return ['span', { style: tableStyle }, ...children];
+                    };
+
+                    // Tables
+                    if (id === 'forderungs_tabelle' || id === 'forderungs_detail_tabelle') {
+                        const headers = ['Fälligkeit', 'Bezeichnung', 'Soll-Betrag', 'Ist-Betrag', 'Offen'];
+                        const rows = [
+                            ['04.05.2026', 'Grundmiete + NK-Vorauszahlung Mai 2026', '850,00 €', '0,00 €', '850,00 €'],
+                            ['04.05.2026', 'Mahngebühr Stufe 1', '5,00 €', '0,00 €', '5,00 €']
+                        ];
+                        return [
+                            'span',
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Forderungstabelle (Vorschau)'],
+                            makeMockTable(headers, rows, 'Gesamtrückstand:', '855,00 €')
+                        ];
+                    }
+                    
+                    if (id === 'nebenkosten_tabelle') {
+                        const headers = ['Kostenart', 'Gesamtkosten', 'Umlageschlüssel', 'Mieteranteil'];
+                        const rows = [
+                            ['Grundsteuer', '1.200,00 €', 'Wohnfläche (100/1000)', '120,00 €'],
+                            ['Heizkosten', '4.500,00 €', 'Verbrauch (850/9000)', '425,00 €']
+                        ];
+                        return [
+                            'span',
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Umlagetabelle (Vorschau)'],
+                            makeMockTable(headers, rows, 'Summe Anteil:', '545,00 €')
+                        ];
+                    }
+
+                    if (id === 'positions_tabelle') {
+                        const headers = ['Pos', 'Beschreibung', 'Betrag'];
+                        const rows = [
+                            ['1', 'Ferienwohnung Buchung (7 Nächte)', '500,00 €'],
+                            ['2', 'Endreinigung Pauschale', '60,00 €']
+                        ];
+                        return [
+                            'span',
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Rechnungspositionen (Vorschau)'],
+                            makeMockTable(headers, rows, 'Gesamt:', '560,00 €')
+                        ];
+                    }
+
+                    // Multiline Text/Addresses
+                    if (id === 'mieter_adresse') {
+                        return [
+                            'span',
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '🏠 Mieter Adresse (Vorschau)'],
+                            'Max Mustermann\nMusterweg 12\n12345 Musterstadt'
+                        ];
+                    }
+
+                    if (id === 'gast_adresse') {
+                        return [
+                            'span',
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '🏠 Gast Adresse (Vorschau)'],
+                            'Dr. Sabine Sommer\nLindenallee 7\n50667 Köln'
+                        ];
+                    }
+
+                    if (id === 'vermieter_bankverbindung') {
+                        return [
+                            'span',
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '💳 Vermieter Bankverbindung (Vorschau)'],
+                            'Sparkasse Musterstadt\nIBAN: DE89 5005 0400 1122 3344 55\nBIC: SOLODEM1MUC'
+                        ];
+                    }
+
+                    // Standard variables like dates/ranges
+                    if (id === 'nutzungszeitraum' || id === 'abrechnungszeitraum' || id === 'buchungszeitraum') {
+                        const val = id === 'buchungszeitraum' ? '15.05.2026 bis 22.05.2026' : '01.01.2025 bis 31.12.2025';
+                        return [
+                            'span',
+                            { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                            `📅 ${label}: ${val}`
+                        ];
+                    }
+
+                    // Fallback to default styling
+                    return [
+                        'span',
+                        { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
+                        `${label}`
+                    ];
+                }
             }),
             HorizontalRule.extend({
                 draggable: true,
