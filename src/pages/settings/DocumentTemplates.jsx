@@ -609,6 +609,55 @@ export const DocumentTemplates = () => {
                         return ['span', { style: tableStyle }, ...children];
                     };
 
+                    const MOCK_VALUES = {
+                        mieter_name: "Max Mustermann",
+                        mieter_nachname: "Mustermann",
+                        mieter_anrede: "Sehr geehrter Herr Mustermann",
+                        mieter_adresse: "Musterweg 12\n12345 Musterstadt",
+                        gast_name: "Dr. Sabine Sommer",
+                        gast_adresse: "Lindenallee 7\n50667 Köln",
+                        objekt_name: "Wohnpark Sonnenseite",
+                        einheit_name: "Wohnung EG links",
+                        objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
+                        vermieter_name: "ImmoControlpro Vermieter GmbH",
+                        vermieter_bankverbindung: "Sparkasse Musterstadt\nIBAN: DE89 5005 0400 1122 3344 55\nBIC: SOLODEM1MUC",
+                        vermieter_adresse: "Musterstraße 42, 12345 Musterstadt",
+                        vermieter_email: "info@vermieter.de",
+                        vermieter_telefon: "0123 4567890",
+                        vermieter_steuernummer: "123/456/78901",
+                        vermieter_ust_id: "DE123456789",
+                        offener_betrag: "908,70 €",
+                        zahlungsfrist_datum: "17.06.2026",
+                        verzugstage: "14",
+                        mahnstufe: "2",
+                        zinsbetrag: "3,70 €",
+                        abrechnungsjahr: "2025",
+                        abrechnungszeitraum: "01.01.2025 - 31.12.2025",
+                        nutzungszeitraum: "01.01.2025 - 31.12.2025",
+                        gesamtkosten_mieter: "550,00 €",
+                        vorauszahlungs_betrag: "400,00 €",
+                        saldo_betrag: "150,00 €",
+                        saldo_art: "Nachzahlung",
+                        kaution_betrag: "1.950,00 €",
+                        buchungszeitraum: "15.05.2026 - 22.05.2026",
+                        gaeste_anzahl: "2",
+                        rechnungsnummer: "RE-2026-0412",
+                        rechnungsdatum: "03.06.2026",
+                        rechnungs_datum: "03.06.2026",
+                        erstellungsdatum: "03.06.2026",
+                        netto_betrag: "560,75 €",
+                        mwst_betrag: "39,25 €",
+                        brutto_betrag: "600,00 €",
+                        original_rechnungsnummer: "RE-2026-0399",
+                        storno_nummer: "ST-2026-0001",
+                        aktuelle_miete: "650,00 €",
+                        neue_miete: "715,00 €",
+                        erhoehungs_betrag: "65,00 €",
+                        erhoehungs_datum: "01.08.2026",
+                        zustimmungs_frist: "31.07.2026",
+                        einzug_datum: "01.06.2026"
+                    };
+
                     // Tables
                     if (id === 'forderungs_tabelle' || id === 'forderungs_detail_tabelle') {
                         const headers = ['Fälligkeit', 'Bezeichnung', 'Soll-Betrag', 'Ist-Betrag', 'Offen'];
@@ -650,37 +699,20 @@ export const DocumentTemplates = () => {
                     }
 
                     // Multiline Text/Addresses
-                    if (id === 'mieter_adresse') {
+                    if (id === 'mieter_adresse' || id === 'gast_adresse' || id === 'vermieter_bankverbindung') {
                         return [
                             'span',
                             { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            'Max Mustermann\nMusterweg 12\n12345 Musterstadt'
+                            MOCK_VALUES[id]
                         ];
                     }
 
-                    if (id === 'gast_adresse') {
+                    // All other variables mapped to mock values
+                    if (MOCK_VALUES[id] !== undefined) {
                         return [
                             'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            'Dr. Sabine Sommer\nLindenallee 7\n50667 Köln'
-                        ];
-                    }
-
-                    if (id === 'vermieter_bankverbindung') {
-                        return [
-                            'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            'Sparkasse Musterstadt\nIBAN: DE89 5005 0400 1122 3344 55\nBIC: SOLODEM1MUC'
-                        ];
-                    }
-
-                    // Standard variables like dates/ranges
-                    if (id === 'nutzungszeitraum' || id === 'abrechnungszeitraum' || id === 'buchungszeitraum') {
-                        const val = id === 'buchungszeitraum' ? '15.05.2026 bis 22.05.2026' : '01.01.2025 bis 31.12.2025';
-                        return [
-                            'span',
-                            { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            `📅 ${label}: ${val}`
+                            { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
+                            MOCK_VALUES[id]
                         ];
                     }
 
