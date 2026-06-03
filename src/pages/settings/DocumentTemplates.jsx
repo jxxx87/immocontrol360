@@ -1089,7 +1089,11 @@ export const DocumentTemplates = () => {
                     const firstDomChild = domNextPage?.firstElementChild;
                     if (firstDomChild) {
                         const childHeight = firstDomChild.getBoundingClientRect().height;
-                        const freeSpace = domBody.clientHeight - domBody.scrollHeight;
+                        // Freien Platz berechnen: Abstand vom letzten Kind zum Body-Ende
+                        const bodyRect = domBody.getBoundingClientRect();
+                        const lastBodyChild = domBody.lastElementChild;
+                        const contentBottom = lastBodyChild ? lastBodyChild.getBoundingClientRect().bottom : bodyRect.top;
+                        const freeSpace = bodyRect.top + domBody.clientHeight - contentBottom;
                         
                         if (childHeight > 0 && childHeight <= freeSpace) {
                             try {
@@ -1114,7 +1118,11 @@ export const DocumentTemplates = () => {
                     const firstChildDom = domNextBody.firstElementChild;
                     if (firstChildDom) {
                         const childHeight = firstChildDom.getBoundingClientRect().height;
-                        const freeSpace = domBody.clientHeight - domBody.scrollHeight;
+                        // Freien Platz berechnen: Abstand vom letzten Kind zum Body-Ende
+                        const bodyRect2 = domBody.getBoundingClientRect();
+                        const lastBodyChild2 = domBody.lastElementChild;
+                        const contentBottom2 = lastBodyChild2 ? lastBodyChild2.getBoundingClientRect().bottom : bodyRect2.top;
+                        const freeSpace = bodyRect2.top + domBody.clientHeight - contentBottom2;
                         
                         if (childHeight > 0 && childHeight <= freeSpace) {
                             try {
