@@ -618,8 +618,7 @@ export const DocumentTemplates = () => {
                         ];
                         return [
                             'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Forderungstabelle (Vorschau)'],
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             makeMockTable(headers, rows, 'Gesamtrückstand:', '855,00 €')
                         ];
                     }
@@ -632,8 +631,7 @@ export const DocumentTemplates = () => {
                         ];
                         return [
                             'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Umlagetabelle (Vorschau)'],
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             makeMockTable(headers, rows, 'Summe Anteil:', '545,00 €')
                         ];
                     }
@@ -646,8 +644,7 @@ export const DocumentTemplates = () => {
                         ];
                         return [
                             'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { class: 'variable-badge-table', style: 'display: block; margin-bottom: 4px; font-weight: bold; color: #0ea5e9; font-size: 8pt;' }, '📊 Rechnungspositionen (Vorschau)'],
+                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             makeMockTable(headers, rows, 'Gesamt:', '560,00 €')
                         ];
                     }
@@ -656,8 +653,7 @@ export const DocumentTemplates = () => {
                     if (id === 'mieter_adresse') {
                         return [
                             'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '🏠 Mieter Adresse (Vorschau)'],
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             'Max Mustermann\nMusterweg 12\n12345 Musterstadt'
                         ];
                     }
@@ -665,8 +661,7 @@ export const DocumentTemplates = () => {
                     if (id === 'gast_adresse') {
                         return [
                             'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '🏠 Gast Adresse (Vorschau)'],
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             'Dr. Sabine Sommer\nLindenallee 7\n50667 Köln'
                         ];
                     }
@@ -674,8 +669,7 @@ export const DocumentTemplates = () => {
                     if (id === 'vermieter_bankverbindung') {
                         return [
                             'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                            ['span', { style: 'display: block; font-size: 7.5pt; font-weight: bold; opacity: 0.8; margin-bottom: 2px;' }, '💳 Vermieter Bankverbindung (Vorschau)'],
+                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
                             'Sparkasse Musterstadt\nIBAN: DE89 5005 0400 1122 3344 55\nBIC: SOLODEM1MUC'
                         ];
                     }
