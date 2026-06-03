@@ -1058,7 +1058,8 @@ export const DocumentTemplates = () => {
         });
         editor.view.dispatch(tr);
         const propKey = property === 'margin-top' ? 'marginTop' :
-            property === 'margin-bottom' ? 'marginBottom' : 'minHeight';
+            property === 'margin-bottom' ? 'marginBottom' :
+            property === 'min-height' ? 'minHeight' : 'width';
         setLayoutPopover(prev => ({
             ...prev, styles: { ...prev.styles, [propKey]: value }
         }));
@@ -1093,7 +1094,8 @@ export const DocumentTemplates = () => {
                     styles: {
                         marginTop: parseFloat(styleObj['margin-top']) || 0,
                         marginBottom: parseFloat(styleObj['margin-bottom']) || 0,
-                        minHeight: parseFloat(styleObj['min-height']) || 0
+                        minHeight: parseFloat(styleObj['min-height']) || 0,
+                        width: parseFloat(styleObj['width']) || 0
                     }
                 });
             } catch(e) { console.error('Layout popover error:', e); }
@@ -3682,11 +3684,11 @@ export const DocumentTemplates = () => {
                                             <div style={{ fontWeight: 700, marginBottom: '10px', color: '#0ea5e9', fontSize: '13px', borderBottom: '2px solid #e2e8f0', paddingBottom: '6px' }}>
                                                 {layoutPopover.label}
                                             </div>
-                                            {[['margin-top', 'marginTop', 'Abstand oben'], ['margin-bottom', 'marginBottom', 'Abstand unten'], ['min-height', 'minHeight', 'Min-Höhe']].map(([cssProp, key, lbl]) => (
+                                            {[[ 'margin-top', 'marginTop', 'Abstand oben' ], [ 'margin-bottom', 'marginBottom', 'Abstand unten' ], [ 'min-height', 'minHeight', 'Mindesthöhe' ], [ 'width', 'width', 'Breite' ]].map(([cssProp, key, lbl]) => (
                                                 <label key={cssProp} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
                                                     <span style={{ color: '#475569' }}>{lbl}</span>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                        <input type="number" min="0" max="80" step="1"
+                                                        <input type="number" min="0" max="250" step="1"
                                                             value={layoutPopover.styles[key]}
                                                             onChange={(e) => updateLayoutStyle(cssProp, parseFloat(e.target.value) || 0)}
                                                             style={{ width: '48px', padding: '3px 6px', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'right', fontSize: '12px' }}
@@ -3695,7 +3697,12 @@ export const DocumentTemplates = () => {
                                                     </div>
                                                 </label>
                                             ))}
-                                            <button onClick={() => { updateLayoutStyle('margin-top', 0); setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); setTimeout(() => updateLayoutStyle('min-height', 0), 20); }}
+                                            <button onClick={() => { 
+                                                updateLayoutStyle('margin-top', 0); 
+                                                setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); 
+                                                setTimeout(() => updateLayoutStyle('min-height', 0), 20); 
+                                                setTimeout(() => updateLayoutStyle('width', 0), 30); 
+                                            }}
                                                 style={{ width: '100%', padding: '5px', marginTop: '6px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
                                             >Zurücksetzen</button>
                                         </div>
