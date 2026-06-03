@@ -50,7 +50,7 @@ Copy-Item -Path "dist\*" -Destination "$tempDir\app" -Recurse -Force
 
 # 5. Dummy package.json im Root erstellen, um Hostinger-Prüfung zu bestehen
 Write-Host "Erstelle Hostinger-Dummy-package.json..." -ForegroundColor Cyan
-$dummyPkg = '{"name": "immocontrol360-combined", "version": "1.0.0", "scripts": {"build": "echo ''No build needed''"}}'
+$dummyPkg = '{"name": "immocontrol360-combined", "version": "1.0.0", "scripts": {"build": "echo ''Build complete''", "start": "echo ''Static hosting''"}}'
 Set-Content -Path "$tempDir\package.json" -Value $dummyPkg
 
 # 6. Git Commit und Push (Inkrementell!)
@@ -80,9 +80,9 @@ Remove-Item -Path $tempDir -Recurse -Force
 Write-Host "--------------------------------------------------------" -ForegroundColor Green
 Write-Host "Kombiniertes Deployment erfolgreich hochgeladen!" -ForegroundColor Green
 Write-Host "Gehe nun zu Hostinger -> Git (für Hauptdomain immocontrol360.de):" -ForegroundColor White
-Write-Host "1. Repository: https://github.com/jxxx87/immocontrol360.git"
-Write-Host "2. Zweig (Branch): production"
-Write-Host "3. Framework-Voreinstellung: Other"
-Write-Host "4. Build-Befehl: npm run build"
-Write-Host "5. Ausgabeverzeichnis: ."
-Write-Host "--------------------------------------------------------"
+Write-Host "1. Repository: https://github.com/jxxx87/immocontrol360.git
+2. Zweig (Branch): production
+3. Framework-Voreinstellung: Other
+4. Build-Befehl: npm run build (oder falls Hostinger meckert: "echo done")
+5. Ausgabeverzeichnis: .
+--------------------------------------------------------------------"

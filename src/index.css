@@ -1038,11 +1038,11 @@ input.search-input-padding {
   display: block !important;
   width: 100% !important;
   margin: 10px 0 !important;
-  background-color: #f8fafc !important;
-  border: 1px solid #cbd5e1 !important;
+  background-color: #e0f2fe !important;
+  border: 1px solid #bae6fd !important;
   border-radius: 6px !important;
   padding: 8px 12px !important;
-  color: #334155 !important;
+  color: #0369a1 !important;
   font-weight: normal !important;
   user-select: none !important;
 }
@@ -1050,11 +1050,11 @@ input.search-input-padding {
 .variable-chip.multiline-variable {
   display: inline-block !important;
   max-width: 100% !important;
-  background-color: #f0fdf4 !important;
-  border: 1px solid #bbf7d0 !important;
+  background-color: #e0f2fe !important;
+  border: 1px solid #bae6fd !important;
   border-radius: 4px !important;
   padding: 6px 10px !important;
-  color: #166534 !important;
+  color: #0369a1 !important;
   font-weight: normal !important;
   font-family: inherit !important;
   white-space: pre-wrap !important;

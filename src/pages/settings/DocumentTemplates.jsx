@@ -571,12 +571,12 @@ export const DocumentTemplates = () => {
                     const label = node.attrs.label || id;
                     
                     const makeMockTable = (headers, rows, totalLabel, totalVal) => {
-                        const tableStyle = "display: table; width: 100%; border-collapse: collapse; margin: 8px 0; border: 1px solid #cbd5e1; background: #ffffff; color: #334155;";
-                        const headerRowStyle = "display: table-row; background-color: #f1f5f9; font-weight: bold; border-bottom: 2px solid #cbd5e1;";
-                        const rowStyle = "display: table-row; border-bottom: 1px solid #cbd5e1;";
-                        const altRowStyle = "display: table-row; border-bottom: 1px solid #cbd5e1; background-color: #f8fafc;";
-                        const headerCellStyle = "display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: left;";
-                        const cellStyle = "display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: left;";
+                        const tableStyle = "display: table; width: 100%; border-collapse: collapse; margin: 8px 0; border: 1px solid #bae6fd; background: #ffffff; color: #0369a1;";
+                        const headerRowStyle = "display: table-row; background-color: #bae6fd; font-weight: bold; color: #0369a1; border-bottom: 2px solid #bae6fd;";
+                        const rowStyle = "display: table-row; border-bottom: 1px solid #bae6fd;";
+                        const altRowStyle = "display: table-row; border-bottom: 1px solid #bae6fd; background-color: #f0f9ff;";
+                        const headerCellStyle = "display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: left;";
+                        const cellStyle = "display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: left; color: #334155;";
                         
                         const children = [
                             ['span', { style: headerRowStyle }, 
@@ -595,13 +595,13 @@ export const DocumentTemplates = () => {
                         ];
 
                         if (totalLabel && totalVal) {
-                            const totalRowStyle = "display: table-row; font-weight: bold; background-color: #f1f5f9;";
-                            const labelColSpanStyle = `display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: right;`;
-                            const valStyle = `display: table-cell; padding: 6px; border: 1px solid #cbd5e1; font-size: 9pt; text-align: right; color: #dc2626;`;
+                            const totalRowStyle = "display: table-row; font-weight: bold; background-color: #e0f2fe; color: #0369a1;";
+                            const labelColSpanStyle = `display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: right;`;
+                            const valStyle = `display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: right; color: #0284c7;`;
                             
                             children.push(['span', { style: totalRowStyle },
                                 ['span', { style: labelColSpanStyle }, totalLabel],
-                                ...Array(headers.length - 2).fill(null).map(() => ['span', { style: "display: table-cell; border: 1px solid #cbd5e1;" }]),
+                                ...Array(headers.length - 2).fill(null).map(() => ['span', { style: "display: table-cell; border: 1px solid #bae6fd;" }]),
                                 ['span', { style: valStyle }, totalVal]
                             ]);
                         }
