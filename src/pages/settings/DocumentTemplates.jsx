@@ -10,6 +10,7 @@ import HorizontalRule from '@tiptap/extension-horizontal-rule';
 import { TextAlign } from '@tiptap/extension-text-align';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
+import { Selection, TextSelection } from '@tiptap/pm/state';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
@@ -102,31 +103,31 @@ const DEFAULT_TEMPLATES = {
         name: 'Zahlungserinnerung',
         category: 'Mahnwesen',
         subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_1: {
         name: 'Mahnung (Stufe 1)',
         category: 'Mahnwesen',
         subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_2: {
         name: 'Abmahnung (Stufe 2)',
         category: 'Mahnwesen',
         subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete is nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete is nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_final: {
         name: 'Letzte Zahlungsaufforderung',
         category: 'Mahnwesen',
         subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Mietbeginn">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete is nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     utility_costs: {
         name: 'Nebenkostenabrechnung',
         category: 'Nebenkosten',
         subject: 'Betriebskostenabrechnung für das Abrechnungsjahr',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Umlagetabelle">Umlagetabelle</span></p><p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt (Seite 2) entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Betriebskostenabrechnung: Berechnungsblatt</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der Betriebskosten, die Umlageschlüssel und die Berechnungsschritte für Ihren Nutzungszeitraum:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Detaillierte Umlagetabelle">Detaillierte Umlagetabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Umlagetabelle">Umlagetabelle</span></p><p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt (Seite 2) entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Betriebskostenabrechnung: Berechnungsblatt</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der Betriebskosten, die Umlageschlüssel und die Berechnungsschritte für Ihren Nutzungszeitraum:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Detaillierte Umlagetabelle">Detaillierte Umlagetabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     fewo_invoice: {
         name: 'Fewo-Rechnung',
@@ -619,6 +620,193 @@ export const DocumentTemplates = () => {
             setSelectedNodeType(node?.type?.name || null);
         },
         editorProps: {
+            // Seitenübergreifende Delete/Backspace-Handler
+            // Seiten verhalten sich wie EIN Dokument – nur optisch in A4 geteilt
+            handleKeyDown(view, event) {
+                const { state } = view;
+                const { selection, doc } = state;
+                const pos = selection.from;
+                
+                // Finde die aktuelle letterBody und letterPage
+                const $pos = doc.resolve(pos);
+                let bodyNode = null, bodyPos = -1, pageNode = null, pagePos = -1;
+                for (let d = $pos.depth; d >= 0; d--) {
+                    const node = $pos.node(d);
+                    if (node.type.name === 'letterBody') {
+                        bodyNode = node;
+                        bodyPos = $pos.before(d);
+                    }
+                    if (node.type.name === 'letterPage') {
+                        pageNode = node;
+                        pagePos = $pos.before(d);
+                        break;
+                    }
+                }
+                
+                if (!bodyNode || !pageNode) return false;
+                
+                // DELETE am Ende des Body → Text von nächster Seite holen
+                if (event.key === 'Delete' && !event.shiftKey && !event.ctrlKey) {
+                    const bodyEnd = bodyPos + bodyNode.nodeSize;
+                    const isAtEnd = pos >= bodyEnd - 2; // Cursor am oder nahe dem Ende
+                    
+                    if (isAtEnd) {
+                        // Finde die nächste Seite
+                        const pages = [];
+                        doc.forEach((node, offset) => {
+                            if (node.type.name === 'letterPage') {
+                                pages.push({ node, pos: offset });
+                            }
+                        });
+                        
+                        const currentPageIdx = pages.findIndex(p => p.pos === pagePos);
+                        if (currentPageIdx >= 0 && currentPageIdx + 1 < pages.length) {
+                            const nextPageData = pages[currentPageIdx + 1];
+                            const nextPage = nextPageData.node;
+                            const nextPagePos = nextPageData.pos;
+                            
+                            // Strukturelle Typen
+                            const structuralTypes = ['letterBody', 'letterFooter', 'letterSender', 
+                                'letterSubject', 'letterObject', 'letterHeaderRow', 'letterRecipient', 'letterDate'];
+                            
+                            // Prüfe ob erstes Kind ein Seiten-Level-Absatz ist
+                            const firstChild = nextPage.firstChild;
+                            if (firstChild && !structuralTypes.includes(firstChild.type.name)) {
+                                // Seiten-Level-Absatz → in aktuelle Body verschieben
+                                const fcStart = nextPagePos + 1;
+                                const fcEnd = fcStart + firstChild.nodeSize;
+                                const tr = state.tr;
+                                tr.insert(bodyEnd - 1, firstChild.copy(firstChild.content));
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
+                                view.dispatch(tr);
+                                return true;
+                            }
+                            
+                            // Prüfe Body der nächsten Seite
+                            let nextBodyNode = null, nextBodyPos = -1;
+                            nextPage.forEach((child, offset) => {
+                                if (child.type.name === 'letterBody') {
+                                    nextBodyNode = child;
+                                    nextBodyPos = nextPagePos + 1 + offset;
+                                }
+                            });
+                            
+                            if (nextBodyNode && nextBodyNode.childCount > 0) {
+                                const firstBodyChild = nextBodyNode.firstChild;
+                                const fcStart = nextBodyPos + 1;
+                                const fcEnd = fcStart + firstBodyChild.nodeSize;
+                                const tr = state.tr;
+                                tr.insert(bodyEnd - 1, firstBodyChild.copy(firstBodyChild.content));
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
+                                view.dispatch(tr);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                
+                // BACKSPACE am Anfang eines Absatzes → Text zur vorherigen Seite verschieben / mergen
+                if (event.key === 'Backspace' && !event.shiftKey && !event.ctrlKey) {
+                    const $pos = doc.resolve(pos);
+                    
+                    // Cursor muss am Anfang eines Blocks stehen
+                    if ($pos.parentOffset !== 0) return false;
+                    
+                    const parentPos = $pos.before($pos.depth);
+                    
+                    // Prüfe ob dieser Absatz der ERSTE im Body ist
+                    const isFirstInBody = bodyNode && (parentPos === bodyPos + 1);
+                    
+                    if (!isFirstInBody) return false;
+                    
+                    // Finde alle Seiten
+                    const pages = [];
+                    doc.forEach((node, offset) => {
+                        if (node.type.name === 'letterPage') {
+                            pages.push({ node, pos: offset });
+                        }
+                    });
+                    
+                    const currentPageIdx = pages.findIndex(p => p.pos === pagePos);
+                    if (currentPageIdx <= 0) return false; // Seite 1 → normales Backspace
+                    
+                    const prevPageData = pages[currentPageIdx - 1];
+                    const prevPage = prevPageData.node;
+                    const prevPagePos = prevPageData.pos;
+                    
+                    // Finde Body der vorherigen Seite
+                    let prevBodyNode = null, prevBodyPos = -1;
+                    prevPage.forEach((child, offset) => {
+                        if (child.type.name === 'letterBody') {
+                            prevBodyNode = child;
+                            prevBodyPos = prevPagePos + 1 + offset;
+                        }
+                    });
+                    
+                    if (prevBodyNode && bodyNode && bodyNode.childCount > 0) {
+                        try {
+                            const firstChild = bodyNode.firstChild;
+                            const fcStart = bodyPos + 1;
+                            const fcEnd = fcStart + firstChild.nodeSize;
+                            const tr = state.tr;
+                            
+                            // Finde das letzte Kind des vorherigen Body
+                            let lastChildNode = null;
+                            let lastChildOffset = -1;
+                            prevBodyNode.forEach((child, offset) => {
+                                lastChildNode = child;
+                                lastChildOffset = offset;
+                            });
+                            
+                            let targetCursorPos = -1;
+                            
+                            if (lastChildNode && lastChildNode.type.name === 'paragraph' && firstChild.type.name === 'paragraph') {
+                                // Beide sind Absätze -> Mergen!
+                                const lastChildEnd = prevBodyPos + 1 + lastChildOffset + lastChildNode.nodeSize - 1;
+                                
+                                // Füge den Inhalt des ersten Absatzes am Ende des letzten Absatzes ein
+                                tr.insert(lastChildEnd, firstChild.content);
+                                
+                                // Lösche den originalen ersten Absatz auf Seite 2
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
+                                
+                                // Cursor an die Stelle des Merges setzen (Ende des ursprünglichen letzten Absatzes)
+                                targetCursorPos = tr.mapping.map(lastChildEnd);
+                            } else {
+                                // Unterschiedliche Typen oder kein Absatz -> Absatz verschieben (als neues Kind)
+                                const prevBodyEnd = prevBodyPos + prevBodyNode.nodeSize;
+                                
+                                // Absatz ans Ende des vorherigen Body einfügen
+                                tr.insert(prevBodyEnd - 1, firstChild.copy(firstChild.content));
+                                
+                                // Lösche den originalen Absatz
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
+                                
+                                // Cursor an den Anfang des verschobenen Absatzes setzen
+                                targetCursorPos = tr.mapping.map(prevBodyEnd - 1) + 1;
+                            }
+                            
+                            // Cursor-Positionierung
+                            if (targetCursorPos !== -1) {
+                                try {
+                                    const $mapped = tr.doc.resolve(targetCursorPos);
+                                    const sel = Selection.near($mapped, -1);
+                                    tr.setSelection(sel);
+                                } catch(e) {
+                                    console.warn('Could not set selection near targetCursorPos:', e);
+                                }
+                            }
+                            
+                            view.dispatch(tr);
+                            return true;
+                        } catch (e) {
+                            console.error('Backspace cross-page error:', e);
+                        }
+                    }
+                }
+                
+                return false;
+            },
             handleDrop(view, event, slice, moved) {
                 if (!moved && event.dataTransfer) {
                     const files = event.dataTransfer.files;
@@ -763,11 +951,71 @@ export const DocumentTemplates = () => {
     const runPaginationStep = (editor) => {
         if (!editor || !editor.view || !editor.view.dom) return false;
         
+        // DOM synchronisieren damit Messungen korrekt sind
+        try { editor.view.updateState(editor.view.state); } catch(e) { /* ignore */ }
+        
         const doc = editor.state.doc;
         const pages = getPagesFromDoc(doc);
         const domPages = document.querySelectorAll('.ProseMirror > .letter-page');
         
         if (pages.length === 0 || domPages.length !== pages.length) return false;
+        
+        // 1. Bereinigung: Verschiebe verwaiste Seiten-Level-Absätze und unzulässige Strukturelemente auf Folgeseiten
+        const structuralTypes = ['letterBody', 'letterFooter', 'letterSender', 
+            'letterSubject', 'letterObject', 'letterHeaderRow', 'letterRecipient', 'letterDate'];
+            
+        for (let i = 0; i < pages.length; i++) {
+            const page = pages[i];
+            if (page.bodyPos !== -1) {
+                let hasOrphan = false;
+                let orphanPos = -1;
+                let orphanNode = null;
+                let isSubjectOnFollowPage = false;
+                
+                page.node.forEach((child, offset) => {
+                    // Auf Folgeseiten (Seite 2+) wandeln wir das letterSubject in einen fettgedruckten Paragraph im Body um.
+                    if (i > 0 && child.type.name === 'letterSubject') {
+                        isSubjectOnFollowPage = true;
+                        orphanPos = page.pos + 1 + offset;
+                        orphanNode = child;
+                    } else if (!structuralTypes.includes(child.type.name)) {
+                        hasOrphan = true;
+                        orphanPos = page.pos + 1 + offset;
+                        orphanNode = child;
+                    }
+                });
+                
+                if ((hasOrphan || isSubjectOnFollowPage) && orphanNode) {
+                    try {
+                        const tr = editor.state.tr;
+                        let newNode = orphanNode;
+                        
+                        if (isSubjectOnFollowPage) {
+                            // Wandle letterSubject in einen fettgedruckten Überschriften-Paragraph um
+                            const styleStr = 'font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm; display: block;';
+                            newNode = editor.schema.nodes.paragraph.create(
+                                { style: styleStr },
+                                orphanNode.content
+                            );
+                        } else {
+                            newNode = orphanNode.copy(orphanNode.content);
+                        }
+                        
+                        // Wenn es das Subject auf Folgeseiten oder vor dem Body liegt -> an den Anfang des Bodys
+                        const isBeforeBody = orphanPos < page.bodyPos;
+                        const insertPos = (isSubjectOnFollowPage || isBeforeBody) ? page.bodyPos + 1 : page.bodyEnd - 1;
+                        
+                        tr.insert(insertPos, newNode);
+                        // Lösche das Original auf Seiten-Ebene
+                        tr.delete(tr.mapping.map(orphanPos), tr.mapping.map(orphanPos + orphanNode.nodeSize));
+                        editor.view.dispatch(tr);
+                        return true; // Erneut paginieren
+                    } catch (e) {
+                        console.error('Error auto-fixing orphan/subject paragraph:', e);
+                    }
+                }
+            }
+        }
         
         for (let i = 0; i < pages.length; i++) {
             const page = pages[i];
@@ -776,7 +1024,8 @@ export const DocumentTemplates = () => {
             if (!domBody) continue;
             
             // OVERFLOW: scrollHeight > clientHeight = Content ist geclippt
-            const isOverflowing = domBody.scrollHeight > domBody.clientHeight + 2;
+            // Kein Toleranz-Puffer → Overflow triggert sofort beim ersten Enter
+            const isOverflowing = domBody.scrollHeight > domBody.clientHeight;
             
             if (isOverflowing && page.bodyNode && page.bodyNode.childCount > 1) {
                 const lastChild = page.bodyNode.lastChild;
@@ -786,7 +1035,7 @@ export const DocumentTemplates = () => {
                 
                 try {
                     if (nextIdx >= pages.length) {
-                        // Neue Seite mit Fußzeilen-Klon
+                        // Keine nächste Seite → neue Seite erstellen
                         const footerClone = page.footerNode
                             ? editor.schema.nodes.letterFooter.create(null, page.footerNode.content)
                             : editor.schema.nodes.letterFooter.create(null, [editor.schema.nodes.paragraph.create()]);
@@ -800,9 +1049,13 @@ export const DocumentTemplates = () => {
                         editor.view.dispatch(tr);
                         return true;
                     } else {
+                        // Nächste Seite existiert → AM ANFANG des Bodys der nächsten Seite einfügen
+                        // So bleibt der Text immer sauber innerhalb des Body-Elements gefangen
                         const nextPage = pages[nextIdx];
                         const tr = editor.state.tr;
-                        tr.insert(nextPage.bodyPos + 1, lastChild.copy(lastChild.content));
+                        const targetPos = nextPage.bodyPos !== -1 ? nextPage.bodyPos + 1 : nextPage.pos + 1;
+                        
+                        tr.insert(targetPos, lastChild.copy(lastChild.content));
                         tr.delete(lastChildStart, lastChildEnd);
                         editor.view.dispatch(tr);
                         return true;
@@ -812,12 +1065,49 @@ export const DocumentTemplates = () => {
                 }
             }
             
+            // Overflow mit nur einem Kind → kann nicht weiter aufgeteilt werden
             if (isOverflowing && page.bodyNode && page.bodyNode.childCount <= 1) continue;
             
             // UNDERFLOW: Prüfe ob Content von nächster Seite zurückpasst
             const nextIdx = i + 1;
             if (nextIdx < pages.length) {
                 const nextPage = pages[nextIdx];
+                const domNextPage = domPages[nextIdx];
+                
+                // Layout-Sync erzwingen für genaue Messungen
+                domBody.offsetHeight;
+                
+                // Prüfe ob es Seiten-Level-Absätze gibt (vor Strukturelementen)
+                // Diese wurden durch Overflow VOR Überschriften eingefügt
+                const structuralTypes = ['letterBody', 'letterFooter', 'letterSender', 
+                    'letterSubject', 'letterObject', 'letterHeaderRow', 'letterRecipient', 'letterDate'];
+                const firstPageChild = nextPage.node.firstChild;
+                const isPageLevelParagraph = firstPageChild && !structuralTypes.includes(firstPageChild.type.name);
+                
+                if (isPageLevelParagraph) {
+                    // Seiten-Level-Absatz → zurückholen wenn Platz da ist
+                    const firstDomChild = domNextPage?.firstElementChild;
+                    if (firstDomChild) {
+                        const childHeight = firstDomChild.getBoundingClientRect().height;
+                        const freeSpace = domBody.clientHeight - domBody.scrollHeight;
+                        
+                        if (childHeight > 0 && childHeight <= freeSpace) {
+                            try {
+                                const fcStart = nextPage.pos + 1;
+                                const fcEnd = fcStart + firstPageChild.nodeSize;
+                                const tr = editor.state.tr;
+                                tr.insert(page.bodyEnd - 1, firstPageChild.copy(firstPageChild.content));
+                                tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
+                                editor.view.dispatch(tr);
+                                return true;
+                            } catch (e) {
+                                console.error('Pagination underflow (page-level) error:', e);
+                            }
+                        }
+                    }
+                }
+                
+                // Body-Underflow (auch wenn kein page-level paragraph, IMMER prüfen)
                 const domNextBody = domPages[nextIdx]?.querySelector('.letter-body');
                 
                 if (domNextBody && nextPage.bodyNode && nextPage.bodyNode.childCount > 0) {
@@ -826,7 +1116,7 @@ export const DocumentTemplates = () => {
                         const childHeight = firstChildDom.getBoundingClientRect().height;
                         const freeSpace = domBody.clientHeight - domBody.scrollHeight;
                         
-                        if (childHeight > 0 && childHeight + 4 <= freeSpace) {
+                        if (childHeight > 0 && childHeight <= freeSpace) {
                             try {
                                 const firstChild = nextPage.bodyNode.firstChild;
                                 const fcStart = nextPage.bodyPos + 1;
@@ -841,18 +1131,46 @@ export const DocumentTemplates = () => {
                             }
                         }
                     }
-                } else if (nextPage.bodyNode && nextPage.bodyNode.childCount === 0) {
-                    try {
-                        editor.view.dispatch(editor.state.tr.delete(nextPage.pos, nextPage.end));
-                        return true;
-                    } catch (e) {
-                        console.error('Error deleting empty page:', e);
+                } else if (!isPageLevelParagraph && nextPage.bodyNode && nextPage.bodyNode.childCount === 0) {
+                    // Leere Seite entfernen (keine Seiten-Level-Absätze und leerer Body)
+                    const hasPageLevelContent = (() => {
+                        let found = false;
+                        nextPage.node.forEach(child => {
+                            if (!structuralTypes.includes(child.type.name)) found = true;
+                        });
+                        return found;
+                    })();
+                    if (!hasPageLevelContent) {
+                        try {
+                            editor.view.dispatch(editor.state.tr.delete(nextPage.pos, nextPage.end));
+                            return true;
+                        } catch (e) {
+                            console.error('Error deleting empty page:', e);
+                        }
                     }
                 }
             }
         }
         
         return false;
+    };
+    
+    // Führt die Pagination in einer Schleife aus bis keine Änderung mehr nötig ist
+    const runFullPagination = (editor) => {
+        if (!editor?.view?.dom) return;
+        let changed = true;
+        let iterations = 0;
+        const MAX_ITERATIONS = 30; // Schutz gegen Endlosschleifen
+        while (changed && iterations < MAX_ITERATIONS) {
+            changed = runPaginationStep(editor);
+            iterations++;
+        }
+        // Page-Count aktualisieren
+        let count = 0;
+        editor.state.doc.descendants(node => {
+            if (node.type.name === 'letterPage') count++;
+        });
+        setPageCount(count > 0 ? count : 1);
     };
 
     // Scroll corresponding page into view
@@ -872,17 +1190,15 @@ export const DocumentTemplates = () => {
         let rafId = null;
         
         const handlePagination = () => {
-            const changed = runPaginationStep(editor);
-            if (changed) {
-                timeoutId = setTimeout(handlePagination, 50);
-            }
+            runFullPagination(editor);
         };
         
         const onUpdateOrSelection = () => {
             if (timeoutId) clearTimeout(timeoutId);
-            // Schnelles Debounce (30ms) damit der Text sofort vor der Fußzeile
-            // auf die nächste Seite springt – kein sichtbares Überlappen
-            timeoutId = setTimeout(handlePagination, 30);
+            // Debounce 50ms – Balance zwischen Reaktivität und Performance
+            timeoutId = setTimeout(() => {
+                requestAnimationFrame(handlePagination);
+            }, 50);
         };
         
         editor.on('update', onUpdateOrSelection);
@@ -890,7 +1206,7 @@ export const DocumentTemplates = () => {
         
         // Initial pagination after content is loaded (DOM muss fertig sein)
         rafId = requestAnimationFrame(() => {
-            timeoutId = setTimeout(handlePagination, 200);
+            timeoutId = setTimeout(handlePagination, 300);
         });
         
         return () => {
@@ -1936,7 +2252,7 @@ export const DocumentTemplates = () => {
                 box-shadow: none !important;
                 border: none !important;
                 margin: 0 !important;
-                padding: 20mm 20mm 35mm 25mm !important;
+                padding: 20mm 20mm 15mm 25mm !important;
                 width: 210mm !important;
                 height: 297mm !important;
                 overflow: hidden !important;
@@ -1964,7 +2280,7 @@ export const DocumentTemplates = () => {
             height: 297mm;
             min-height: 297mm;
             max-height: 297mm;
-            padding: 20mm 20mm 35mm 25mm;
+            padding: 20mm 20mm 15mm 25mm;
             background: #ffffff !important;
             color: #000000 !important;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
@@ -2058,6 +2374,9 @@ export const DocumentTemplates = () => {
         }
         
         .letter-body {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
             flex-grow: 1;
             flex-shrink: 1;
             min-height: 0;
@@ -2073,12 +2392,12 @@ export const DocumentTemplates = () => {
         }
         
         .letter-footer {
-            position: absolute !important;
-            bottom: 10mm !important;
-            left: 25mm !important;
-            right: 20mm !important;
-            height: 18mm !important;
-            margin-top: 0 !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            flex-shrink: 0 !important;
+            margin-top: auto !important;
+            min-height: 15mm !important;
             display: flex !important;
             justify-content: space-between !important;
             border-top: 1px solid #dddddd !important;
@@ -2087,7 +2406,6 @@ export const DocumentTemplates = () => {
             color: #666666 !important;
             line-height: 1.4 !important;
             text-align: left !important;
-            box-sizing: border-box !important;
             background-color: #ffffff !important;
         }
         
@@ -2242,13 +2560,54 @@ export const DocumentTemplates = () => {
                     outline: none;
                     width: 100%;
                 }
-                .ProseMirror > .letter-page {
-                    display: flex !important;
-                    margin: 0 auto 20px auto !important;
-                }
+                /* A4 Seite im Editor – feste Höhe ist KRITISCH für Overflow-Erkennung */
+                .ProseMirror > .letter-page,
                 .preview-live-container > .letter-page {
                     display: flex !important;
+                    flex-direction: column !important;
                     margin: 0 auto 20px auto !important;
+                    width: 210mm !important;
+                    height: 297mm !important;
+                    min-height: 297mm !important;
+                    max-height: 297mm !important;
+                    padding: 20mm 20mm 15mm 25mm !important;
+                    background: #ffffff !important;
+                    border: 1px solid var(--border-color, #cbd5e1) !important;
+                    box-shadow: 0 2px 12px rgba(0,0,0,0.08) !important;
+                    overflow: hidden !important;
+                    position: relative !important;
+                    box-sizing: border-box !important;
+                    font-size: 11pt !important;
+                    line-height: 1.5 !important;
+                }
+                /* Body: Flexibler Bereich zwischen Header und Footer */
+                .ProseMirror .letter-body,
+                .preview-live-container .letter-body {
+                    flex: 1 1 auto !important;
+                    min-height: 0 !important;
+                    overflow: hidden !important;
+                    font-size: 11pt !important;
+                    line-height: 1.6 !important;
+                }
+                /* Footer: Am Seitenende fixiert, NICHT editierbar im Editor */
+                .ProseMirror .letter-footer,
+                .preview-live-container .letter-footer {
+                    flex-shrink: 0 !important;
+                    margin-top: auto !important;
+                    display: flex !important;
+                    justify-content: space-between !important;
+                    border-top: 1px solid #ddd !important;
+                    padding-top: 3mm !important;
+                    font-size: 8pt !important;
+                    color: #666 !important;
+                    min-height: 15mm !important;
+                    user-select: none !important;
+                    cursor: default !important;
+                    opacity: 0.7 !important;
+                }
+                .ProseMirror .footer-col,
+                .preview-live-container .footer-col {
+                    width: 30%;
                 }
                 @media (max-width: 1450px) {
                     .letter-page {
