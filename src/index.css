@@ -1008,8 +1008,8 @@ input.search-input-padding {
 
 .tiptap.show-outlines .layout-div::before {
   position: absolute;
-  top: -8px;
-  left: 8px;
+  top: 2px;
+  left: 2px;
   background-color: #0ea5e9;
   color: white;
   font-size: 8px;
@@ -1017,8 +1017,9 @@ input.search-input-padding {
   border-radius: 2px;
   font-family: monospace;
   pointer-events: none;
-  opacity: 0.7;
-  z-index: 10;
+  opacity: 0.85;
+  z-index: 100;
+  white-space: nowrap;
 }
 
 .tiptap.show-outlines .layout-div.letter-sender::before { content: "Absenderzeile"; }
