@@ -883,12 +883,15 @@ input.search-input-padding {
   text-align: left;
 }
 
-/* Body Area */
+/* Body Area – margin-bottom schafft Abstand zur Fußzeile.
+   Footer ist bei bottom:10mm + height:18mm = 28mm vom Seitenende.
+   Page padding-bottom: 35mm. Mit 5mm margin = 12mm Lücke vor Footer. */
 .letter-body {
   flex-grow: 1;
   flex-shrink: 1;
   min-height: 0;
   overflow: hidden;
+  margin-bottom: 5mm;
   font-size: 11pt;
   line-height: 1.6;
   text-align: left;
