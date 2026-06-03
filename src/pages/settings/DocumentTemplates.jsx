@@ -927,7 +927,6 @@ export const DocumentTemplates = () => {
             const secClass = sectionClasses.find(c => layoutDiv.classList.contains(c));
             if (!secClass) return;
             const typeName = classToNodeType[secClass];
-            const rect = layoutDiv.getBoundingClientRect();
             const styleObj = parseStyleStr(layoutDiv.getAttribute('style'));
             try {
                 const pos = editor.view.posAtDOM(layoutDiv, 0);
@@ -940,7 +939,8 @@ export const DocumentTemplates = () => {
                 }
                 setLayoutPopover({
                     secClass, typeName, label: sectionLabels[secClass], nodePos,
-                    popupTop: rect.top, popupLeft: rect.right + 8,
+                    popupTop: Math.max(10, Math.min(e.clientY - 20, window.innerHeight - 250)),
+                    popupLeft: Math.max(10, Math.min(e.clientX - 110, window.innerWidth - 230)),
                     styles: {
                         marginTop: parseFloat(styleObj['margin-top']) || 0,
                         marginBottom: parseFloat(styleObj['margin-bottom']) || 0,
@@ -3513,8 +3513,8 @@ export const DocumentTemplates = () => {
                                     {layoutPopover && showLayoutOutlines && !showLivePreview && (
                                         <div className="layout-popover" style={{
                                             position: 'fixed',
-                                            top: Math.min(layoutPopover.popupTop, window.innerHeight - 260),
-                                            left: Math.min(layoutPopover.popupLeft, window.innerWidth - 240),
+                                            top: layoutPopover.popupTop,
+                                            left: layoutPopover.popupLeft,
                                             zIndex: 9999, background: '#ffffff',
                                             border: '1px solid #e2e8f0', borderRadius: '10px',
                                             padding: '14px 16px',
