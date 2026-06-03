@@ -1199,7 +1199,9 @@ export const DocumentTemplates = () => {
             let pagePos = -1;
             state.doc.descendants((n, p) => {
                 if (n.type.name === 'letterPage') {
-                    pagePos = p;
+                    if (pagePos === -1) {
+                        pagePos = p;
+                    }
                     return false;
                 }
             });
@@ -3235,7 +3237,9 @@ export const DocumentTemplates = () => {
                                                         let nodePos = -1;
                                                         editor.state.doc.descendants((node, pos) => {
                                                             if (node.type.name === classToNodeType[secClass]) {
-                                                                nodePos = pos;
+                                                                if (nodePos === -1) {
+                                                                    nodePos = pos;
+                                                                }
                                                                 return false;
                                                             }
                                                         });
