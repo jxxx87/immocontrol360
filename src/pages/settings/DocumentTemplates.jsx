@@ -1068,6 +1068,14 @@ export const DocumentTemplates = () => {
     useEffect(() => {
         if (!editor || !showLayoutOutlines) return;
         const sectionClasses = Object.keys(sectionLabels);
+        
+        const pxToMm = (pxStr) => {
+            if (!pxStr) return 0;
+            const px = parseFloat(pxStr);
+            if (isNaN(px)) return 0;
+            return Math.round(px * 25.4 / 96);
+        };
+
         const handleClick = (e) => {
             if (e.target.closest('.layout-popover')) return;
             const layoutDiv = e.target.closest('.layout-div');
@@ -1078,6 +1086,8 @@ export const DocumentTemplates = () => {
             if (!secClass) return;
             const typeName = classToNodeType[secClass];
             const styleObj = parseStyleStr(layoutDiv.getAttribute('style'));
+            const computed = window.getComputedStyle(layoutDiv);
+            
             try {
                 const pos = editor.view.posAtDOM(layoutDiv, 0);
                 const $pos = editor.state.doc.resolve(pos);
@@ -1087,15 +1097,16 @@ export const DocumentTemplates = () => {
                         nodePos = $pos.before(d); break;
                     }
                 }
+                
                 setLayoutPopover({
                     secClass, typeName, label: sectionLabels[secClass], nodePos,
                     popupTop: Math.max(10, Math.min(e.clientY - 20, window.innerHeight - 250)),
                     popupLeft: Math.max(10, Math.min(e.clientX - 110, window.innerWidth - 230)),
                     styles: {
-                        marginTop: parseFloat(styleObj['margin-top']) || 0,
-                        marginBottom: parseFloat(styleObj['margin-bottom']) || 0,
-                        minHeight: parseFloat(styleObj['min-height']) || 0,
-                        width: parseFloat(styleObj['width']) || 0
+                        marginTop: parseFloat(styleObj['margin-top']) || pxToMm(computed.marginTop),
+                        marginBottom: parseFloat(styleObj['margin-bottom']) || pxToMm(computed.marginBottom),
+                        minHeight: parseFloat(styleObj['min-height']) || pxToMm(computed.minHeight),
+                        width: parseFloat(styleObj['width']) || pxToMm(computed.width)
                     }
                 });
             } catch(e) { console.error('Layout popover error:', e); }
