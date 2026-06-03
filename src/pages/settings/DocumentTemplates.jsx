@@ -2347,7 +2347,7 @@ export const DocumentTemplates = () => {
                 box-shadow: none !important;
                 border: none !important;
                 margin: 0 !important;
-                padding: 20mm 20mm 15mm 25mm !important;
+                padding: 20mm 20mm 35mm 25mm !important;
                 width: 210mm !important;
                 height: 297mm !important;
                 overflow: hidden !important;
@@ -2375,7 +2375,7 @@ export const DocumentTemplates = () => {
             height: 297mm;
             min-height: 297mm;
             max-height: 297mm;
-            padding: 20mm 20mm 15mm 25mm;
+            padding: 20mm 20mm 35mm 25mm;
             background: #ffffff !important;
             color: #000000 !important;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
@@ -2476,6 +2476,7 @@ export const DocumentTemplates = () => {
             flex-shrink: 1;
             min-height: 0;
             overflow: hidden;
+            margin-bottom: 12mm;
             font-size: 11pt;
             line-height: 1.6;
             text-align: left;
@@ -2487,12 +2488,12 @@ export const DocumentTemplates = () => {
         }
         
         .letter-footer {
-            width: 100% !important;
-            max-width: 100% !important;
-            box-sizing: border-box !important;
-            flex-shrink: 0 !important;
-            margin-top: auto !important;
-            min-height: 15mm !important;
+            position: absolute !important;
+            bottom: 10mm !important;
+            left: 25mm !important;
+            right: 20mm !important;
+            height: 18mm !important;
+            margin-top: 0 !important;
             display: flex !important;
             justify-content: space-between !important;
             border-top: 1px solid #dddddd !important;
@@ -2501,6 +2502,7 @@ export const DocumentTemplates = () => {
             color: #666666 !important;
             line-height: 1.4 !important;
             text-align: left !important;
+            box-sizing: border-box !important;
             background-color: #ffffff !important;
         }
         
@@ -2665,7 +2667,7 @@ export const DocumentTemplates = () => {
                     height: 297mm !important;
                     min-height: 297mm !important;
                     max-height: 297mm !important;
-                    padding: 20mm 20mm 15mm 25mm !important;
+                    padding: 20mm 20mm 35mm 25mm !important;
                     background: #ffffff !important;
                     border: 1px solid var(--border-color, #cbd5e1) !important;
                     box-shadow: 0 2px 12px rgba(0,0,0,0.08) !important;
@@ -2681,21 +2683,27 @@ export const DocumentTemplates = () => {
                     flex: 1 1 auto !important;
                     min-height: 0 !important;
                     overflow: hidden !important;
+                    margin-bottom: 12mm !important;
                     font-size: 11pt !important;
                     line-height: 1.6 !important;
                 }
                 /* Footer: Am Seitenende fixiert, NICHT editierbar im Editor */
                 .ProseMirror .letter-footer,
                 .preview-live-container .letter-footer {
-                    flex-shrink: 0 !important;
-                    margin-top: auto !important;
+                    position: absolute !important;
+                    bottom: 10mm !important;
+                    left: 25mm !important;
+                    right: 20mm !important;
+                    height: 18mm !important;
+                    margin-top: 0 !important;
                     display: flex !important;
                     justify-content: space-between !important;
                     border-top: 1px solid #ddd !important;
                     padding-top: 3mm !important;
                     font-size: 8pt !important;
                     color: #666 !important;
-                    min-height: 15mm !important;
+                    box-sizing: border-box !important;
+                    background-color: #ffffff !important;
                     user-select: none !important;
                     cursor: default !important;
                     opacity: 0.7 !important;
