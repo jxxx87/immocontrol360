@@ -1059,7 +1059,7 @@ export const DocumentTemplates = () => {
         editor.view.dispatch(tr);
         const propKey = property === 'margin-top' ? 'marginTop' :
             property === 'margin-bottom' ? 'marginBottom' :
-            property === 'min-height' ? 'minHeight' : 'width';
+            property === 'height' ? 'height' : 'width';
         setLayoutPopover(prev => ({
             ...prev, styles: { ...prev.styles, [propKey]: value }
         }));
@@ -1105,7 +1105,7 @@ export const DocumentTemplates = () => {
                     styles: {
                         marginTop: parseFloat(styleObj['margin-top']) || pxToMm(computed.marginTop),
                         marginBottom: parseFloat(styleObj['margin-bottom']) || pxToMm(computed.marginBottom),
-                        minHeight: parseFloat(styleObj['min-height']) || pxToMm(computed.minHeight),
+                        height: parseFloat(styleObj['height']) || pxToMm(computed.height),
                         width: parseFloat(styleObj['width']) || pxToMm(computed.width)
                     }
                 });
@@ -3695,7 +3695,7 @@ export const DocumentTemplates = () => {
                                             <div style={{ fontWeight: 700, marginBottom: '10px', color: '#0ea5e9', fontSize: '13px', borderBottom: '2px solid #e2e8f0', paddingBottom: '6px' }}>
                                                 {layoutPopover.label}
                                             </div>
-                                            {[[ 'margin-top', 'marginTop', 'Abstand oben' ], [ 'margin-bottom', 'marginBottom', 'Abstand unten' ], [ 'min-height', 'minHeight', 'Mindesthöhe' ], [ 'width', 'width', 'Breite' ]].map(([cssProp, key, lbl]) => (
+                                            {[[ 'margin-top', 'marginTop', 'Abstand oben' ], [ 'margin-bottom', 'marginBottom', 'Abstand unten' ], [ 'height', 'height', 'Höhe' ], [ 'width', 'width', 'Breite' ]].map(([cssProp, key, lbl]) => (
                                                 <label key={cssProp} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
                                                     <span style={{ color: '#475569' }}>{lbl}</span>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -3711,7 +3711,7 @@ export const DocumentTemplates = () => {
                                             <button onClick={() => { 
                                                 updateLayoutStyle('margin-top', 0); 
                                                 setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); 
-                                                setTimeout(() => updateLayoutStyle('min-height', 0), 20); 
+                                                setTimeout(() => updateLayoutStyle('height', 0), 20); 
                                                 setTimeout(() => updateLayoutStyle('width', 0), 30); 
                                             }}
                                                 style={{ width: '100%', padding: '5px', marginTop: '6px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
