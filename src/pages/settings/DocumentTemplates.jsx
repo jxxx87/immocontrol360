@@ -523,6 +523,7 @@ export const DocumentTemplates = () => {
     const [selectedNodeType, setSelectedNodeType] = useState(null);
     const [showLivePreview, setShowLivePreview] = useState(false);
     const [showLayoutOutlines, setShowLayoutOutlines] = useState(false);
+    const [layoutPopover, setLayoutPopover] = useState(null);
     const [diagnostics, setDiagnostics] = useState({
         lastError: null,
         loadSource: 'Initial',
@@ -864,6 +865,92 @@ export const DocumentTemplates = () => {
                 }
             });
         }
+        if (!showLayoutOutlines) setLayoutPopover(null);
+    }, [editor, showLayoutOutlines]);
+
+    // ── Layout-Popover: Klick auf Bereich zeigt Abstands-Editor ──
+    const sectionLabels = {
+        'letter-sender': 'Absenderzeile', 'letter-recipient': 'Empfängeradresse',
+        'letter-date': 'Ort / Datum', 'letter-subject': 'Betreffzeile',
+        'letter-object': 'Objekt / Details', 'letter-body': 'Brieftext / Inhalt',
+        'letter-footer': 'Fußzeile', 'letter-header-row': 'Kopfzeile-Spalten',
+        'footer-col': 'Spalte Fußzeile'
+    };
+    const classToNodeType = {
+        'letter-sender': 'letterSender', 'letter-recipient': 'letterRecipient',
+        'letter-date': 'letterDate', 'letter-subject': 'letterSubject',
+        'letter-object': 'letterObject', 'letter-body': 'letterBody',
+        'letter-footer': 'letterFooter', 'letter-header-row': 'letterHeaderRow',
+        'footer-col': 'footerCol'
+    };
+
+    const parseStyleStr = (s) => {
+        if (!s) return {};
+        const r = {};
+        s.split(';').forEach(rule => {
+            const [p, v] = rule.split(':').map(x => x.trim());
+            if (p && v) r[p] = v;
+        });
+        return r;
+    };
+    const buildStyleStr = (obj) => Object.entries(obj)
+        .filter(([_, v]) => v && v !== '0mm')
+        .map(([k, v]) => `${k}: ${v}`).join('; ') || null;
+
+    const updateLayoutStyle = (property, value) => {
+        if (!layoutPopover || layoutPopover.nodePos < 0 || !editor) return;
+        const node = editor.state.doc.nodeAt(layoutPopover.nodePos);
+        if (!node) return;
+        const styles = parseStyleStr(node.attrs.style);
+        if (value > 0) styles[property] = `${value}mm`;
+        else delete styles[property];
+        const tr = editor.state.tr.setNodeMarkup(layoutPopover.nodePos, null, {
+            ...node.attrs, style: buildStyleStr(styles)
+        });
+        editor.view.dispatch(tr);
+        const propKey = property === 'margin-top' ? 'marginTop' :
+            property === 'margin-bottom' ? 'marginBottom' : 'minHeight';
+        setLayoutPopover(prev => ({
+            ...prev, styles: { ...prev.styles, [propKey]: value }
+        }));
+    };
+
+    useEffect(() => {
+        if (!editor || !showLayoutOutlines) return;
+        const sectionClasses = Object.keys(sectionLabels);
+        const handleClick = (e) => {
+            if (e.target.closest('.layout-popover')) return;
+            const layoutDiv = e.target.closest('.layout-div');
+            if (!layoutDiv || layoutDiv.classList.contains('letter-page')) {
+                setLayoutPopover(null); return;
+            }
+            const secClass = sectionClasses.find(c => layoutDiv.classList.contains(c));
+            if (!secClass) return;
+            const typeName = classToNodeType[secClass];
+            const rect = layoutDiv.getBoundingClientRect();
+            const styleObj = parseStyleStr(layoutDiv.getAttribute('style'));
+            try {
+                const pos = editor.view.posAtDOM(layoutDiv, 0);
+                const $pos = editor.state.doc.resolve(pos);
+                let nodePos = -1;
+                for (let d = $pos.depth; d >= 0; d--) {
+                    if ($pos.node(d).type.name === typeName) {
+                        nodePos = $pos.before(d); break;
+                    }
+                }
+                setLayoutPopover({
+                    secClass, typeName, label: sectionLabels[secClass], nodePos,
+                    popupTop: rect.top, popupLeft: rect.right + 8,
+                    styles: {
+                        marginTop: parseFloat(styleObj['margin-top']) || 0,
+                        marginBottom: parseFloat(styleObj['margin-bottom']) || 0,
+                        minHeight: parseFloat(styleObj['min-height']) || 0
+                    }
+                });
+            } catch(e) { console.error('Layout popover error:', e); }
+        };
+        editor.view.dom.addEventListener('click', handleClick);
+        return () => editor.view.dom.removeEventListener('click', handleClick);
     }, [editor, showLayoutOutlines]);
 
     const getHrStyleValue = (property) => {
@@ -3423,6 +3510,39 @@ export const DocumentTemplates = () => {
                                      ) : (
                                          <EditorContent editor={editor} />
                                      )}
+                                    {layoutPopover && showLayoutOutlines && !showLivePreview && (
+                                        <div className="layout-popover" style={{
+                                            position: 'fixed',
+                                            top: Math.min(layoutPopover.popupTop, window.innerHeight - 260),
+                                            left: Math.min(layoutPopover.popupLeft, window.innerWidth - 240),
+                                            zIndex: 9999, background: '#ffffff',
+                                            border: '1px solid #e2e8f0', borderRadius: '10px',
+                                            padding: '14px 16px',
+                                            boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+                                            width: '210px', fontSize: '12px',
+                                            fontFamily: 'Inter, system-ui, sans-serif'
+                                        }}>
+                                            <div style={{ fontWeight: 700, marginBottom: '10px', color: '#0ea5e9', fontSize: '13px', borderBottom: '2px solid #e2e8f0', paddingBottom: '6px' }}>
+                                                {layoutPopover.label}
+                                            </div>
+                                            {[['margin-top', 'marginTop', 'Abstand oben'], ['margin-bottom', 'marginBottom', 'Abstand unten'], ['min-height', 'minHeight', 'Min-Höhe']].map(([cssProp, key, lbl]) => (
+                                                <label key={cssProp} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
+                                                    <span style={{ color: '#475569' }}>{lbl}</span>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                        <input type="number" min="0" max="80" step="1"
+                                                            value={layoutPopover.styles[key]}
+                                                            onChange={(e) => updateLayoutStyle(cssProp, parseFloat(e.target.value) || 0)}
+                                                            style={{ width: '48px', padding: '3px 6px', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'right', fontSize: '12px' }}
+                                                        />
+                                                        <span style={{ color: '#94a3b8', fontSize: '10px', minWidth: '20px' }}>mm</span>
+                                                    </div>
+                                                </label>
+                                            ))}
+                                            <button onClick={() => { updateLayoutStyle('margin-top', 0); setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); setTimeout(() => updateLayoutStyle('min-height', 0), 20); }}
+                                                style={{ width: '100%', padding: '5px', marginTop: '6px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
+                                            >Zurücksetzen</button>
+                                        </div>
+                                    )}
                                  </div>
                             </div>
                         </>
