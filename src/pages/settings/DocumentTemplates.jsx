@@ -11,6 +11,7 @@ import { TextAlign } from '@tiptap/extension-text-align';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
 import { Selection, TextSelection } from '@tiptap/pm/state';
+import { DOMParser } from '@tiptap/pm/model';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
@@ -1168,29 +1169,31 @@ export const DocumentTemplates = () => {
             const present = getPresentSections();
             if (present[secClass]) return;
             
-            let nodeJson = { type: classToNodeType[secClass] };
+            let html = '';
             if (secClass === 'letter-sender') {
-                nodeJson.content = [{ type: 'text', text: 'Absenderzeile (Bitte anpassen)' }];
+                html = `<div class="letter-sender">Absenderzeile (Bitte anpassen)</div>`;
             } else if (secClass === 'letter-header-row') {
-                nodeJson.content = [
-                    { type: 'letterRecipient', content: [{ type: 'text', text: 'Empfängeradresse' }] },
-                    { type: 'letterDate', content: [{ type: 'text', text: 'Ort, den Datum' }] }
-                ];
+                html = `<div class="letter-header-row"><div class="letter-recipient">Empfängeradresse</div><div class="letter-date">Ort, den Datum</div></div>`;
             } else if (secClass === 'letter-subject') {
-                nodeJson.content = [{ type: 'text', text: 'Betreffzeile (Bitte anpassen)' }];
+                html = `<div class="letter-subject">Betreffzeile (Bitte anpassen)</div>`;
             } else if (secClass === 'letter-object') {
-                nodeJson.content = [{ type: 'text', text: 'Betreffdetails / Objekt' }];
+                html = `<div class="letter-object">Betreffdetails / Objekt</div>`;
             } else if (secClass === 'letter-body') {
-                nodeJson.content = [{ type: 'paragraph', content: [{ type: 'text', text: 'Brieftext...' }] }];
+                html = `<div class="letter-body"><p>Brieftext...</p></div>`;
             } else if (secClass === 'letter-footer') {
-                nodeJson.content = [
-                    { type: 'footerCol', content: [{ type: 'text', text: 'Anschrift: Vermieter Name' }] },
-                    { type: 'footerCol', content: [{ type: 'text', text: 'Kontakt: info@immocontrol.de' }] },
-                    { type: 'footerCol', content: [{ type: 'text', text: 'Bankverbindung: IBAN' }] }
-                ];
+                html = `<div class="letter-footer"><div class="footer-col">Anschrift: Vermieter Name</div><div class="footer-col">Kontakt: info@immocontrol.de</div><div class="footer-col">Bankverbindung: IBAN</div></div>`;
             }
             
-            const node = state.schema.nodeFromJSON(nodeJson);
+            if (!html) return;
+            
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = html;
+            
+            // Parse DOM using ProseMirror DOMParser
+            const parsed = DOMParser.fromSchema(state.schema).parse(tempDiv);
+            const node = parsed.firstChild;
+            if (!node) return;
+            
             const tr = state.tr;
             
             let pagePos = -1;
