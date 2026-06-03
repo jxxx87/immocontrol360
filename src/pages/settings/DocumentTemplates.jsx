@@ -24,7 +24,8 @@ import {
     List, ListOrdered, Undo, Redo, 
     Save, RotateCcw, FileText, ChevronLeft, ChevronRight, 
     HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2,
-    ArrowLeft, ArrowRight, Minus, Strikethrough, Sliders, Eye, EyeOff
+    ArrowLeft, ArrowRight, Minus, Strikethrough, Sliders, Eye, EyeOff,
+    ArrowUp, ArrowDown, Layers
 } from 'lucide-react';
 
 // Deutsche Variablen für globale Verwendung
@@ -1063,6 +1064,173 @@ export const DocumentTemplates = () => {
         setLayoutPopover(prev => ({
             ...prev, styles: { ...prev.styles, [propKey]: value }
         }));
+    };
+
+    const canMoveNode = (pos, direction) => {
+        if (!editor) return false;
+        try {
+            const $pos = editor.state.doc.resolve(pos);
+            const parent = $pos.parent;
+            if (parent.type.name !== 'letterPage') return false;
+            const index = $pos.index();
+            const targetIndex = index + direction;
+            return targetIndex >= 0 && targetIndex < parent.childCount;
+        } catch(e) {
+            return false;
+        }
+    };
+
+    const moveLayoutNode = (pos, direction) => {
+        if (!editor) return;
+        const state = editor.state;
+        try {
+            const $pos = state.doc.resolve(pos);
+            const node = state.doc.nodeAt(pos);
+            if (!node) return;
+            const parent = $pos.parent;
+            const index = $pos.index();
+            const targetIndex = index + direction;
+            if (targetIndex < 0 || targetIndex >= parent.childCount) return;
+            
+            const targetNode = parent.child(targetIndex);
+            const tr = state.tr;
+            const nodeSize = node.nodeSize;
+            const parentStart = $pos.start($pos.depth);
+            
+            let currentPos = parentStart;
+            let nodeOffset = -1;
+            let targetOffset = -1;
+            
+            for (let i = 0; i < parent.childCount; i++) {
+                const child = parent.child(i);
+                if (i === index) nodeOffset = currentPos;
+                if (i === targetIndex) targetOffset = currentPos;
+                currentPos += child.nodeSize;
+            }
+            
+            if (nodeOffset === -1 || targetOffset === -1) return;
+            
+            if (direction === -1) {
+                tr.delete(nodeOffset, nodeOffset + nodeSize);
+                tr.insert(targetOffset, node);
+                editor.view.dispatch(tr);
+                setLayoutPopover(prev => prev ? { ...prev, nodePos: targetOffset } : null);
+            } else {
+                tr.delete(nodeOffset, nodeOffset + nodeSize);
+                const insertPos = targetOffset - nodeSize + targetNode.nodeSize;
+                tr.insert(insertPos, node);
+                editor.view.dispatch(tr);
+                setLayoutPopover(prev => prev ? { ...prev, nodePos: insertPos } : null);
+            }
+        } catch(e) {
+            console.error('Error moving layout node:', e);
+        }
+    };
+
+    const deleteLayoutNode = (pos) => {
+        if (!editor) return;
+        const state = editor.state;
+        try {
+            const node = state.doc.nodeAt(pos);
+            if (!node) return;
+            const tr = state.tr.delete(pos, pos + node.nodeSize);
+            editor.view.dispatch(tr);
+            setLayoutPopover(null);
+        } catch(e) {
+            console.error('Error deleting layout node:', e);
+        }
+    };
+
+    const getPresentSections = () => {
+        if (!editor) return {};
+        const present = {};
+        try {
+            editor.state.doc.descendants((node) => {
+                if (node.type.name === 'letterSender') present['letter-sender'] = true;
+                if (node.type.name === 'letterHeaderRow') present['letter-header-row'] = true;
+                if (node.type.name === 'letterSubject') present['letter-subject'] = true;
+                if (node.type.name === 'letterObject') present['letter-object'] = true;
+                if (node.type.name === 'letterBody') present['letter-body'] = true;
+                if (node.type.name === 'letterFooter') present['letter-footer'] = true;
+            });
+        } catch(e) {
+            console.error('Error getting present sections:', e);
+        }
+        return present;
+    };
+
+    const addSection = (secClass) => {
+        if (!editor) return;
+        const state = editor.state;
+        try {
+            const present = getPresentSections();
+            if (present[secClass]) return;
+            
+            let nodeJson = { type: classToNodeType[secClass] };
+            if (secClass === 'letter-sender') {
+                nodeJson.content = [{ type: 'text', text: 'Absenderzeile (Bitte anpassen)' }];
+            } else if (secClass === 'letter-header-row') {
+                nodeJson.content = [
+                    { type: 'letterRecipient', content: [{ type: 'text', text: 'Empfängeradresse' }] },
+                    { type: 'letterDate', content: [{ type: 'text', text: 'Ort, den Datum' }] }
+                ];
+            } else if (secClass === 'letter-subject') {
+                nodeJson.content = [{ type: 'text', text: 'Betreffzeile (Bitte anpassen)' }];
+            } else if (secClass === 'letter-object') {
+                nodeJson.content = [{ type: 'text', text: 'Betreffdetails / Objekt' }];
+            } else if (secClass === 'letter-body') {
+                nodeJson.content = [{ type: 'paragraph', content: [{ type: 'text', text: 'Brieftext...' }] }];
+            } else if (secClass === 'letter-footer') {
+                nodeJson.content = [
+                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 1' }] }] },
+                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 2' }] }] },
+                    { type: 'footerCol', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Spalte 3' }] }] }
+                ];
+            }
+            
+            const node = state.schema.nodeFromJSON(nodeJson);
+            const tr = state.tr;
+            
+            let pagePos = -1;
+            state.doc.descendants((n, p) => {
+                if (n.type.name === 'letterPage') {
+                    pagePos = p;
+                    return false;
+                }
+            });
+            
+            if (pagePos === -1) return;
+            
+            const pageNode = state.doc.nodeAt(pagePos);
+            const parentStart = pagePos + 1;
+            const order = ['letterSender', 'letterHeaderRow', 'letterSubject', 'letterObject', 'letterBody', 'letterFooter'];
+            const targetType = classToNodeType[secClass];
+            const targetOrderIdx = order.indexOf(targetType);
+            
+            let insertOffset = 0;
+            let inserted = false;
+            
+            for (let i = 0; i < pageNode.childCount; i++) {
+                const child = pageNode.child(i);
+                const childType = child.type.name;
+                const childOrderIdx = order.indexOf(childType);
+                
+                if (childOrderIdx > targetOrderIdx) {
+                    tr.insert(parentStart + insertOffset, node);
+                    inserted = true;
+                    break;
+                }
+                insertOffset += child.nodeSize;
+            }
+            
+            if (!inserted) {
+                tr.insert(parentStart + insertOffset, node);
+            }
+            
+            editor.view.dispatch(tr);
+        } catch(e) {
+            console.error('Error adding layout section:', e);
+        }
     };
 
     useEffect(() => {
@@ -3005,6 +3173,75 @@ export const DocumentTemplates = () => {
                         ))}
                     </div>
 
+                    {/* Manage Layout Sections */}
+                    {editor && !showLivePreview && (
+                        <div style={{ 
+                            display: 'flex', 
+                            flexDirection: 'column', 
+                            gap: '0.75rem', 
+                            border: '1px solid var(--border-color)', 
+                            borderRadius: 'var(--radius-md)', 
+                            padding: '12px', 
+                            backgroundColor: 'var(--background-color)'
+                        }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: '0', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <Layers size={14} style={{ color: '#0ea5e9' }} />
+                                    Brief-Bereiche
+                                </h4>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>Bereiche ein- oder ausblenden:</span>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                {[
+                                    ['letter-sender', 'Absenderzeile'],
+                                    ['letter-header-row', 'Empfänger & Datum'],
+                                    ['letter-subject', 'Betreffzeile'],
+                                    ['letter-object', 'Objekt / Details'],
+                                    ['letter-body', 'Brieftext / Inhalt'],
+                                    ['letter-footer', 'Fußzeile']
+                                ].map(([secClass, label]) => {
+                                    const isPresent = getPresentSections()[secClass];
+                                    return (
+                                        <div key={secClass} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', background: 'var(--surface-color)', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                                            <span style={{ fontSize: '0.75rem', fontWeight: 500, color: isPresent ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                                                {label}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (isPresent) {
+                                                        let nodePos = -1;
+                                                        editor.state.doc.descendants((node, pos) => {
+                                                            if (node.type.name === classToNodeType[secClass]) {
+                                                                nodePos = pos;
+                                                                return false;
+                                                            }
+                                                        });
+                                                        if (nodePos !== -1) deleteLayoutNode(nodePos);
+                                                    } else {
+                                                        addSection(secClass);
+                                                    }
+                                                }}
+                                                style={{
+                                                    border: 'none',
+                                                    background: isPresent ? '#fee2e2' : '#e0f2fe',
+                                                    color: isPresent ? '#ef4444' : '#0ea5e9',
+                                                    padding: '3px 6px',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    cursor: 'pointer'
+                                                }}
+                                            >
+                                                {isPresent ? 'Ausblenden' : 'Einblenden'}
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Variable Library */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '12px', backgroundColor: 'var(--background-color)', flex: 1 }}>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -3708,14 +3945,53 @@ export const DocumentTemplates = () => {
                                                     </div>
                                                 </label>
                                             ))}
-                                            <button onClick={() => { 
-                                                updateLayoutStyle('margin-top', 0); 
-                                                setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); 
-                                                setTimeout(() => updateLayoutStyle('height', 0), 20); 
-                                                setTimeout(() => updateLayoutStyle('width', 0), 30); 
-                                            }}
-                                                style={{ width: '100%', padding: '5px', marginTop: '6px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
-                                            >Zurücksetzen</button>
+                                            <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                                                <button onClick={() => { 
+                                                    updateLayoutStyle('margin-top', 0); 
+                                                    setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); 
+                                                    setTimeout(() => updateLayoutStyle('height', 0), 20); 
+                                                    setTimeout(() => updateLayoutStyle('width', 0), 30); 
+                                                }}
+                                                    style={{ flex: 1, padding: '5px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
+                                                >Zurücksetzen</button>
+                                            </div>
+
+                                            <div style={{ display: 'flex', gap: '6px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #e2e8f0' }}>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => moveLayoutNode(layoutPopover.nodePos, -1)}
+                                                    disabled={!canMoveNode(layoutPopover.nodePos, -1)}
+                                                    style={{
+                                                        flex: 1, padding: '5px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: canMoveNode(layoutPopover.nodePos, -1) ? 'pointer' : 'not-allowed', fontSize: '11px', fontWeight: 600, color: '#475569', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px',
+                                                        opacity: canMoveNode(layoutPopover.nodePos, -1) ? 1 : 0.4
+                                                    }}
+                                                    title="Nach oben verschieben"
+                                                >
+                                                    <ArrowUp size={12} /> Nach oben
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => moveLayoutNode(layoutPopover.nodePos, 1)}
+                                                    disabled={!canMoveNode(layoutPopover.nodePos, 1)}
+                                                    style={{
+                                                        flex: 1, padding: '5px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: canMoveNode(layoutPopover.nodePos, 1) ? 'pointer' : 'not-allowed', fontSize: '11px', fontWeight: 600, color: '#475569', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px',
+                                                        opacity: canMoveNode(layoutPopover.nodePos, 1) ? 1 : 0.4
+                                                    }}
+                                                    title="Nach unten verschieben"
+                                                >
+                                                    <ArrowDown size={12} /> Nach unten
+                                                </button>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => deleteLayoutNode(layoutPopover.nodePos)}
+                                                style={{
+                                                    width: '100%', padding: '5px', marginTop: '6px', background: '#fee2e2', border: '1px solid #fecaca', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, color: '#ef4444', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px'
+                                                }}
+                                                title="Diesen Bereich ausblenden"
+                                            >
+                                                <Trash2 size={12} /> Bereich ausblenden
+                                            </button>
                                         </div>
                                     )}
                                  </div>
