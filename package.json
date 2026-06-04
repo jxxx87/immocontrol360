@@ -1,1 +1,10 @@
-{"name": "immocontrol360-combined", "version": "1.0.0", "scripts": {"build": "echo 'No build needed'"}}
+{
+  "name": "immocontrol360-combined",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "echo 'Static site - no build needed'",
+    "start": "echo 'Static site'"
+  },
+  "dependencies": {}
+}
