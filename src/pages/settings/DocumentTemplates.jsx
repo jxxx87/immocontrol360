@@ -2314,44 +2314,55 @@ export const DocumentTemplates = () => {
                 </div>`
         };
 
-        // Parse the HTML using DOMParser to accurately replace complex components without regex parsing bugs
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(contentHtml, 'text/html');
-        
-        // Find all span tags that represent our mentions/placeholders
-        const mentions = doc.querySelectorAll('span[data-type="mention"]');
-        mentions.forEach(mention => {
-            const id = mention.getAttribute('data-id');
-            if (!id) return;
-            
-            if (mockTables[id] !== undefined) {
-                const tempDiv = doc.createElement('div');
-                tempDiv.innerHTML = mockTables[id].trim();
-                const replacementNode = tempDiv.firstElementChild;
-                if (replacementNode) {
-                    mention.parentNode.replaceChild(replacementNode, mention);
-                }
-            } else if (mockData[id] !== undefined) {
-                const tempSpan = doc.createElement('span');
-                tempSpan.innerHTML = mockData[id];
-                mention.parentNode.replaceChild(tempSpan, mention);
+        // Defensiv: Niemals einen Render-Crash (leere Seite) verursachen.
+        // Bei einem Fehler wird der Roh-Inhalt zurückgegeben, statt die App abstürzen zu lassen.
+        try {
+            // Parse the HTML using DOMParser to accurately replace complex components without regex parsing bugs
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(contentHtml, 'text/html');
+
+            // Find all span tags that represent our mentions/placeholders
+            const mentions = doc.querySelectorAll('span[data-type="mention"]');
+            if (mentions && typeof mentions.forEach === 'function') {
+                mentions.forEach(mention => {
+                    const id = mention.getAttribute('data-id');
+                    if (!id) return;
+
+                    if (mockTables[id] !== undefined) {
+                        const tempDiv = doc.createElement('div');
+                        tempDiv.innerHTML = mockTables[id].trim();
+                        const replacementNode = tempDiv.firstElementChild;
+                        if (replacementNode && mention.parentNode) {
+                            mention.parentNode.replaceChild(replacementNode, mention);
+                        }
+                    } else if (mockData[id] !== undefined) {
+                        const tempSpan = doc.createElement('span');
+                        tempSpan.innerHTML = mockData[id];
+                        if (mention.parentNode) {
+                            mention.parentNode.replaceChild(tempSpan, mention);
+                        }
+                    }
+                });
             }
-        });
-        
-        let res = doc.body.innerHTML;
 
-        // Fallback or text-based bracket placeholders: {key}
-        Object.keys(mockTables).forEach(key => {
-            const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-            res = res.replace(textRegex, mockTables[key]);
-        });
+            let res = doc.body.innerHTML;
 
-        Object.keys(mockData).forEach(key => {
-            const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-            res = res.replace(textRegex, mockData[key]);
-        });
+            // Fallback or text-based bracket placeholders: {key}
+            Object.keys(mockTables).forEach(key => {
+                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+                res = res.replace(textRegex, mockTables[key]);
+            });
 
-        return res;
+            Object.keys(mockData).forEach(key => {
+                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
+                res = res.replace(textRegex, mockData[key]);
+            });
+
+            return res;
+        } catch (err) {
+            console.error('getResolvedHtml fehlgeschlagen – zeige Roh-Inhalt:', err);
+            return contentHtml || '';
+        }
     };
 
     // Open A4 print preview window with replaced placeholders and tables
