@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Öffentliche, indexierbare Seiten der Marketing-Website (bei neuen Seiten/Routen in App.jsx ergänzen) -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://immocontrol360.de/</loc></url>
+  <url><loc>https://immocontrol360.de/preise</loc></url>
+  <url><loc>https://immocontrol360.de/funktionen</loc></url>
+  <url><loc>https://immocontrol360.de/faq</loc></url>
+  <url><loc>https://immocontrol360.de/abo-starten</loc></url>
+  <url><loc>https://immocontrol360.de/impressum</loc></url>
+  <url><loc>https://immocontrol360.de/datenschutz</loc></url>
+  <url><loc>https://immocontrol360.de/agb</loc></url>
+</urlset>
