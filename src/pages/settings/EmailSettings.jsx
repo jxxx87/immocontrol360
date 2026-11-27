@@ -121,9 +121,17 @@ export const EmailSettings = () => {
                     .update(payload)
                     .eq('user_id', user.id));
             } else {
+                // Kein Upsert: ON CONFLICT … SET smtp_pass = EXCLUDED.smtp_pass bräuchte Leserecht auf
+                // smtp_pass, das der Browser bewusst nicht mehr hat. Daher Insert, bei vorhandener Zeile Update.
                 ({ error } = await supabase
                     .from('user_smtp_settings')
-                    .upsert({ ...payload, user_id: user.id }, { onConflict: 'user_id' }));
+                    .insert({ ...payload, user_id: user.id }));
+                if (error?.code === '23505') {
+                    ({ error } = await supabase
+                        .from('user_smtp_settings')
+                        .update(payload)
+                        .eq('user_id', user.id));
+                }
             }
 
             if (error) throw error;
