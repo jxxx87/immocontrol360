@@ -21,6 +21,7 @@ import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import Modal from '../../components/ui/Modal';
+import { openSansFontFaceCss, fontOrigin } from '../../lib/fontFaces';
 import { 
     Bold, Italic, Underline as UnderlineIcon, 
     AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -1320,8 +1321,8 @@ const openPrintWindow = ({ bodyHtml, title, notices = [] }) => {
     const csp = [
         "default-src 'none'",
         `script-src 'nonce-${nonce}'`,
-        "style-src 'unsafe-inline' https://fonts.googleapis.com",
-        'font-src https://fonts.gstatic.com data:',
+        "style-src 'unsafe-inline'",
+        `font-src ${fontOrigin()} data:`,
         'img-src data: blob: https:',
         "base-uri 'none'",
         "form-action 'none'",
@@ -1336,8 +1337,7 @@ const openPrintWindow = ({ bodyHtml, title, notices = [] }) => {
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <meta name="referrer" content="no-referrer">
     <title>${escapeHtml(title)}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" referrerpolicy="no-referrer">
-    <style>${PRINT_PAGE_CSS}${LETTER_CONTENT_CSS}</style>
+    <style>${openSansFontFaceCss()}${PRINT_PAGE_CSS}${LETTER_CONTENT_CSS}</style>
 </head>
 <body>
     <div class="no-print tpl-toolbar">

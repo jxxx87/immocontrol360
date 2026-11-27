@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import QRCode from 'qrcode';
+import { openSansFontFaceCss } from './fontFaces';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemeinsame Hilfsfunktionen für das Forderungsmanagement (Forderungsliste,
@@ -757,7 +758,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     // Build the final printed HTML
     const finalHtml = `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><title>${escapeHtml(docType)} - ${escapeHtml(tenantName)}</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
+        ${openSansFontFaceCss()}
         @page { size: A4; margin: 0; }
         * { box-sizing: border-box; }
         body { margin: 0; padding: 0; background: #fff; font-family: 'Open Sans', Arial, sans-serif; font-size: 11pt; color: #000; }

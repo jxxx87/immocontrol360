@@ -1,47 +1,49 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { lazyPage } from './lib/lazyPage';
+import PageLoader from './components/ui/PageLoader';
 import Layout from './components/layout/Layout';
-import Dashboard from './pages/Dashboard';
-import Properties from './pages/Properties';
+const Dashboard = lazyPage(() => import('./pages/Dashboard'));
+const Properties = lazyPage(() => import('./pages/Properties'));
 
-import Tenants from './pages/Tenants';
-import TenantDetail from './pages/TenantDetail';
-import Finance from './pages/Finance';
-import BankReconciliation from './pages/BankReconciliation';
-import UtilityCosts from './pages/UtilityCosts';
-import Invoices from './pages/Invoices';
-import InvoiceForm from './pages/InvoiceForm';
-import Meters from './pages/Meters';
-import Contacts from './pages/Contacts';
-import Claims from './pages/Claims';
-import ClaimDetail from './pages/ClaimDetail';
-import ClaimPortal from './pages/ClaimPortal';
-import TenantDataUpdatePortal from './pages/TenantDataUpdatePortal';
-import Loans from './pages/Loans';
-import Documents from './pages/Documents';
-import CloudExplorer from './pages/CloudExplorer';
-import Settings from './pages/Settings';
-import Letting from './pages/Letting';
-import PublicLettingPortal from './pages/tenant/PublicLettingPortal';
-import PublicViewingBooking from './pages/tenant/PublicViewingBooking';
-import { CloudCallback } from './pages/settings/CloudCallback';
-import Import from './pages/Import';
-import Privacy from './pages/Privacy';
-import Terms from './pages/Terms';
-import BuyAndHold from './pages/investor/BuyAndHold';
-import FixAndFlip from './pages/investor/FixAndFlip';
-import TaxAndExit from './pages/investor/TaxAndExit';
-import AssetManagement from './pages/investor/AssetManagement';
-import InvestorPortal from './pages/InvestorPortal';
-import RenovationManager from './pages/renovation/RenovationManager';
-import RenovationWizard from './pages/renovation/RenovationWizard';
-import RenovationProjectDetail from './pages/renovation/RenovationProjectDetail';
-import RenovationCalculatorDetail from './pages/renovation/RenovationCalculatorDetail';
-import FloorPlanEditor from './pages/renovation/FloorPlanEditor';
-import PdfTemplateEditor from './pages/pdf-template/PdfTemplateEditor';
-import Login from './pages/auth/Login';
-import Register from './pages/auth/Register';
-import PasswordRecovery from './components/layout/PasswordRecovery';
+const Tenants = lazyPage(() => import('./pages/Tenants'));
+const TenantDetail = lazyPage(() => import('./pages/TenantDetail'));
+const Finance = lazyPage(() => import('./pages/Finance'));
+const BankReconciliation = lazyPage(() => import('./pages/BankReconciliation'));
+const UtilityCosts = lazyPage(() => import('./pages/UtilityCosts'));
+const Invoices = lazyPage(() => import('./pages/Invoices'));
+const InvoiceForm = lazyPage(() => import('./pages/InvoiceForm'));
+const Meters = lazyPage(() => import('./pages/Meters'));
+const Contacts = lazyPage(() => import('./pages/Contacts'));
+const Claims = lazyPage(() => import('./pages/Claims'));
+const ClaimDetail = lazyPage(() => import('./pages/ClaimDetail'));
+const ClaimPortal = lazyPage(() => import('./pages/ClaimPortal'));
+const TenantDataUpdatePortal = lazyPage(() => import('./pages/TenantDataUpdatePortal'));
+const Loans = lazyPage(() => import('./pages/Loans'));
+const Documents = lazyPage(() => import('./pages/Documents'));
+const CloudExplorer = lazyPage(() => import('./pages/CloudExplorer'));
+const Settings = lazyPage(() => import('./pages/Settings'));
+const Letting = lazyPage(() => import('./pages/Letting'));
+const PublicLettingPortal = lazyPage(() => import('./pages/tenant/PublicLettingPortal'));
+const PublicViewingBooking = lazyPage(() => import('./pages/tenant/PublicViewingBooking'));
+const CloudCallback = lazyPage(() => import('./pages/settings/CloudCallback').then((mod) => ({ default: mod.CloudCallback })));
+const Import = lazyPage(() => import('./pages/Import'));
+const Privacy = lazyPage(() => import('./pages/Privacy'));
+const Terms = lazyPage(() => import('./pages/Terms'));
+const BuyAndHold = lazyPage(() => import('./pages/investor/BuyAndHold'));
+const FixAndFlip = lazyPage(() => import('./pages/investor/FixAndFlip'));
+const TaxAndExit = lazyPage(() => import('./pages/investor/TaxAndExit'));
+const AssetManagement = lazyPage(() => import('./pages/investor/AssetManagement'));
+const InvestorPortal = lazyPage(() => import('./pages/InvestorPortal'));
+const RenovationManager = lazyPage(() => import('./pages/renovation/RenovationManager'));
+const RenovationWizard = lazyPage(() => import('./pages/renovation/RenovationWizard'));
+const RenovationProjectDetail = lazyPage(() => import('./pages/renovation/RenovationProjectDetail'));
+const RenovationCalculatorDetail = lazyPage(() => import('./pages/renovation/RenovationCalculatorDetail'));
+const FloorPlanEditor = lazyPage(() => import('./pages/renovation/FloorPlanEditor'));
+const PdfTemplateEditor = lazyPage(() => import('./pages/pdf-template/PdfTemplateEditor'));
+const Login = lazyPage(() => import('./pages/auth/Login'));
+const Register = lazyPage(() => import('./pages/auth/Register'));
+const PasswordRecovery = lazyPage(() => import('./components/layout/PasswordRecovery'));
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PortfolioProvider } from './context/PortfolioContext';
 import { PermissionProvider } from './context/PermissionContext';
@@ -50,23 +52,23 @@ import { ViewModeProvider } from './context/ViewModeContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { SubscriptionProvider } from './context/SubscriptionContext';
 import PaywallModal from './components/subscription/PaywallModal';
-import BillingSuccess from './pages/BillingSuccess';
+const BillingSuccess = lazyPage(() => import('./pages/BillingSuccess'));
 import ToastContainer from './components/ui/ToastContainer';
 
 // ── Tenant Portal Pages ──
-import TenantDashboard from './pages/tenant/TenantDashboard';
-import TenantTickets from './pages/tenant/TenantTickets';
-import TenantMessages from './pages/tenant/TenantMessages';
-import TenantAnnouncements from './pages/tenant/TenantAnnouncements';
-import TenantDocuments from './pages/tenant/TenantDocuments';
-import TenantStamdaten from './pages/tenant/TenantStamdaten';
+const TenantDashboard = lazyPage(() => import('./pages/tenant/TenantDashboard'));
+const TenantTickets = lazyPage(() => import('./pages/tenant/TenantTickets'));
+const TenantMessages = lazyPage(() => import('./pages/tenant/TenantMessages'));
+const TenantAnnouncements = lazyPage(() => import('./pages/tenant/TenantAnnouncements'));
+const TenantDocuments = lazyPage(() => import('./pages/tenant/TenantDocuments'));
+const TenantStamdaten = lazyPage(() => import('./pages/tenant/TenantStamdaten'));
 
 // ── Investor Portal Pages ──
-import TenantManagement from './pages/TenantManagement';
-import TicketKanban from './pages/TicketKanban';
-import Announcements from './pages/Announcements';
-import InvestorMessages from './pages/InvestorMessages';
-import ObjectCalendar from './pages/ObjectCalendar';
+const TenantManagement = lazyPage(() => import('./pages/TenantManagement'));
+const TicketKanban = lazyPage(() => import('./pages/TicketKanban'));
+const Announcements = lazyPage(() => import('./pages/Announcements'));
+const InvestorMessages = lazyPage(() => import('./pages/InvestorMessages'));
+const ObjectCalendar = lazyPage(() => import('./pages/ObjectCalendar'));
 
 // Helper to redirect authenticated users away from auth pages
 const AuthRoute = ({ children }) => {
@@ -95,6 +97,7 @@ function App() {
             <SubscriptionProvider>
               <ViewModeProvider>
                 <NotificationProvider>
+                  <Suspense fallback={<PageLoader />}>
                   <Routes>
                     {/* Public Auth Routes */}
                     <Route path="/login" element={<AuthRoute><Login /></AuthRoute>} />
@@ -174,6 +177,7 @@ function App() {
                     {/* Catch-all route to redirect back to main index */}
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
+                  </Suspense>
                   <ToastContainer />
                 </NotificationProvider>
               </ViewModeProvider>

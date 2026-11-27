@@ -15,6 +15,7 @@
 //   vatRate (0/7/19), smallBusiness (true = § 19 UStG), refInvoiceId/-Number/-Date (Gutschrift)
 
 import { supabase } from './supabase';
+import { openSansFontFaceCss, fontOrigin } from './fontFaces';
 
 // ─── Status ──────────────────────────────────────────────────────────
 export const INVOICE_STATUS = Object.freeze({
@@ -382,10 +383,10 @@ const SCOPED_CSS = `
 .ic-invoice-doc.ic-flow .ic-draft-mark { width: 100%; }
 `;
 
-// Schrift wie im Editor (index.css lädt sie für die App ebenfalls von Google Fonts).
-const FONT_IMPORT = "@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');";
+// Schrift wie im Editor: lokal ausgelieferte Open Sans (dieselben Dateien), siehe lib/fontFaces.js.
+const fontFaceCss = () => openSansFontFaceCss();
 // Kein Skript im Druckdokument: zusätzliche Absicherung neben Maskierung und Bereinigung.
-const DOC_CSP = "default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src data: blob: https:;";
+const docCsp = () => `default-src 'none'; style-src 'unsafe-inline'; font-src ${fontOrigin()} data:; img-src data: blob: https:;`;
 
 // ─── Positionstabelle ────────────────────────────────────────────────
 const buildPositionsTable = ({ positions, smallBusiness, breakdown, isCredit, notes }) => {
@@ -549,8 +550,8 @@ export const generateInvoiceHtml = (inv, { portfolios = [], writingTemplates = n
     const rootClass = ['ic-invoice-doc', info.isDraft ? 'ic-draft' : '', forPdf ? 'ic-pdf' : ''].filter(Boolean).join(' ');
     const draftMark = info.isDraft ? '<div class="ic-draft-mark" aria-hidden="true">ENTWURF</div>' : '';
 
-    return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${DOC_CSP}"><title>${escapeHtml(info.titleBase)}</title>
-    <style>${FONT_IMPORT} @page { size: A4; margin: 0; } html, body { margin: 0; padding: 0; background: #ffffff; } @media print { html, body { margin: 0; padding: 0; background: #ffffff; } }</style>
+    return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${docCsp()}"><title>${escapeHtml(info.titleBase)}</title>
+    <style>${fontFaceCss()} @page { size: A4; margin: 0; } html, body { margin: 0; padding: 0; background: #ffffff; } @media print { html, body { margin: 0; padding: 0; background: #ffffff; } }</style>
     </head>
     <body><div class="${rootClass}"><style>${SCOPED_CSS}</style>${draftMark}${renderedContent}</div></body>
     </html>`;

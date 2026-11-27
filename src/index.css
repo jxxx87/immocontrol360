@@ -1,7 +1,5 @@
-/* Open Sans für die Briefseiten (Vorlagen-Editor). Hinweis: Wird noch vom Google-CDN geladen –
-   Umstellung auf lokale Schriftdateien muss zusammen mit allen Druckfenstern erfolgen
-   (gleiche Schriftversion in Editor und Druck, sonst andere Seitenumbrüche). */
-@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap');
+/* Open Sans für die Briefseiten (Vorlagen-Editor) wird lokal ausgeliefert (@fontsource/open-sans,
+   Import in main.jsx). Druckfenster nutzen dieselben Dateien über lib/fontFaces.js. */
 
 @keyframes spin {
   from {

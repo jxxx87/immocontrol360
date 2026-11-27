@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
+import PageLoader from '../ui/PageLoader';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Topbar from './Topbar';
@@ -164,7 +165,9 @@ const Layout = () => {
                         </div>
                     )}
                     {showOutlet ? (
-                        <Outlet context={{ onboardingLocked, unlockOnboarding: () => setOnboardingLocked(false) }} />
+                        <Suspense fallback={<PageLoader />}>
+                            <Outlet context={{ onboardingLocked, unlockOnboarding: () => setOnboardingLocked(false) }} />
+                        </Suspense>
                     ) : (
                         <div style={{ display: 'flex', justifyContent: 'center', padding: '60px', color: 'var(--text-secondary)' }}>
                             Lade...
