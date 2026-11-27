@@ -38,7 +38,8 @@ const GLOBAL_VARIABLES = [
     { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪', description: 'Die Bezeichnung der Wohneinheit (z.B. "EG links" oder "Wohnung Nr. 5").' },
     { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍', description: 'Die vollständige Adresse des Objekts.' },
     { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters (wird als Absender oder in der Grußformel genutzt).' },
-    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die hinterlegte IBAN und BIC des Vermieters für Zahlungsaufforderungen.' }
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die hinterlegte IBAN und BIC des Vermieters für Zahlungsaufforderungen.' },
+    { id: 'rechnungsdatum', label: 'Briefdatum', icon: '📅', description: 'Das Datum des Schreibens (wird in der Datumszeile "Ort, den ..." ausgegeben).' }
 ];
 
 // Deutsche Variablen für das Mahnwesen
@@ -49,7 +50,9 @@ const DUNNING_VARIABLES = [
     { id: 'verzugstage', label: 'Verzugstage', icon: '⏱️', description: 'Die Anzahl der Tage, die der Mieter bereits mit der Zahlung im Verzug ist.' },
     { id: 'mahnstufe', label: 'Mahnstufe', icon: '📈', description: 'Die aktuelle Stufe des Mahnverfahrens (z.B. 1, 2 oder Letzte Mahnung).' },
     { id: 'zinsbetrag', label: 'Verzugszinsen', icon: '💸', description: 'Der berechnete Verzugszinsbetrag basierend auf den Verzugstagen.' },
-    { id: 'forderungs_tabelle', label: 'Forderungstabelle', icon: '📊', description: 'Eine strukturierte Tabelle, die alle offenen Posten, Mieten und Mahngebühren auflistet.' }
+    { id: 'forderungs_tabelle', label: 'Forderungstabelle', icon: '📊', description: 'Eine strukturierte Tabelle, die alle offenen Posten, Mieten und Mahngebühren auflistet.' },
+    { id: 'nutzungszeitraum', label: 'Mietbeginn/Nutzungszeitraum', icon: '⏳', description: 'Der Mietbeginn bzw. Nutzungszeitraum des Mieters (in Mahnschreiben als "Mietbeginn" ausgegeben).' },
+    { id: 'forderungs_detail_tabelle', label: 'Detaillierte Forderungstabelle', icon: '📋', description: 'Die detaillierte Aufstellung aller Forderungen als Anlage zur Mahnung (Seite 2).' }
 ];
 
 // Deutsche Variablen für Nebenkosten
@@ -62,7 +65,8 @@ const UTILITY_VARIABLES = [
     { id: 'vorauszahlungs_betrag', label: 'Geleistete Vorauszahlung', icon: '📥', description: 'Die Summe der vom Mieter im Abrechnungszeitraum bereits gezahlten Nebenkostenabschläge.' },
     { id: 'saldo_betrag', label: 'Saldo (Ergebnis)', icon: '💵', description: 'Der Differenzbetrag zwischen den Gesamtkosten und den Vorauszahlungen.' },
     { id: 'saldo_art', label: 'Saldo Art (Nachzahlung/Gutschrift)', icon: '📝', description: 'Gibt an, ob der Saldo eine "Nachzahlung" (Mieter muss zahlen) oder eine "Gutschrift" (Mieter erhält Geld zurück) ist.' },
-    { id: 'nebenkosten_tabelle', label: 'Umlagetabelle', icon: '📊', description: 'Die detaillierte Umlagetabelle der Betriebskosten mit Kostenarten, Gesamtkosten, Umlageschlüsseln und Mieteranteil.' }
+    { id: 'nebenkosten_tabelle', label: 'Umlagetabelle', icon: '📊', description: 'Die detaillierte Umlagetabelle der Betriebskosten mit Kostenarten, Gesamtkosten, Umlageschlüsseln und Mieteranteil.' },
+    { id: 'nebenkosten_detail_tabelle', label: 'Detaillierte Umlagetabelle', icon: '📋', description: 'Das detaillierte Berechnungsblatt der Nebenkosten als Anlage (Seite 2).' }
 ];
 
 // Deutsche Variablen für Fewo-Rechnungen
@@ -81,7 +85,8 @@ const INVOICE_VARIABLES = [
     { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters.' },
     { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die IBAN und BIC des Vermieters für die Überweisung.' },
     { id: 'vermieter_steuernummer', label: 'Vermieter Steuernummer', icon: '📝', description: 'Die Steuernummer des Vermieters für steuerliche Zwecke.' },
-    { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔', description: 'Die Umsatzsteuer-Identifikationsnummer des Vermieters.' }
+    { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔', description: 'Die Umsatzsteuer-Identifikationsnummer des Vermieters.' },
+    { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍', description: 'Die Adresse des Objekts (z.B. im Absender der Fewo-Rechnung).' }
 ];
 
 // Deutsche Variablen für Mieterhöhungen
@@ -207,16 +212,27 @@ const SYSTEM_TEMPLATES = [
     { id: 'utility_costs', label: 'Nebenkostenabrechnung', hasSubject: true, variables: UTILITY_VARIABLES, group: 'Nebenkosten' },
     { id: 'fewo_invoice', label: 'Fewo-Rechnung', hasSubject: true, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
     { id: 'fewo_credit_note', label: 'Fewo-Gutschrift', hasSubject: true, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
-    { id: 'lease_residential', label: 'Mietvertrag Wohnraum', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Verträge' },
-    { id: 'lease_commercial', label: 'Mietvertrag Gewerbe', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Verträge' },
-    { id: 'lease_garage', label: 'Mietvertrag Garagen & Stellplätze', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Verträge' },
+    { id: 'lease_residential', label: 'Mietvertrag Wohnraum', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
+    { id: 'lease_commercial', label: 'Mietvertrag Gewerbe', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
+    { id: 'lease_garage', label: 'Mietvertrag Garagen & Stellplätze', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
     { id: 'rent_increase', label: 'Mieterhöhungsschreiben', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
     { id: 'rent_increase_consent', label: 'Zustimmungserklärung', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
-    { id: 'landlord_confirmation', label: 'Wohnungsgeberbestätigung', hasSubject: false, variables: CERTIFICATE_VARIABLES, group: 'Bescheinigungen' },
+    { id: 'landlord_confirmation', label: 'Wohnungsgeberbestätigung', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Bescheinigungen' },
     { id: 'rent_clearance_certificate', label: 'Mietschuldenfreiheitsbescheinigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
     { id: 'rental_guarantee', label: 'Mietbürgschaft', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
     { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' }
 ];
+
+// Ordnet eigenen (Custom-)Vorlagen die zur Kategorie passende Variablen-Palette zu
+const VARIABLES_BY_CATEGORY = {
+    'Mahnwesen': DUNNING_VARIABLES,
+    'Nebenkosten': UTILITY_VARIABLES,
+    'FEWO-Rechnungen': INVOICE_VARIABLES,
+    'Mieterhöhung': RENT_INCREASE_VARIABLES,
+    'Bescheinigungen': CERTIFICATE_VARIABLES,
+    'Verträge': CERTIFICATE_VARIABLES,
+};
+const getVariablesForCategory = (category) => VARIABLES_BY_CATEGORY[category] || GLOBAL_VARIABLES;
 
 const LetterNavigation = Extension.create({
     name: 'letterNavigation',
@@ -1620,11 +1636,12 @@ export const DocumentTemplates = () => {
         
         let timeoutId = null;
         let rafId = null;
-        
+        let cancelled = false;
+
         const handlePagination = () => {
             runFullPagination(editor);
         };
-        
+
         const onUpdateOrSelection = () => {
             if (timeoutId) clearTimeout(timeoutId);
             // Debounce 50ms – Balance zwischen Reaktivität und Performance
@@ -1632,16 +1649,35 @@ export const DocumentTemplates = () => {
                 requestAnimationFrame(handlePagination);
             }, 50);
         };
-        
+
         editor.on('update', onUpdateOrSelection);
         editor.on('selectionUpdate', onUpdateOrSelection);
-        
+
+        // Webfont 'Open Sans' aktiv anfordern – sonst misst die Pagination mit der
+        // Ersatzschrift (Arial); der Druck nutzt Open Sans und bricht Seiten anders um.
+        if (document.fonts && typeof document.fonts.load === 'function') {
+            document.fonts.load("11pt 'Open Sans'");
+            document.fonts.load("italic 11pt 'Open Sans'");
+            document.fonts.load("700 11pt 'Open Sans'");
+            document.fonts.load("8pt 'Open Sans'");
+        }
+
         // Initial pagination after content is loaded (DOM muss fertig sein)
         rafId = requestAnimationFrame(() => {
             timeoutId = setTimeout(handlePagination, 300);
         });
-        
+
+        // Sobald die Webfont vollständig geladen ist, mit den ECHTEN Schriftmaßen neu
+        // paginieren -> Editor-Seitenumbruch entspricht dann exakt dem Druck (WYSIWYG).
+        if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(() => {
+                if (cancelled) return;
+                rafId = requestAnimationFrame(handlePagination);
+            });
+        }
+
         return () => {
+            cancelled = true;
             if (timeoutId) clearTimeout(timeoutId);
             if (rafId) cancelAnimationFrame(rafId);
             editor.off('update', onUpdateOrSelection);
@@ -1702,11 +1738,11 @@ export const DocumentTemplates = () => {
     const allTemplates = [
         ...SYSTEM_TEMPLATES.map(t => ({ ...t, isCustom: false })),
         ...customTemplates.map(t => ({ 
-            id: t.type, 
-            label: t.name, 
-            hasSubject: true, 
-            variables: GLOBAL_VARIABLES, 
-            group: t.category || 'Eigene', 
+            id: t.type,
+            label: t.name,
+            hasSubject: true,
+            variables: getVariablesForCategory(t.category),
+            group: t.category || 'Eigene',
             isCustom: true,
             dbId: t.id
         }))
@@ -1776,13 +1812,14 @@ export const DocumentTemplates = () => {
                 // If not found in portfolio-specific, try global custom template
                 if (activeConfig.isCustom) {
                     if (portfolioFilter) {
-                        const { data: globalCustom } = await supabase
+                        const { data: globalCustom, error: globalCustomError } = await supabase
                             .from('document_templates')
                             .select('*')
                             .eq('user_id', user.id)
                             .eq('type', activeType)
                             .is('portfolio_id', null)
                             .maybeSingle();
+                        if (globalCustomError) console.error('Fehler beim Laden der globalen Eigene-Vorlage:', globalCustomError);
                         if (globalCustom) {
                             setSubject(globalCustom.subject || '');
                             editor?.commands.setContent(globalCustom.content_html || '');
@@ -1810,14 +1847,14 @@ export const DocumentTemplates = () => {
 
                 // If portfolio-specific template doesn't exist, try loading the global template first
                 if (portfolioFilter) {
-                    const { data: globalData } = await supabase
+                    const { data: globalData, error: globalDataError } = await supabase
                         .from('document_templates')
                         .select('*')
                         .eq('user_id', user.id)
                         .eq('type', activeType)
                         .is('portfolio_id', null)
                         .maybeSingle();
-                    
+                    if (globalDataError) console.error('Fehler beim Laden der globalen Vorlage:', globalDataError);
                     if (globalData) {
                         setSubject(globalData.subject || '');
                         editor?.commands.setContent(globalData.content_html || '');
@@ -1877,9 +1914,15 @@ export const DocumentTemplates = () => {
     // Save template
     const handleSave = async () => {
         if (!user || !editor) return;
+        const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+        // Hinweis: Wird eine global/standardmäßig geladene Vorlage gespeichert, während ein Portfolio gewählt ist,
+        // entsteht eine portfolio-spezifische Kopie (die globale Vorlage bleibt unverändert).
+        if (portfolioFilter && diagnostics.loadSource && diagnostics.loadSource !== 'Datenbank (Portfolio)') {
+            const ok = window.confirm('Für dieses Portfolio existiert noch keine eigene Version dieser Vorlage. Beim Speichern wird eine portfolio-spezifische Kopie angelegt; die globale Vorlage bleibt unverändert. Fortfahren?');
+            if (!ok) return;
+        }
         setSaving(true);
         try {
-            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
             const contentHtml = editor.getHTML();
 
             let query = supabase
@@ -1905,7 +1948,7 @@ export const DocumentTemplates = () => {
                 content_html: contentHtml,
                 is_custom: activeConfig.isCustom,
                 category: activeConfig.group,
-                updated_at: new Date()
+                updated_at: new Date().toISOString()
             };
 
             let error;
@@ -1924,8 +1967,8 @@ export const DocumentTemplates = () => {
 
 
             if (error) throw error;
+            await fetchCustomTemplates();
             alert('Vorlage erfolgreich gespeichert.');
-            fetchCustomTemplates();
         } catch (error) {
             console.error('Error saving template:', error);
             alert('Fehler beim Speichern der Vorlage: ' + error.message);
@@ -1959,7 +2002,8 @@ export const DocumentTemplates = () => {
                 subject: newTemplateSubject.trim() || null,
                 content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
                 is_custom: true,
-                category: newTemplateCategory
+                category: newTemplateCategory,
+                updated_at: new Date().toISOString()
             };
 
             const { error } = await supabase
@@ -1971,7 +2015,8 @@ export const DocumentTemplates = () => {
             setIsCreateModalOpen(false);
             setNewTemplateName('');
             setNewTemplateSubject('');
-            
+            setNewTemplateCategory('Eigene');
+
             await fetchCustomTemplates();
             setActiveType(customType);
         } catch (error) {
@@ -1992,7 +2037,7 @@ export const DocumentTemplates = () => {
 
 
             await fetchCustomTemplates();
-            setActiveType('payment_reminder');
+            if (type === activeType) setActiveType('payment_reminder');
         } catch (error) {
             alert('Fehler beim Löschen: ' + error.message);
         }
@@ -2104,11 +2149,14 @@ export const DocumentTemplates = () => {
             }
             if (t.cold_rent) {
                 const rentVal = parseFloat(t.cold_rent) || 0;
+                // Nur die TATSÄCHLICHE aktuelle Miete einsetzen. Die neue Miete und der
+                // Erhöhungsbetrag werden bewusst NICHT automatisch berechnet (keine erfundenen 15 %),
+                // da dies rechtlich relevante Werte sind, die der Nutzer selbst festlegen muss.
                 mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-                const increaseVal = rentVal * 0.15;
-                const newRentVal = rentVal + increaseVal;
-                mockData.neue_miete = newRentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-                mockData.erhoehungs_betrag = increaseVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+            }
+            const einzug = t.einzug_datum || t.start_date || t.move_in || t.lease_start;
+            if (einzug) {
+                try { mockData.einzug_datum = new Date(einzug).toLocaleDateString('de-DE'); } catch (_) { /* ungültiges Datum ignorieren */ }
             }
         }
 
@@ -2443,11 +2491,14 @@ export const DocumentTemplates = () => {
             }
             if (t.cold_rent) {
                 const rentVal = parseFloat(t.cold_rent) || 0;
+                // Nur die TATSÄCHLICHE aktuelle Miete einsetzen. Die neue Miete und der
+                // Erhöhungsbetrag werden bewusst NICHT automatisch berechnet (keine erfundenen 15 %),
+                // da dies rechtlich relevante Werte sind, die der Nutzer selbst festlegen muss.
                 mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-                const increaseVal = rentVal * 0.15;
-                const newRentVal = rentVal + increaseVal;
-                mockData.neue_miete = newRentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-                mockData.erhoehungs_betrag = increaseVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+            }
+            const einzug = t.einzug_datum || t.start_date || t.move_in || t.lease_start;
+            if (einzug) {
+                try { mockData.einzug_datum = new Date(einzug).toLocaleDateString('de-DE'); } catch (_) { /* ungültiges Datum ignorieren */ }
             }
         }
 
@@ -2874,7 +2925,46 @@ export const DocumentTemplates = () => {
         .footer-col {
             width: 30%;
         }
-        
+
+        /* Der Editor (ProseMirror) zeigt manuelle Zeilenumbrüche (literale \n) via
+           white-space:pre-wrap an. Das Druckfenster nutzt sonst white-space:normal und
+           zieht sie auf eine Zeile zusammen (z.B. Bankverbindung in der Fußzeile).
+           Hier für die DIN-5008-Textfelder angleichen – Tabellen bewusst ausgenommen. */
+        .letter-sender,
+        .letter-recipient,
+        .letter-date,
+        .letter-subject,
+        .letter-object,
+        .letter-footer,
+        .footer-col {
+            white-space: pre-wrap;
+        }
+
+        /* Platzhalter-Chips (z.B. mehrzeilige Bankverbindung mit echten \n):
+           index.css ist im Druckfenster NICHT geladen, daher hier die Chip-Regeln
+           replizieren. Im Druck als sauberer Text (ohne blaue Editor-Chip-Box),
+           aber mit erhaltenen Zeilenumbrüchen via white-space:pre-wrap. */
+        .variable-chip {
+            white-space: pre-wrap !important;
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            color: inherit !important;
+            font-weight: normal !important;
+            font-family: inherit !important;
+        }
+        .variable-chip.multiline-variable {
+            display: inline-block !important;
+            max-width: 100% !important;
+            vertical-align: top !important;
+            line-height: 1.4 !important;
+        }
+        .variable-chip.expanded-variable-table {
+            display: block !important;
+            width: 100% !important;
+        }
+
         /* Tabellen im Editor */
         table:not(.invoice-table) {
             width: 100%;

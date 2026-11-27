@@ -7,7 +7,7 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { Plus, Users, Loader2, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, Users, Loader2, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical, ChevronDown, ChevronRight, FileText } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
@@ -1321,6 +1321,35 @@ const Tenants = () => {
                             }}
                         >
                             <Edit size={14} /> Bearbeiten
+                        </button>
+                        <button
+                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
+                            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                            onClick={() => {
+                                const row = selectedActionRow;
+                                const t = row.activeLease?.tenant || {};
+                                const tenantData = {
+                                    first_name: t.first_name || '',
+                                    last_name: t.last_name || '',
+                                    gender: t.gender || null,
+                                    street: row.property?.street || '',
+                                    house_number: row.property?.house_number || '',
+                                    zip: row.property?.zip || '',
+                                    city: row.property?.city || '',
+                                    objekt_name: row.property?.name || '',
+                                    einheit_name: row.unit_name || '',
+                                    cold_rent: row.activeLease?.cold_rent || '',
+                                    start_date: row.activeLease?.start_date || row.activeLease?.move_in || null
+                                };
+                                setOpenActionMenuId(null);
+                                setSelectedActionRow(null);
+                                // Öffnet den Schreibvorlagen-Manager mit den ECHTEN Daten dieses Mietverhältnisses.
+                                // Dort wählt der Nutzer die Vorlage (Vertrag/Mieterhöhung/Bescheinigung/...) und druckt.
+                                navigate('/settings', { state: { activeTab: 'document-templates', tenant: tenantData } });
+                            }}
+                        >
+                            <FileText size={14} /> Dokument erstellen
                         </button>
                         <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
                         <button

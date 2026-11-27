@@ -20,6 +20,7 @@ import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
 import Modal from '../components/ui/Modal';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
+import { printInvoice, downloadInvoicePdf } from '../lib/invoiceDocument';
 
 const InvoiceForm = () => {
     const { id } = useParams();
@@ -693,24 +694,25 @@ const InvoiceForm = () => {
     };
 
     const handlePrint = (data) => {
-        const win = window.open('', '_blank');
-        if (!win) {
-            alert('Bitte Popups erlauben.');
-            return;
-        }
-        win.document.open();
-        win.document.write(generateInvoiceHTML(data));
-        win.document.close();
-        // Slightly longer delay to ensure styles render
-        setTimeout(() => {
-            win.focus();
-            win.print();
-        }, 800);
+        // Vorlagenbasierte Ausgabe über das gemeinsame Rechnungs-Modul (Schreibvorlage fewo_invoice/_credit_note).
+        printInvoice({ ...data, portfolio_id: data.portfolio_id || senderPortfolioId }, { user, portfolios });
     };
 
     // ===== PDF (Client-Side Vector Drawing) =====
     const handlePDF = async (data) => {
+        // Vorlagenbasierte Ausgabe über das gemeinsame Rechnungs-Modul (ersetzt das alte manuelle jsPDF-Layout).
         setPdfGenerating(true);
+        try {
+            await downloadInvoicePdf({ ...data, portfolio_id: data.portfolio_id || senderPortfolioId }, { user, portfolios });
+        } catch (error) {
+            console.error(error);
+            alert('PDF Fehler: ' + error.message);
+        } finally {
+            setPdfGenerating(false);
+        }
+        return;
+        // --- Alt (deaktiviert, unreachable): manuelles jsPDF-Vektor-Layout ---
+        // eslint-disable-next-line no-unreachable
         try {
             // Lazy load jsPDF to avoid large bundle size
             if (!window.jspdf) {

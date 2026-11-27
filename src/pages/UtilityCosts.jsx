@@ -780,6 +780,8 @@ const UtilityCosts = () => {
             const localVars = {
                 mieter_name: page.tenantName,
                 mieter_anrede: `Sehr geehrte/r ${page.tenantName}`,
+                mieter_adresse: `${propAddress}, ${propCity}`,
+                objekt_name: prop?.name || propAddress,
                 objekt_adresse: `${propAddress}, ${propCity}`,
                 einheit_name: page.unitName,
                 abrechnungsjahr: settlement.year || '',
@@ -792,6 +794,7 @@ const UtilityCosts = () => {
                 vermieter_name: landlordName,
                 vermieter_bankverbindung: bankDetailsStr,
                 erstellungsdatum: formatDate(settlement.created_at),
+                rechnungsdatum: formatDate(settlement.created_at),
                 nebenkosten_tabelle: summaryTableHtml,
                 nebenkosten_detail_tabelle: detailTableHtml
             };
