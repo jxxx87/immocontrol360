@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
     ArrowLeft, Save, Undo2, Redo2, Download, MousePointer2, PenTool,
     DoorOpen, Square, Sofa, Trash2, Loader2, ChevronDown, Plus,
     RotateCcw, FlipHorizontal2, Copy, Box, Image, FileText, Ruler,
     List, FileSpreadsheet, BoxSelect, SeparatorHorizontal, AppWindow, Armchair, Search,
     Upload, Eye, EyeOff, X, Scaling, Layers, Maximize, Minimize, Home,
-    Spline, CircleDot, Pentagon, Type,
+    Spline, CircleDot, Pentagon, Type, AlertTriangle, RefreshCw, Check,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -20,10 +20,10 @@ import {
     createStorey, duplicateStorey, addPoint, getPoint,
     addOuterWallSegment, closeOuterWalls, addInnerWallSegment,
     computeRooms, placeOpening, deleteWall, deleteOpening, deleteFurniture,
-    placeFurniture, moveFurniture, flipWallSide, findWallAtPoint,
+    placeFurniture, flipWallSide, findWallAtPoint,
     findFurnitureAtPoint, findOpeningAtPoint, findRoomAtPoint,
     snapToGrid, snapAngle, findSnapPoint, dist, getPointSide, genId, pointToSegmentDist,
-    getWallPolygon, ensureCW, offsetPolygon, buildOrderedPolygon,
+    getWallPolygon,
     splitWallAtPoint,
 } from '../../lib/floorplan/geometryKernel';
 import {
@@ -36,23 +36,265 @@ import { exportToPNG, exportToPDF, exportQuantityListCSV, exportQuantityListPDF,
 // Lazy load 3D viewer to avoid loading Three.js unless needed
 const FloorPlan3DView = lazy(() => import('./FloorPlan3DView'));
 
+// ─── Helpers ────────────────────────────────────────────────────
+
+// Fokus in einem Eingabefeld? Dann dürfen Editor-Tastenkürzel (Entf, Strg+C/V/Z, Leertaste) nicht greifen.
+const NON_TEXT_INPUT_TYPES = ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image'];
+const isEditableTarget = (el) => {
+    if (!el || !el.tagName) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') return !NON_TEXT_INPUT_TYPES.includes(String(el.type || 'text').toLowerCase());
+    return false;
+};
+
+// Laufzeitfelder des Renderers gehören weder in Undo-Snapshots noch in den Vergleich "geändert?"
+const TRANSIENT_KEYS = new Set(['_hitBox', '_labelHitBox']);
+const snapshotReplacer = (key, value) => (TRANSIENT_KEYS.has(key) ? undefined : value);
+
+// Undo-Snapshot eines Geschosses als JSON-String. Das (große) Hintergrundbild ist bewusst
+// nicht Teil der Bearbeitungshistorie und bleibt beim Rückgängig machen unverändert.
+const snapshotStorey = (storey) => {
+    if (!storey) return null;
+    const { bgImage: _bgImage, ...rest } = storey;
+    return JSON.stringify(rest, snapshotReplacer);
+};
+
+// Sucht nicht-endliche Zahlen (NaN/Infinity) in den vom Nutzer bearbeitbaren Maßen.
+// Solche Stände werden nicht gespeichert (JSON würde sie still zu null machen).
+// Berechnete Felder (Räume, Außenkontur) werden bewusst nicht geprüft.
+const isBadNumber = (v) => typeof v === 'number' && !Number.isFinite(v);
+const hasBadField = (obj, fields) => !!obj && fields.some(f => isBadNumber(obj[f]));
+const INVALID_FIELDS = {
+    storey: ['height_mm', 'ref_height_mm'],
+    point: ['x', 'y'],
+    wall: ['thickness_mm', 'height_mm', 'ref_height_mm'],
+    opening: ['position_mm', 'width_mm', 'height_mm', 'sill_mm'],
+    furniture: ['x', 'y', 'width_mm', 'depth_mm', 'height_mm', 'rotation'],
+    slab: ['thickness_mm', 'ref_height_mm'],
+    roof: ['kneeWall_mm', 'pitch_deg', 'overhang_mm', 'parapet_mm'],
+    annotation: ['x', 'y', 'cx', 'cy', 'radius'],
+};
+const findInvalidGeometry = (storeys) => {
+    for (const s of storeys || []) {
+        const where = `Geschoss „${s?.label || '?'}“`;
+        if (hasBadField(s, INVALID_FIELDS.storey) || hasBadField(s?.roof, INVALID_FIELDS.roof)) return where;
+        if ((s.points || []).some(p => hasBadField(p, INVALID_FIELDS.point))) return `${where} (Wandpunkt)`;
+        if ((s.walls || []).some(w => hasBadField(w, INVALID_FIELDS.wall))) return `${where} (Wand)`;
+        if ((s.openings || []).some(o => hasBadField(o, INVALID_FIELDS.opening))) return `${where} (Tür/Fenster)`;
+        if ((s.furniture || []).some(f => hasBadField(f, INVALID_FIELDS.furniture))) return `${where} (Möbel)`;
+        if ((s.slabs || []).some(sl => hasBadField(sl, INVALID_FIELDS.slab)
+            || (sl.polygon || []).some(p => hasBadField(p, INVALID_FIELDS.point)))) return `${where} (Decke)`;
+        if ((s.annotations || []).some(a => hasBadField(a, INVALID_FIELDS.annotation)
+            || (a.points || []).some(p => hasBadField(p, INVALID_FIELDS.point)))) return `${where} (Anmerkung)`;
+    }
+    return null;
+};
+
+// Geladene Plandaten absichern (ältere/teilweise gespeicherte Pläne ohne alle Arrays)
+const STOREY_ARRAY_KEYS = ['points', 'walls', 'openings', 'furniture', 'rooms', 'slabs', 'annotations'];
+const normalizeStorey = (raw, idx) => {
+    const storey = raw && typeof raw === 'object' ? raw : {};
+    for (const key of STOREY_ARRAY_KEYS) {
+        if (!Array.isArray(storey[key])) storey[key] = [];
+    }
+    if (!storey.id) storey.id = genId();
+    if (!storey.label) storey.label = `Geschoss ${idx + 1}`;
+    if (!Number.isFinite(storey.height_mm) || storey.height_mm <= 0) storey.height_mm = STOREY_HEIGHT.default;
+    if (storey.roof === undefined) storey.roof = null;
+    return storey;
+};
+
+// Außenwand-Polygon (Innen- und Außenkante) nach Geometrieänderungen neu berechnen.
+// Nur für bereits geschlossene Außenwände; closeOuterWalls des Geometriekerns rechnet die
+// Außenkontur mit der Dicke JE Wand (statt pauschal mit der Dicke der ersten Außenwand).
+const refreshOuterPolygon = (storey) => {
+    if (!storey.outerClosed) return;
+    closeOuterWalls(storey);
+};
+
+// Achsparallele Hülle eines Möbelstücks für die Rahmenauswahl. Ursprung (x, y) ist die obere
+// linke Ecke, gedreht wird um diesen Punkt (wie Zeichnung und findFurnitureAtPoint).
+const furnitureBounds = (f) => {
+    const w = Number(f?.width_mm) || 500;
+    const d = Number(f?.depth_mm) || 500;
+    const rad = ((Number(f?.rotation) || 0) * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const x = Number(f?.x) || 0, y = Number(f?.y) || 0;
+    const xs = [0, w * cos, w * cos - d * sin, -d * sin].map(v => x + v);
+    const ys = [0, w * sin, w * sin + d * cos, d * cos].map(v => y + v);
+    return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+};
+
+// Wandlänge setzen: Endpunkt p2 entlang der (gemerkten oder aktuellen) Wandrichtung verschieben
+const applyWallLength = (storey, wall, newLenMm, dir) => {
+    if (!wall || !Number.isFinite(newLenMm) || newLenMm <= 0) return false;
+    const p1 = getPoint(storey, wall.p1);
+    const p2 = getPoint(storey, wall.p2);
+    if (!p1 || !p2) return false;
+    let ux, uy;
+    if (dir && Number.isFinite(dir.x) && Number.isFinite(dir.y) && (dir.x !== 0 || dir.y !== 0)) {
+        ux = dir.x; uy = dir.y;
+    } else {
+        const cur = dist(p1, p2);
+        if (!(cur >= 1)) return false;
+        ux = (p2.x - p1.x) / cur;
+        uy = (p2.y - p1.y) / cur;
+    }
+    const nx = snapToGrid(p1.x + ux * newLenMm);
+    const ny = snapToGrid(p1.y + uy * newLenMm);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return false;
+    p2.x = nx;
+    p2.y = ny;
+    refreshOuterPolygon(storey);
+    computeRooms(storey);
+    return true;
+};
+
+// Öffnungsbreite setzen und die Öffnung vollständig innerhalb der Wand halten
+const applyOpeningWidth = (storey, opening, widthMm) => {
+    if (!opening || !Number.isFinite(widthMm) || widthMm <= 0) return false;
+    const wallId = opening.wall_id ?? opening.wallId;
+    const wall = storey.walls.find(w => w.id === wallId);
+    const p1 = wall ? getPoint(storey, wall.p1) : null;
+    const p2 = wall ? getPoint(storey, wall.p2) : null;
+    if (!p1 || !p2) { opening.width_mm = Math.round(widthMm); return true; }
+    const wallLen = dist(p1, p2);
+    const width = Math.min(Math.round(widthMm), Math.floor(wallLen - 2 * OPENING_MIN_EDGE_DIST));
+    if (!(width > 0)) return false;
+    opening.width_mm = width;
+    const minPos = width / 2 + OPENING_MIN_EDGE_DIST;
+    const maxPos = wallLen - width / 2 - OPENING_MIN_EDGE_DIST;
+    if (Number.isFinite(opening.position_mm)) {
+        opening.position_mm = Math.max(minPos, Math.min(maxPos, opening.position_mm));
+    } else {
+        opening.position_mm = wallLen / 2;
+    }
+    return true;
+};
+
+// Zahleneingabe: Komma als Dezimaltrenner zulassen, leer/ungültig = NaN
+const parseNumberInput = (raw) => {
+    if (raw === null || raw === undefined) return NaN;
+    const s = String(raw).trim().replace(',', '.');
+    if (s === '') return NaN;
+    return Number(s);
+};
+const formatNumberInput = (v) => (Number.isFinite(v) ? String(Math.round(v * 10000) / 10000) : '');
+
+const sanitizeFileName = (name) => {
+    const cleaned = String(name || '')
+        .split('').filter(ch => ch.charCodeAt(0) >= 32).join('')
+        .replace(/[\\/:*?"<>|]+/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+    return cleaned || 'Grundriss';
+};
+
+const zoomToPercent = (zoom) => Math.round(zoom * 100 / 0.15);
+
+// WebGL-Unterstützung prüfen, bevor die 3D-Ansicht gemountet wird
+const isWebGLAvailable = () => {
+    try {
+        if (typeof window === 'undefined' || !window.WebGLRenderingContext) return false;
+        const c = document.createElement('canvas');
+        const gl = c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (!gl) return false;
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+// Hintergrundbild: Grenzen, damit plan_data nicht durch riesige Base64-Bilder unbenutzbar wird
+const MAX_BG_FILE_BYTES = 30 * 1024 * 1024;     // 30 MB Eingangsdatei
+const MAX_BG_EDGE_PX = 4096;                     // max. Kantenlänge des gespeicherten Bildes
+const MAX_BG_DATAURL_CHARS = 6 * 1024 * 1024;    // ab hier JPEG statt PNG
+
+const encodeBgCanvas = (canvas) => {
+    let url = canvas.toDataURL('image/png');
+    if (url.length > MAX_BG_DATAURL_CHARS) url = canvas.toDataURL('image/jpeg', 0.85);
+    return url;
+};
+
+// Bild auf MAX_BG_EDGE_PX herunterrechnen; liefert neue dataUrl und den Skalierungsfaktor
+const downscaleBgImage = (img) => {
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    const factor = Math.min(1, MAX_BG_EDGE_PX / Math.max(w, h, 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * factor));
+    canvas.height = Math.max(1, Math.round(h * factor));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return { dataUrl: encodeBgCanvas(canvas), factor: canvas.width / w };
+};
+
+const DRAG_LABELS = {
+    furniture: 'Möbel verschieben',
+    opening: 'Öffnung verschieben',
+    corner: 'Wandecke verschieben',
+    wall_perp: 'Wand verschieben',
+    wall_body: 'Wand verschieben',
+    multi: 'Auswahl verschieben',
+    slab_corner: 'Deckenpunkt verschieben',
+    room_label: 'Raumbeschriftung verschieben',
+    annotation_drag: 'Anmerkung verschieben',
+    annotation_point: 'Anmerkung bearbeiten',
+    annotation_resize_circle: 'Anmerkung bearbeiten',
+};
+const GEOMETRY_DRAG_TYPES = ['corner', 'wall_perp', 'wall_body', 'multi'];
+
+// Fängt Fehler der 3D-Ansicht ab (WebGL, Chunk-Download, Renderfehler), statt die ganze Seite abzureißen
+class ViewErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        return { error };
+    }
+
+    componentDidCatch(error) {
+        console.error('3D-Ansicht fehlgeschlagen:', error);
+        if (this.props.onError) this.props.onError(error);
+    }
+
+    render() {
+        if (this.state.error) return this.props.fallback ?? null;
+        return this.props.children;
+    }
+}
+
 // ─── Main Component ─────────────────────────────────────────────
 
 const FloorPlanEditor = () => {
     const { id: planId } = useParams();
     const isNew = planId === 'new';
     const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
     const { user } = useAuth();
+    const userId = user?.id || null;
     const { isMobile } = useViewMode();
 
     // ─── State ──────────────────────────────────────────────────
     const [planName, setPlanName] = useState('Neuer Grundriss');
-    const [storeys, setStoreys] = useState([createStorey('EG', 2600)]);
+    const [storeys, setStoreys] = useState(() => [createStorey('EG', 2600)]);
     const [activeStoreyIdx, setActiveStoreyIdx] = useState(0);
-    const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(!isNew);
-    const [savedId, setSavedId] = useState(isNew ? null : planId);
+    const [loadError, setLoadError] = useState(null);
+    const [loadAttempt, setLoadAttempt] = useState(0);
+    // Speicherstatus: 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
+    const [saveState, setSaveState] = useState('idle');
+    const [saveError, setSaveError] = useState(null);
+    const saving = saveState === 'saving';
+    const [viewNotice, setViewNotice] = useState(null);
+    const [zoomPct, setZoomPct] = useState(() => zoomToPercent(0.15));
 
     // Tool state
     const [activeTool, setActiveTool] = useState(TOOLS.SELECT);
@@ -100,7 +342,6 @@ const FloorPlanEditor = () => {
     const [annotationLineWidth, setAnnotationLineWidth] = useState(2);
     const [annotationPoints, setAnnotationPoints] = useState([]); // {x,y}[] for current polyline/area
     const [annotationCircleCenter, setAnnotationCircleCenter] = useState(null); // {x,y}
-    const [editingAnnotationId, setEditingAnnotationId] = useState(null); // text being edited
     const [activeAnnotationId, setActiveAnnotationId] = useState(null); // live-editing polyline/area id
     const clipboardRef = useRef(null); // { type, data } for copy/paste
 
@@ -135,75 +376,222 @@ const FloorPlanEditor = () => {
     const snapPointRef = useRef(null);
     const mouseWorldRef = useRef({ x: 0, y: 0 });
 
-    // Autosave timer
+    // Autosave / Speicherstand
     const autosaveTimerRef = useRef(null);
     const isDirtyRef = useRef(false);
+    const revisionRef = useRef(0);            // wird bei jeder Änderung erhöht
+    const saveInFlightRef = useRef(null);     // Promise des laufenden Speichervorgangs
+    const pendingSaveRef = useRef(false);     // während eines Speicherns angefordert → danach nachholen
+    const saveFailedRef = useRef(false);
+    const saveRef = useRef(null);             // immer aktuelle handleSave-Funktion (für Timer/Listener)
+    const loadedOkRef = useRef(isNew);        // Speichern erst nach erfolgreichem Laden erlaubt
+    const savedIdRef = useRef(null);
+
+    // Interaktions-Refs (auch vom Autosave genutzt, um nicht mitten im Ziehen zu speichern)
+    const isPanningRef = useRef(false);
+    const panStartRef = useRef({ x: 0, y: 0 });
+    const dragStartRef = useRef(null);
+    const spaceHeldRef = useRef(false);
+    const dragHandleRef = useRef(null);     // which handle is being dragged: p1Id, p2Id, or 'mid'
+    const dimensionLineRef = useRef(null);  // active dimension line during drag
+    const selectedIdRef = useRef(null);     // always-current selectedId for closures
+    selectedIdRef.current = selectedId;
+    const hoverPointRef = useRef(null);     // world point near cursor for corner hover
+    const marqueeRef = useRef(null);        // { sx1, sy1, sx2, sy2 } screen coords for selection rectangle
+    const hoverIdRef = useRef(null);         // ID of element currently hovered
+    const pendingDrawRef = useRef(null);    // { storeyId, before, last } – Zeichenschritte, die noch nicht in der Historie stehen
+    const textEditRef = useRef(null);       // { storeyId, before, label } – laufende Texteingabe im Panel
+    const lengthEditDoneRef = useRef(false);
+    const planNameFocusRef = useRef(null);
+    const canvasSizeRef = useRef({ w: 0, h: 0, dpr: 1 }); // CSS-Größe der Zeichenfläche
+    const needsCenterRef = useRef(true);
 
     // ─── Active Storey ──────────────────────────────────────────
     const activeStorey = storeys[activeStoreyIdx] || storeys[0];
 
+    // Immer aktuelle Werte für Callbacks, Timer und Fenster-Listener
+    const storeysRef = useRef(storeys);
+    storeysRef.current = storeys;
+    const activeStoreyRef = useRef(activeStorey);
+    activeStoreyRef.current = activeStorey;
+    const planNameRef = useRef(planName);
+    planNameRef.current = planName;
+    const userRef = useRef(user);
+    userRef.current = user;
+    const drawPointsRef = useRef(drawPoints);
+    drawPointsRef.current = drawPoints;
+
     // ─── Load ───────────────────────────────────────────────────
     useEffect(() => {
-        if (isNew || !user) { setLoading(false); return; }
+        if (isNew) { loadedOkRef.current = true; setLoading(false); return; }
+        if (!userId) return; // warten, bis die Anmeldung feststeht
+        let cancelled = false;
+        loadedOkRef.current = false;
+        savedIdRef.current = null;
+        setLoading(true);
+        setLoadError(null);
         (async () => {
-            const { data, error } = await supabase.from('floor_plans').select('*').eq('id', planId).single();
-            if (error || !data) { setLoading(false); return; }
-            setPlanName(data.name || 'Grundriss');
-            if (Array.isArray(data.plan_data) && data.plan_data.length > 0) {
-                setStoreys(data.plan_data);
+            try {
+                const { data, error } = await supabase.from('floor_plans').select('*').eq('id', planId).single();
+                if (cancelled) return;
+                if (error || !data) {
+                    const notFound = !data && (!error || error.code === 'PGRST116');
+                    setLoadError(notFound
+                        ? 'Der Grundriss wurde nicht gefunden oder Sie haben keinen Zugriff darauf.'
+                        : `Der Grundriss konnte nicht geladen werden${error?.message ? ` (${error.message})` : ''}.`);
+                    setLoading(false);
+                    return;
+                }
+                setPlanName(data.name || 'Grundriss');
+                if (Array.isArray(data.plan_data) && data.plan_data.length > 0) {
+                    const loaded = data.plan_data.map((s, i) => normalizeStorey(s, i));
+                    storeysRef.current = loaded;
+                    setStoreys(loaded);
+                    setActiveStoreyIdx(0);
+                }
+                savedIdRef.current = data.id;
+                loadedOkRef.current = true;
+                isDirtyRef.current = false;
+                cmdStackRef.current.clear();
+                setSaveState('idle');
+                setLoading(false);
+            } catch (err) {
+                if (cancelled) return;
+                setLoadError(`Der Grundriss konnte nicht geladen werden (${err?.message || err}).`);
+                setLoading(false);
             }
-            setSavedId(data.id);
-            setLoading(false);
         })();
-    }, [planId, user]);
+        return () => { cancelled = true; };
+    }, [planId, userId, isNew, loadAttempt]);
 
     // ─── Save ───────────────────────────────────────────────────
-    const handleSave = useCallback(async (silent = false) => {
-        if (!user || saving) return;
-        setSaving(true);
-        try {
-            // Recompute rooms before saving
-            const updated = storeys.map(s => {
-                computeRooms(s);
-                // Clean up temporary render data from annotations
-                if (s.annotations) {
-                    for (const ann of s.annotations) { delete ann._hitBox; }
+    // Liest alle Daten über Refs, damit Autosave-Timer nie mit veralteten Closures arbeiten.
+    const handleSave = useCallback((silent = false) => {
+        const currentUser = userRef.current;
+        if (!currentUser || !loadedOkRef.current) return Promise.resolve(false);
+        if (saveInFlightRef.current) {
+            // Läuft bereits ein Speichervorgang: danach mit dem dann aktuellen Stand erneut speichern
+            pendingSaveRef.current = true;
+            return saveInFlightRef.current;
+        }
+        if (autosaveTimerRef.current) { clearTimeout(autosaveTimerRef.current); autosaveTimerRef.current = null; }
+        const revisionAtStart = revisionRef.current;
+
+        const run = (async () => {
+            setSaveState('saving');
+            try {
+                // Recompute rooms before saving
+                const updated = storeysRef.current.map(s => {
+                    computeRooms(s);
+                    // Clean up temporary render data from annotations
+                    if (s.annotations) {
+                        for (const ann of s.annotations) { delete ann._hitBox; }
+                    }
+                    return { ...s };
+                });
+
+                const invalidAt = findInvalidGeometry(updated);
+                if (invalidAt) {
+                    throw new Error(`Der Plan enthält ungültige Maße – ${invalidAt}. Bitte korrigieren oder mit Strg+Z rückgängig machen; der zuletzt gespeicherte Stand bleibt erhalten.`);
                 }
-                return { ...s };
-            });
 
-            const payload = {
-                user_id: user.id,
-                name: planName.trim() || 'Grundriss',
-                plan_data: updated,
-                updated_at: new Date().toISOString(),
-            };
+                const payload = {
+                    name: (planNameRef.current || '').trim() || 'Grundriss',
+                    plan_data: updated,
+                    updated_at: new Date().toISOString(),
+                };
 
-            if (savedId) {
-                await supabase.from('floor_plans').update(payload).eq('id', savedId);
-            } else {
-                const { data } = await supabase.from('floor_plans').insert(payload).select('id').single();
-                if (data) {
-                    setSavedId(data.id);
-                    window.history.replaceState(null, '', `/renovation/floorplan/${data.id}`);
+                if (savedIdRef.current) {
+                    // user_id bleibt beim Update unverändert (kein Besitzerwechsel bei geteiltem Zugriff)
+                    const { data, error } = await supabase.from('floor_plans').update(payload).eq('id', savedIdRef.current).select('id');
+                    if (error) throw error;
+                    if (!data || data.length === 0) {
+                        throw new Error('Der Grundriss wurde nicht gefunden oder Sie haben keine Berechtigung, ihn zu ändern.');
+                    }
+                } else {
+                    const { data, error } = await supabase.from('floor_plans').insert({ ...payload, user_id: currentUser.id }).select('id').single();
+                    if (error) throw error;
+                    if (!data?.id) throw new Error('Der Grundriss konnte nicht angelegt werden.');
+                    savedIdRef.current = data.id;
+                    window.history.replaceState(window.history.state, '', `/renovation/floorplan/${data.id}`);
+                }
+
+                saveFailedRef.current = false;
+                setSaveError(null);
+                if (revisionRef.current === revisionAtStart) {
+                    isDirtyRef.current = false;
+                    setSaveState('saved');
+                } else {
+                    // Während des Speicherns geändert → sofort nachspeichern
+                    pendingSaveRef.current = true;
+                    setSaveState('dirty');
+                }
+                return true;
+            } catch (err) {
+                const msg = err?.message || String(err);
+                console.error('Grundriss speichern fehlgeschlagen:', err);
+                saveFailedRef.current = true;
+                setSaveError(msg);
+                setSaveState('error');
+                if (!silent) alert('Fehler beim Speichern: ' + msg);
+                return false;
+            } finally {
+                saveInFlightRef.current = null;
+                if (pendingSaveRef.current) {
+                    pendingSaveRef.current = false;
+                    // Nach einem Fehler nicht in Endlosschleife erneut senden – die nächste Änderung versucht es wieder
+                    if (isDirtyRef.current && !saveFailedRef.current) {
+                        if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+                        autosaveTimerRef.current = setTimeout(() => { autosaveTimerRef.current = null; saveRef.current?.(true); }, 0);
+                    }
                 }
             }
-            isDirtyRef.current = false;
-        } catch (err) {
-            if (!silent) alert('Fehler beim Speichern: ' + err.message);
-        } finally {
-            setSaving(false);
-        }
-    }, [user, saving, planName, storeys, savedId]);
+        })();
+        saveInFlightRef.current = run;
+        return run;
+    }, []);
+    saveRef.current = handleSave;
 
-    // Autosave
+    // Autosave: jede Änderung erhöht die Revision; gespeichert wird 2 s nach der letzten Änderung
     const markDirty = useCallback(() => {
+        revisionRef.current += 1;
         isDirtyRef.current = true;
+        setSaveState(prev => (prev === 'saving' || prev === 'error' ? prev : 'dirty'));
         if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-        autosaveTimerRef.current = setTimeout(() => {
-            if (isDirtyRef.current) handleSave(true);
-        }, 2000);
-    }, [handleSave]);
+        const schedule = (delay) => {
+            autosaveTimerRef.current = setTimeout(() => {
+                autosaveTimerRef.current = null;
+                if (!isDirtyRef.current) return;
+                // Nicht mitten in einem Zieh-Vorgang speichern
+                if (dragStartRef.current || isPanningRef.current) { schedule(1000); return; }
+                saveRef.current?.(true);
+            }, delay);
+        };
+        schedule(2000);
+    }, []);
+
+    // Beim Verlassen (Tab schließen/ausblenden, Navigation in der App) ausstehende Änderungen sofort speichern
+    useEffect(() => {
+        const flush = () => { if (isDirtyRef.current) saveRef.current?.(true); };
+        const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
+        const onBeforeUnload = (e) => {
+            if (isDirtyRef.current || saveInFlightRef.current) {
+                flush();
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        };
+        window.addEventListener('pagehide', flush);
+        document.addEventListener('visibilitychange', onVisibility);
+        window.addEventListener('beforeunload', onBeforeUnload);
+        return () => {
+            window.removeEventListener('pagehide', flush);
+            document.removeEventListener('visibilitychange', onVisibility);
+            window.removeEventListener('beforeunload', onBeforeUnload);
+            if (autosaveTimerRef.current) { clearTimeout(autosaveTimerRef.current); autosaveTimerRef.current = null; }
+            flush();
+        };
+    }, []);
 
     // ─── Undo/Redo subscription ─────────────────────────────────
     useEffect(() => {
@@ -211,62 +599,20 @@ const FloorPlanEditor = () => {
         return unsub;
     }, []);
 
-    // ─── Canvas Setup ───────────────────────────────────────────
-    useEffect(() => {
-        if (viewMode !== '2d') return; // canvas not mounted in 3D mode
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const resize = () => {
-            const rect = canvas.parentElement.getBoundingClientRect();
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-            requestRender();
-        };
-        // Small timeout to ensure DOM has laid out after view mode switch
-        const timer = setTimeout(resize, 50);
-        window.addEventListener('resize', resize);
-        return () => { clearTimeout(timer); window.removeEventListener('resize', resize); };
-    }, [loading, viewMode]);
-
-    // Center viewport on first load
-    useEffect(() => {
-        if (loading) return;
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const vp = vpRef.current;
-        vp.offsetX = canvas.width / 2;
-        vp.offsetY = canvas.height / 2;
-        requestRender();
-    }, [loading]);
-
-    // Keep selectedIds ref in sync so requestRender never uses stale selection
+    // Keep selection refs in sync so requestRender never uses stale selection
     const selectedIdsRef = useRef(selectedIds);
-    useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+    selectedIdsRef.current = selectedIds;
     const selectedRoomIdRef = useRef(selectedRoomId);
-    useEffect(() => { selectedRoomIdRef.current = selectedRoomId; }, [selectedRoomId]);
+    selectedRoomIdRef.current = selectedRoomId;
 
     // Keep bg refs in sync so requestRender always uses current values
     const bgImageRef = useRef(bgImage);
+    bgImageRef.current = bgImage;
     const bgImageObjRef = useRef(bgImageObj);
+    bgImageObjRef.current = bgImageObj;
     const calibPointsRef = useRef(calibPoints);
-    useEffect(() => { bgImageRef.current = bgImage; }, [bgImage]);
-    useEffect(() => { bgImageObjRef.current = bgImageObj; }, [bgImageObj]);
-    useEffect(() => { calibPointsRef.current = calibPoints; }, [calibPoints]);
-
-    // Restore background image from saved storey data
-    useEffect(() => {
-        if (activeStorey?.bgImage?.dataUrl && !bgImage) {
-            const saved = activeStorey.bgImage;
-            setBgImage(saved);
-            const img = new window.Image();
-            img.onload = () => { setBgImageObj(img); requestRender(); };
-            img.src = saved.dataUrl;
-        } else if (activeStorey && !activeStorey.bgImage && bgImage) {
-            // Storey changed and new storey has no bg
-            setBgImage(null);
-            setBgImageObj(null);
-        }
-    }, [activeStorey?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    calibPointsRef.current = calibPoints;
+    const bgLoadTokenRef = useRef(0);
 
     // ─── Render Loop ────────────────────────────────────────────
     const isPrintingRef = useRef(false);
@@ -280,10 +626,15 @@ const FloorPlanEditor = () => {
         animFrameRef.current = requestAnimationFrame(() => {
             animFrameRef.current = null;
             const canvas = canvasRef.current;
-            if (!canvas) return;
+            const storey = activeStoreyRef.current;
+            if (!canvas || !storey) return;
             const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            // Zeichenfläche ist in Gerätepixeln angelegt (HiDPI) – gezeichnet wird in CSS-Pixeln
+            const dpr = canvasSizeRef.current.dpr || 1;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             const bg = bgImageRef.current;
-            render(ctx, canvas, vpRef.current, activeStorey, {
+            render(ctx, canvas, vpRef.current, storey, {
                 selectedId: selectedIdRef.current,
                 selectedIds: selectedIdsRef.current,
                 preview: previewRef.current,
@@ -299,14 +650,234 @@ const FloorPlanEditor = () => {
                 isPrinting: isPrintingRef.current,
                 showDimensions: showDimensionsRef.current,
                 selectedRoomId: selectedRoomIdRef.current,
+                // Neuere Renderer-Versionen setzen die Transformation selbst anhand von pixelRatio
+                pixelRatio: dpr,
             });
         });
-    }, [activeStorey]);
+    }, []);
 
-    useEffect(() => { requestRender(); }, [requestRender, storeys, activeStoreyIdx, selectedId, selectedIds, selectedRoomId]);
+    // Nach jedem React-Render die Zeichenfläche nachziehen (In-Place-Änderungen + forceRender)
+    useEffect(() => { requestRender(); });
 
-    // Re-render when bg changes
-    useEffect(() => { requestRender(); }, [bgImage, bgImageObj, calibPoints]);
+    // Hintergrundbild immer aus dem aktiven Geschoss ableiten (beim Geschosswechsel neu laden)
+    useEffect(() => {
+        const saved = activeStorey?.bgImage || null;
+        const token = ++bgLoadTokenRef.current;
+        setBgImage(saved);
+        setBgImageObj(null);
+        if (saved?.dataUrl) {
+            const img = new window.Image();
+            img.onload = () => { if (bgLoadTokenRef.current === token) { setBgImageObj(img); requestRender(); } };
+            img.onerror = () => { if (bgLoadTokenRef.current === token) setBgImageObj(null); };
+            img.src = saved.dataUrl;
+        }
+    }, [activeStorey?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ─── Canvas Setup ───────────────────────────────────────────
+    // Größe folgt dem Container (ResizeObserver, auch bei ein-/ausgeblendeten Seitenleisten), HiDPI-scharf.
+    useEffect(() => {
+        if (viewMode !== '2d' || loading || loadError) return; // canvas not mounted
+        const canvas = canvasRef.current;
+        const parent = canvas?.parentElement;
+        if (!canvas || !parent) return;
+        const resize = () => {
+            const rect = parent.getBoundingClientRect();
+            const w = Math.max(1, Math.round(rect.width));
+            const h = Math.max(1, Math.round(rect.height));
+            const dpr = Math.min(2, window.devicePixelRatio || 1);
+            canvasSizeRef.current = { w, h, dpr };
+            const bw = Math.round(w * dpr);
+            const bh = Math.round(h * dpr);
+            if (canvas.width !== bw) canvas.width = bw;
+            if (canvas.height !== bh) canvas.height = bh;
+            // Erstes Zentrieren erst, wenn die echte Größe bekannt ist
+            if (needsCenterRef.current && rect.width > 1 && rect.height > 1) {
+                needsCenterRef.current = false;
+                vpRef.current.offsetX = w / 2;
+                vpRef.current.offsetY = h / 2;
+            }
+            requestRender();
+        };
+        resize();
+        let ro = null;
+        if (typeof ResizeObserver !== 'undefined') {
+            ro = new ResizeObserver(() => resize());
+            ro.observe(parent);
+        }
+        window.addEventListener('resize', resize);
+        return () => {
+            if (ro) ro.disconnect();
+            window.removeEventListener('resize', resize);
+        };
+    }, [loading, loadError, viewMode, requestRender]);
+
+    // ─── Änderungshistorie (Undo/Redo) ──────────────────────────
+    // Jede Bearbeitung wird als Vorher-/Nachher-Snapshot des betroffenen Geschosses erfasst.
+    const applyStoreySnapshot = useCallback((storeyId, snap) => {
+        const target = storeysRef.current.find(s => s.id === storeyId);
+        if (!target || !snap) return false;
+        const keepBg = target.bgImage;
+        for (const key of Object.keys(target)) delete target[key];
+        Object.assign(target, JSON.parse(snap));
+        if (keepBg) target.bgImage = keepBg;
+        return true;
+    }, []);
+
+    const focusStoreyById = useCallback((storeyId) => {
+        const idx = storeysRef.current.findIndex(s => s.id === storeyId);
+        if (idx >= 0 && storeysRef.current[idx] !== activeStoreyRef.current) setActiveStoreyIdx(idx);
+    }, []);
+
+    const pushHistory = useCallback((label, storeyId, before, after) => {
+        let firstRun = true;
+        cmdStackRef.current.execute({
+            label,
+            do: () => {
+                if (firstRun) { firstRun = false; return; } // Änderung ist bereits ausgeführt
+                applyStoreySnapshot(storeyId, after);
+                focusStoreyById(storeyId);
+            },
+            undo: () => {
+                applyStoreySnapshot(storeyId, before);
+                focusStoreyById(storeyId);
+            },
+        });
+    }, [applyStoreySnapshot, focusStoreyById]);
+
+    // Änderung übernehmen: nur wenn sich wirklich etwas geändert hat → Historie + Autosave
+    const commitChange = useCallback((label, storey, before) => {
+        if (!storey || before == null) return null;
+        const after = snapshotStorey(storey);
+        if (after === before) return null;
+        pushHistory(label, storey.id, before, after);
+        markDirty();
+        forceRender(v => v + 1);
+        requestRender();
+        return after;
+    }, [pushHistory, markDirty, requestRender]);
+
+    // Mutation am aktiven Geschoss ausführen und als ein Undo-Schritt erfassen
+    const applyChange = useCallback((label, mutate) => {
+        const storey = activeStoreyRef.current;
+        if (!storey) return null;
+        const before = snapshotStorey(storey);
+        mutate(storey);
+        return commitChange(label, storey, before);
+    }, [commitChange]);
+
+    // Geschoss-Liste ersetzen (Hinzufügen/Duplizieren/Löschen) – auch für Undo/Redo
+    const commitStoreys = useCallback((next, nextActiveIdx) => {
+        storeysRef.current = next;
+        setStoreys(next);
+        if (nextActiveIdx !== undefined) setActiveStoreyIdx(Math.max(0, Math.min(next.length - 1, nextActiveIdx)));
+    }, []);
+
+    const pushStoreysHistory = useCallback((label, beforeList, afterList, beforeIdx, afterIdx) => {
+        let firstRun = true;
+        cmdStackRef.current.execute({
+            label,
+            do: () => {
+                if (firstRun) { firstRun = false; return; }
+                commitStoreys(afterList, afterIdx);
+            },
+            undo: () => commitStoreys(beforeList, beforeIdx),
+        });
+    }, [commitStoreys]);
+
+    // Texteingaben im Panel: live ins Modell schreiben, beim Verlassen des Feldes als ein Undo-Schritt erfassen
+    const beginTextEdit = useCallback((label) => {
+        const storey = activeStoreyRef.current;
+        textEditRef.current = storey ? { storeyId: storey.id, before: snapshotStorey(storey), label } : null;
+    }, []);
+    const endTextEdit = useCallback(() => {
+        const te = textEditRef.current;
+        textEditRef.current = null;
+        if (!te) return;
+        const storey = storeysRef.current.find(s => s.id === te.storeyId);
+        if (storey) commitChange(te.label, storey, te.before);
+    }, [commitChange]);
+    const liveTextChange = useCallback(() => {
+        markDirty();
+        forceRender(v => v + 1);
+        requestRender();
+    }, [markDirty, requestRender]);
+
+    // Laufende Zeichenaktion abbrechen; noch nicht übernommene Zwischenschritte (Startpunkt,
+    // geteilte Wirtswand) werden zurückgerollt, sofern seitdem nichts anderes geändert wurde.
+    const cancelDrawing = useCallback(() => {
+        const pd = pendingDrawRef.current;
+        pendingDrawRef.current = null;
+        let rolledBack = false;
+        if (pd && pd.last) {
+            const storey = storeysRef.current.find(s => s.id === pd.storeyId);
+            if (storey && snapshotStorey(storey) === pd.last) {
+                applyStoreySnapshot(pd.storeyId, pd.before);
+                rolledBack = true;
+            }
+        }
+        if (!rolledBack) {
+            // Fallback: einzelnen, von keiner Wand genutzten Startpunkt entfernen
+            const dp = drawPointsRef.current;
+            const storey = activeStoreyRef.current;
+            if (storey && dp.length === 1 && typeof dp[0] === 'string') {
+                const ptId = dp[0];
+                const usedByWall = storey.walls.some(w => w.p1 === ptId || w.p2 === ptId);
+                if (!usedByWall && storey.points.some(p => p.id === ptId)) {
+                    storey.points = storey.points.filter(p => p.id !== ptId);
+                    rolledBack = true;
+                }
+            }
+        }
+        setDrawPoints([]);
+        drawPointsRef.current = [];
+        previewRef.current = null;
+        snapPointRef.current = null;
+        if (rolledBack) {
+            markDirty();
+            forceRender(v => v + 1);
+        }
+        requestRender();
+        return rolledBack;
+    }, [applyStoreySnapshot, markDirty, requestRender]);
+
+    // Gemeinsamer Ablauf für Undo/Redo (Tastatur und Buttons)
+    const afterHistoryStep = useCallback(() => {
+        setEditingLength(null);
+        setActiveAnnotationId(null);
+        setAnnotationPoints([]);
+        setAnnotationCircleCenter(null);
+        dragStartRef.current = null;
+        marqueeRef.current = null;
+        dimensionLineRef.current = null;
+        dragHandleRef.current = null;
+        setSelectedId(null);
+        setSelectedType(null);
+        setSelectedIds([]);
+        setSelectedRoomId(null);
+        markDirty();
+        forceRender(v => v + 1);
+        requestRender();
+    }, [markDirty, requestRender]);
+
+    const handleUndo = useCallback(() => {
+        // Erst eine angefangene Zeichnung zurücknehmen (Startpunkt / offene Decke), sonst den letzten Schritt
+        const dp = drawPointsRef.current;
+        if (dp.length > 0 || pendingDrawRef.current) {
+            const onlyStarted = dp.length === 1 || (dp.length > 0 && typeof dp[0] !== 'string');
+            const rolledBack = cancelDrawing();
+            if (rolledBack || onlyStarted) return;
+        }
+        if (!cmdStackRef.current.canUndo()) return;
+        cmdStackRef.current.undo();
+        afterHistoryStep();
+    }, [cancelDrawing, afterHistoryStep]);
+
+    const handleRedo = useCallback(() => {
+        if (!cmdStackRef.current.canRedo()) return;
+        cancelDrawing();
+        cmdStackRef.current.redo();
+        afterHistoryStep();
+    }, [cancelDrawing, afterHistoryStep]);
 
     // Hide grid during printing
     useEffect(() => {
@@ -321,38 +892,66 @@ const FloorPlanEditor = () => {
     }, [requestRender]);
 
     // ─── Background Image Upload ─────────────────────────────────
-    const handleBgUpload = useCallback((e) => {
+    // Hintergrundbild am aktiven Geschoss ändern (Sichtbarkeit, Transparenz, Maßstab) und speichern
+    const updateBgImage = useCallback((patch) => {
+        const storey = activeStoreyRef.current;
+        if (!storey?.bgImage) return;
+        const next = { ...storey.bgImage, ...patch };
+        storey.bgImage = next;
+        setBgImage(next);
+        markDirty();
+        requestRender();
+    }, [markDirty, requestRender]);
+
+    const handleBgUpload = (e) => {
         const file = e.target.files?.[0];
+        e.target.value = '';
         if (!file) return;
+        if (file.size > MAX_BG_FILE_BYTES) {
+            alert(`Die Datei ist zu groß (${(file.size / 1024 / 1024).toFixed(1).replace('.', ',')} MB). Bitte eine Datei bis 30 MB verwenden.`);
+            return;
+        }
+        // Ziel-Geschoss beim Start festhalten – das Bild landet dort, auch wenn inzwischen gewechselt wurde
+        const targetStoreyId = activeStoreyRef.current?.id;
+
+        const applyLoadedBg = (dataUrl, pxPerMm, img) => {
+            const target = storeysRef.current.find(s => s.id === targetStoreyId);
+            if (!target) return;
+            // pxPerMm = how many image pixels per 1 mm of real-world space
+            const finalScale = pxPerMm || 5;
+            const bgData = {
+                dataUrl,
+                scale: finalScale,
+                offsetX: 0,
+                offsetY: 0,
+                opacity: 0.35,
+                visible: true,
+                imgWidth: img.width,
+                imgHeight: img.height,
+            };
+            // Persist to storey so it saves to DB
+            target.bgImage = bgData;
+            if (activeStoreyRef.current?.id === targetStoreyId) {
+                bgLoadTokenRef.current++;
+                setBgImage(bgData);
+                setBgImageObj(img);
+            }
+            markDirty();
+            requestRender();
+        };
 
         const loadImage = (dataUrl, pxPerMm) => {
             const img = new window.Image();
-            img.onload = () => {
-                setBgImageObj(img);
-                // pxPerMm = how many image pixels per 1 mm of real-world space
-                const finalScale = pxPerMm || 5;
-                const bgData = {
-                    dataUrl,
-                    scale: finalScale,
-                    offsetX: 0,
-                    offsetY: 0,
-                    opacity: 0.35,
-                    visible: true,
-                    imgWidth: img.width,
-                    imgHeight: img.height,
-                };
-                setBgImage(bgData);
-                // Persist to storey so it saves to DB
-                if (activeStorey) activeStorey.bgImage = bgData;
-                markDirty();
-                requestRender();
-            };
+            img.onload = () => applyLoadedBg(dataUrl, pxPerMm, img);
+            img.onerror = () => alert('Das Hintergrundbild konnte nicht geladen werden. Bitte eine PNG-, JPG- oder PDF-Datei verwenden.');
             img.src = dataUrl;
         };
 
         if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
             // PDF: render first page to canvas using pdfjsLib
             const loadPdf = async () => {
+                let loadingTask = null;
+                let pdf = null;
                 try {
                     const pdfjsLib = await import('pdfjs-dist');
 
@@ -366,26 +965,28 @@ const FloorPlanEditor = () => {
                     }
 
                     const arrayBuffer = await file.arrayBuffer();
-                    const pdf = await pdfjsLib.getDocument({
+                    loadingTask = pdfjsLib.getDocument({
                         data: new Uint8Array(arrayBuffer),
                         useWorkerFetch: false,
                         isEvalSupported: false,
                         useSystemFonts: true,
-                    }).promise;
+                    });
+                    pdf = await loadingTask.promise;
                     const page = await pdf.getPage(1);
 
                     // Get physical page size (1 PDF point = 1/72 inch = 0.352778 mm)
                     const baseViewport = page.getViewport({ scale: 1 });
                     const pageWidthMm = baseViewport.width * 0.352778;
-                    const pageHeightMm = baseViewport.height * 0.352778;
-                    console.log(`[PDF] Page size: ${(pageWidthMm / 1000).toFixed(2)}m × ${(pageHeightMm / 1000).toFixed(2)}m`);
 
-                    const renderScale = 4; // Render at 4x for crisp quality
+                    // Render-Auflösung begrenzen (max. MAX_BG_EDGE_PX Kantenlänge, höchstens 4-fach)
+                    const renderScale = Math.min(4, MAX_BG_EDGE_PX / Math.max(baseViewport.width, baseViewport.height, 1));
                     const viewport = page.getViewport({ scale: renderScale });
                     const canvas = document.createElement('canvas');
-                    canvas.width = viewport.width;
-                    canvas.height = viewport.height;
+                    canvas.width = Math.max(1, Math.floor(viewport.width));
+                    canvas.height = Math.max(1, Math.floor(viewport.height));
                     const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
                     await page.render({ canvasContext: ctx, viewport }).promise;
 
                     // pxPerMm = rendered pixels / physical mm on paper
@@ -394,30 +995,50 @@ const FloorPlanEditor = () => {
                     const drawingScale = 100; // default: 1:100
                     const pxPerMm = viewport.width / (pageWidthMm * drawingScale);
 
-                    const dataUrl = canvas.toDataURL('image/png');
+                    const dataUrl = encodeBgCanvas(canvas);
                     loadImage(dataUrl, pxPerMm);
                 } catch (err) {
                     console.error('PDF load error:', err);
                     alert('PDF konnte nicht geladen werden: ' + (err.message || err) + '\nBitte verwende ein Bild (PNG/JPG) oder versuche es erneut.');
+                } finally {
+                    try {
+                        if (pdf) await pdf.destroy();
+                        else if (loadingTask) await loadingTask.destroy();
+                    } catch { /* ignore */ }
                 }
             };
             loadPdf();
         } else {
             // Regular image — assume 150 DPI scanned plan at 1:100 scale
             // 150 DPI = 5.906 px/mm on paper; at 1:100 → 0.05906 px/mm in real world
+            const basePxPerMm = 5.906 / 100;
             const reader = new FileReader();
             reader.onload = (ev) => {
-                loadImage(ev.target.result, 5.906 / 100);
+                const original = ev.target.result;
+                const img = new window.Image();
+                img.onload = () => {
+                    const maxEdge = Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height);
+                    if (maxEdge > MAX_BG_EDGE_PX || String(original).length > MAX_BG_DATAURL_CHARS) {
+                        // Zu groß für plan_data → verkleinern, Maßstab entsprechend anpassen
+                        const { dataUrl, factor } = downscaleBgImage(img);
+                        loadImage(dataUrl, basePxPerMm * factor);
+                    } else {
+                        applyLoadedBg(original, basePxPerMm, img);
+                    }
+                };
+                img.onerror = () => alert('Das Bild konnte nicht gelesen werden. Bitte eine PNG- oder JPG-Datei verwenden.');
+                img.src = original;
             };
+            reader.onerror = () => alert('Die Datei konnte nicht gelesen werden.');
             reader.readAsDataURL(file);
         }
-        e.target.value = '';
-    }, [requestRender]);
+    };
 
-    const handleCalibApply = useCallback(() => {
-        if (calibPoints.length < 2 || !calibDistMm) return;
-        const distMm = parseFloat(calibDistMm.replace(',', '.'));
-        if (!distMm || distMm <= 0) return;
+    const handleCalibApply = () => {
+        const storey = activeStoreyRef.current;
+        if (calibPoints.length < 2 || !calibDistMm || !storey?.bgImage) return;
+        const distMm = parseNumberInput(calibDistMm);
+        if (!Number.isFinite(distMm) || distMm <= 0) return;
 
         // Distance in current world coords between the two calibration points
         const dx = calibPoints[1].x - calibPoints[0].x;
@@ -428,50 +1049,51 @@ const FloorPlanEditor = () => {
         // Current scale: pxPerMm. worldDist mm in current scale = worldDist mm
         // Real distance = distMm mm.
         // New scale = old scale * (worldDist / distMm)
-        const oldScale = bgImage?.scale || 1;
+        const oldScale = storey.bgImage.scale || 1;
         const newScale = oldScale * (worldDist / distMm);
+        if (!Number.isFinite(newScale) || newScale <= 0) return;
 
-        setBgImage(prev => { const u = { ...prev, scale: newScale }; if (activeStorey) activeStorey.bgImage = u; return u; });
+        updateBgImage({ scale: newScale });
         setCalibPoints([]);
         setShowCalibDialog(false);
         setCalibDistMm('');
         setActiveTool(TOOLS.SELECT);
-        requestRender();
-    }, [calibPoints, calibDistMm, bgImage, requestRender]);
+    };
 
-    const removeBgImage = useCallback(() => {
+    const removeBgImage = () => {
+        bgLoadTokenRef.current++;
         setBgImage(null);
         setBgImageObj(null);
         setCalibPoints([]);
         if (bgFileRef.current) bgFileRef.current.value = '';
-        if (activeStorey) { delete activeStorey.bgImage; markDirty(); }
+        const storey = activeStoreyRef.current;
+        if (storey?.bgImage) { delete storey.bgImage; markDirty(); }
         requestRender();
-    }, [activeStorey, markDirty, requestRender]);
+    };
 
     // ─── Mouse Handlers ─────────────────────────────────────────
-    const isPanningRef = useRef(false);
-    const panStartRef = useRef({ x: 0, y: 0 });
-    const dragStartRef = useRef(null);
-    const spaceHeldRef = useRef(false);
-    const dragHandleRef = useRef(null);     // which handle is being dragged: p1Id, p2Id, or 'mid'
-    const dimensionLineRef = useRef(null);  // active dimension line during drag
-    const selectedIdRef = useRef(null);     // always-current selectedId for closures
-    selectedIdRef.current = selectedId;
-    const hoverPointRef = useRef(null);     // world point near cursor for corner hover
-    const marqueeRef = useRef(null);        // { sx1, sy1, sx2, sy2 } screen coords for selection rectangle
-    const hoverIdRef = useRef(null);         // ID of element currently hovered
     showDimensionsRef.current = showDimensions;
 
-    // Track Space key for pan mode
+    // Track Space key for pan mode (nicht in Eingabefeldern – dort ist die Leertaste ein Leerzeichen)
     useEffect(() => {
-        const down = (e) => { if (e.code === 'Space' && !e.repeat) { spaceHeldRef.current = true; e.preventDefault(); } };
+        const down = (e) => {
+            if (e.code !== 'Space' || e.repeat || isEditableTarget(e.target)) return;
+            spaceHeldRef.current = true;
+            e.preventDefault();
+        };
         const up = (e) => { if (e.code === 'Space') { spaceHeldRef.current = false; } };
+        const reset = () => { spaceHeldRef.current = false; };
         window.addEventListener('keydown', down);
         window.addEventListener('keyup', up);
-        return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+        window.addEventListener('blur', reset);
+        return () => {
+            window.removeEventListener('keydown', down);
+            window.removeEventListener('keyup', up);
+            window.removeEventListener('blur', reset);
+        };
     }, []);
 
-    const handleMouseDown = useCallback((e) => {
+    const handleMouseDown = (e) => {
         const canvas = canvasRef.current;
         if (!canvas) return;
         const rect = canvas.getBoundingClientRect();
@@ -482,25 +1104,14 @@ const FloorPlanEditor = () => {
         // BUT: right-click during wall drawing = cancel drawing
         if (e.button === 2 && (activeTool === TOOLS.OUTER_WALL || activeTool === TOOLS.INNER_WALL) && drawPoints.length > 0) {
             e.preventDefault();
-            // Cancel current drawing operation
-            if (drawPoints.length === 1) {
-                // Remove the single placed point if no wall was created yet
-                const ptId = drawPoints[0];
-                const usedByWall = activeStorey.walls.some(w => w.p1 === ptId || w.p2 === ptId);
-                if (!usedByWall) {
-                    activeStorey.points = activeStorey.points.filter(p => p.id !== ptId);
-                }
-            }
-            setDrawPoints([]);
-            previewRef.current = null;
-            snapPointRef.current = null;
-            requestRender();
-            forceRender(v => v + 1);
+            // Cancel current drawing operation (inkl. Rücknahme von Startpunkt/Wandteilung)
+            cancelDrawing();
             return;
         }
         if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceHeldRef.current)) {
             isPanningRef.current = true;
             panStartRef.current = { x: sx, y: sy };
+            canvas.style.cursor = 'grabbing';
             e.preventDefault();
             return;
         }
@@ -533,7 +1144,14 @@ const FloorPlanEditor = () => {
                 requestRender();
             }
         } else if (activeTool === TOOLS.SELECT) {
+            // Stand vor einem möglichen Ziehen merken – beim Loslassen wird nur bei echter Änderung gespeichert
+            const before = snapshotStorey(activeStorey);
+            dragStartRef.current = null;
             handleSelectClick(wx, wy, sx, sy);
+            if (dragStartRef.current) {
+                dragStartRef.current.before = before;
+                dragStartRef.current.storeyId = activeStorey.id;
+            }
         } else if (activeTool === TOOLS.SLAB) {
             // Polygon drawing for slabs
             let clickX = wx, clickY = wy;
@@ -557,8 +1175,6 @@ const FloorPlanEditor = () => {
                 const startPt = drawPoints[0];
                 if (dist({ x: clickX, y: clickY }, startPt) < 30 / vpRef.current.zoom) {
                     // Create slab with polygon
-                    if (!activeStorey.slabs) activeStorey.slabs = [];
-                    const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
                     const newSlab = {
                         id: genId(),
                         name: 'Decke',
@@ -566,11 +1182,9 @@ const FloorPlanEditor = () => {
                         ref_height_mm: activeStorey.height_mm || 2600,
                         polygon: drawPoints.map(p => ({ x: p.x, y: p.y })),
                     };
-                    activeStorey.slabs.push(newSlab);
-                    cmdStackRef.current.execute({
-                        do: () => { },
-                        undo: () => { Object.assign(activeStorey, storeyCopy); forceRender(v => v + 1); },
-                        label: 'Decke erstellen',
+                    applyChange('Decke erstellen', st => {
+                        if (!st.slabs) st.slabs = [];
+                        st.slabs.push(newSlab);
                     });
                     setDrawPoints([]);
                     previewRef.current = null;
@@ -578,9 +1192,6 @@ const FloorPlanEditor = () => {
                     setSelectedId(newSlab.id);
                     setSelectedType('slab');
                     setActiveTool(TOOLS.SELECT);
-                    markDirty();
-                    forceRender(v => v + 1);
-                    requestRender();
                     return;
                 }
             }
@@ -599,7 +1210,6 @@ const FloorPlanEditor = () => {
         // ── Annotation Tools ──────────────────────────────────────────
         const isAnnotTool = [TOOLS.ANNOTATE_POLYLINE, TOOLS.ANNOTATE_CIRCLE, TOOLS.ANNOTATE_AREA, TOOLS.ANNOTATE_TEXT].includes(activeTool);
         if (isAnnotTool) {
-            if (!activeStorey.annotations) activeStorey.annotations = [];
             const world = screenToWorld(vpRef.current, sx, sy);
             let ax = snapToGrid(world.x), ay = snapToGrid(world.y);
 
@@ -608,38 +1218,38 @@ const FloorPlanEditor = () => {
             if (snapResult) { ax = snapResult.x; ay = snapResult.y; }
             const genAnnId = () => 'ann_' + Math.random().toString(36).substr(2, 9);
 
+            // Jede Anmerkungs-Aktion ist ein eigener Undo-Schritt
             if (activeTool === TOOLS.ANNOTATE_POLYLINE || activeTool === TOOLS.ANNOTATE_AREA) {
                 const annType = activeTool === TOOLS.ANNOTATE_POLYLINE ? 'polyline' : 'area';
                 if (!activeAnnotationId) {
-                    // First click — just store the first point
-                    setAnnotationPoints([{ x: ax, y: ay }]);
+                    if (annotationPoints.length >= 1) {
+                        // After 2nd point: create the annotation object immediately
+                        const newAnn = {
+                            id: genAnnId(), type: annType,
+                            points: [...annotationPoints, { x: ax, y: ay }],
+                            color: annotationColor,
+                            lineWidth: annotationLineWidth,
+                            fillColor: annType === 'area' ? (annotationColor + '33') : undefined,
+                        };
+                        applyChange('Anmerkung erstellen', st => {
+                            if (!st.annotations) st.annotations = [];
+                            st.annotations.push(newAnn);
+                        });
+                        setActiveAnnotationId(newAnn.id);
+                        setAnnotationPoints([...annotationPoints, { x: ax, y: ay }]);
+                        setSelectedId(newAnn.id);
+                        setSelectedType('annotation');
+                    } else {
+                        // First click — just store the first point
+                        setAnnotationPoints([{ x: ax, y: ay }]);
+                    }
                 } else {
                     // Subsequent clicks — add point to the live annotation
-                    const ann = activeStorey.annotations.find(a => a.id === activeAnnotationId);
+                    const ann = (activeStorey.annotations || []).find(a => a.id === activeAnnotationId);
                     if (ann) {
-                        ann.points.push({ x: ax, y: ay });
+                        applyChange('Anmerkung erweitern', () => { ann.points.push({ x: ax, y: ay }); });
                         setAnnotationPoints(prev => [...prev, { x: ax, y: ay }]);
-                        markDirty();
-                        forceRender(v => v + 1);
                     }
-                }
-
-                // After 2nd point: create the annotation object immediately
-                if (!activeAnnotationId && annotationPoints.length >= 1) {
-                    const newAnn = {
-                        id: genAnnId(), type: annType,
-                        points: [...annotationPoints, { x: ax, y: ay }],
-                        color: annotationColor,
-                        lineWidth: annotationLineWidth,
-                        fillColor: annType === 'area' ? (annotationColor + '33') : undefined,
-                    };
-                    activeStorey.annotations.push(newAnn);
-                    setActiveAnnotationId(newAnn.id);
-                    setAnnotationPoints([...annotationPoints, { x: ax, y: ay }]);
-                    setSelectedId(newAnn.id);
-                    setSelectedType('annotation');
-                    markDirty();
-                    forceRender(v => v + 1);
                 }
                 requestRender();
             } else if (activeTool === TOOLS.ANNOTATE_CIRCLE) {
@@ -654,11 +1264,12 @@ const FloorPlanEditor = () => {
                             cx: annotationCircleCenter.x, cy: annotationCircleCenter.y,
                             radius, color: annotationColor, lineWidth: annotationLineWidth,
                         };
-                        activeStorey.annotations.push(newAnn);
+                        applyChange('Anmerkung erstellen', st => {
+                            if (!st.annotations) st.annotations = [];
+                            st.annotations.push(newAnn);
+                        });
                         setSelectedId(newAnn.id);
                         setSelectedType('annotation');
-                        markDirty();
-                        forceRender(v => v + 1);
                     }
                     setAnnotationCircleCenter(null);
                     requestRender();
@@ -669,23 +1280,28 @@ const FloorPlanEditor = () => {
                     x: ax, y: ay, text: 'Text',
                     color: annotationColor, fontSize: 14,
                 };
-                activeStorey.annotations.push(newAnn);
-                setEditingAnnotationId(newAnn.id);
+                applyChange('Anmerkung erstellen', st => {
+                    if (!st.annotations) st.annotations = [];
+                    st.annotations.push(newAnn);
+                });
                 setSelectedId(newAnn.id);
                 setSelectedType('annotation');
-                markDirty();
-                forceRender(v => v + 1);
-                requestRender();
             }
         }
-    }, [activeTool, activeStorey, drawPoints, placingFurniture, innerWallType, innerWallThickness, outerWallThickness, calibPoints, requestRender, nextOpeningPreset, selectedIds, selectedType, annotationColor, annotationLineWidth, annotationCircleCenter, annotationPoints, activeAnnotationId]);
+    };
 
-    const handleMouseMove = useCallback((e) => {
+    const handleMouseMove = (e) => {
         const canvas = canvasRef.current;
         if (!canvas) return;
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
+
+        // Maustaste wurde außerhalb losgelassen → Ziehen/Pan/Auswahlrahmen beenden
+        if (e.buttons === 0 && (isPanningRef.current || dragStartRef.current || marqueeRef.current?.dragging)) {
+            handleMouseUp();
+            return;
+        }
 
         // Pan
         if (isPanningRef.current) {
@@ -720,8 +1336,9 @@ const FloorPlanEditor = () => {
                     if (hostWall) {
                         const wp1 = getPoint(activeStorey, hostWall.p1);
                         const wp2 = getPoint(activeStorey, hostWall.p2);
-                        if (wp1 && wp2) {
-                            const wallLen = dist(wp1, wp2);
+                        const wallLen = wp1 && wp2 ? dist(wp1, wp2) : 0;
+                        // Degenerierte oder zu kurze Wand: Öffnung nicht verschieben (keine Division durch 0)
+                        if (wallLen >= 1 && wallLen >= opening.width_mm + 2 * OPENING_MIN_EDGE_DIST) {
                             const wallDx = (wp2.x - wp1.x) / wallLen;
                             const wallDy = (wp2.y - wp1.y) / wallLen;
                             // Project mouse position onto wall axis
@@ -730,8 +1347,8 @@ const FloorPlanEditor = () => {
                             let newPos = relX * wallDx + relY * wallDy;
                             // Clamp to valid range
                             const halfW = opening.width_mm / 2;
-                            newPos = Math.max(halfW + 50, Math.min(wallLen - halfW - 50, snapToGrid(newPos)));
-                            opening.position_mm = newPos;
+                            newPos = Math.max(halfW + OPENING_MIN_EDGE_DIST, Math.min(wallLen - halfW - OPENING_MIN_EDGE_DIST, snapToGrid(newPos)));
+                            if (Number.isFinite(newPos)) opening.position_mm = newPos;
                         }
                     }
                 }
@@ -803,7 +1420,7 @@ const FloorPlanEditor = () => {
                     // Constrain endpoints to their host walls (if attached)
                     if (draggedWall && draggedWall.type !== 'outer') {
                         // For each endpoint, find a host wall it lies on and project movement onto it
-                        const constrainToHost = (origPt, newX, newY, ptId) => {
+                        const constrainToHost = (origPt, newX, newY) => {
                             // Find host wall: another wall whose edge contains this point
                             for (const hw of activeStorey.walls) {
                                 if (hw.id === id) continue;
@@ -841,8 +1458,8 @@ const FloorPlanEditor = () => {
                             return { x: newX, y: newY, constrained: false };
                         };
 
-                        const c1 = constrainToHost(origP1, newP1x, newP1y, p1Id);
-                        const c2 = constrainToHost(origP2, newP2x, newP2y, p2Id);
+                        const c1 = constrainToHost(origP1, newP1x, newP1y);
+                        const c2 = constrainToHost(origP2, newP2x, newP2y);
                         newP1x = c1.x; newP1y = c1.y;
                         newP2x = c2.x; newP2y = c2.y;
                     }
@@ -1234,17 +1851,18 @@ const FloorPlanEditor = () => {
             if (hit) {
                 const pt1 = getPoint(activeStorey, hit.wall.p1);
                 const pt2 = getPoint(activeStorey, hit.wall.p2);
-                if (pt1 && pt2) {
-                    const wallLen = dist(pt1, pt2);
+                const wallLenHit = pt1 && pt2 ? dist(pt1, pt2) : 0;
+                const presetHit = nextOpeningPreset[activeTool === TOOLS.DOOR ? 'door' : 'window'];
+                // Wand zu kurz (oder degeneriert) für diese Öffnung → keine Vorschau
+                if (!(wallLenHit >= 1 && wallLenHit >= presetHit.width + 2 * OPENING_MIN_EDGE_DIST)) {
+                    previewRef.current = null;
+                } else {
+                    const wallLen = wallLenHit;
                     const pos = hit.t * wallLen;
-                    const openingKey = activeTool === TOOLS.DOOR ? 'door' : 'window';
-                    const preset = nextOpeningPreset[openingKey];
-                    const width = preset.width;
-                    const height = preset.height;
-                    const sill = preset.sill || 0;
+                    const width = presetHit.width;
                     const halfW = width / 2;
                     // Clamp to valid range
-                    const clampedPos = Math.max(halfW + 50, Math.min(wallLen - halfW - 50, pos));
+                    const clampedPos = Math.max(halfW + OPENING_MIN_EDGE_DIST, Math.min(wallLen - halfW - OPENING_MIN_EDGE_DIST, pos));
                     const dx = (pt2.x - pt1.x) / wallLen;
                     const dy = (pt2.y - pt1.y) / wallLen;
                     previewRef.current = {
@@ -1329,7 +1947,6 @@ const FloorPlanEditor = () => {
             requestRender();
         } else if ((activeTool === TOOLS.ANNOTATE_POLYLINE || activeTool === TOOLS.ANNOTATE_AREA) && annotationPoints.length > 0) {
             // Preview line from last annotation point to cursor
-            const lastPt = annotationPoints[annotationPoints.length - 1];
             let ax = snapToGrid(world.x), ay = snapToGrid(world.y);
             const snapResult = findSnapPoint(ax, ay, activeStorey.points, []);
             if (snapResult) { ax = snapResult.x; ay = snapResult.y; }
@@ -1430,17 +2047,15 @@ const FloorPlanEditor = () => {
                         }
                     }
                     for (const f of activeStorey.furniture) {
-                        const fw = (f.width_mm || 500) / 2;
-                        const fh = (f.depth_mm || 500) / 2;
-                        if (f.x + fw >= minX && f.x - fw <= maxX && f.y + fh >= minY && f.y - fh <= maxY) {
+                        const fb = furnitureBounds(f);
+                        if (fb.maxX >= minX && fb.minX <= maxX && fb.maxY >= minY && fb.minY <= maxY) {
                             preselected.add(f.id);
                         }
                     }
                     marqueeRef.current.preselected = preselected;
                 }
-            } else if ((activeTool === TOOLS.INNER_WALL && drawPoints.length === 0) ||
-                (activeTool === TOOLS.OUTER_WALL && drawPoints.length === 0)) {
-                // Show snap indicator before first click
+            } else if (activeTool === TOOLS.INNER_WALL && drawPoints.length === 0) {
+                // Show snap indicator before first click (Außenwand ohne Punkt wird bereits oben behandelt)
                 const gx = snapToGrid(world.x), gy = snapToGrid(world.y);
                 let bestDist = 20 / vpRef.current.zoom;
                 let snap = null;
@@ -1529,39 +2144,29 @@ const FloorPlanEditor = () => {
 
             requestRender();
         }
-    }, [activeTool, drawPoints, activeStorey, placingFurniture, nextOpeningPreset]);
+    };
 
-    const handleMouseUp = useCallback((e) => {
+    const handleMouseUp = () => {
         if (isPanningRef.current) {
             isPanningRef.current = false;
+            if (canvasRef.current) canvasRef.current.style.cursor = '';
             return;
         }
         if (dragStartRef.current) {
-            const { type } = dragStartRef.current;
-            if (type === 'furniture' || type === 'corner' || type === 'wall_perp' || type === 'wall_body' || type === 'multi' || type === 'opening' || type === 'slab_corner' || type === 'room_label' || type === 'annotation_drag' || type === 'annotation_point' || type === 'annotation_resize_circle') {
-                // Recompute rooms and inner polygon after wall geometry changes
-                if (type === 'corner' || type === 'wall_perp' || type === 'wall_body' || type === 'multi') {
-                    // Recompute both boundaries for outer walls
-                    if (activeStorey.outerClosed) {
-                        const outerWalls = activeStorey.walls.filter(w => w.type === 'outer');
-                        if (outerWalls.length >= 3) {
-                            const pts = buildOrderedPolygon(outerWalls, activeStorey.points);
-                            if (pts && pts.length >= 3) {
-                                const cwPoly = ensureCW(pts);
-                                const thickness = outerWalls[0].thickness_mm;
-                                activeStorey.outerPolygon = [...cwPoly];
-                                activeStorey.outerBoundary = offsetPolygon(cwPoly, -thickness);
-                            }
-                        }
-                    }
-                }
-                computeRooms(activeStorey);
-                markDirty();
-                forceRender(v => v + 1);
-            }
+            const drag = dragStartRef.current;
             dragStartRef.current = null;
             dragHandleRef.current = null;
             dimensionLineRef.current = null;
+            const storey = storeysRef.current.find(s => s.id === drag.storeyId) || activeStorey;
+            // Nur bei tatsächlicher Änderung (nicht beim reinen Anklicken) neu berechnen, erfassen und speichern
+            if (storey && drag.before != null && snapshotStorey(storey) !== drag.before) {
+                if (GEOMETRY_DRAG_TYPES.includes(drag.type)) {
+                    // Recompute both boundaries for outer walls
+                    refreshOuterPolygon(storey);
+                }
+                computeRooms(storey);
+                commitChange(DRAG_LABELS[drag.type] || 'Verschieben', storey, drag.before);
+            }
             requestRender();
         }
 
@@ -1600,20 +2205,18 @@ const FloorPlanEditor = () => {
 
                 // Openings on selected walls or inside marquee
                 for (const opening of activeStorey.openings) {
-                    const wall = activeStorey.walls.find(w => w.id === opening.wallId);
+                    const openingWallId = opening.wall_id ?? opening.wallId;
+                    const wall = activeStorey.walls.find(w => w.id === openingWallId);
                     if (wall && selected.some(s => s.id === wall.id)) {
                         selected.push({ id: opening.id, type: 'opening' });
                     }
                 }
 
-                // Furniture: select if center or any corner is inside marquee
+                // Furniture: select if its (rotated) bounding box overlaps the marquee
                 for (const furn of activeStorey.furniture) {
-                    const fw = (furn.width_mm || 500) / 2;
-                    const fh = (furn.depth_mm || 500) / 2;
-                    const fMinX = furn.x - fw, fMaxX = furn.x + fw;
-                    const fMinY = furn.y - fh, fMaxY = furn.y + fh;
+                    const fb = furnitureBounds(furn);
                     // Check if bounding boxes overlap
-                    if (fMaxX >= minX && fMinX <= maxX && fMaxY >= minY && fMinY <= maxY) {
+                    if (fb.maxX >= minX && fb.minX <= maxX && fb.maxY >= minY && fb.minY <= maxY) {
                         selected.push({ id: furn.id, type: 'furniture' });
                     }
                 }
@@ -1631,7 +2234,22 @@ const FloorPlanEditor = () => {
             marqueeRef.current = null;
             requestRender();
         }
-    }, [activeStorey, markDirty, requestRender]);
+    };
+
+    // Loslassen auch außerhalb der Zeichenfläche (Seitenleiste, Topbar, außerhalb des Fensters) erkennen
+    const mouseUpRef = useRef(null);
+    mouseUpRef.current = handleMouseUp;
+    useEffect(() => {
+        const onUp = () => {
+            if (isPanningRef.current || dragStartRef.current || marqueeRef.current) mouseUpRef.current?.();
+        };
+        window.addEventListener('mouseup', onUp);
+        window.addEventListener('blur', onUp);
+        return () => {
+            window.removeEventListener('mouseup', onUp);
+            window.removeEventListener('blur', onUp);
+        };
+    }, []);
 
     const handleWheel = useCallback((e) => {
         e.preventDefault();
@@ -1642,6 +2260,7 @@ const FloorPlanEditor = () => {
         if (e.ctrlKey) {
             // Ctrl + Wheel = Zoom
             zoomAtPoint(vpRef.current, e.clientX - rect.left, e.clientY - rect.top, e.deltaY);
+            setZoomPct(zoomToPercent(vpRef.current.zoom));
         } else {
             // Normal scroll = Pan
             const vp = vpRef.current;
@@ -1653,7 +2272,17 @@ const FloorPlanEditor = () => {
 
     // ─── Tool Click Handlers ────────────────────────────────────
 
+    // Ausgangsstand für den nächsten Zeichenschritt: noch offener Stand aus dem laufenden Zug oder aktueller Stand
+    const pendingBeforeFor = (storey) => {
+        const current = snapshotStorey(storey);
+        const pd = pendingDrawRef.current;
+        // Nur übernehmen, wenn seit dem letzten Zeichenschritt nichts anderes geändert wurde
+        if (pd && pd.storeyId === storey.id && current === (pd.last ?? pd.before)) return pd.before;
+        return current;
+    };
+
     const handleOuterWallClick = (wx, wy) => {
+        const before = pendingBeforeFor(activeStorey);
 
         // Apply active snap point if available
         let clickX = wx, clickY = wy;
@@ -1690,27 +2319,15 @@ const FloorPlanEditor = () => {
                 // Close polygon
                 const lastPtId = drawPoints[drawPoints.length - 1];
 
-                const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
                 addOuterWallSegment(activeStorey, lastPtId, chainStartId, outerWallThickness);
                 closeOuterWalls(activeStorey);
                 computeRooms(activeStorey);
-
-                cmdStackRef.current.execute({
-                    do: () => { /* already done */ },
-                    undo: () => {
-                        const idx = storeys.indexOf(activeStorey);
-                        if (idx >= 0) {
-                            Object.assign(activeStorey, storeyCopy);
-                        }
-                        forceRender(v => v + 1);
-                    },
-                    label: 'Außenwand schließen',
-                });
+                commitChange('Außenwand schließen', activeStorey, before);
+                pendingDrawRef.current = null;
 
                 setDrawPoints([]);
                 previewRef.current = null;
                 snapPointRef.current = null;
-                markDirty();
                 forceRender(v => v + 1);
                 return;
             }
@@ -1718,19 +2335,23 @@ const FloorPlanEditor = () => {
 
         // If snapping to an existing point, reuse it instead of creating a new one
         let pt;
+        let createdPoint = false;
         const existingSnap = snapPointRef.current && snapPointRef.current.id
             ? activeStorey.points.find(p => p.id === snapPointRef.current.id)
             : null;
         if (existingSnap) {
             pt = existingSnap;
         } else {
+            const countBefore = activeStorey.points.length;
             pt = addPoint(activeStorey, clickX, clickY);
+            createdPoint = activeStorey.points.length > countBefore;
         }
 
         if (drawPoints.length > 0) {
             const lastPtId = drawPoints[drawPoints.length - 1];
             const lastPt = getPoint(activeStorey, lastPtId);
-            if (lastPt && !existingSnap) {
+            // Nur neu angelegte Punkte ausrichten – vorhandene (evtl. geteilte) Punkte nicht verschieben
+            if (lastPt && !existingSnap && createdPoint) {
                 // Only snap angle if very close to axis alignment (within 2°)
                 const dx = pt.x - lastPt.x, dy = pt.y - lastPt.y;
                 const angle = Math.atan2(dy, dx) * 180 / Math.PI;
@@ -1742,7 +2363,19 @@ const FloorPlanEditor = () => {
                 }
             }
             const wall = addOuterWallSegment(activeStorey, lastPtId, pt.id, outerWallThickness);
-            if (!wall) return; // too short
+            if (!wall) {
+                // too short – gerade angelegten Punkt wieder entfernen (kein verwaistes Snap-Ziel)
+                if (createdPoint) activeStorey.points = activeStorey.points.filter(p => p.id !== pt.id);
+                requestRender();
+                return;
+            }
+            // Jedes Segment sofort als Undo-Schritt erfassen und automatisch speichern
+            const after = commitChange('Außenwand zeichnen', activeStorey, before);
+            pendingDrawRef.current = { storeyId: activeStorey.id, before: after || snapshotStorey(activeStorey), last: null };
+        } else {
+            // Startpunkt: noch kein Undo-Schritt – bei Abbruch (ESC/Rechtsklick) wird er zurückgenommen
+            const last = snapshotStorey(activeStorey);
+            pendingDrawRef.current = { storeyId: activeStorey.id, before, last: last !== before ? last : null };
         }
         setDrawPoints([...drawPoints, pt.id]);
         forceRender(v => v + 1);
@@ -1751,6 +2384,9 @@ const FloorPlanEditor = () => {
 
     const handleInnerWallClick = (wx, wy) => {
         if (!activeStorey.outerClosed) return;
+        // Stand vor dem ersten Klick (inkl. evtl. Teilung der Wirtswand) für Undo bzw. Abbruch
+        const before = pendingBeforeFor(activeStorey);
+        const pointIdsBefore = new Set(activeStorey.points.map(p => p.id));
 
         // Apply active snap point if available
         let clickX = wx, clickY = wy;
@@ -1830,14 +2466,11 @@ const FloorPlanEditor = () => {
                 ? activeStorey.walls.find(w => w.id === snapPointRef.current.snapWallId)
                 : null;
             if (hostWall && hostWall.type !== 'outer' && activeStorey.outerClosed) {
-                const outerWalls = activeStorey.walls.filter(w => w.type === 'outer');
-                const orderedPts = buildOrderedPolygon(outerWalls, activeStorey.points);
-                if (orderedPts && orderedPts.length >= 3) {
-                    const cwPoly = ensureCW(orderedPts);
-                    activeStorey.outerPolygon = [...cwPoly];
-                    activeStorey.outerBoundary = offsetPolygon(cwPoly, -outerWalls[0].thickness_mm);
-                }
+                refreshOuterPolygon(activeStorey);
             }
+            // Erster Klick ist noch kein Undo-Schritt; bei Abbruch werden Punkt/Teilung zurückgenommen
+            const last = snapshotStorey(activeStorey);
+            pendingDrawRef.current = { storeyId: activeStorey.id, before, last: last !== before ? last : null };
             setDrawPoints([pt.id]);
             requestRender();
             return;
@@ -1845,9 +2478,20 @@ const FloorPlanEditor = () => {
 
         const lastPtId = drawPoints[0];
         const lastPt = getPoint(activeStorey, lastPtId);
+        if (!lastPt) {
+            // Startpunkt existiert nicht mehr (z. B. nach Rückgängig) → Zeichnen sauber abbrechen
+            if (snapshotStorey(activeStorey) !== before) { applyStoreySnapshot(activeStorey.id, before); markDirty(); }
+            pendingDrawRef.current = null;
+            setDrawPoints([]);
+            previewRef.current = null;
+            snapPointRef.current = null;
+            forceRender(v => v + 1);
+            requestRender();
+            return;
+        }
         // Only apply angle snap if NOT snapping to an existing point/wall surface
-        // AND only for short-distance alignment (not forced)
-        const skipAngleSnap = existingSnap || (snapPointRef.current && snapPointRef.current.snapWallId);
+        // AND only for short-distance alignment (not forced); vorhandene Punkte nie verschieben
+        const skipAngleSnap = existingSnap || (snapPointRef.current && snapPointRef.current.snapWallId) || pointIdsBefore.has(pt.id);
         if (lastPt && !skipAngleSnap) {
             // Check if very close to axis alignment (within 2°), only then snap
             const dx = pt.x - lastPt.x, dy = pt.y - lastPt.y;
@@ -1863,33 +2507,21 @@ const FloorPlanEditor = () => {
         // Determine side from cursor
         const side = getPointSide(mouseWorldRef.current.x, mouseWorldRef.current.y, lastPt.x, lastPt.y, pt.x, pt.y);
 
-        const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
         const wall = addInnerWallSegment(activeStorey, lastPtId, pt.id, innerWallType, innerWallThickness, side);
 
         if (wall) {
             // Recompute outer boundary in case a wall was split
-            if (activeStorey.outerClosed) {
-                const outerWalls = activeStorey.walls.filter(w => w.type === 'outer');
-                const orderedPts = buildOrderedPolygon(outerWalls, activeStorey.points);
-                if (orderedPts && orderedPts.length >= 3) {
-                    const cwPoly = ensureCW(orderedPts);
-                    // Match closeOuterWalls: outerPolygon = inner edge (room boundary)
-                    activeStorey.outerPolygon = [...cwPoly];
-                    // outerBoundary = outer edge (offset outward)
-                    activeStorey.outerBoundary = offsetPolygon(cwPoly, -outerWalls[0].thickness_mm);
-                }
-            }
+            // (Match closeOuterWalls: outerPolygon = inner edge, outerBoundary = outer edge)
+            refreshOuterPolygon(activeStorey);
             computeRooms(activeStorey);
-            cmdStackRef.current.execute({
-                do: () => { /* already done */ },
-                undo: () => {
-                    Object.assign(activeStorey, storeyCopy);
-                    forceRender(v => v + 1);
-                },
-                label: 'Innenwand hinzufügen',
-            });
+            // Ein Undo-Schritt inkl. Startpunkt und evtl. geteilter Wirtswände
+            commitChange('Innenwand hinzufügen', activeStorey, before);
+        } else if (snapshotStorey(activeStorey) !== before) {
+            // Wand zu kurz: angelegte Punkte/Teilungen nicht als Waisen zurücklassen
+            applyStoreySnapshot(activeStorey.id, before);
             markDirty();
         }
+        pendingDrawRef.current = null;
 
         setDrawPoints([]);
         setActiveTool(TOOLS.SELECT); // Reset to select mode after drawing
@@ -1909,8 +2541,11 @@ const FloorPlanEditor = () => {
         if (!pt1 || !pt2) return;
 
         const wallLen = dist(pt1, pt2);
+        if (wallLen < 1) return; // degenerierte Wand
         const pos = hit.t * wallLen;
 
+        // Snapshot VOR dem Platzieren, damit Undo die Öffnung wirklich entfernt
+        const before = snapshotStorey(activeStorey);
         const preset = nextOpeningPreset[type === 'door' ? 'door' : 'window'];
         const opening = placeOpening(activeStorey, hit.wall.id, type, pos, {
             width_mm: preset.width,
@@ -1919,19 +2554,9 @@ const FloorPlanEditor = () => {
         });
 
         if (opening) {
-            const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
-            cmdStackRef.current.execute({
-                do: () => { /* already done */ },
-                undo: () => {
-                    Object.assign(activeStorey, storeyCopy);
-                    forceRender(v => v + 1);
-                },
-                label: `${type === 'door' ? 'Tür' : 'Fenster'} platzieren`,
-            });
+            commitChange(`${type === 'door' ? 'Tür' : 'Fenster'} platzieren`, activeStorey, before);
             setSelectedId(opening.id);
             setSelectedType('opening');
-            markDirty();
-            forceRender(v => v + 1);
         }
     };
 
@@ -1941,36 +2566,29 @@ const FloorPlanEditor = () => {
         // Place with mouse as center of object
         const fx = wx - item.defaultWidth / 2;
         const fy = wy - item.defaultDepth / 2;
+        const before = snapshotStorey(activeStorey);
         const furn = placeFurniture(activeStorey, item.id, fx, fy, item.defaultWidth, item.defaultDepth, item.defaultHeight, 0);
         if (furn) {
-            const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
-            cmdStackRef.current.execute({
-                do: () => { /* already done */ },
-                undo: () => {
-                    Object.assign(activeStorey, storeyCopy);
-                    forceRender(v => v + 1);
-                },
-                label: `${item.name} platzieren`,
-            });
+            commitChange(`${item.name} platzieren`, activeStorey, before);
             setSelectedId(furn.id);
             setSelectedType('furniture');
-            markDirty();
-            forceRender(v => v + 1);
         }
     };
 
     const handleDeleteClick = (wx, wy) => {
-        const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
+        const before = snapshotStorey(activeStorey);
+        let deletedId = null;
 
         const furn = findFurnitureAtPoint(activeStorey, wx, wy);
-        if (furn) { deleteFurniture(activeStorey, furn.id); }
+        if (furn) { deleteFurniture(activeStorey, furn.id); deletedId = furn.id; }
         else {
             const opening = findOpeningAtPoint(activeStorey, wx, wy);
-            if (opening) { deleteOpening(activeStorey, opening.id); }
+            if (opening) { deleteOpening(activeStorey, opening.id); deletedId = opening.id; }
             else {
                 const hit = findWallAtPoint(activeStorey, wx, wy, 30 / vpRef.current.zoom);
                 if (hit && hit.wall.type !== 'outer') {
                     deleteWall(activeStorey, hit.wall.id);
+                    deletedId = hit.wall.id;
                 } else if (activeStorey.annotations) {
                     // Check annotations for delete
                     for (let i = activeStorey.annotations.length - 1; i >= 0; i--) {
@@ -1992,6 +2610,7 @@ const FloorPlanEditor = () => {
                             }
                         }
                         if (hitAnn) {
+                            deletedId = ann.id;
                             activeStorey.annotations.splice(i, 1);
                             break;
                         }
@@ -2000,14 +2619,20 @@ const FloorPlanEditor = () => {
             }
         }
 
+        // Nur bei einem echten Treffer: Räume neu berechnen, Undo-Schritt anlegen, speichern
+        if (!deletedId) return;
         computeRooms(activeStorey);
-        cmdStackRef.current.execute({
-            do: () => { },
-            undo: () => { Object.assign(activeStorey, storeyCopy); forceRender(v => v + 1); },
-            label: 'Löschen',
-        });
-        markDirty();
-        forceRender(v => v + 1);
+        commitChange('Löschen', activeStorey, before);
+        if (selectedIdRef.current === deletedId) {
+            setSelectedId(null);
+            setSelectedType(null);
+        }
+    };
+
+    // Schwebende Längeneingabe öffnen (seq erzwingt ein frisches Eingabefeld je Wand)
+    const openLengthEditor = (info) => {
+        lengthEditDoneRef.current = false;
+        setEditingLength({ ...info, seq: Date.now() });
     };
 
     const handleSelectClick = (wx, wy, sx, sy) => {
@@ -2118,7 +2743,7 @@ const FloorPlanEditor = () => {
                         const wLen = dist(p1, p2);
                         const wDx = (p2.x - p1.x) / wLen;
                         const wDy = (p2.y - p1.y) / wLen;
-                        setEditingLength({
+                        openLengthEditor({
                             wallId: selWall.id,
                             value: +(wLen / 1000).toFixed(3),
                             dirX: wDx, dirY: wDy,
@@ -2149,7 +2774,8 @@ const FloorPlanEditor = () => {
                     }
                     // Check midpoint handle (perpendicular move)
                     const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-                    if (dist({ x: wx, y: wy }, mid) < handleRadius) {
+                    // (degenerierte Wand ohne Länge: keine Normale berechenbar → kein Senkrecht-Ziehen)
+                    if (dist({ x: wx, y: wy }, mid) < handleRadius && dist(p1, p2) >= 1) {
                         const wallLen = dist(p1, p2);
                         const wallDx = (p2.x - p1.x) / wallLen;
                         const wallDy = (p2.y - p1.y) / wallLen;
@@ -2192,7 +2818,7 @@ const FloorPlanEditor = () => {
                 const wLen = dist(wp1, wp2);
                 const wDirX = (wp2.x - wp1.x) / wLen;
                 const wDirY = (wp2.y - wp1.y) / wLen;
-                setEditingLength({
+                openLengthEditor({
                     wallId: wall.id,
                     value: +(wLen / 1000).toFixed(3),
                     dirX: wDirX, dirY: wDirY,
@@ -2213,40 +2839,22 @@ const FloorPlanEditor = () => {
             const p1 = getPoint(activeStorey, w.p1);
             const p2 = getPoint(activeStorey, w.p2);
             if (p1 && p2) {
-                // Duplicate shared endpoints so only this wall moves
-                const isP1Shared = activeStorey.walls.some(o => o.id !== w.id && (o.p1 === w.p1 || o.p2 === w.p1));
-                const isP2Shared = activeStorey.walls.some(o => o.id !== w.id && (o.p1 === w.p2 || o.p2 === w.p2));
-                let p1Id = w.p1, p2Id = w.p2;
-                if (isP1Shared) {
-                    const np = addPoint(activeStorey, p1.x, p1.y);
-                    w.p1 = np.id;
-                    p1Id = np.id;
-                }
-                if (isP2Shared) {
-                    const np = addPoint(activeStorey, p2.x, p2.y);
-                    w.p2 = np.id;
-                    p2Id = np.id;
-                }
+                // Gemeinsame Eckpunkte bleiben verbunden: angeschlossene Wände werden beim Ziehen mitgeführt.
+                // (Der frühere "Duplizieren"-Versuch war wirkungslos, da addPoint den vorhandenen Punkt
+                // zurückgibt, und konnte die Wand still auf einen deckungsgleichen Punkt umhängen.)
                 dragStartRef.current = {
                     type: 'wall_body', id: w.id,
                     startX: wx, startY: wy,
                     origP1: { x: p1.x, y: p1.y },
                     origP2: { x: p2.x, y: p2.y },
-                    p1Id, p2Id,
+                    p1Id: w.p1, p2Id: w.p2,
                 };
             }
             return;
         }
 
-        // Check rooms
-        const room = findRoomAtPoint(activeStorey, wx, wy);
-        if (room) {
-            setSelectedId(room.id);
-            setSelectedType('room');
-            return;
-        }
-
         // Check annotations — first check handles on currently selected annotation
+        // (Anmerkungen und Decken liegen über den Räumen und werden daher vor dem Raum geprüft)
         const curSelAnn = (selectedType === 'annotation' && activeStorey.annotations)
             ? activeStorey.annotations.find(a => a.id === selectedIdRef.current) : null;
         if (curSelAnn) {
@@ -2360,14 +2968,13 @@ const FloorPlanEditor = () => {
                 const b = curSelSlab.polygon[(i + 1) % curSelSlab.polygon.length];
                 const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
                 if (dist({ x: wx, y: wy }, { x: mx, y: my }) < handleRadius) {
-                    // Insert new point at midpoint
+                    // Insert new point at midpoint (Erfassung/Speichern beim Loslassen in handleMouseUp)
                     curSelSlab.polygon.splice(i + 1, 0, { x: mx, y: my });
                     // Start dragging the new point
                     dragStartRef.current = {
                         type: 'slab_corner', slabId: curSelSlab.id, cornerIdx: i + 1,
                         startX: mx, startY: my, origX: mx, origY: my,
                     };
-                    markDirty();
                     requestRender();
                     return;
                 }
@@ -2390,6 +2997,14 @@ const FloorPlanEditor = () => {
                     return;
                 }
             }
+        }
+
+        // Check rooms (letzter Treffer-Fallback; Räume sind zusätzlich über ihre Beschriftung wählbar)
+        const room = findRoomAtPoint(activeStorey, wx, wy);
+        if (room) {
+            setSelectedId(room.id);
+            setSelectedType('room');
+            return;
         }
 
         // Start marquee selection (deselect happens on mouseUp if no drag)
@@ -2440,7 +3055,7 @@ const FloorPlanEditor = () => {
         const itemsToDelete = selectedIds.length > 0 ? selectedIds : (selectedId ? [{ id: selectedId, type: selectedType }] : []);
         if (itemsToDelete.length === 0) return;
 
-        const storeyCopy = JSON.parse(JSON.stringify(activeStorey));
+        const before = snapshotStorey(activeStorey);
         let deleted = false;
 
         for (const item of itemsToDelete) {
@@ -2476,29 +3091,32 @@ const FloorPlanEditor = () => {
 
         if (deleted) {
             computeRooms(activeStorey);
-            cmdStackRef.current.execute({
-                do: () => { },
-                undo: () => { Object.assign(activeStorey, storeyCopy); forceRender(v => v + 1); },
-                label: 'Löschen',
-            });
+            commitChange('Löschen', activeStorey, before);
             setSelectedId(null);
             setSelectedType(null);
             setSelectedIds([]);
-            markDirty();
-            forceRender(v => v + 1);
-            requestRender();
         }
-    }, [selectedId, selectedType, selectedIds, activeStorey, markDirty, requestRender]);
+    }, [selectedId, selectedType, selectedIds, activeStorey, commitChange]);
 
     // ─── Keyboard ───────────────────────────────────────────────
     useEffect(() => {
         const handleKeyDown = (e) => {
+            const mod = e.ctrlKey || e.metaKey;
+            const key = String(e.key || '').toLowerCase();
+            const inField = isEditableTarget(e.target);
+
+            // Strg/Cmd+S speichert immer – vorher eine laufende Feldeingabe übernehmen
+            if (mod && key === 's') {
+                e.preventDefault();
+                if (inField && typeof e.target.blur === 'function') e.target.blur();
+                handleSave(false);
+                return;
+            }
+
             if (e.key === 'Escape') {
-                setDrawPoints([]);
+                cancelDrawing();
                 setMeasurePoints([]);
                 setMeasureResult(null);
-                previewRef.current = null;
-                snapPointRef.current = null;
                 setPlacingFurniture(null);
                 setShowExportMenu(false);
                 setShowStoreyDialog(false);
@@ -2511,83 +3129,109 @@ const FloorPlanEditor = () => {
                 setSelectedIds([]);
                 setSelectedRoomId(null);
                 requestRender();
+                return;
             }
-            if (e.ctrlKey && e.key === 'z') { e.preventDefault(); cmdStackRef.current.undo(); forceRender(v => v + 1); requestRender(); }
-            if (e.ctrlKey && e.key === 'y') { e.preventDefault(); cmdStackRef.current.redo(); forceRender(v => v + 1); requestRender(); }
-            if (e.ctrlKey && e.key === 's') { e.preventDefault(); handleSave(); }
+
+            // Alle weiteren Kürzel nicht in Eingabefeldern (Entf, Strg+Z/C/V gehören dort dem Feld)
+            if (inField) return;
+
+            if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo(); return; }
+            if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); handleRedo(); return; }
             if (e.key === 'Delete' && (selectedId || selectedIds.length > 0)) {
                 e.preventDefault();
                 handleDeleteSelected();
+                return;
             }
 
             // ── Copy (Ctrl+C) ────────────────────────────────────
-            if (e.ctrlKey && e.key === 'c' && selectedId && activeStorey) {
-                e.preventDefault();
+            if (mod && key === 'c' && selectedId && activeStorey) {
+                let copied = null;
                 if (selectedType === 'annotation') {
                     const ann = (activeStorey.annotations || []).find(a => a.id === selectedId);
-                    if (ann) clipboardRef.current = { type: 'annotation', data: JSON.parse(JSON.stringify(ann)) };
+                    if (ann) copied = { type: 'annotation', data: JSON.parse(JSON.stringify(ann, snapshotReplacer)) };
                 } else if (selectedType === 'furniture') {
                     const furn = (activeStorey.furniture || []).find(f => f.id === selectedId);
-                    if (furn) clipboardRef.current = { type: 'furniture', data: JSON.parse(JSON.stringify(furn)) };
+                    if (furn) copied = { type: 'furniture', data: JSON.parse(JSON.stringify(furn)) };
                 } else if (selectedType === 'opening') {
                     const op = (activeStorey.openings || []).find(o => o.id === selectedId);
-                    if (op) clipboardRef.current = { type: 'opening', data: JSON.parse(JSON.stringify(op)) };
+                    if (op) copied = { type: 'opening', data: JSON.parse(JSON.stringify(op)) };
                 } else if (selectedType === 'slab') {
                     const slab = (activeStorey.slabs || []).find(s => s.id === selectedId);
-                    if (slab) clipboardRef.current = { type: 'slab', data: JSON.parse(JSON.stringify(slab)) };
+                    if (slab) copied = { type: 'slab', data: JSON.parse(JSON.stringify(slab)) };
                 }
+                if (copied) {
+                    e.preventDefault();
+                    clipboardRef.current = copied;
+                }
+                return;
             }
 
-            // ── Paste (Ctrl+V) ───────────────────────────────────
-            if (e.ctrlKey && e.key === 'v' && clipboardRef.current && activeStorey) {
+            // ── Paste (Ctrl+V) – als ein Undo-Schritt ──────────────
+            if (mod && key === 'v' && clipboardRef.current && activeStorey) {
                 e.preventDefault();
-                const genId = () => Math.random().toString(36).substr(2, 9);
                 const cb = clipboardRef.current;
                 const offset = 50; // offset pasted element slightly
+                let pasted = null;
 
-                if (cb.type === 'annotation') {
-                    if (!activeStorey.annotations) activeStorey.annotations = [];
-                    const copy = JSON.parse(JSON.stringify(cb.data));
-                    copy.id = 'ann_' + genId();
-                    // Offset the pasted element
-                    if (copy.type === 'polyline' || copy.type === 'area') {
-                        copy.points = copy.points.map(p => ({ x: p.x + offset, y: p.y + offset }));
-                    } else if (copy.type === 'circle') {
-                        copy.cx += offset; copy.cy += offset;
-                    } else if (copy.type === 'text') {
+                applyChange('Einfügen', st => {
+                    if (cb.type === 'annotation') {
+                        if (!st.annotations) st.annotations = [];
+                        const copy = JSON.parse(JSON.stringify(cb.data));
+                        copy.id = 'ann_' + genId();
+                        // Offset the pasted element
+                        if (copy.type === 'polyline' || copy.type === 'area') {
+                            copy.points = (copy.points || []).map(p => ({ x: p.x + offset, y: p.y + offset }));
+                        } else if (copy.type === 'circle') {
+                            copy.cx += offset; copy.cy += offset;
+                        } else if (copy.type === 'text') {
+                            copy.x += offset; copy.y += offset;
+                        }
+                        delete copy._hitBox;
+                        st.annotations.push(copy);
+                        pasted = { id: copy.id, type: 'annotation' };
+                    } else if (cb.type === 'furniture') {
+                        if (!st.furniture) st.furniture = [];
+                        const copy = JSON.parse(JSON.stringify(cb.data));
+                        copy.id = 'furn_' + genId();
                         copy.x += offset; copy.y += offset;
+                        st.furniture.push(copy);
+                        pasted = { id: copy.id, type: 'furniture' };
+                    } else if (cb.type === 'slab') {
+                        if (!st.slabs) st.slabs = [];
+                        const copy = JSON.parse(JSON.stringify(cb.data));
+                        copy.id = 'slab_' + genId();
+                        copy.polygon = (copy.polygon || []).map(p => ({ x: p.x + offset, y: p.y + offset }));
+                        st.slabs.push(copy);
+                        pasted = { id: copy.id, type: 'slab' };
+                    } else if (cb.type === 'opening') {
+                        // Öffnung versetzt auf derselben Wand einfügen (rechts daneben, sonst links)
+                        const src = cb.data;
+                        const hostId = src.wall_id ?? src.wallId;
+                        if (st.walls.some(w => w.id === hostId)) {
+                            const gap = (src.width_mm || 0) + 100;
+                            for (const pos of [src.position_mm + gap, src.position_mm - gap]) {
+                                const op = placeOpening(st, hostId, src.type, pos, {
+                                    width_mm: src.width_mm, height_mm: src.height_mm, sill_mm: src.sill_mm,
+                                    swing: src.swing, direction: src.direction,
+                                });
+                                if (op) { pasted = { id: op.id, type: 'opening' }; break; }
+                            }
+                        }
                     }
-                    delete copy._hitBox;
-                    activeStorey.annotations.push(copy);
-                    setSelectedId(copy.id);
-                    setSelectedType('annotation');
-                } else if (cb.type === 'furniture') {
-                    if (!activeStorey.furniture) activeStorey.furniture = [];
-                    const copy = JSON.parse(JSON.stringify(cb.data));
-                    copy.id = 'furn_' + genId();
-                    copy.x += offset; copy.y += offset;
-                    activeStorey.furniture.push(copy);
-                    setSelectedId(copy.id);
-                    setSelectedType('furniture');
-                } else if (cb.type === 'slab') {
-                    if (!activeStorey.slabs) activeStorey.slabs = [];
-                    const copy = JSON.parse(JSON.stringify(cb.data));
-                    copy.id = 'slab_' + genId();
-                    copy.polygon = copy.polygon.map(p => ({ x: p.x + offset, y: p.y + offset }));
-                    activeStorey.slabs.push(copy);
-                    setSelectedId(copy.id);
-                    setSelectedType('slab');
+                });
+                if (pasted) {
+                    setSelectedId(pasted.id);
+                    setSelectedType(pasted.type);
+                    setSelectedIds([]);
                 }
-                markDirty();
-                forceRender(v => v + 1);
-                requestRender();
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [handleSave, selectedId, selectedIds, selectedType, activeStorey, handleDeleteSelected, requestRender]);
+    }, [handleSave, selectedId, selectedIds, selectedType, activeStorey, handleDeleteSelected, requestRender, handleUndo, handleRedo, cancelDrawing, applyChange]);
 
     // ─── Canvas event attachment ────────────────────────────────
+    // Auch nach 3D→2D-Wechsel und nach dem Laden neu am (neu erzeugten) Canvas registrieren
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -2598,40 +3242,117 @@ const FloorPlanEditor = () => {
             canvas.removeEventListener('wheel', handleWheel);
             canvas.removeEventListener('contextmenu', preventContext);
         };
-    }, [handleWheel]);
+    }, [handleWheel, viewMode, loading, loadError]);
 
     const [showStoreyDialog, setShowStoreyDialog] = useState(false);
 
     const addStoreyAt = (position) => {
-        const usedLabels = storeys.map(s => s.label);
-        const nextLabel = STOREY_LABELS.find(l => !usedLabels.includes(l)) || `${storeys.length + 1}. OG`;
+        cancelDrawing();
+        const current = storeysRef.current;
+        const usedLabels = current.map(s => s.label);
+        const nextLabel = STOREY_LABELS.find(l => !usedLabels.includes(l)) || `${current.length + 1}. OG`;
         const newStorey = createStorey(nextLabel, STOREY_HEIGHT.default);
         const insertIdx = position === 'above' ? activeStoreyIdx + 1 : activeStoreyIdx;
-        const newStoreys = [...storeys];
+        const newStoreys = [...current];
         newStoreys.splice(insertIdx, 0, newStorey);
-        setStoreys(newStoreys);
-        setActiveStoreyIdx(insertIdx);
+        pushStoreysHistory('Geschoss hinzufügen', current, newStoreys, activeStoreyIdx, insertIdx);
+        commitStoreys(newStoreys, insertIdx);
+        setSelectedId(null);
+        setSelectedType(null);
+        setSelectedIds([]);
         setShowStoreyDialog(false);
+        markDirty();
     };
 
     const duplicateCurrentStorey = () => {
+        cancelDrawing();
+        const current = storeysRef.current;
         const dupe = duplicateStorey(activeStorey, `${activeStorey.label} (Kopie)`);
-        setStoreys([...storeys, dupe]);
-        setActiveStoreyIdx(storeys.length);
+        const newStoreys = [...current, dupe];
+        pushStoreysHistory('Geschoss duplizieren', current, newStoreys, activeStoreyIdx, current.length);
+        commitStoreys(newStoreys, current.length);
+        setSelectedId(null);
+        setSelectedType(null);
+        setSelectedIds([]);
         markDirty();
     };
 
     const deleteCurrentStorey = () => {
-        if (storeys.length <= 1) return; // mindestens 1 Geschoss behalten
+        const current = storeysRef.current;
+        if (current.length <= 1) return; // mindestens 1 Geschoss behalten
         const idx = activeStoreyIdx;
-        const newStoreys = storeys.filter((_, i) => i !== idx);
-        setStoreys(newStoreys);
-        setActiveStoreyIdx(Math.max(0, idx - 1));
+        const storey = current[idx];
+        if (!storey) return;
+        const parts = [
+            storey.walls?.length ? `${storey.walls.length} Wände` : null,
+            storey.openings?.length ? `${storey.openings.length} Öffnungen` : null,
+            storey.furniture?.length ? `${storey.furniture.length} Möbel` : null,
+            storey.annotations?.length ? `${storey.annotations.length} Anmerkungen` : null,
+        ].filter(Boolean);
+        const contents = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+        if (!window.confirm(`Geschoss „${storey.label}“${contents} wirklich entfernen?\n\nDas Entfernen kann mit „Rückgängig“ (Strg+Z) zurückgenommen werden.`)) return;
+        cancelDrawing();
+        const newStoreys = current.filter((_, i) => i !== idx);
+        const nextIdx = Math.max(0, idx - 1);
+        pushStoreysHistory(`Geschoss „${storey.label}“ entfernen`, current, newStoreys, idx, nextIdx);
+        commitStoreys(newStoreys, nextIdx);
         setSelectedId(null);
         setSelectedType(null);
-        setDrawPoints([]);
+        setSelectedIds([]);
+        setSelectedRoomId(null);
+        setEditingLength(null);
         markDirty();
     };
+
+    // Zurück zur Übersicht: ausstehende Änderungen vorher speichern
+    const handleBack = async () => {
+        if (document.activeElement && isEditableTarget(document.activeElement)) document.activeElement.blur();
+        let ok = true;
+        for (let i = 0; i < 3 && (isDirtyRef.current || saveInFlightRef.current); i++) {
+            ok = await handleSave(true);
+            if (!ok) break;
+        }
+        if ((!ok || isDirtyRef.current) && loadedOkRef.current) {
+            const leave = window.confirm('Die letzten Änderungen konnten nicht gespeichert werden.\n\nTrotzdem zur Übersicht wechseln? Nicht gespeicherte Änderungen gehen dann verloren.');
+            if (!leave) return;
+        }
+        navigate('/renovation?tab=floorplan');
+    };
+
+    // Exporte mit Fehlerbehandlung
+    const runExport = async (fn) => {
+        setShowExportMenu(false);
+        try {
+            await fn();
+        } catch (err) {
+            console.error('Export fehlgeschlagen:', err);
+            alert('Export fehlgeschlagen: ' + (err?.message || err));
+        }
+    };
+
+    const toggleViewMode = () => {
+        if (viewMode === '2d') {
+            if (!isWebGLAvailable()) {
+                setViewNotice('Die 3D-Ansicht benötigt WebGL, das in diesem Browser bzw. auf diesem Gerät nicht verfügbar ist.');
+                return;
+            }
+            setViewNotice(null);
+            setViewMode('3d');
+        } else {
+            setViewMode('2d');
+        }
+    };
+
+    // Dachparameter: neues roof-Objekt erzeugen (damit auch die 3D-Ansicht die Änderung erkennt)
+    const setRoofParam = (key, value) => {
+        if (!Number.isFinite(value)) return;
+        applyChange('Dach ändern', st => { if (st.roof) st.roof = { ...st.roof, [key]: value }; });
+    };
+
+    const handle3DError = useCallback((error) => {
+        setViewMode('2d');
+        setViewNotice(`Die 3D-Ansicht konnte nicht angezeigt werden${error?.message ? ` (${error.message})` : ''}. Es wird wieder die 2D-Ansicht gezeigt.`);
+    }, []);
 
     // ─── Selected Element Details ───────────────────────────────
     const selectedWall = selectedType === 'wall' ? activeStorey.walls.find(w => w.id === selectedId) : null;
@@ -2643,7 +3364,38 @@ const FloorPlanEditor = () => {
     // ─── Render ─────────────────────────────────────────────────
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '60px' }}><Loader2 className="animate-spin" size={28} /></div>;
 
-    const zoomPercent = Math.round(vpRef.current.zoom * 100 / 0.15);
+    // Laden fehlgeschlagen: Editor sperren, damit kein leerer Stand über den echten Plan gespeichert wird
+    if (loadError) {
+        return (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '60px 16px' }}>
+                <div style={{
+                    maxWidth: '460px', width: '100%', background: 'var(--surface-color)',
+                    border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)',
+                    padding: '24px', boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: '#dc2626', fontWeight: 700 }}>
+                        <AlertTriangle size={18} /> Grundriss nicht geladen
+                    </div>
+                    <p style={{ margin: '0 0 18px', fontSize: '0.88rem', color: 'var(--text-secondary)' }}>{loadError}</p>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        <button onClick={() => setLoadAttempt(a => a + 1)} style={{ ...topBtnStyle, color: '#0ea5e9', fontWeight: 600, gap: '6px' }}>
+                            <RefreshCw size={14} /> Erneut laden
+                        </button>
+                        <button onClick={() => navigate('/renovation?tab=floorplan')} style={{ ...topBtnStyle, gap: '6px' }}>
+                            <ArrowLeft size={14} /> Zur Übersicht
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    const saveStatusInfo = {
+        dirty: { text: 'Nicht gespeichert', color: 'var(--text-secondary)' },
+        saving: { text: 'Speichert …', color: '#0ea5e9' },
+        saved: { text: 'Gespeichert', color: '#16a34a' },
+        error: { text: 'Speichern fehlgeschlagen', color: '#dc2626' },
+    }[saveState];
 
     return (
         <div ref={editorContainerRef} style={{ display: 'flex', flexDirection: 'column', height: isFullscreen ? '100vh' : 'calc(100vh - 64px)', overflow: 'hidden', position: 'relative', background: 'var(--bg-color, #fff)' }}>
@@ -2653,7 +3405,7 @@ const FloorPlanEditor = () => {
                 borderBottom: '1px solid var(--border-color)', background: 'var(--surface-color)',
                 flexWrap: 'wrap', minHeight: '48px',
             }}>
-                <button onClick={() => navigate('/renovation?tab=floorplan')} style={topBtnStyle} title="Zur Übersicht">
+                <button onClick={handleBack} style={topBtnStyle} title="Zur Übersicht">
                     <ArrowLeft size={16} />
                 </button>
 
@@ -2661,14 +3413,25 @@ const FloorPlanEditor = () => {
                     type="text"
                     value={planName}
                     onChange={e => setPlanName(e.target.value)}
-                    onBlur={markDirty}
+                    onBlur={() => { if (planNameFocusRef.current !== planName) markDirty(); }}
                     style={{
                         border: '1px solid transparent', borderRadius: 'var(--radius-sm)',
                         padding: '4px 8px', fontSize: '0.95rem', fontWeight: 600,
                         background: 'transparent', minWidth: '120px', maxWidth: '300px',
                     }}
-                    onFocus={e => e.target.style.borderColor = 'var(--border-color)'}
+                    onFocus={e => { planNameFocusRef.current = planName; e.target.style.borderColor = 'var(--border-color)'; }}
                 />
+
+                {saveStatusInfo && (
+                    <span
+                        title={saveState === 'error' && saveError ? saveError : undefined}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: saveStatusInfo.color, whiteSpace: 'nowrap' }}
+                    >
+                        {saveState === 'saved' && <Check size={13} />}
+                        {saveState === 'error' && <AlertTriangle size={13} />}
+                        {!isMobile && saveStatusInfo.text}
+                    </span>
+                )}
 
                 <div style={{ flex: 1 }} />
 
@@ -2676,7 +3439,7 @@ const FloorPlanEditor = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                     <select
                         value={activeStoreyIdx}
-                        onChange={e => { setActiveStoreyIdx(Number(e.target.value)); setDrawPoints([]); }}
+                        onChange={e => { cancelDrawing(); setActiveStoreyIdx(Number(e.target.value)); setSelectedIds([]); }}
                         style={{ padding: '4px 8px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', fontSize: '0.82rem', background: 'var(--surface-color)' }}
                     >
                         {storeys.map((s, i) => (
@@ -2724,13 +3487,13 @@ const FloorPlanEditor = () => {
 
                 <div style={{ width: '1px', height: '24px', background: 'var(--border-color)' }} />
 
-                <button onClick={() => cmdStackRef.current.undo()} disabled={!cmdStackRef.current.canUndo()} style={topBtnStyle} title="Rückgängig (Strg+Z)">
+                <button onClick={handleUndo} disabled={!cmdStackRef.current.canUndo() && drawPoints.length === 0} style={topBtnStyle} title="Rückgängig (Strg+Z)">
                     <Undo2 size={16} />
                 </button>
-                <button onClick={() => cmdStackRef.current.redo()} disabled={!cmdStackRef.current.canRedo()} style={topBtnStyle} title="Wiederholen (Strg+Y)">
+                <button onClick={handleRedo} disabled={!cmdStackRef.current.canRedo()} style={topBtnStyle} title="Wiederholen (Strg+Y / Strg+Umschalt+Z)">
                     <Redo2 size={16} />
                 </button>
-                <button onClick={() => handleSave()} disabled={saving} style={{ ...topBtnStyle, color: '#0ea5e9', fontWeight: 600 }} title="Speichern (Strg+S)">
+                <button onClick={() => handleSave(false)} disabled={saving} style={{ ...topBtnStyle, color: '#0ea5e9', fontWeight: 600 }} title="Speichern (Strg+S)">
                     {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                     {!isMobile && <span style={{ marginLeft: '4px', fontSize: '0.82rem' }}>Speichern</span>}
                 </button>
@@ -2757,7 +3520,7 @@ const FloorPlanEditor = () => {
                 {bgImage && (
                     <>
                         <button
-                            onClick={() => { setBgImage(prev => { const u = { ...prev, visible: !prev.visible }; if (activeStorey) activeStorey.bgImage = u; return u; }); }}
+                            onClick={() => updateBgImage({ visible: bgImage.visible === false })}
                             style={{ ...topBtnStyle, color: bgImage.visible !== false ? '#0ea5e9' : 'var(--text-secondary)' }}
                             title={bgImage.visible !== false ? 'Hintergrund ausblenden' : 'Hintergrund einblenden'}
                         >
@@ -2767,15 +3530,15 @@ const FloorPlanEditor = () => {
                             type="range"
                             min="5" max="90" step="5"
                             value={(bgImage.opacity || 0.35) * 100}
-                            onChange={e => { const op = Number(e.target.value) / 100; setBgImage(prev => { const u = { ...prev, opacity: op }; if (activeStorey) activeStorey.bgImage = u; return u; }); }}
+                            onChange={e => updateBgImage({ opacity: Number(e.target.value) / 100 })}
                             title={`Transparenz: ${Math.round((bgImage.opacity || 0.35) * 100)}%`}
                             style={{ width: '60px', accentColor: '#0ea5e9' }}
                         />
                         <button
                             onClick={() => {
+                                cancelDrawing();
                                 setActiveTool(TOOLS.CALIBRATE);
                                 setCalibPoints([]);
-                                setDrawPoints([]);
                             }}
                             style={{ ...topBtnStyle, color: activeTool === TOOLS.CALIBRATE ? '#ef4444' : 'var(--text-secondary)', background: activeTool === TOOLS.CALIBRATE ? '#fef2f2' : 'transparent' }}
                             title="Referenzmaß setzen (2 Punkte klicken, Strecke eingeben)"
@@ -2803,7 +3566,7 @@ const FloorPlanEditor = () => {
 
                 {/* 2D/3D toggle */}
                 <button
-                    onClick={() => setViewMode(viewMode === '2d' ? '3d' : '2d')}
+                    onClick={toggleViewMode}
                     style={{ ...topBtnStyle, background: viewMode === '3d' ? '#e0f2fe' : 'var(--surface-color)', color: viewMode === '3d' ? '#0ea5e9' : 'var(--text-secondary)' }}
                     title={viewMode === '2d' ? '3D-Ansicht' : '2D-Ansicht'}
                 >
@@ -2840,20 +3603,24 @@ const FloorPlanEditor = () => {
                         }}>
                             <ExportMenuItem
                                 icon={Image} label="Als PNG exportieren" sublabel="Hochauflösendes Bild"
-                                onClick={async () => { setShowExportMenu(false); const blob = await exportToPNG(activeStorey, planName); downloadBlob(blob, `${planName}_${activeStorey.label}.png`); }}
+                                onClick={() => runExport(async () => {
+                                    const blob = await exportToPNG(activeStorey, planName);
+                                    if (!blob) throw new Error('Das Bild konnte nicht erzeugt werden (Zeichenfläche zu groß?).');
+                                    downloadBlob(blob, `${sanitizeFileName(`${planName}_${activeStorey.label}`)}.png`);
+                                })}
                             />
                             <ExportMenuItem
                                 icon={FileText} label="Als PDF exportieren" sublabel="Alle Geschosse"
-                                onClick={() => { setShowExportMenu(false); exportToPDF(storeys, planName); }}
+                                onClick={() => runExport(() => exportToPDF(storeys, planName))}
                             />
                             <div style={{ height: '1px', background: 'var(--border-color)' }} />
                             <ExportMenuItem
                                 icon={FileSpreadsheet} label="Massenermittlung CSV" sublabel="Für Excel"
-                                onClick={() => { setShowExportMenu(false); exportQuantityListCSV(storeys, planName); }}
+                                onClick={() => runExport(() => exportQuantityListCSV(storeys, planName))}
                             />
                             <ExportMenuItem
                                 icon={FileText} label="Massenermittlung PDF" sublabel="Druckfertig"
-                                onClick={() => { setShowExportMenu(false); exportQuantityListPDF(storeys, planName); }}
+                                onClick={() => runExport(() => exportQuantityListPDF(storeys, planName))}
                             />
                         </div>
                     )}
@@ -2863,9 +3630,10 @@ const FloorPlanEditor = () => {
                     onClick={() => {
                         const canvas = canvasRef.current;
                         if (!canvas) return;
-                        zoomToFit(vpRef.current, activeStorey, canvas.width, canvas.height);
+                        const { w, h } = canvasSizeRef.current;
+                        zoomToFit(vpRef.current, activeStorey, w || canvas.clientWidth, h || canvas.clientHeight);
+                        setZoomPct(zoomToPercent(vpRef.current.zoom));
                         requestRender();
-                        forceRender(v => v + 1);
                     }}
                     style={topBtnStyle}
                     title="Grundriss einpassen (Zoom auf alles)"
@@ -2873,9 +3641,39 @@ const FloorPlanEditor = () => {
                     <Search size={16} />
                 </button>
                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', minWidth: '40px', textAlign: 'center' }}>
-                    {zoomPercent}%
+                    {zoomPct}%
                 </div>
             </div>
+
+            {/* ── Hinweise: Speicherfehler / 3D nicht verfügbar ── */}
+            {saveState === 'error' && (
+                <div role="alert" style={{
+                    display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
+                    padding: '8px 16px', background: '#fef2f2', borderBottom: '1px solid #fecaca',
+                    color: '#991b1b', fontSize: '0.8rem',
+                }}>
+                    <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1, minWidth: '200px' }}>
+                        <strong>Änderungen nicht gespeichert.</strong> {saveError || 'Unbekannter Fehler.'}
+                    </span>
+                    <button onClick={() => handleSave(false)} disabled={saving} style={{ ...topBtnStyle, color: '#dc2626', borderColor: '#fecaca', gap: '6px', fontSize: '0.78rem' }}>
+                        <RefreshCw size={13} /> Erneut speichern
+                    </button>
+                </div>
+            )}
+            {viewNotice && (
+                <div role="status" style={{
+                    display: 'flex', alignItems: 'center', gap: '10px',
+                    padding: '8px 16px', background: '#fffbeb', borderBottom: '1px solid #fde68a',
+                    color: '#92400e', fontSize: '0.8rem',
+                }}>
+                    <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>{viewNotice}</span>
+                    <button onClick={() => setViewNotice(null)} style={{ ...topBtnStyle, padding: '4px 6px' }} title="Hinweis schließen">
+                        <X size={13} />
+                    </button>
+                </div>
+            )}
 
             {/* ── Calibration Dialog ── */}
             {showCalibDialog && (
@@ -2959,13 +3757,13 @@ const FloorPlanEditor = () => {
                         <button
                             key={t.tool}
                             onClick={() => {
+                                cancelDrawing();
                                 setActiveTool(t.tool);
-                                setDrawPoints([]);
                                 setMeasurePoints([]);
                                 setMeasureResult(null);
                                 setAnnotationPoints([]);
                                 setAnnotationCircleCenter(null);
-                                previewRef.current = null;
+                                setActiveAnnotationId(null);
                                 if (t.tool !== TOOLS.FURNITURE) setPlacingFurniture(null);
                             }}
                             disabled={t.disabled}
@@ -3054,10 +3852,10 @@ const FloorPlanEditor = () => {
                                         if (key === 'hip') { defaults.pitch_deg = rt.pitch_deg; defaults.overhang_mm = rt.overhang_mm; }
                                         if (key === 'flat') { defaults.parapet_mm = rt.parapet_mm; }
                                         // Merge with existing values if type matches
-                                        const existing = activeStorey.roof?.type === key ? activeStorey.roof : {};
-                                        activeStorey.roof = { ...defaults, ...existing, type: key };
-                                        forceRender(n => n + 1);
-                                        markDirty();
+                                        applyChange('Dachform ändern', st => {
+                                            const existing = st.roof?.type === key ? st.roof : {};
+                                            st.roof = { ...defaults, ...existing, type: key };
+                                        });
                                     }}
                                     style={{
                                         padding: '8px 10px', borderRadius: 'var(--radius-sm)',
@@ -3075,34 +3873,35 @@ const FloorPlanEditor = () => {
                         {activeStorey.roof && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 {/* Satteldach */}
+                                {/* Werte mit ?? statt ||, damit 0 (kein Kniestock/Überstand) erhalten bleibt; Vorgaben wie in der 3D-Ansicht */}
                                 {activeStorey.roof.type === 'gable' && (
                                     <>
-                                        <PropField label="Kniestockhöhe" value={(activeStorey.roof.kneeWall_mm || 1000) / 10} unit="cm" min={0} max={200} step={5}
-                                            onChange={v => { activeStorey.roof.kneeWall_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
-                                        <PropField label="Dachneigung" value={activeStorey.roof.pitch_deg || 35} unit="°" min={10} max={60} step={1}
-                                            onChange={v => { activeStorey.roof.pitch_deg = Math.round(v); forceRender(n => n + 1); markDirty(); }} />
-                                        <PropField label="Dachüberstand" value={(activeStorey.roof.overhang_mm || 500) / 10} unit="cm" min={0} max={150} step={5}
-                                            onChange={v => { activeStorey.roof.overhang_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                        <PropField label="Kniestockhöhe" value={(activeStorey.roof.kneeWall_mm ?? ROOF_TYPES.gable.kneeWall_mm) / 10} unit="cm" min={0} max={200} step={5}
+                                            onChange={v => setRoofParam('kneeWall_mm', Math.round(v * 10))} />
+                                        <PropField label="Dachneigung" value={activeStorey.roof.pitch_deg ?? ROOF_TYPES.gable.pitch_deg} unit="°" min={10} max={60} step={1}
+                                            onChange={v => setRoofParam('pitch_deg', Math.round(v))} />
+                                        <PropField label="Dachüberstand" value={(activeStorey.roof.overhang_mm ?? ROOF_TYPES.gable.overhang_mm) / 10} unit="cm" min={0} max={150} step={5}
+                                            onChange={v => setRoofParam('overhang_mm', Math.round(v * 10))} />
                                     </>
                                 )}
                                 {/* Walmdach */}
                                 {activeStorey.roof.type === 'hip' && (
                                     <>
-                                        <PropField label="Dachneigung" value={activeStorey.roof.pitch_deg || 25} unit="°" min={10} max={60} step={1}
-                                            onChange={v => { activeStorey.roof.pitch_deg = Math.round(v); forceRender(n => n + 1); markDirty(); }} />
-                                        <PropField label="Dachüberstand" value={(activeStorey.roof.overhang_mm || 500) / 10} unit="cm" min={0} max={150} step={5}
-                                            onChange={v => { activeStorey.roof.overhang_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                        <PropField label="Dachneigung" value={activeStorey.roof.pitch_deg ?? ROOF_TYPES.hip.pitch_deg} unit="°" min={10} max={60} step={1}
+                                            onChange={v => setRoofParam('pitch_deg', Math.round(v))} />
+                                        <PropField label="Dachüberstand" value={(activeStorey.roof.overhang_mm ?? ROOF_TYPES.hip.overhang_mm) / 10} unit="cm" min={0} max={150} step={5}
+                                            onChange={v => setRoofParam('overhang_mm', Math.round(v * 10))} />
                                     </>
                                 )}
                                 {/* Flachdach */}
                                 {activeStorey.roof.type === 'flat' && (
-                                    <PropField label="Attikahöhe" value={(activeStorey.roof.parapet_mm || 500) / 10} unit="cm" min={10} max={150} step={5}
-                                        onChange={v => { activeStorey.roof.parapet_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                    <PropField label="Attikahöhe" value={(activeStorey.roof.parapet_mm ?? ROOF_TYPES.flat.parapet_mm) / 10} unit="cm" min={10} max={150} step={5}
+                                        onChange={v => setRoofParam('parapet_mm', Math.round(v * 10))} />
                                 )}
 
                                 {/* Delete roof */}
                                 <button
-                                    onClick={() => { activeStorey.roof = null; forceRender(n => n + 1); markDirty(); }}
+                                    onClick={() => applyChange('Dach entfernen', st => { st.roof = null; })}
                                     style={{
                                         marginTop: '12px', padding: '6px 10px', borderRadius: 'var(--radius-sm)',
                                         border: '1px solid #fecaca', background: '#fef2f2', color: '#dc2626',
@@ -3118,27 +3917,27 @@ const FloorPlanEditor = () => {
                 )}
 
                 {/* Canvas / 3D View */}
-                <div style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: viewMode === '3d' ? 'default' : getCursor(activeTool, isPanningRef.current) }}>
+                <div style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: viewMode === '3d' ? 'default' : getCursor(activeTool) }}>
                     {viewMode === '2d' ? (
                         <canvas
                             ref={canvasRef}
                             onMouseMove={handleMouseMove}
-                            onMouseUp={handleMouseUp}
                             onMouseDown={(e) => {
                                 setSlabContextMenu(null); // close on any click
+                                // Offene Eingabe im Panel zuerst übernehmen (blur → Commit), dann Klick verarbeiten
+                                if (document.activeElement && isEditableTarget(document.activeElement)) document.activeElement.blur();
                                 if (activeTool === 'measure') {
                                     handleMeasureClick(e);
                                 } else {
                                     handleMouseDown(e);
                                 }
                             }}
-                            onDoubleClick={(e) => {
+                            onDoubleClick={() => {
                                 // Finish polyline or area on double-click — finalize the live annotation
                                 if ((activeTool === TOOLS.ANNOTATE_POLYLINE || activeTool === TOOLS.ANNOTATE_AREA) && activeAnnotationId) {
-                                    // The annotation already exists — just finalize
+                                    // The annotation already exists (each point is already saved) — just finalize
                                     setActiveAnnotationId(null);
                                     setAnnotationPoints([]);
-                                    markDirty();
                                     forceRender(v => v + 1);
                                     requestRender();
                                 }
@@ -3153,7 +3952,8 @@ const FloorPlanEditor = () => {
                                         const rect = canvasRef.current.getBoundingClientRect();
                                         const sx = e.clientX - rect.left;
                                         const sy = e.clientY - rect.top;
-                                        const world = screenToWorld(vpRef.current, sx * (canvasRef.current.width / rect.width), sy * (canvasRef.current.height / rect.height));
+                                        // Viewport rechnet in CSS-Pixeln (Canvas-Bitmap ist ggf. HiDPI-skaliert)
+                                        const world = screenToWorld(vpRef.current, sx, sy);
                                         // Find nearest edge to insert a point
                                         let bestEdge = 0, bestDist = Infinity;
                                         for (let i = 0; i < slab.polygon.length; i++) {
@@ -3168,24 +3968,35 @@ const FloorPlanEditor = () => {
                                             const d = dist({ x: world.x, y: world.y }, slab.polygon[i]);
                                             if (d < nearestCornerDist) { nearestCornerDist = d; nearestCornerIdx = i; }
                                         }
+                                        // "Punkt entfernen" nur anbieten, wenn wirklich nahe an einer Ecke geklickt wurde (15 px)
+                                        const cornerInReach = nearestCornerDist * vpRef.current.zoom <= 15;
                                         setSlabContextMenu({
                                             x: e.clientX, y: e.clientY,
                                             worldX: snapToGrid(world.x), worldY: snapToGrid(world.y),
                                             slabId: slab.id, edgeIdx: bestEdge,
-                                            nearCornerIdx: slab.polygon.length > 3 ? nearestCornerIdx : -1,
+                                            nearCornerIdx: slab.polygon.length > 3 && cornerInReach ? nearestCornerIdx : -1,
                                         });
                                     }
                                 }
                             }}
                         />
                     ) : (
-                        <Suspense fallback={
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f8fafc' }}>
-                                <Loader2 className="animate-spin" size={32} color="#0ea5e9" />
-                            </div>
-                        }>
-                            <FloorPlan3DView storeys={storeys} activeStoreyIdx={activeStoreyIdx} />
-                        </Suspense>
+                        <ViewErrorBoundary
+                            onError={handle3DError}
+                            fallback={
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f8fafc', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                    3D-Ansicht nicht verfügbar
+                                </div>
+                            }
+                        >
+                            <Suspense fallback={
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f8fafc' }}>
+                                    <Loader2 className="animate-spin" size={32} color="#0ea5e9" />
+                                </div>
+                            }>
+                                <FloorPlan3DView storeys={storeys} />
+                            </Suspense>
+                        </ViewErrorBoundary>
                     )}
 
                     {/* Slab right-click context menu */}
@@ -3201,15 +4012,11 @@ const FloorPlanEditor = () => {
                         >
                             <button
                                 onClick={() => {
-                                    const slab = (activeStorey.slabs || []).find(s => s.id === slabContextMenu.slabId);
-                                    if (slab) {
-                                        slab.polygon.splice(slabContextMenu.edgeIdx + 1, 0, {
-                                            x: slabContextMenu.worldX, y: slabContextMenu.worldY,
-                                        });
-                                        markDirty();
-                                        forceRender(n => n + 1);
-                                        requestRender();
-                                    }
+                                    const menu = slabContextMenu;
+                                    applyChange('Deckenpunkt einfügen', st => {
+                                        const slab = (st.slabs || []).find(s => s.id === menu.slabId);
+                                        if (slab) slab.polygon.splice(menu.edgeIdx + 1, 0, { x: menu.worldX, y: menu.worldY });
+                                    });
                                     setSlabContextMenu(null);
                                 }}
                                 style={{
@@ -3225,13 +4032,11 @@ const FloorPlanEditor = () => {
                             {slabContextMenu.nearCornerIdx >= 0 && (
                                 <button
                                     onClick={() => {
-                                        const slab = (activeStorey.slabs || []).find(s => s.id === slabContextMenu.slabId);
-                                        if (slab && slab.polygon.length > 3) {
-                                            slab.polygon.splice(slabContextMenu.nearCornerIdx, 1);
-                                            markDirty();
-                                            forceRender(n => n + 1);
-                                            requestRender();
-                                        }
+                                        const menu = slabContextMenu;
+                                        applyChange('Deckenpunkt entfernen', st => {
+                                            const slab = (st.slabs || []).find(s => s.id === menu.slabId);
+                                            if (slab && slab.polygon.length > 3) slab.polygon.splice(menu.nearCornerIdx, 1);
+                                        });
                                         setSlabContextMenu(null);
                                     }}
                                     style={{
@@ -3269,37 +4074,23 @@ const FloorPlanEditor = () => {
                         const p2 = getPoint(activeStorey, wall.p2);
                         if (!p1 || !p2) return null;
 
-                        // Use stored original direction & p1 for stable length changes
-                        const origDx = editingLength.dirX;
-                        const origDy = editingLength.dirY;
-                        const origP1x = editingLength.p1x;
-                        const origP1y = editingLength.p1y;
+                        // Use stored original direction for stable length changes
+                        const origDir = { x: editingLength.dirX, y: editingLength.dirY };
 
                         // Position overlay from the STORED screen position (doesn't jump)
                         const ox = editingLength.overlayX;
                         const oy = editingLength.overlayY;
 
-                        const applyLength = (val) => {
-                            const newLen = Math.max(100, parseFloat(val) * 1000);
-                            if (!isNaN(newLen) && newLen > 0 && origDx !== undefined) {
-                                // Apply new length along the original direction
-                                p2.x = snapToGrid(origP1x + origDx * newLen);
-                                p2.y = snapToGrid(origP1y + origDy * newLen);
-                                if (activeStorey.outerClosed) {
-                                    const outerWalls = activeStorey.walls.filter(w => w.type === 'outer');
-                                    const pts = buildOrderedPolygon(outerWalls, activeStorey.points);
-                                    if (pts && pts.length >= 3) {
-                                        const cwPoly = ensureCW(pts);
-                                        const thickness = outerWalls[0].thickness_mm;
-                                        activeStorey.outerPolygon = [...cwPoly];
-                                        activeStorey.outerBoundary = offsetPolygon(cwPoly, -thickness);
-                                    }
-                                }
-                                computeRooms(activeStorey);
-                                markDirty();
-                                requestRender();
-                                forceRender(v => v + 1);
-                            }
+                        // Erst bei Enter/Verlassen anwenden (ein Undo-Schritt); ESC verwirft die Eingabe
+                        const commitLength = (raw) => {
+                            if (lengthEditDoneRef.current) return;
+                            lengthEditDoneRef.current = true;
+                            setEditingLength(null);
+                            const val = parseNumberInput(raw);
+                            if (!Number.isFinite(val) || val <= 0) return;
+                            if (Math.abs(val - editingLength.value) < 1e-9) return; // unverändert
+                            const newLen = Math.max(100, val * 1000);
+                            applyChange('Wandlänge ändern', st => { applyWallLength(st, wall, newLen, origDir); });
                         };
 
                         return (
@@ -3308,28 +4099,23 @@ const FloorPlanEditor = () => {
                                 zIndex: 100, display: 'flex', gap: '2px', alignItems: 'center',
                             }}>
                                 <input
+                                    key={`${editingLength.wallId}_${editingLength.seq || 0}`}
                                     type="number"
                                     autoFocus
                                     defaultValue={editingLength.value}
                                     step="0.01"
                                     min="0.10"
-                                    onChange={e => {
-                                        // Live update as you type
-                                        if (e.target.value && !isNaN(parseFloat(e.target.value))) {
-                                            applyLength(e.target.value);
-                                        }
-                                    }}
                                     onKeyDown={e => {
                                         if (e.key === 'Enter') {
-                                            applyLength(e.target.value);
+                                            e.preventDefault();
+                                            commitLength(e.currentTarget.value);
+                                        } else if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            lengthEditDoneRef.current = true;
                                             setEditingLength(null);
                                         }
-                                        if (e.key === 'Escape') setEditingLength(null);
                                     }}
-                                    onBlur={e => {
-                                        applyLength(e.target.value);
-                                        setEditingLength(null);
-                                    }}
+                                    onBlur={e => commitLength(e.currentTarget.value)}
                                     style={{
                                         width: '70px', padding: '4px 8px',
                                         border: '2px solid #0ea5e9', borderRadius: '6px',
@@ -3399,16 +4185,11 @@ const FloorPlanEditor = () => {
                             <PropGroup label="Geschoss">
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
                                     <span style={{ fontSize: '0.78rem', width: '80px' }}>Raumhöhe:</span>
-                                    <input
-                                        type="number"
+                                    {/* Übernahme erst bei Enter/Verlassen; Klemmen auf den zulässigen Bereich erst dann */}
+                                    <NumberInput
                                         value={activeStorey.height_mm / 1000}
-                                        onChange={e => {
-                                            const v = Math.max(STOREY_HEIGHT.min, Math.min(STOREY_HEIGHT.max, Math.round(parseFloat(e.target.value) * 1000)));
-                                            activeStorey.height_mm = v;
-                                            forceRender(v => v + 1);
-                                            markDirty();
-                                        }}
-                                        step="0.05"
+                                        onCommit={v => applyChange('Raumhöhe ändern', st => { st.height_mm = Math.round(v * 1000); })}
+                                        step={0.05}
                                         min={STOREY_HEIGHT.min / 1000}
                                         max={STOREY_HEIGHT.max / 1000}
                                         style={inputStyle}
@@ -3417,21 +4198,16 @@ const FloorPlanEditor = () => {
                                 </div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                     <span style={{ fontSize: '0.78rem', width: '80px' }}>Ref.-Höhe:</span>
-                                    <input
-                                        type="number"
+                                    <NumberInput
                                         value={(activeStorey.ref_height_mm || 0) / 1000}
-                                        onChange={e => {
-                                            activeStorey.ref_height_mm = Math.round(parseFloat(e.target.value) * 1000) || 0;
-                                            forceRender(v => v + 1);
-                                            markDirty();
-                                        }}
-                                        step="0.01"
+                                        onCommit={v => applyChange('Bezugshöhe ändern', st => { st.ref_height_mm = Math.round(v * 1000); })}
+                                        step={0.01}
                                         style={inputStyle}
                                     />
                                     <span style={unitStyle}>m</span>
                                 </div>
                                 <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                    Bezugshöhe des Geschosses (0,00 = Erdniveau)
+                                    Bezugshöhe des Geschosses (0,00 = Erdniveau) – nur zur Information, fließt derzeit nicht in 3D-Ansicht und Massen ein
                                 </div>
                             </PropGroup>
 
@@ -3548,7 +4324,9 @@ const FloorPlanEditor = () => {
                                                 <input
                                                     type="text"
                                                     value={ann.text}
-                                                    onChange={e => { ann.text = e.target.value; forceRender(v => v + 1); markDirty(); requestRender(); }}
+                                                    onFocus={() => beginTextEdit('Anmerkungstext ändern')}
+                                                    onChange={e => { ann.text = e.target.value; liveTextChange(); }}
+                                                    onBlur={endTextEdit}
                                                     style={{ ...inputStyle, width: '100%', padding: '4px 6px' }}
                                                 />
                                             </div>
@@ -3559,7 +4337,7 @@ const FloorPlanEditor = () => {
                                                 {['#ef4444', '#f97316', '#eab308', '#22c55e', '#0ea5e9', '#8b5cf6', '#ec4899', '#64748b', '#1e293b'].map(c => (
                                                     <button
                                                         key={c}
-                                                        onClick={() => { ann.color = c; if (ann.type === 'area') ann.fillColor = c + '33'; forceRender(v => v + 1); markDirty(); requestRender(); }}
+                                                        onClick={() => applyChange('Anmerkungsfarbe ändern', () => { ann.color = c; if (ann.type === 'area') ann.fillColor = c + '33'; })}
                                                         style={{
                                                             width: '24px', height: '24px', borderRadius: '4px',
                                                             background: c, border: ann.color === c ? '2px solid #0ea5e9' : '2px solid transparent',
@@ -3574,7 +4352,7 @@ const FloorPlanEditor = () => {
                                                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Linienstärke</div>
                                                 <select
                                                     value={ann.lineWidth || 2}
-                                                    onChange={e => { ann.lineWidth = Number(e.target.value); forceRender(v => v + 1); markDirty(); requestRender(); }}
+                                                    onChange={e => { const lw = Number(e.target.value); applyChange('Linienstärke ändern', () => { ann.lineWidth = lw; }); }}
                                                     style={{ ...inputStyle, width: '100%', padding: '4px 6px' }}
                                                 >
                                                     <option value={1}>1 px</option>
@@ -3630,17 +4408,17 @@ const FloorPlanEditor = () => {
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
                                             <span style={{ fontSize: '0.78rem', width: '48px' }}>Dicke:</span>
-                                            <input
-                                                type="number"
+                                            {/* Übernahme bei Enter/Verlassen; leer/ungültig wird verworfen, Bereich 5–50 cm */}
+                                            <NumberInput
                                                 value={selectedWall.thickness_mm / 10}
-                                                onChange={e => {
-                                                    selectedWall.thickness_mm = Math.max(50, Math.min(500, Math.round(parseFloat(e.target.value) * 10)));
-                                                    if (selectedWall.type === 'outer') closeOuterWalls(activeStorey);
-                                                    computeRooms(activeStorey);
-                                                    forceRender(v => v + 1);
-                                                    markDirty();
-                                                }}
-                                                step="0.5"
+                                                onCommit={v => applyChange('Wanddicke ändern', st => {
+                                                    selectedWall.thickness_mm = Math.round(v * 10);
+                                                    if (selectedWall.type === 'outer') refreshOuterPolygon(st);
+                                                    computeRooms(st);
+                                                })}
+                                                step={0.5}
+                                                min={WALL_THICKNESS.min / 10}
+                                                max={WALL_THICKNESS.max / 10}
                                                 style={inputStyle}
                                             />
                                             <span style={unitStyle}>cm</span>
@@ -3652,38 +4430,12 @@ const FloorPlanEditor = () => {
                                             return (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
                                                     <span style={{ fontSize: '0.78rem', width: '48px' }}>Länge:</span>
-                                                    <input
-                                                        type="number"
-                                                        value={+(len / 1000).toFixed(3)}
-                                                        onChange={e => {
-                                                            const newLen = Math.max(0.1, parseFloat(e.target.value)) * 1000; // mm
-                                                            if (pt1 && pt2) {
-                                                                const currentLen = dist(pt1, pt2);
-                                                                if (currentLen > 0) {
-                                                                    const dx = pt2.x - pt1.x;
-                                                                    const dy = pt2.y - pt1.y;
-                                                                    const scale = newLen / currentLen;
-                                                                    pt2.x = snapToGrid(pt1.x + dx * scale);
-                                                                    pt2.y = snapToGrid(pt1.y + dy * scale);
-                                                                    if (activeStorey.outerClosed) {
-                                                                        const outerWalls = activeStorey.walls.filter(w => w.type === 'outer');
-                                                                        const pts = buildOrderedPolygon(outerWalls, activeStorey.points);
-                                                                        if (pts && pts.length >= 3) {
-                                                                            const cwPoly = ensureCW(pts);
-                                                                            const thickness = outerWalls[0].thickness_mm;
-                                                                            activeStorey.outerPolygon = [...cwPoly];
-                                                                            activeStorey.outerBoundary = offsetPolygon(cwPoly, -thickness);
-                                                                        }
-                                                                    }
-                                                                    computeRooms(activeStorey);
-                                                                    forceRender(v => v + 1);
-                                                                    markDirty();
-                                                                    requestRender();
-                                                                }
-                                                            }
-                                                        }}
-                                                        step="0.01"
-                                                        min="0.10"
+                                                    {/* Einmalige Anwendung bei Enter/Verlassen entlang der aktuellen Richtung (kein Winkeldrift) */}
+                                                    <NumberInput
+                                                        value={Number.isFinite(len) ? +(len / 1000).toFixed(3) : NaN}
+                                                        onCommit={v => applyChange('Wandlänge ändern', st => { applyWallLength(st, selectedWall, v * 1000); })}
+                                                        step={0.01}
+                                                        min={0.1}
                                                         style={inputStyle}
                                                     />
                                                     <span style={unitStyle}>m</span>
@@ -3692,37 +4444,28 @@ const FloorPlanEditor = () => {
                                         })()}
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
                                             <span style={{ fontSize: '0.78rem', width: '48px' }}>Höhe:</span>
-                                            <input
-                                                type="number"
+                                            <NumberInput
                                                 value={(selectedWall.height_mm || activeStorey.height_mm) / 1000}
-                                                onChange={e => {
-                                                    selectedWall.height_mm = Math.max(100, Math.round(parseFloat(e.target.value) * 1000));
-                                                    forceRender(v => v + 1);
-                                                    markDirty();
-                                                }}
-                                                step="0.05"
+                                                onCommit={v => applyChange('Wandhöhe ändern', () => { selectedWall.height_mm = Math.round(v * 1000); })}
+                                                step={0.05}
+                                                min={0.1}
                                                 style={inputStyle}
                                             />
                                             <span style={unitStyle}>m</span>
                                         </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }} title="Nur zur Information – fließt derzeit nicht in 3D-Ansicht und Massen ein">
                                             <span style={{ fontSize: '0.78rem', width: '48px' }}>Ref.:</span>
-                                            <input
-                                                type="number"
+                                            <NumberInput
                                                 value={(selectedWall.ref_height_mm || 0) / 1000}
-                                                onChange={e => {
-                                                    selectedWall.ref_height_mm = Math.round(parseFloat(e.target.value) * 1000) || 0;
-                                                    forceRender(v => v + 1);
-                                                    markDirty();
-                                                }}
-                                                step="0.01"
+                                                onCommit={v => applyChange('Bezugshöhe ändern', () => { selectedWall.ref_height_mm = Math.round(v * 1000); })}
+                                                step={0.01}
                                                 style={inputStyle}
                                             />
                                             <span style={unitStyle}>m</span>
                                         </div>
                                         {selectedWall.type !== 'outer' && (
                                             <button
-                                                onClick={() => { flipWallSide(selectedWall); computeRooms(activeStorey); forceRender(v => v + 1); markDirty(); }}
+                                                onClick={() => applyChange('Wandseite wechseln', st => { flipWallSide(selectedWall); computeRooms(st); })}
                                                 style={{ ...topBtnStyle, marginTop: '6px', gap: '4px', fontSize: '0.78rem' }}
                                             >
                                                 <FlipHorizontal2 size={14} /> Seite wechseln
@@ -3744,18 +4487,18 @@ const FloorPlanEditor = () => {
                             {/* Opening preset (when door/window tool active) */}
                             {(activeTool === TOOLS.DOOR || activeTool === TOOLS.WINDOW) && (
                                 <PropGroup label={activeTool === TOOLS.DOOR ? 'Nächste Tür' : 'Nächstes Fenster'}>
-                                    <PropField label="Breite" value={nextOpeningPreset[activeTool === TOOLS.DOOR ? 'door' : 'window'].width / 10} unit="cm"
+                                    <PropField label="Breite" value={nextOpeningPreset[activeTool === TOOLS.DOOR ? 'door' : 'window'].width / 10} unit="cm" min={10}
                                         onChange={v => {
                                             const key = activeTool === TOOLS.DOOR ? 'door' : 'window';
                                             setNextOpeningPreset(prev => ({ ...prev, [key]: { ...prev[key], width: Math.round(v * 10) } }));
                                         }} />
-                                    <PropField label="Höhe" value={nextOpeningPreset[activeTool === TOOLS.DOOR ? 'door' : 'window'].height / 10} unit="cm"
+                                    <PropField label="Höhe" value={nextOpeningPreset[activeTool === TOOLS.DOOR ? 'door' : 'window'].height / 10} unit="cm" min={10}
                                         onChange={v => {
                                             const key = activeTool === TOOLS.DOOR ? 'door' : 'window';
                                             setNextOpeningPreset(prev => ({ ...prev, [key]: { ...prev[key], height: Math.round(v * 10) } }));
                                         }} />
                                     {activeTool === TOOLS.WINDOW && (
-                                        <PropField label="Brüstung" value={nextOpeningPreset.window.sill / 10} unit="cm"
+                                        <PropField label="Brüstung" value={nextOpeningPreset.window.sill / 10} unit="cm" min={0}
                                             onChange={v => {
                                                 setNextOpeningPreset(prev => ({ ...prev, window: { ...prev.window, sill: Math.round(v * 10) } }));
                                             }} />
@@ -3769,32 +4512,33 @@ const FloorPlanEditor = () => {
                             {/* Opening properties */}
                             {selectedOpening && (
                                 <PropGroup label={selectedOpening.type === 'door' ? 'Tür' : 'Fenster'}>
-                                    <PropField label="Breite" value={selectedOpening.width_mm / 10} unit="cm"
-                                        onChange={v => { selectedOpening.width_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); requestRender(); }} />
-                                    <PropField label="Höhe" value={selectedOpening.height_mm / 10} unit="cm"
-                                        onChange={v => { selectedOpening.height_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); requestRender(); }} />
+                                    {/* Breite wird auf die Wandlänge begrenzt, die Öffnung bleibt vollständig in der Wand */}
+                                    <PropField label="Breite" value={selectedOpening.width_mm / 10} unit="cm" min={10}
+                                        onChange={v => applyChange('Öffnungsbreite ändern', st => { applyOpeningWidth(st, selectedOpening, v * 10); })} />
+                                    <PropField label="Höhe" value={selectedOpening.height_mm / 10} unit="cm" min={10}
+                                        onChange={v => applyChange('Öffnungshöhe ändern', () => { selectedOpening.height_mm = Math.round(v * 10); })} />
                                     {selectedOpening.type === 'window' && (
-                                        <PropField label="Brüstung" value={selectedOpening.sill_mm / 10} unit="cm"
-                                            onChange={v => { selectedOpening.sill_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); requestRender(); }} />
+                                        <PropField label="Brüstung" value={selectedOpening.sill_mm / 10} unit="cm" min={0}
+                                            onChange={v => applyChange('Brüstungshöhe ändern', () => { selectedOpening.sill_mm = Math.round(v * 10); })} />
                                     )}
                                     {selectedOpening.type === 'door' && (
                                         <>
                                             <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '8px', marginBottom: '2px' }}>Anschlag</div>
                                             <div style={{ display: 'flex', gap: '8px' }}>
                                                 <label style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="swing" checked={selectedOpening.swing === 'left'} onChange={() => { selectedOpening.swing = 'left'; forceRender(n => n + 1); markDirty(); requestRender(); }} /> Links
+                                                    <input type="radio" name="swing" checked={selectedOpening.swing === 'left'} onChange={() => applyChange('Türanschlag ändern', () => { selectedOpening.swing = 'left'; })} /> Links
                                                 </label>
                                                 <label style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="swing" checked={selectedOpening.swing === 'right'} onChange={() => { selectedOpening.swing = 'right'; forceRender(n => n + 1); markDirty(); requestRender(); }} /> Rechts
+                                                    <input type="radio" name="swing" checked={selectedOpening.swing === 'right'} onChange={() => applyChange('Türanschlag ändern', () => { selectedOpening.swing = 'right'; })} /> Rechts
                                                 </label>
                                             </div>
                                             <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '6px', marginBottom: '2px' }}>Öffnungsrichtung</div>
                                             <div style={{ display: 'flex', gap: '8px' }}>
                                                 <label style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="dir" checked={selectedOpening.direction === 'inward'} onChange={() => { selectedOpening.direction = 'inward'; forceRender(n => n + 1); markDirty(); requestRender(); }} /> Innen
+                                                    <input type="radio" name="dir" checked={selectedOpening.direction === 'inward'} onChange={() => applyChange('Öffnungsrichtung ändern', () => { selectedOpening.direction = 'inward'; })} /> Innen
                                                 </label>
                                                 <label style={{ fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="dir" checked={selectedOpening.direction === 'outward'} onChange={() => { selectedOpening.direction = 'outward'; forceRender(n => n + 1); markDirty(); requestRender(); }} /> Außen
+                                                    <input type="radio" name="dir" checked={selectedOpening.direction === 'outward'} onChange={() => applyChange('Öffnungsrichtung ändern', () => { selectedOpening.direction = 'outward'; })} /> Außen
                                                 </label>
                                             </div>
                                         </>
@@ -3816,19 +4560,26 @@ const FloorPlanEditor = () => {
                                 const catItem = getFurnitureItem(selectedFurniture.catalog_id);
                                 return (
                                     <PropGroup label={catItem?.name || 'Möbel'}>
+                                        {/* Maße werden auf die Katalog-Grenzen geklemmt (clampDimensions), nie 0/negativ */}
                                         <PropField label="Breite" value={selectedFurniture.width_mm / 10} unit="cm"
                                             min={catItem ? catItem.minWidth / 10 : 10} max={catItem ? catItem.maxWidth / 10 : 1000}
-                                            onChange={v => { selectedFurniture.width_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                            onChange={v => applyChange('Möbelbreite ändern', () => {
+                                                const w = Math.round(v * 10);
+                                                selectedFurniture.width_mm = catItem ? clampDimensions(catItem, w, selectedFurniture.depth_mm).width : w;
+                                            })} />
                                         <PropField label="Tiefe" value={selectedFurniture.depth_mm / 10} unit="cm"
                                             min={catItem ? catItem.minDepth / 10 : 10} max={catItem ? catItem.maxDepth / 10 : 1000}
-                                            onChange={v => { selectedFurniture.depth_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
-                                        <PropField label="Höhe" value={selectedFurniture.height_mm / 10} unit="cm"
-                                            onChange={v => { selectedFurniture.height_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                            onChange={v => applyChange('Möbeltiefe ändern', () => {
+                                                const d = Math.round(v * 10);
+                                                selectedFurniture.depth_mm = catItem ? clampDimensions(catItem, selectedFurniture.width_mm, d).depth : d;
+                                            })} />
+                                        <PropField label="Höhe" value={selectedFurniture.height_mm / 10} unit="cm" min={1}
+                                            onChange={v => applyChange('Möbelhöhe ändern', () => { selectedFurniture.height_mm = Math.round(v * 10); })} />
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
                                             <span style={{ fontSize: '0.78rem', width: '48px' }}>Rotation:</span>
                                             <select
                                                 value={selectedFurniture.rotation}
-                                                onChange={e => { selectedFurniture.rotation = Number(e.target.value); forceRender(n => n + 1); markDirty(); }}
+                                                onChange={e => { const rot = Number(e.target.value); applyChange('Möbel drehen', () => { selectedFurniture.rotation = rot; }); }}
                                                 style={inputStyle}
                                             >
                                                 {[0, 45, 90, 135, 180, 225, 270, 315].map(a => (
@@ -3856,7 +4607,9 @@ const FloorPlanEditor = () => {
                                         <input
                                             type="text"
                                             value={selectedRoom.name}
-                                            onChange={e => { selectedRoom.name = e.target.value; forceRender(n => n + 1); markDirty(); }}
+                                            onFocus={() => beginTextEdit('Raum umbenennen')}
+                                            onChange={e => { selectedRoom.name = e.target.value; liveTextChange(); }}
+                                            onBlur={endTextEdit}
                                             style={{ ...inputStyle, flex: 1 }}
                                         />
                                     </div>
@@ -3873,7 +4626,9 @@ const FloorPlanEditor = () => {
                                         <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Bezeichnung</label>
                                         <input
                                             type="text" value={selectedSlab.name || ''}
-                                            onChange={e => { selectedSlab.name = e.target.value; forceRender(n => n + 1); markDirty(); }}
+                                            onFocus={() => beginTextEdit('Decke umbenennen')}
+                                            onChange={e => { selectedSlab.name = e.target.value; liveTextChange(); }}
+                                            onBlur={endTextEdit}
                                             style={{
                                                 width: '100%', padding: '4px 8px', fontSize: '0.82rem',
                                                 border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
@@ -3881,10 +4636,10 @@ const FloorPlanEditor = () => {
                                             }}
                                         />
                                     </div>
-                                    <PropField label="Dicke" value={selectedSlab.thickness_mm / 10} unit="cm"
-                                        onChange={v => { selectedSlab.thickness_mm = Math.round(v * 10); forceRender(n => n + 1); markDirty(); }} />
+                                    <PropField label="Dicke" value={selectedSlab.thickness_mm / 10} unit="cm" min={1}
+                                        onChange={v => applyChange('Deckendicke ändern', () => { selectedSlab.thickness_mm = Math.round(v * 10); })} />
                                     <PropField label="Referenzhöhe" value={selectedSlab.ref_height_mm / 1000} unit="m"
-                                        onChange={v => { selectedSlab.ref_height_mm = Math.round(v * 1000); forceRender(n => n + 1); markDirty(); }} />
+                                        onChange={v => applyChange('Deckenhöhe ändern', () => { selectedSlab.ref_height_mm = Math.round(v * 1000); })} />
                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
                                         {selectedSlab.ref_height_mm >= 0
                                             ? `↑ ${(selectedSlab.ref_height_mm / 1000).toFixed(2)} m über 0,00 (Decke)`
@@ -3892,9 +4647,9 @@ const FloorPlanEditor = () => {
                                     </div>
                                     <button
                                         onClick={() => {
-                                            activeStorey.slabs = (activeStorey.slabs || []).filter(s => s.id !== selectedSlab.id);
+                                            const slabId = selectedSlab.id;
+                                            applyChange('Decke löschen', st => { st.slabs = (st.slabs || []).filter(s => s.id !== slabId); });
                                             setSelectedId(null); setSelectedType(null);
-                                            markDirty(); forceRender(v => v + 1); requestRender();
                                         }}
                                         style={{
                                             marginTop: '10px', width: '100%', padding: '6px', fontSize: '0.78rem',
@@ -3968,18 +4723,58 @@ const PropGroup = ({ label, children }) => (
     </div>
 );
 
-const PropField = ({ label, value, unit, onChange, min, max, step = 0.5 }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-        <span style={{ fontSize: '0.78rem', width: '54px', flexShrink: 0 }}>{label}:</span>
+// Zahleneingabe mit Zwischenpuffer: Tippen ändert das Modell nicht; übernommen wird erst bei
+// Enter oder Verlassen des Feldes – nur endliche Werte, auf min/max geklemmt. ESC verwirft.
+const NumberInput = ({ value, onCommit, min, max, step, style }) => {
+    const [editing, setEditing] = useState(false);
+    const [text, setText] = useState('');
+    const skipBlurRef = useRef(false);
+
+    const commit = (raw) => {
+        // Unverändert (nur fokussiert/verlassen) → nichts schreiben, auch keine Klemmung von Altwerten
+        if (String(raw).trim() === formatNumberInput(value)) return;
+        const n = parseNumberInput(raw);
+        if (!Number.isFinite(n)) return; // leer/ungültig → alter Wert bleibt
+        let v = n;
+        if (Number.isFinite(min)) v = Math.max(min, v);
+        if (Number.isFinite(max)) v = Math.min(max, v);
+        setText(formatNumberInput(v));
+        if (!Number.isFinite(value) || Math.abs(v - value) > 1e-9) onCommit(v);
+    };
+
+    return (
         <input
             type="number"
-            value={value}
-            onChange={e => onChange(parseFloat(e.target.value))}
+            value={editing ? text : formatNumberInput(value)}
+            onFocus={() => { setText(formatNumberInput(value)); setEditing(true); }}
+            onChange={e => setText(e.target.value)}
+            onBlur={e => {
+                setEditing(false);
+                if (skipBlurRef.current) { skipBlurRef.current = false; return; }
+                commit(e.target.value);
+            }}
+            onKeyDown={e => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commit(e.currentTarget.value);
+                } else if (e.key === 'Escape') {
+                    skipBlurRef.current = true;
+                    setText(formatNumberInput(value));
+                    e.currentTarget.blur();
+                }
+            }}
             step={step}
             min={min}
             max={max}
-            style={inputStyle}
+            style={style}
         />
+    );
+};
+
+const PropField = ({ label, value, unit, onChange, min, max, step = 0.5 }) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+        <span style={{ fontSize: '0.78rem', width: '54px', flexShrink: 0 }}>{label}:</span>
+        <NumberInput value={value} onCommit={onChange} step={step} min={min} max={max} style={inputStyle} />
         <span style={unitStyle}>{unit}</span>
     </div>
 );
@@ -4004,8 +4799,8 @@ const unitStyle = {
     fontSize: '0.72rem', color: 'var(--text-secondary)', flexShrink: 0,
 };
 
-const getCursor = (tool, panning) => {
-    if (panning) return 'grabbing';
+// Pan-Cursor ('grabbing') wird direkt am Canvas gesetzt, da der Pan-Zustand ein Ref ist
+const getCursor = (tool) => {
     switch (tool) {
         case TOOLS.SELECT: return 'default';
         case TOOLS.OUTER_WALL:
@@ -4050,7 +4845,8 @@ const ExportMenuItem = ({ icon: Icon, label, sublabel, onClick }) => (
 // ─── Quantities Panel ───────────────────────────────────────────
 
 const QuantitiesPanel = ({ storeys, activeStoreyIdx }) => {
-    const data = useMemo(() => generateQuantityList(storeys), [storeys]);
+    // Bewusst ohne useMemo: Geschosse werden in-place geändert, die Array-Referenz bleibt gleich
+    const data = generateQuantityList(storeys);
     const activeSt = data.storeys[activeStoreyIdx];
 
     return (

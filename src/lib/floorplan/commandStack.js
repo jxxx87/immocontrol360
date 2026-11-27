@@ -1,16 +1,26 @@
 // ─── Command Stack (Undo/Redo) ──────────────────────────────────────
 // Generic command-pattern undo/redo system for the floor plan editor.
 
+// Maximale Anzahl Undo-Schritte. Der Editor legt pro Befehl eine Tiefkopie des
+// Geschosses ab (ggf. inkl. Hintergrundbild) – ohne Obergrenze wächst der
+// Speicher in langen Sitzungen unbegrenzt. Die ältesten Schritte werden verworfen.
+export const MAX_UNDO_STEPS = 100;
+
 /**
  * Create a new command stack instance.
+ * @param {{ maxSteps?: number }} [options]
  * @returns {{ execute, undo, redo, canUndo, canRedo, clear }}
  */
-export const createCommandStack = () => {
+export const createCommandStack = (options = {}) => {
+    const maxSteps = Math.max(1, Number(options.maxSteps) || MAX_UNDO_STEPS);
     let undoStack = [];
     let redoStack = [];
     let listeners = [];
 
     const notify = () => listeners.forEach(fn => fn());
+    const trim = (stack) => {
+        if (stack.length > maxSteps) stack.splice(0, stack.length - maxSteps);
+    };
 
     return {
         /**
@@ -20,6 +30,7 @@ export const createCommandStack = () => {
         execute(command) {
             command.do();
             undoStack.push(command);
+            trim(undoStack);
             redoStack = []; // clear redo on new action
             notify();
         },
@@ -27,17 +38,32 @@ export const createCommandStack = () => {
         undo() {
             if (undoStack.length === 0) return;
             const cmd = undoStack.pop();
-            cmd.undo();
-            redoStack.push(cmd);
-            notify();
+            try {
+                cmd.undo();
+                redoStack.push(cmd);
+                trim(redoStack);
+            } catch (err) {
+                // Befehl nicht verlieren: zurück auf den Undo-Stapel
+                undoStack.push(cmd);
+                throw err;
+            } finally {
+                notify();
+            }
         },
 
         redo() {
             if (redoStack.length === 0) return;
             const cmd = redoStack.pop();
-            cmd.do();
-            undoStack.push(cmd);
-            notify();
+            try {
+                cmd.do();
+                undoStack.push(cmd);
+                trim(undoStack);
+            } catch (err) {
+                redoStack.push(cmd);
+                throw err;
+            } finally {
+                notify();
+            }
         },
 
         canUndo() { return undoStack.length > 0; },

@@ -2,9 +2,11 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Building2, Wallet, Menu, Home, TicketCheck, MessageSquare } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { usePermission } from '../../context/PermissionContext';
 
 const BottomNav = ({ onMenuClick }) => {
     const { userRole } = useAuth();
+    const { canRead } = usePermission() || {};
 
     const tabs = userRole === 'tenant' ? [
         { path: '/tenant', icon: Home, label: 'Home' },
@@ -12,9 +14,9 @@ const BottomNav = ({ onMenuClick }) => {
         { path: '/tenant/messages', icon: MessageSquare, label: 'Chat' },
     ] : [
         { path: '/', icon: LayoutDashboard, label: 'Dash' },
-        { path: '/properties', icon: Building2, label: 'Immo' },
-        { path: '/finance', icon: Wallet, label: 'Finanz' },
-    ];
+        { path: '/properties', icon: Building2, label: 'Immo', category: 'immobilien' },
+        { path: '/finance', icon: Wallet, label: 'Finanz', category: 'finanzen' },
+    ].filter(tab => !tab.category || !canRead || canRead(tab.category));
 
     return (
         <div style={{

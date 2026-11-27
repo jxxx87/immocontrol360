@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
     Calculator, Plus, Search, Trash2, Loader2, Building2,
-    ArrowRight, Tag
+    ArrowRight, AlertCircle, RefreshCw
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { useViewMode } from '../../context/ViewModeContext';
+import { translateError } from '../../lib/errorTranslator';
 
 const fmt = (v) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(v || 0);
 
@@ -23,39 +24,62 @@ const RenovationCalculator = () => {
 
     const [calculations, setCalculations] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [deletingId, setDeletingId] = useState(null);
 
-    useEffect(() => {
-        if (user) fetchCalcs();
-    }, [user]);
-
-    const fetchCalcs = async () => {
+    const fetchCalcs = useCallback(async () => {
         setLoading(true);
+        setLoadError(null);
         try {
+            // Nur die für die Liste benötigten Spalten (ohne building_config-JSONB).
+            // Kein Filter auf user_id: die Zugriffsregeln der Datenbank liefern eigene
+            // Kalkulationen und die freigegebener Objekte.
             const { data, error } = await supabase
                 .from('renovation_calculations')
                 .select(`
-                    *,
+                    id, name, calc_type, total_cost, created_at,
                     property:properties(street, house_number, city),
                     unit:units(unit_name)
                 `)
-                .eq('user_id', user.id)
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
             setCalculations(data || []);
         } catch (err) {
             console.error('Error fetching calculations:', err);
+            setLoadError(translateError(err));
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        if (user) fetchCalcs();
+    }, [user, fetchCalcs]);
 
     const handleDelete = async (id, e) => {
         e.stopPropagation();
         if (!window.confirm('Kalkulation endgültig löschen?')) return;
-        await supabase.from('renovation_calculations').delete().eq('id', id);
-        fetchCalcs();
+        setDeletingId(id);
+        try {
+            const { data, error } = await supabase
+                .from('renovation_calculations')
+                .delete()
+                .eq('id', id)
+                .select('id');
+            if (error) throw error;
+            if (!data || data.length === 0) {
+                throw new Error('Die Kalkulation wurde nicht gelöscht (keine Berechtigung oder bereits entfernt).');
+            }
+            setCalculations(prev => prev.filter(c => c.id !== id));
+        } catch (err) {
+            console.error('Error deleting calculation:', err);
+            alert('Kalkulation konnte nicht gelöscht werden: ' + translateError(err));
+            fetchCalcs();
+        } finally {
+            setDeletingId(null);
+        }
     };
 
     const enriched = useMemo(() => {
@@ -69,10 +93,22 @@ const RenovationCalculator = () => {
     const filtered = useMemo(() => {
         if (!searchTerm) return enriched;
         const s = searchTerm.toLowerCase();
-        return enriched.filter(c => (c.name + (c.propertyLabel || '')).toLowerCase().includes(s));
+        return enriched.filter(c => ((c.name || '') + (c.propertyLabel || '')).toLowerCase().includes(s));
     }, [enriched, searchTerm]);
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '40px' }}><Loader2 className="animate-spin" size={28} /></div>;
+
+    if (loadError) {
+        return (
+            <div style={{ padding: '16px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: '8px', color: '#991B1B' }}>
+                <h4 style={{ fontWeight: 700, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertCircle size={20} /> Kalkulationen konnten nicht geladen werden
+                </h4>
+                <p style={{ fontSize: '0.9rem', marginBottom: '12px' }}>{loadError}</p>
+                <Button size="sm" icon={RefreshCw} onClick={fetchCalcs}>Erneut laden</Button>
+            </div>
+        );
+    }
 
     return (
         <div>
@@ -98,7 +134,7 @@ const RenovationCalculator = () => {
             </div>
 
             {/* List */}
-            {filtered.length === 0 ? (
+            {enriched.length === 0 ? (
                 <div style={{
                     textAlign: 'center', padding: '60px 20px',
                     color: 'var(--text-secondary)', fontSize: '0.9rem',
@@ -107,6 +143,17 @@ const RenovationCalculator = () => {
                     <p>Noch keine Kalkulationen erstellt.</p>
                     <Button icon={Plus} onClick={() => navigate('/renovation/calculator/new')} style={{ marginTop: '16px' }}>
                         Neue Kalkulation
+                    </Button>
+                </div>
+            ) : filtered.length === 0 ? (
+                <div style={{
+                    textAlign: 'center', padding: '40px 20px',
+                    color: 'var(--text-secondary)', fontSize: '0.9rem',
+                }}>
+                    <Search size={36} style={{ opacity: 0.3, marginBottom: '12px' }} />
+                    <p>Keine Kalkulation passt zur Suche „{searchTerm}".</p>
+                    <Button variant="secondary" onClick={() => setSearchTerm('')} style={{ marginTop: '12px' }}>
+                        Suche zurücksetzen
                     </Button>
                 </div>
             ) : (
@@ -151,9 +198,11 @@ const RenovationCalculator = () => {
                                     <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                                         <button
                                             onClick={(e) => handleDelete(c.id, e)}
-                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px' }}
+                                            disabled={deletingId === c.id}
+                                            title="Kalkulation löschen"
+                                            style={{ background: 'none', border: 'none', cursor: deletingId === c.id ? 'wait' : 'pointer', color: 'var(--text-secondary)', padding: '4px' }}
                                         >
-                                            <Trash2 size={16} />
+                                            {deletingId === c.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                         </button>
                                         <ArrowRight size={16} color="var(--text-secondary)" />
                                     </div>
@@ -162,9 +211,8 @@ const RenovationCalculator = () => {
                         );
                     })}
                 </div>
-            )
-            }
-        </div >
+            )}
+        </div>
     );
 };
 

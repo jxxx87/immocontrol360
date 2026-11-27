@@ -1,80 +1,188 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { translateError } from '../lib/errorTranslator';
+import {
+    FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
+    prepareUploadBody, extractStoragePath
+} from '../lib/storageFiles';
 import {
     Plus, X, Megaphone, Calendar, Edit2, Trash2, Pin, Building2,
-    Upload, FileText, Image as ImageIcon, Paperclip
+    Upload, FileText, Image as ImageIcon, Paperclip, AlertCircle
 } from 'lucide-react';
+
+const BUCKET = 'announcements';
+
+// Speicherpfade (nur Bucket-Pfade) einer Anhangsliste
+const storagePathsOf = (attachments) => (Array.isArray(attachments) ? attachments : [])
+    .map(att => extractStoragePath(att?.path, BUCKET))
+    .filter(Boolean);
+
+const removeStorageFiles = async (paths) => {
+    if (!paths || paths.length === 0) return;
+    const { error } = await supabase.storage.from(BUCKET).remove(paths);
+    if (error) console.error('Error removing announcement files:', error);
+};
 
 const Announcements = () => {
     const { user } = useAuth();
     const [announcements, setAnnouncements] = useState([]);
     const [properties, setProperties] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(true); // nur beim ersten Laden
+    const [pageError, setPageError] = useState(null);
     const [showForm, setShowForm] = useState(false);
     const [editId, setEditId] = useState(null);
     const [form, setForm] = useState({ title: '', content: '', property_id: '' });
-    const [uploadFiles, setUploadFiles] = useState([]);
+    const [uploadFiles, setUploadFiles] = useState([]); // [{ file, previewUrl }]
     const [existingAttachments, setExistingAttachments] = useState([]);
+    const [originalAttachments, setOriginalAttachments] = useState([]); // Stand beim Öffnen (Bearbeiten)
     const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState(null);
     const fileInputRef = useRef(null);
+    const previewUrlsRef = useRef([]);
 
-    const fetchData = async () => {
-        setLoading(true);
+    // Vorschau-URLs beim Verlassen der Seite freigeben
+    useEffect(() => () => {
+        previewUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+        previewUrlsRef.current = [];
+    }, []);
+
+    const fetchData = useCallback(async () => {
         const [annRes, propRes] = await Promise.all([
             supabase.from('announcements').select('*, property:properties(street, house_number, city)').order('created_at', { ascending: false }),
             supabase.from('properties').select('id, street, house_number, city').order('street')
         ]);
-        setAnnouncements(annRes.data || []);
-        setProperties(propRes.data || []);
+        const loadError = annRes.error || propRes.error;
+        if (loadError) {
+            console.error('Error loading announcements:', loadError);
+            setPageError(`Aushänge konnten nicht geladen werden: ${translateError(loadError)}`);
+        } else {
+            setPageError(null);
+            setAnnouncements(annRes.data || []);
+            setProperties(propRes.data || []);
+        }
         setLoading(false);
+    }, []);
+
+    useEffect(() => { fetchData(); }, [fetchData]);
+
+    // ── Dateiauswahl / Vorschau ─────────────────────────────────────
+    const releasePreview = (url) => {
+        URL.revokeObjectURL(url);
+        previewUrlsRef.current = previewUrlsRef.current.filter(u => u !== url);
     };
 
-    useEffect(() => { fetchData(); }, []);
+    const clearNewFiles = () => {
+        uploadFiles.forEach(item => releasePreview(item.previewUrl));
+        setUploadFiles([]);
+    };
 
+    const addFiles = (fileList) => {
+        const files = Array.from(fileList || []);
+        if (files.length === 0) return;
+        const errors = [];
+        const items = [];
+        files.forEach(file => {
+            const validationError = validateUploadFile(file, FILE_RULES.announcements);
+            if (validationError) {
+                errors.push(validationError);
+                return;
+            }
+            const previewUrl = URL.createObjectURL(file);
+            previewUrlsRef.current.push(previewUrl);
+            items.push({ file, previewUrl });
+        });
+        setUploadFiles(prev => [...prev, ...items]);
+        setFormError(errors.length > 0 ? errors.join('\n') : null);
+    };
+
+    const resetForm = () => {
+        setShowForm(false);
+        setEditId(null);
+        setForm({ title: '', content: '', property_id: '' });
+        clearNewFiles();
+        setExistingAttachments([]);
+        setOriginalAttachments([]);
+        setFormError(null);
+    };
+
+    // Speichern: Bei Fehlern bleibt das Formular offen, bereits hochgeladene Dateien
+    // werden wieder entfernt und der Nutzer sieht eine Meldung.
     const handleSave = async () => {
         if (!form.title.trim() || !form.content.trim() || !form.property_id || saving) return;
         setSaving(true);
+        setFormError(null);
+
+        const propertyId = form.property_id;
+        const createdPaths = []; // in diesem Vorgang neu angelegte Dateien (für Rücknahme)
 
         try {
+            // Wurde die Immobilie gewechselt, Anhänge in den Ordner der neuen Immobilie
+            // kopieren – sonst können deren Mieter sie nicht öffnen.
+            const keptAttachments = [];
+            for (const att of existingAttachments) {
+                const oldPath = extractStoragePath(att?.path, BUCKET);
+                if (!oldPath || oldPath.startsWith(`${propertyId}/`)) {
+                    keptAttachments.push(att);
+                    continue;
+                }
+                const newPath = `${propertyId}/${buildStorageObjectName(att.name || oldPath)}`;
+                const { error: copyError } = await supabase.storage.from(BUCKET).copy(oldPath, newPath);
+                if (copyError) {
+                    throw new Error(`Anhang „${att.name || 'Datei'}“ konnte nicht in die neue Immobilie übernommen werden: ${translateError(copyError)}`);
+                }
+                createdPaths.push(newPath);
+                keptAttachments.push({ ...att, path: newPath });
+            }
+
             // Upload new files
             const newPaths = [];
-            for (const file of uploadFiles) {
-                const timestamp = Date.now();
-                const filePath = `${form.property_id}/${timestamp}_${file.name}`;
+            for (const { file } of uploadFiles) {
+                const filePath = `${propertyId}/${buildStorageObjectName(file)}`;
+                const { body, contentType } = prepareUploadBody(file);
                 const { error: uploadError } = await supabase.storage
-                    .from('announcements')
-                    .upload(filePath, file);
-                if (!uploadError) {
-                    newPaths.push({ path: filePath, name: file.name, type: file.type });
+                    .from(BUCKET)
+                    .upload(filePath, body, { contentType });
+                if (uploadError) {
+                    throw new Error(`„${file.name}“ konnte nicht hochgeladen werden: ${translateError(uploadError)}`);
                 }
+                createdPaths.push(filePath);
+                newPaths.push({ path: filePath, name: file.name, type: contentType });
             }
 
-            const allAttachments = [...existingAttachments, ...newPaths];
+            const allAttachments = [...keptAttachments, ...newPaths];
 
             if (editId) {
-                await supabase.from('announcements').update({
+                const { data: updated, error } = await supabase.from('announcements').update({
                     title: form.title, content: form.content,
-                    property_id: form.property_id,
+                    property_id: propertyId,
                     attachments: allAttachments,
                     updated_at: new Date().toISOString()
-                }).eq('id', editId);
+                }).eq('id', editId).select('id');
+                if (error) throw error;
+                if (!updated || updated.length === 0) {
+                    throw new Error('Der Aushang konnte nicht gespeichert werden (keine Berechtigung).');
+                }
             } else {
-                await supabase.from('announcements').insert({
+                const { error } = await supabase.from('announcements').insert({
                     title: form.title, content: form.content,
-                    property_id: form.property_id, created_by: user.id,
+                    property_id: propertyId, created_by: user.id,
                     attachments: allAttachments
                 });
+                if (error) throw error;
             }
 
-            setShowForm(false);
-            setEditId(null);
-            setForm({ title: '', content: '', property_id: '' });
-            setUploadFiles([]);
-            setExistingAttachments([]);
+            // Nicht mehr verwendete Dateien entfernen (entfernte Anhänge, alte Kopien)
+            const stillUsed = new Set(storagePathsOf(allAttachments));
+            const obsolete = storagePathsOf(originalAttachments).filter(p => !stillUsed.has(p));
+            await removeStorageFiles(obsolete);
+
+            resetForm();
             fetchData();
         } catch (err) {
             console.error('Error saving:', err);
+            await removeStorageFiles(createdPaths);
+            setFormError(err?.message && !err.code ? err.message : `Fehler beim Speichern: ${translateError(err)}`);
         } finally {
             setSaving(false);
         }
@@ -82,15 +190,34 @@ const Announcements = () => {
 
     const handleEdit = (a) => {
         setForm({ title: a.title, content: a.content, property_id: a.property_id });
-        setExistingAttachments(a.attachments || []);
-        setUploadFiles([]);
+        const attachments = Array.isArray(a.attachments) ? a.attachments.filter(Boolean) : [];
+        setExistingAttachments(attachments);
+        setOriginalAttachments(attachments);
+        clearNewFiles();
+        setFormError(null);
         setEditId(a.id);
         setShowForm(true);
     };
 
-    const handleDelete = async (id) => {
+    const handleDelete = async (announcement) => {
         if (!window.confirm('Aushang wirklich löschen?')) return;
-        await supabase.from('announcements').delete().eq('id', id);
+        setPageError(null);
+        const { data: deleted, error } = await supabase
+            .from('announcements')
+            .delete()
+            .eq('id', announcement.id)
+            .select('id');
+        if (error) {
+            console.error('Error deleting announcement:', error);
+            setPageError(`Der Aushang konnte nicht gelöscht werden: ${translateError(error)}`);
+            return;
+        }
+        if (!deleted || deleted.length === 0) {
+            setPageError('Der Aushang konnte nicht gelöscht werden (keine Berechtigung).');
+            return;
+        }
+        // Anhänge ebenfalls aus dem Speicher entfernen
+        await removeStorageFiles(storagePathsOf(announcement.attachments));
         fetchData();
     };
 
@@ -99,6 +226,8 @@ const Announcements = () => {
     };
 
     const removeNewFile = (idx) => {
+        const item = uploadFiles[idx];
+        if (item) releasePreview(item.previewUrl);
         setUploadFiles(prev => prev.filter((_, i) => i !== idx));
     };
 
@@ -108,8 +237,7 @@ const Announcements = () => {
 
     const getPropertyLabel = (p) => `${p.street} ${p.house_number || ''}, ${p.city}`;
 
-    const isImageFile = (name) => /\.(jpg|jpeg|png|gif|webp)$/i.test(name);
-    const isPdfFile = (name) => /\.pdf$/i.test(name);
+    const isImageFile = (name) => /\.(jpg|jpeg|png|gif|webp)$/i.test(name || '');
 
     if (loading) {
         return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}>
@@ -126,11 +254,27 @@ const Announcements = () => {
                         Erstellen Sie Aushänge für Ihre Mieter.
                     </p>
                 </div>
-                <button onClick={() => { setShowForm(true); setEditId(null); setForm({ title: '', content: '', property_id: '' }); setUploadFiles([]); setExistingAttachments([]); }}
+                <button onClick={() => { resetForm(); setShowForm(true); }}
                     className="btn btn-primary btn-md" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <Plus size={18} /> Neuer Aushang
                 </button>
             </div>
+
+            {pageError && (
+                <div role="alert" style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '10px',
+                    padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)',
+                    border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+                    color: '#B91C1C', fontSize: '0.85rem'
+                }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <span style={{ flex: 1 }}>{pageError}</span>
+                    <button onClick={() => setPageError(null)} title="Schließen"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}>
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
 
             {announcements.length === 0 ? (
                 <div style={{
@@ -189,7 +333,7 @@ const Announcements = () => {
                                         style={{ color: 'var(--text-secondary)', cursor: 'pointer', background: 'none', border: 'none' }} title="Bearbeiten">
                                         <Edit2 size={16} />
                                     </button>
-                                    <button onClick={() => handleDelete(a.id)}
+                                    <button onClick={() => handleDelete(a)}
                                         style={{ color: '#DC2626', cursor: 'pointer', background: 'none', border: 'none' }} title="Löschen">
                                         <Trash2 size={16} />
                                     </button>
@@ -274,14 +418,11 @@ const Announcements = () => {
                                 <input
                                     type="file"
                                     ref={fileInputRef}
-                                    accept="image/*,.pdf"
+                                    accept={`image/*,${acceptAttribute(FILE_RULES.announcements)}`}
                                     multiple
                                     style={{ display: 'none' }}
                                     onChange={(e) => {
-                                        const files = Array.from(e.target.files);
-                                        if (files.length > 0) {
-                                            setUploadFiles(prev => [...prev, ...files]);
-                                        }
+                                        addFiles(e.target.files);
                                         e.target.value = '';
                                     }}
                                 />
@@ -313,8 +454,8 @@ const Announcements = () => {
 
                                 {/* New files to upload */}
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                                    {uploadFiles.map((file, idx) => (
-                                        <div key={`new-${idx}`} style={{
+                                    {uploadFiles.map(({ file, previewUrl }, idx) => (
+                                        <div key={previewUrl} style={{
                                             position: 'relative',
                                             display: 'flex', alignItems: 'center', gap: '6px',
                                             padding: '6px 10px', borderRadius: '8px',
@@ -322,7 +463,7 @@ const Announcements = () => {
                                             fontSize: '0.78rem'
                                         }}>
                                             {isImageFile(file.name) ? (
-                                                <img src={URL.createObjectURL(file)} alt=""
+                                                <img src={previewUrl} alt=""
                                                     style={{ width: '24px', height: '24px', objectFit: 'cover', borderRadius: '4px' }} />
                                             ) : (
                                                 <FileText size={14} color="#3B82F6" />
@@ -355,6 +496,16 @@ const Announcements = () => {
                             </div>
                         </div>
 
+                        {formError && (
+                            <div role="alert" style={{
+                                marginTop: '16px', padding: '10px 14px', borderRadius: 'var(--radius-md)',
+                                border: '1px solid #FECACA', color: '#B91C1C', fontSize: '0.82rem',
+                                whiteSpace: 'pre-wrap'
+                            }}>
+                                {formError}
+                            </div>
+                        )}
+
                         <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '24px' }}>
                             <button onClick={() => setShowForm(false)} className="btn btn-secondary btn-md">Abbrechen</button>
                             <button onClick={handleSave}
@@ -374,27 +525,29 @@ const Announcements = () => {
 };
 
 // ── ATTACHMENT GALLERY (shared display for both investor + tenant views) ──
+// Nur Pfade des Buckets werden signiert; fremde Adressen werden nicht verlinkt.
 const AttachmentGallery = ({ attachments }) => {
-    const [signedUrls, setSignedUrls] = useState({});
+    const signedUrlsRef = useRef({});
 
-    const getSignedUrl = async (path) => {
-        if (signedUrls[path]) return signedUrls[path];
-        // If path is already a URL, return directly
-        if (path.startsWith('http')) return path;
+    const getSignedUrl = useCallback(async (path) => {
+        const storagePath = extractStoragePath(path, BUCKET);
+        if (!storagePath) return null;
+        if (signedUrlsRef.current[storagePath]) return signedUrlsRef.current[storagePath];
 
-        const { data } = await supabase.storage
-            .from('announcements')
-            .createSignedUrl(path, 3600);
+        const { data, error } = await supabase.storage
+            .from(BUCKET)
+            .createSignedUrl(storagePath, 3600);
+        if (error) console.error('Error signing attachment:', error);
         if (data?.signedUrl) {
-            setSignedUrls(prev => ({ ...prev, [path]: data.signedUrl }));
+            signedUrlsRef.current = { ...signedUrlsRef.current, [storagePath]: data.signedUrl };
             return data.signedUrl;
         }
         return null;
-    };
+    }, []);
 
     return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-            {attachments.map((att, idx) => (
+            {(attachments || []).filter(Boolean).map((att, idx) => (
                 <AttachmentItem key={idx} att={att} getSignedUrl={getSignedUrl} />
             ))}
         </div>
@@ -404,17 +557,21 @@ const AttachmentGallery = ({ attachments }) => {
 const AttachmentItem = ({ att, getSignedUrl }) => {
     const [url, setUrl] = useState(null);
     const [loading, setLoading] = useState(true);
-    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(att.name || att.path);
-    const isPdf = /\.pdf$/i.test(att.name || att.path);
+    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(att?.name || att?.path || '');
+    const isPdf = /\.pdf$/i.test(att?.name || att?.path || '');
+    const attPath = att?.path;
 
     useEffect(() => {
+        let cancelled = false;
         const load = async () => {
-            const signedUrl = await getSignedUrl(att.path);
+            const signedUrl = await getSignedUrl(attPath);
+            if (cancelled) return;
             setUrl(signedUrl);
             setLoading(false);
         };
         load();
-    }, [att.path]);
+        return () => { cancelled = true; };
+    }, [attPath, getSignedUrl]);
 
     if (loading) {
         return (
@@ -431,12 +588,29 @@ const AttachmentItem = ({ att, getSignedUrl }) => {
         );
     }
 
-    if (isImage && url) {
+    if (!url) {
+        return (
+            <span
+                title="Der Anhang ist nicht verfügbar."
+                style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '8px 12px', borderRadius: '8px',
+                    backgroundColor: '#F8FAFC', border: '1px dashed var(--border-color)',
+                    fontSize: '0.78rem', color: 'var(--text-secondary)', cursor: 'not-allowed'
+                }}
+            >
+                <Paperclip size={14} />
+                {att?.name || 'Datei'} (nicht verfügbar)
+            </span>
+        );
+    }
+
+    if (isImage) {
         return (
             <img
                 src={url}
                 alt={att.name}
-                onClick={() => window.open(url, '_blank')}
+                onClick={() => window.open(url, '_blank', 'noopener')}
                 style={{
                     width: '120px', height: '90px', objectFit: 'cover',
                     borderRadius: '8px', cursor: 'pointer',
@@ -448,7 +622,7 @@ const AttachmentItem = ({ att, getSignedUrl }) => {
 
     return (
         <a
-            href={url || '#'}
+            href={url}
             target="_blank"
             rel="noopener noreferrer"
             style={{

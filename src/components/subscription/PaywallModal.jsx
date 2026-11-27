@@ -36,9 +36,12 @@ const PLANS = [
     },
 ];
 
+// Stripe-Status, bei denen ein Abo noch läuft (dann kein neuer Checkout, sondern Kundenportal)
+const RUNNING_STATUSES = ['active', 'trialing', 'past_due', 'unpaid', 'paused'];
+
 /* ─── Component ──────────────────────────────────────────── */
 const PaywallModal = () => {
-    const { showPaywall, setShowPaywall, paywallReason } = useSubscription();
+    const { showPaywall, setShowPaywall, paywallReason, subscription } = useSubscription();
     const { session } = useAuth();
     const [loadingPlan, setLoadingPlan] = useState(null);
     const [billingPeriod, setBillingPeriod] = useState('yearly');
@@ -57,29 +60,60 @@ const PaywallModal = () => {
         }
     }, [showPaywall, session]);
 
-    // Handle ESC
+    // Zurück-Navigation vom Stripe-Checkout (Seite aus dem bfcache): Sperre wieder lösen
     useEffect(() => {
-        const dialog = dialogRef.current;
-        if (!dialog) return;
-        const onCancel = (e) => { e.preventDefault(); setShowPaywall(false); };
-        dialog.addEventListener('cancel', onCancel);
-        return () => dialog.removeEventListener('cancel', onCancel);
-    }, [setShowPaywall]);
+        const onPageShow = (e) => { if (e.persisted) setLoadingPlan(null); };
+        window.addEventListener('pageshow', onPageShow);
+        return () => window.removeEventListener('pageshow', onPageShow);
+    }, []);
+
+    // ESC / Schließen: Zustand immer aus den Dialog-Ereignissen synchronisieren
+    // (deklarativ am Element, damit es auch nach einem Login ohne Reload greift)
+    const handleCancel = (e) => { e.preventDefault(); setShowPaywall(false); };
+    const handleClose = () => { if (showPaywall) setShowPaywall(false); };
 
     // ── Handlers ──
     const handleSubscribe = async (planId) => {
+        if (loadingPlan) return; // Nur ein Checkout gleichzeitig
         setLoadingPlan(planId);
+        let redirecting = false;
         try {
+            // Laufendes Stripe-Abo: kein zweites Abo anlegen, Tarifwechsel über das Kundenportal
+            if (subscription?.stripe_subscription_id && RUNNING_STATUSES.includes(subscription.status)) {
+                const { data: portal, error: portalError } = await supabase.functions.invoke('create-portal-session', {
+                    body: { user_id: session.user.id, return_url: `${window.location.origin}/settings` },
+                });
+                if (portalError || !portal?.url) {
+                    throw new Error(portal?.message || 'Das Stripe-Kundenportal konnte nicht geöffnet werden.');
+                }
+                alert('Du hast bereits ein laufendes Abo. Tarifwechsel und Verwaltung erfolgen im Stripe-Kundenportal.');
+                redirecting = true;
+                window.location.href = portal.url;
+                return;
+            }
+
+            // user_id wird nur noch für ältere Function-Versionen mitgeschickt;
+            // die neue Function ermittelt den Nutzer aus dem Anmelde-Token.
             const { data, error } = await supabase.functions.invoke('create-checkout-session', {
                 body: { plan_id: planId, billing_period: billingPeriod, user_id: session.user.id },
             });
-            if (error) throw error;
-            if (data?.url) window.location.href = data.url;
+            if (error) {
+                let message = null;
+                try { message = (await error.context?.json())?.message || null; } catch { /* kein JSON */ }
+                throw new Error(message || 'Fehler beim Starten des Checkouts.');
+            }
+            if (!data?.url) throw new Error(data?.message || 'Fehler beim Starten des Checkouts.');
+            if (data.already_subscribed) {
+                alert(data.message || 'Du hast bereits ein laufendes Abo. Du wirst zum Stripe-Kundenportal weitergeleitet.');
+            }
+            redirecting = true;
+            window.location.href = data.url;
         } catch (err) {
             console.error('Checkout error:', err);
-            alert('Fehler beim Starten des Checkouts.');
+            alert(err?.message || 'Fehler beim Starten des Checkouts.');
         } finally {
-            setLoadingPlan(null);
+            // Bei erfolgreicher Weiterleitung gesperrt lassen, damit kein zweiter Checkout startet
+            if (!redirecting) setLoadingPlan(null);
         }
     };
 
@@ -317,19 +351,25 @@ const PaywallModal = () => {
 
     /* ─── Render ──────────────────────────────────────────── */
     return (
-        <dialog ref={dialogRef} style={s.dialog}>
+        <dialog
+            ref={dialogRef}
+            className="paywall-dialog"
+            style={s.dialog}
+            onCancel={handleCancel}
+            onClose={handleClose}
+        >
             <style>{`
-                dialog::backdrop {
+                dialog.paywall-dialog::backdrop {
                     background: rgba(15, 23, 42, 0.7);
                     backdrop-filter: blur(6px);
                 }
-                dialog[open] {
+                dialog.paywall-dialog[open] {
                     max-height: 90vh;
                     overflow-y: auto;
                     -webkit-overflow-scrolling: touch;
                 }
                 @media (max-width: 768px) {
-                    dialog[open] {
+                    dialog.paywall-dialog[open] {
                         max-height: 95vh;
                         width: 100% !important;
                         border-radius: 12px !important;
@@ -410,6 +450,7 @@ const PaywallModal = () => {
                                 plan={plan}
                                 isMonthly={isMonthly}
                                 loading={loadingPlan === plan.id}
+                                disabled={!!loadingPlan}
                                 onSubscribe={() => handleSubscribe(plan.id)}
                                 styles={s}
                             />
@@ -417,9 +458,15 @@ const PaywallModal = () => {
                     </div>
 
                     {/* Footer */}
-                    <div style={{ marginTop: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '12px', display: 'flex', justifyContent: 'center', gap: '16px' }}>
+                    <div style={{ marginTop: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '12px', display: 'flex', justifyContent: 'center', gap: '16px', flexWrap: 'wrap' }}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Shield size={12} /> Sichere Zahlung via Stripe</span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Zap size={12} /> Sofortiger Zugriff</span>
+                    </div>
+                    <div style={{ marginTop: '8px', textAlign: 'center', color: '#94a3b8', fontSize: '11px' }}>
+                        {isMonthly
+                            ? 'Monatliche Abrechnung.'
+                            : 'Jährliche Abrechnung: Der Jahresbetrag wird zu Beginn der Laufzeit im Voraus fällig.'}
+                        {' '}Der verbindliche Gesamtbetrag wird vor der Zahlung im Stripe-Checkout angezeigt.
                     </div>
                 </div>
             </div>
@@ -428,7 +475,7 @@ const PaywallModal = () => {
 };
 
 /* ─── Plan Card Sub-Component ──────────────────────────── */
-const PlanCard = ({ plan, isMonthly, loading, onSubscribe, styles }) => {
+const PlanCard = ({ plan, isMonthly, loading, disabled, onSubscribe, styles }) => {
     const [hovered, setHovered] = useState(false);
     const s = styles;
 
@@ -455,6 +502,9 @@ const PlanCard = ({ plan, isMonthly, loading, onSubscribe, styles }) => {
             <div style={{ marginBottom: '20px' }}>
                 <span style={s.cardPrice}>{isMonthly ? plan.monthly : plan.yearly}€</span>
                 <span style={s.cardPriceSuffix}>/Monat</span>
+                <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '6px' }}>
+                    {isMonthly ? 'monatlich abgerechnet' : 'jährlich im Voraus abgerechnet'}
+                </div>
             </div>
 
             <ul style={s.cardFeatures}>
@@ -468,8 +518,8 @@ const PlanCard = ({ plan, isMonthly, loading, onSubscribe, styles }) => {
 
             <button
                 onClick={onSubscribe}
-                disabled={loading}
-                style={s.cardBtn(plan)}
+                disabled={loading || disabled}
+                style={{ ...s.cardBtn(plan), ...(disabled && !loading ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}
                 onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.9'; e.currentTarget.style.transform = 'scale(1.02)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'scale(1)'; }}
             >

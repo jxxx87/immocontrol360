@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -10,7 +10,6 @@ import {
     Wallet,
     Home,
     AlertCircle,
-    ArrowRight,
     Loader2
 } from 'lucide-react';
 import {
@@ -25,253 +24,282 @@ import {
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
+import { translateError } from '../lib/errorTranslator';
+import {
+    num,
+    toLocalDateStr,
+    toMonthStr,
+    parseDateOnly,
+    buildRentIndex,
+    computeArrears,
+    filterExpensesByPortfolio,
+    fetchAllRows,
+    loadMahnverfahren,
+    isMissingRelationError
+} from '../lib/rentArrears';
 
-const KPICard = ({ title, value, trend, trendValue, icon: Icon, color, onClick }) => (
-    <Card className="kpi-card" onClick={onClick} style={{ cursor: onClick ? 'pointer' : 'default' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--spacing-sm)' }}>
-            <div>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>{title}</p>
-                <h3 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</h3>
+const MONTH_NAMES = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+
+const KPICard = (props) => {
+    const { title, value, trend, trendValue, subtitle, icon: Icon, color, onClick } = props;
+    return (
+        <Card className="kpi-card" onClick={onClick} style={{ cursor: onClick ? 'pointer' : 'default' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--spacing-sm)' }}>
+                <div>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>{title}</p>
+                    <h3 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</h3>
+                </div>
+                <div style={{
+                    padding: '0.5rem',
+                    borderRadius: 'var(--radius-md)',
+                    backgroundColor: `${color}20`,
+                    color: color
+                }}>
+                    <Icon size={24} />
+                </div>
             </div>
-            <div style={{
-                padding: '0.5rem',
-                borderRadius: 'var(--radius-md)',
-                backgroundColor: `${color}20`,
-                color: color
-            }}>
-                <Icon size={24} />
+            <div style={{ display: 'flex', alignItems: 'center', fontSize: '0.875rem', flexWrap: 'wrap' }}>
+                <span style={{
+                    color: trend === 'up' ? 'var(--success-color)' : trend === 'down' ? 'var(--danger-color)' : 'var(--text-secondary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    marginRight: '0.5rem',
+                    fontWeight: 500
+                }}>
+                    {trend === 'up' ? <TrendingUp size={16} style={{ marginRight: 4 }} /> : trend === 'down' ? <TrendingDown size={16} style={{ marginRight: 4 }} /> : null}
+                    {trendValue}
+                </span>
+                {subtitle && <span style={{ color: 'var(--text-secondary)' }}>{subtitle}</span>}
             </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', fontSize: '0.875rem' }}>
-            <span style={{
-                color: trend === 'up' ? 'var(--success-color)' : trend === 'down' ? 'var(--danger-color)' : 'var(--text-secondary)',
-                display: 'flex',
-                alignItems: 'center',
-                marginRight: '0.5rem',
-                fontWeight: 500
-            }}>
-                {trend === 'up' ? <TrendingUp size={16} style={{ marginRight: 4 }} /> : trend === 'down' ? <TrendingDown size={16} style={{ marginRight: 4 }} /> : null}
-                {trendValue}
-            </span>
-            <span style={{ color: 'var(--text-secondary)' }}>vs. Vormonat</span>
-        </div>
-    </Card>
-);
+        </Card>
+    );
+};
+
+const formatCurrency = (val) => num(val).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+
+// Vormonat 0 -> kein Prozentwert; Basis ist der Betrag des Vormonats (auch bei negativen Werten)
+const calcTrend = (current, previous) => {
+    if (previous === 0 && current === 0) return { trend: 'neutral', value: '±0%' };
+    if (previous === 0) return { trend: 'neutral', value: 'neu' };
+    const pct = ((current - previous) / Math.abs(previous)) * 100;
+    const sign = pct >= 0 ? '+' : '';
+    return {
+        trend: pct >= 0 ? 'up' : 'down',
+        value: `${sign}${pct.toFixed(1)}%`
+    };
+};
+
+const monthStartStr = (year, month0) => toLocalDateStr(new Date(year, month0, 1));
 
 const Dashboard = () => {
     const { user } = useAuth();
-    const { selectedPortfolioID } = usePortfolio();
-    const [loading, setLoading] = useState(true);
+    const userId = user?.id;
+    const { selectedPortfolioID, portfolios } = usePortfolio();
     const navigate = useNavigate();
 
-    // Live KPI state
-    const [incomeThisMonth, setIncomeThisMonth] = useState(0);
-    const [incomeLastMonth, setIncomeLastMonth] = useState(0);
-    const [expensesThisMonth, setExpensesThisMonth] = useState(0);
-    const [expensesLastMonth, setExpensesLastMonth] = useState(0);
-    const [vacantUnits, setVacantUnits] = useState(0);
-    const [totalUnits, setTotalUnits] = useState(0);
-    const [overdueRent, setOverdueRent] = useState(0);
-    const [recentBookings, setRecentBookings] = useState([]);
-    const [chartData, setChartData] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [warnings, setWarnings] = useState([]);
+    const [data, setData] = useState(null);
+    const requestIdRef = useRef(0);
+
+    // Daten werden portfolio-unabhängig geladen und im Speicher gefiltert: ein Portfoliowechsel braucht
+    // keinen neuen Request, und ältere Antworten können neuere nicht überschreiben (Request-Zähler).
+    const fetchDashboardData = useCallback(async () => {
+        if (!userId) return;
+        const requestId = ++requestIdRef.current;
+        try {
+            const now = new Date();
+            // Zeitraum für Diagramm (6 Monate) und Vormonatsvergleich
+            const windowStart = monthStartStr(now.getFullYear(), now.getMonth() - 5);
+            const paymentCols = 'id, lease_id, payment_date, period_month, amount, note';
+            const expenseCols = 'id, booking_date, payee, note, amount, property_id, expense_categories(name)';
+
+            const [propRes, unitRes, leaseRes, ledgerRes, payRes, expRes, recentPayRes, recentExpRes, tenantRes] = await Promise.all([
+                fetchAllRows('properties', 'id, portfolio_id'),
+                fetchAllRows('units', 'id, property_id, is_vacation_rental'),
+                fetchAllRows('leases', '*'),
+                fetchAllRows('rent_ledger', 'id, lease_id, period_month, due_date, expected_rent, paid_amount, status'),
+                fetchAllRows('rent_payments', paymentCols, q => q.gte('payment_date', windowStart)),
+                fetchAllRows('expenses', expenseCols, q => q.gte('booking_date', windowStart)),
+                supabase.from('rent_payments').select(paymentCols).order('payment_date', { ascending: false }).order('created_at', { ascending: false }).limit(50),
+                supabase.from('expenses').select(expenseCols).order('booking_date', { ascending: false }).order('created_at', { ascending: false }).limit(50),
+                fetchAllRows('tenants', 'id, first_name, last_name')
+            ]);
+            if (requestId !== requestIdRef.current) return;
+
+            const firstError = [propRes, unitRes, leaseRes, payRes, expRes, recentPayRes, recentExpRes, tenantRes].find(r => r.error)?.error;
+            if (firstError) throw firstError;
+
+            const nextWarnings = [];
+            let ledger = [];
+            if (ledgerRes.error) {
+                if (!isMissingRelationError(ledgerRes.error)) {
+                    nextWarnings.push('Mietkonto nicht verfügbar – Rückstände werden aus den Mietverträgen berechnet.');
+                }
+            } else {
+                ledger = ledgerRes.data || [];
+            }
+
+            const mahn = await loadMahnverfahren(ledger);
+            if (requestId !== requestIdRef.current) return;
+            if (mahn.error) nextWarnings.push('Mahnstatus konnte nicht geladen werden – Monate im Mahnverfahren können als offen zählen.');
+
+            const dedupe = (a, b) => {
+                const map = new Map();
+                [...(a || []), ...(b || [])].forEach(r => map.set(r.id, r));
+                return [...map.values()];
+            };
+
+            setData({
+                properties: propRes.data || [],
+                units: unitRes.data || [],
+                leases: leaseRes.data || [],
+                ledger,
+                payments: dedupe(payRes.data, recentPayRes.data),
+                expenses: dedupe(expRes.data, recentExpRes.data),
+                tenants: tenantRes.data || [],
+                mahnKeys: mahn.keys
+            });
+            setWarnings(nextWarnings);
+            setLoadError(null);
+        } catch (error) {
+            if (requestId !== requestIdRef.current) return;
+            console.error('Dashboard fetch error:', error);
+            setLoadError(translateError(error));
+        } finally {
+            if (requestId === requestIdRef.current) setLoading(false);
+        }
+    }, [userId]);
 
     useEffect(() => {
-        if (user) fetchDashboardData();
-    }, [user, selectedPortfolioID]);
+        fetchDashboardData();
+    }, [fetchDashboardData]);
 
-    const fetchDashboardData = async () => {
-        try {
-            setLoading(true);
-            const now = new Date();
-            const thisYear = now.getFullYear();
-            const thisMonth = now.getMonth(); // 0-indexed
+    const ownPortfolioIds = useMemo(
+        () => (portfolios || []).filter(p => p.user_id === userId).map(p => p.id),
+        [portfolios, userId]
+    );
 
-            // Current month range
-            const currentMonthStart = `${thisYear}-${String(thisMonth + 1).padStart(2, '0')}-01`;
-            const nextMonthDate = new Date(thisYear, thisMonth + 1, 1);
-            const currentMonthEnd = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}-01`;
+    const view = useMemo(() => {
+        if (!data) return null;
+        const now = new Date();
+        const thisYear = now.getFullYear();
+        const thisMonth = now.getMonth(); // 0-indexed
+        const todayStr = toLocalDateStr(now);
+        const currentMonth = toMonthStr(now);
+        const lastMonthDate = new Date(thisYear, thisMonth - 1, 1);
+        const lastMonth = toMonthStr(lastMonthDate);
+        // Vergleich bis zum gleichen Tag des Vormonats (laufender Monat ist unvollständig)
+        const daysInLastMonth = new Date(thisYear, thisMonth, 0).getDate();
+        const compareDay = Math.min(now.getDate(), daysInLastMonth);
+        const lastMonthCompareEnd = toLocalDateStr(new Date(thisYear, thisMonth - 1, compareDay));
 
-            // Last month range
-            const lastMonthDate = new Date(thisYear, thisMonth - 1, 1);
-            const lastMonthStart = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, '0')}-01`;
+        const pid = selectedPortfolioID;
+        const propertyPortfolio = new Map(data.properties.map(p => [p.id, p.portfolio_id]));
+        const unitById = new Map(data.units.map(u => [u.id, u]));
+        const unitPortfolio = (unitId) => propertyPortfolio.get(unitById.get(unitId)?.property_id);
+        const leaseById = new Map(data.leases.map(l => [l.id, l]));
 
-            // Fetch all data in parallel
-            const [rentRes, expRes, leasesRes, unitsRes, tenantsRes] = await Promise.all([
-                supabase.from('rent_payments').select('*, lease:leases(*, unit:units(property:properties(id, portfolio_id)))').order('payment_date', { ascending: false }),
-                supabase.from('expenses').select('*, expense_categories(name)').order('booking_date', { ascending: false }),
-                supabase.from('leases').select('*, unit:units(*, property:properties(*))'),
-                supabase.from('units').select('*, property:properties(*)'),
-                supabase.from('tenants').select('*')
-            ]);
+        const units = pid ? data.units.filter(u => propertyPortfolio.get(u.property_id) === pid) : data.units;
+        const leases = pid ? data.leases.filter(l => unitPortfolio(l.unit_id) === pid) : data.leases;
+        const payments = pid
+            ? data.payments.filter(p => { const l = leaseById.get(p.lease_id); return l && unitPortfolio(l.unit_id) === pid; })
+            : data.payments;
+        const includeUnassigned = !pid || (ownPortfolioIds.length === 1 && ownPortfolioIds[0] === pid);
+        const { list: expenses } = filterExpensesByPortfolio(data.expenses, { selectedPortfolioID: pid, propertyPortfolio, includeUnassigned });
 
-            if (rentRes.error) throw rentRes.error;
-            if (expRes.error) throw expRes.error;
-            if (leasesRes.error) throw leasesRes.error;
-            if (unitsRes.error) throw unitsRes.error;
+        // --- Einnahmen / Ausgaben: einheitlich nach Zahl- bzw. Buchungsdatum ---
+        const sumIn = (list, dateField, from, to) => list
+            .filter(r => r[dateField] && r[dateField] >= from && r[dateField] <= to)
+            .reduce((sum, r) => sum + num(r.amount), 0);
+        const currentStart = `${currentMonth}-01`;
+        const currentEnd = `${currentMonth}-31`;
+        const lastStart = `${lastMonth}-01`;
 
-            let allPayments = rentRes.data || [];
-            let allExpenses = expRes.data || [];
-            let allLeases = leasesRes.data || [];
-            let allUnits = unitsRes.data || [];
-            let allTenants = tenantsRes.data || [];
+        const incomeThisMonth = sumIn(payments, 'payment_date', currentStart, currentEnd);
+        const expensesThisMonth = sumIn(expenses, 'booking_date', currentStart, currentEnd);
+        const incomeTrend = calcTrend(
+            sumIn(payments, 'payment_date', currentStart, todayStr),
+            sumIn(payments, 'payment_date', lastStart, lastMonthCompareEnd)
+        );
+        const expenseTrend = calcTrend(
+            sumIn(expenses, 'booking_date', currentStart, todayStr),
+            sumIn(expenses, 'booking_date', lastStart, lastMonthCompareEnd)
+        );
 
-            // Portfolio filter
-            if (selectedPortfolioID) {
-                allPayments = allPayments.filter(r => r.lease?.unit?.property?.portfolio_id === selectedPortfolioID);
-                allExpenses = allExpenses.filter(e => {
-                    if (!e.property_id) return true;
-                    // Need to check property portfolio
-                    const unit = allUnits.find(u => u.property_id === e.property_id);
-                    return unit?.property?.portfolio_id === selectedPortfolioID;
-                });
-                allLeases = allLeases.filter(l => l.unit?.property?.portfolio_id === selectedPortfolioID);
-                allUnits = allUnits.filter(u => u.property?.portfolio_id === selectedPortfolioID);
-            }
+        // --- Leerstand (Ferienwohnungen getrennt, nicht in der Quote) ---
+        const vacationUnits = units.filter(u => u.is_vacation_rental).length;
+        const rentableUnits = units.filter(u => !u.is_vacation_rental);
+        let occupied = 0;
+        rentableUnits.forEach(unit => {
+            const hasActiveLease = leases.some(l =>
+                l.unit_id === unit.id &&
+                l.status === 'active' &&
+                l.start_date <= todayStr &&
+                (!l.end_date || l.end_date >= todayStr)
+            );
+            if (hasActiveLease) occupied++;
+        });
 
-            // --- Income: period_month based ---
-            const incCurrent = allPayments
-                .filter(p => p.period_month && p.period_month.startsWith(`${thisYear}-${String(thisMonth + 1).padStart(2, '0')}`))
-                .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+        // --- Offene Forderungen: gleiche Rückstandslogik wie Finanzen ("Überfällige Mieten") ---
+        const index = buildRentIndex({ ledgerRows: data.ledger, payments: data.payments });
+        const arrears = computeArrears({ leases, index, mahnKeys: data.mahnKeys, today: now });
 
-            const incLast = allPayments
-                .filter(p => p.period_month && p.period_month.startsWith(`${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, '0')}`))
-                .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+        // --- Letzte Buchungen ---
+        const tenantById = new Map(data.tenants.map(t => [t.id, t]));
+        const recentBookings = [
+            ...expenses.map(e => ({
+                id: `exp-${e.id}`,
+                date: e.booking_date,
+                text: e.payee || e.expense_categories?.name || 'Ausgabe',
+                note: e.note || '',
+                amount: num(e.amount),
+                status: 'expense'
+            })),
+            ...payments.map(r => {
+                const lease = leaseById.get(r.lease_id);
+                const t = lease?.tenant_id ? tenantById.get(lease.tenant_id) : null;
+                const name = t ? [t.last_name, t.first_name].filter(Boolean).join(', ') : '';
+                return {
+                    id: `inc-${r.id}`,
+                    date: r.payment_date,
+                    text: name ? `Mieteingang ${name}` : 'Mieteinnahme',
+                    note: r.note || '',
+                    amount: num(r.amount),
+                    status: 'income'
+                };
+            })
+        ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).slice(0, 10);
 
-            setIncomeThisMonth(incCurrent);
-            setIncomeLastMonth(incLast);
-
-            // --- Expenses: booking_date based ---
-            const expCurrent = allExpenses
-                .filter(e => e.booking_date >= currentMonthStart && e.booking_date < currentMonthEnd)
-                .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
-
-            const expLast = allExpenses
-                .filter(e => e.booking_date >= lastMonthStart && e.booking_date < currentMonthStart)
-                .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
-
-            setExpensesThisMonth(expCurrent);
-            setExpensesLastMonth(expLast);
-
-            // --- Vacancy ---
-            const today = now.toISOString().split('T')[0];
-            let occupied = 0;
-            allUnits.forEach(unit => {
-                const hasActiveLease = allLeases.some(l =>
-                    l.unit_id === unit.id &&
-                    l.status === 'active' &&
-                    l.start_date <= today &&
-                    (!l.end_date || l.end_date >= today)
-                );
-                if (hasActiveLease || unit.is_vacation_rental) occupied++;
-            });
-            setTotalUnits(allUnits.length);
-            setVacantUnits(allUnits.length - occupied);
-
-            // --- Overdue (Expected - Paid this month) ---
-            let expectedThisMonth = 0;
-            const checkDate = `${thisYear}-${String(thisMonth + 1).padStart(2, '0')}-01`;
-            allLeases.forEach(l => {
-                if (l.status === 'active' && l.start_date <= checkDate && (!l.end_date || l.end_date >= checkDate)) {
-                    expectedThisMonth += (l.cold_rent || 0) + (l.service_charge || 0) + (l.heating_cost || 0) + (l.other_costs || 0);
-                }
-            });
-            // Add target rent of vacation rentals (Ferienwohnungen)
-            allUnits.forEach(u => {
-                if (u.is_vacation_rental) {
-                    expectedThisMonth += (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0);
-                }
-            });
-            const overdue = Math.max(0, expectedThisMonth - incCurrent);
-            setOverdueRent(overdue);
-
-            // --- Recent Bookings (combined, last 10) ---
-            const combinedBookings = [
-                ...allExpenses.slice(0, 30).map(e => ({
-                    id: `exp-${e.id}`,
-                    date: e.booking_date,
-                    text: e.payee || e.expense_categories?.name || 'Ausgabe',
-                    note: e.note || '',
-                    amount: parseFloat(e.amount) || 0,
-                    status: 'expense'
-                })),
-                ...allPayments.slice(0, 30).map(r => {
-                    const t = r.lease?.tenant_id ? allTenants.find(t => t.id === r.lease.tenant_id) : null;
-                    return {
-                        id: `inc-${r.id}`,
-                        date: r.payment_date,
-                        text: t ? `Mieteingang ${t.last_name}, ${t.first_name}` : 'Mieteinnahme',
-                        note: r.note || '',
-                        amount: parseFloat(r.amount) || 0,
-                        status: 'income'
-                    };
-                })
-            ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
-
-            setRecentBookings(combinedBookings);
-
-            // --- Chart Data (last 6 months) ---
-            const monthNames = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
-            const chartMonths = [];
-            for (let i = 5; i >= 0; i--) {
-                const d = new Date(thisYear, thisMonth - i, 1);
-                const y = d.getFullYear();
-                const m = d.getMonth();
-                const prefix = `${y}-${String(m + 1).padStart(2, '0')}`;
-                const monthStartStr = `${prefix}-01`;
-                const nextM = new Date(y, m + 1, 1);
-                const monthEndStr = `${nextM.getFullYear()}-${String(nextM.getMonth() + 1).padStart(2, '0')}-01`;
-
-                const einnahmen = allPayments
-                    .filter(p => p.period_month && p.period_month.startsWith(prefix))
-                    .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-
-                const ausgaben = allExpenses
-                    .filter(e => e.booking_date >= monthStartStr && e.booking_date < monthEndStr)
-                    .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
-
-                chartMonths.push({ name: monthNames[m], einnahmen: Math.round(einnahmen), ausgaben: Math.round(ausgaben) });
-            }
-            setChartData(chartMonths);
-
-        } catch (error) {
-            console.error('Dashboard fetch error:', error);
-        } finally {
-            setLoading(false);
+        // --- Chart Data (last 6 months) ---
+        const chartData = [];
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date(thisYear, thisMonth - i, 1);
+            const prefix = toMonthStr(d);
+            const einnahmen = sumIn(payments, 'payment_date', `${prefix}-01`, `${prefix}-31`);
+            const ausgaben = sumIn(expenses, 'booking_date', `${prefix}-01`, `${prefix}-31`);
+            chartData.push({ name: MONTH_NAMES[d.getMonth()], einnahmen: Math.round(einnahmen), ausgaben: Math.round(ausgaben) });
         }
-    };
 
-    // --- KPI Calculations ---
-    const formatCurrency = (val) => {
-        return val.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
-    };
-
-    const calcTrend = (current, previous) => {
-        if (previous === 0 && current === 0) return { trend: 'neutral', value: '0%' };
-        if (previous === 0) return { trend: 'up', value: '+100%' };
-        const pct = ((current - previous) / previous) * 100;
-        const sign = pct >= 0 ? '+' : '';
         return {
-            trend: pct >= 0 ? 'up' : 'down',
-            value: `${sign}${pct.toFixed(1)}%`
+            incomeThisMonth,
+            expensesThisMonth,
+            incomeTrend,
+            expenseTrend,
+            compareDay,
+            totalUnits: rentableUnits.length,
+            vacantUnits: rentableUnits.length - occupied,
+            vacationUnits,
+            overdueRent: arrears.totalOverdue,
+            overdueHiddenAmount: arrears.hidden.amount,
+            recentBookings,
+            chartData
         };
-    };
-
-    const incomeTrend = calcTrend(incomeThisMonth, incomeLastMonth);
-    const expenseTrend = calcTrend(expensesThisMonth, expensesLastMonth);
-    const netCurrent = incomeThisMonth - expensesThisMonth;
-    const netLast = incomeLastMonth - expensesLastMonth;
-    const netTrend = calcTrend(netCurrent, netLast);
-    const occupancyPct = totalUnits > 0 ? Math.round(((totalUnits - vacantUnits) / totalUnits) * 100) : 0;
-
-    const kpis = [
-        { title: 'Gesamteinnahmen', value: formatCurrency(incomeThisMonth), trend: incomeTrend.trend, trendValue: incomeTrend.value, icon: Wallet, color: '#0066CC', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
-        { title: 'Ausgaben (Gesamt)', value: formatCurrency(expensesThisMonth), trend: expenseTrend.trend === 'up' ? 'down' : 'up', trendValue: expenseTrend.value, icon: TrendingDown, color: '#DC2626', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
-        { title: 'Leerstand', value: `${vacantUnits} Einheit${vacantUnits !== 1 ? 'en' : ''}`, trend: vacantUnits > 0 ? 'down' : 'up', trendValue: `${vacantUnits} / ${totalUnits}`, icon: Home, color: '#F59E0B', onClick: () => navigate('/tenants', { state: { filter: 'vacant' } }) },
-        { title: 'Offene Forderungen', value: formatCurrency(overdueRent), trend: overdueRent > 0 ? 'down' : 'up', trendValue: overdueRent > 0 ? 'Offen' : 'Alles bezahlt', icon: AlertCircle, color: '#EF4444', onClick: () => navigate('/finance', { state: { view: 'overdue_details' } }) },
-    ];
+    }, [data, selectedPortfolioID, ownPortfolioIds]);
 
     const bookingColumns = [
-        { header: 'Datum', accessor: 'date', render: row => new Date(row.date).toLocaleDateString('de-DE') },
+        { header: 'Datum', accessor: 'date', render: row => { const d = parseDateOnly(row.date); return d ? d.toLocaleDateString('de-DE') : '-'; } },
         { header: 'Buchungstext', accessor: 'text' },
         {
             header: 'Betrag',
@@ -299,11 +327,49 @@ const Dashboard = () => {
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
 
+    if (loadError || !view) {
+        return (
+            <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
+                    <h1 style={{ fontSize: '1.875rem', fontWeight: 700 }}>Dashboard</h1>
+                </div>
+                <Card>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '30px', gap: '16px', textAlign: 'center' }}>
+                        <AlertCircle size={40} color="#E53E3E" />
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: 700 }}>Kennzahlen konnten nicht geladen werden</h3>
+                        <p style={{ color: 'var(--text-secondary)', maxWidth: '560px' }}>{loadError || 'Keine Daten verfügbar.'}</p>
+                        <Button onClick={() => { setLoading(true); fetchDashboardData(); }}>Erneut laden</Button>
+                    </div>
+                </Card>
+            </div>
+        );
+    }
+
+    const {
+        incomeThisMonth, expensesThisMonth, incomeTrend, expenseTrend, compareDay,
+        totalUnits, vacantUnits, vacationUnits, overdueRent, overdueHiddenAmount, recentBookings, chartData
+    } = view;
+    const occupancyPct = totalUnits > 0 ? Math.round(((totalUnits - vacantUnits) / totalUnits) * 100) : 0;
+    const compareLabel = `vs. Vormonat (1.–${compareDay}.)`;
+
+    const kpis = [
+        { title: 'Gesamteinnahmen', value: formatCurrency(incomeThisMonth), trend: incomeTrend.trend, trendValue: incomeTrend.value, subtitle: compareLabel, icon: Wallet, color: '#0066CC', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
+        { title: 'Ausgaben (Gesamt)', value: formatCurrency(expensesThisMonth), trend: expenseTrend.trend === 'up' ? 'down' : expenseTrend.trend === 'down' ? 'up' : 'neutral', trendValue: expenseTrend.value, subtitle: compareLabel, icon: TrendingDown, color: '#DC2626', onClick: () => navigate('/finance', { state: { view: 'accounting' } }) },
+        { title: 'Leerstand', value: `${vacantUnits} Einheit${vacantUnits !== 1 ? 'en' : ''}`, trend: vacantUnits > 0 ? 'down' : 'up', trendValue: `${vacantUnits} / ${totalUnits}`, subtitle: vacationUnits > 0 ? `ohne ${vacationUnits} Ferienwohnung${vacationUnits !== 1 ? 'en' : ''}` : 'Einheiten', icon: Home, color: '#F59E0B', onClick: () => navigate('/tenants', { state: { filter: 'vacant' } }) },
+        { title: 'Offene Forderungen', value: formatCurrency(overdueRent), trend: overdueRent > 0 ? 'down' : 'up', trendValue: overdueRent > 0 ? 'Offen' : 'Keine Rückstände', subtitle: overdueHiddenAmount > 0 ? `überfällige Mieten (ohne Mahnverfahren), zzgl. ${formatCurrency(overdueHiddenAmount)} vor Buchungsbeginn` : 'überfällige Mieten (ohne Mahnverfahren)', icon: AlertCircle, color: '#EF4444', onClick: () => navigate('/finance', { state: { view: 'overdue_details' } }) },
+    ];
+
     return (
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--spacing-xl)' }}>
                 <h1 style={{ fontSize: '1.875rem', fontWeight: 700 }}>Dashboard</h1>
             </div>
+
+            {warnings.length > 0 && (
+                <div style={{ marginBottom: 'var(--spacing-md)', padding: '10px 14px', borderRadius: '8px', border: '1px solid #FCD34D', backgroundColor: 'rgba(245, 158, 11, 0.08)', color: '#92400E', fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {warnings.map((w, i) => <span key={i}>{w}</span>)}
+                </div>
+            )}
 
             {/* KPI Grid */}
             <div style={{
@@ -326,7 +392,7 @@ const Dashboard = () => {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--spacing-xl)' }}>
                     {/* Chart Section */}
                     <div style={{ flex: '1 1 500px', minWidth: 0 }}>
-                        <Card title="Einnahmen & Ausgaben (letzte 6 Monate)">
+                        <Card title="Einnahmen & Ausgaben (letzte 6 Monate, nach Zahl-/Buchungsdatum)">
                             <div style={{ height: '300px', width: '100%' }}>
                                 <ResponsiveContainer width="100%" height="100%">
                                     <BarChart data={chartData}>
@@ -361,6 +427,11 @@ const Dashboard = () => {
                                 </div>
                                 <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                                     {totalUnits - vacantUnits} von {totalUnits} Einheiten vermietet
+                                    {vacationUnits > 0 && (
+                                        <div style={{ fontSize: '0.8rem', marginTop: '2px' }}>
+                                            zzgl. {vacationUnits} Ferienwohnung{vacationUnits !== 1 ? 'en' : ''} (nicht in der Quote)
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </Card>
@@ -386,7 +457,7 @@ const Dashboard = () => {
                         }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
                                 <div style={{ fontWeight: 500, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                    {new Date(row.date).toLocaleDateString('de-DE')}
+                                    {(() => { const d = parseDateOnly(row.date); return d ? d.toLocaleDateString('de-DE') : '-'; })()}
                                 </div>
                                 <Badge variant={row.status === 'income' ? 'success' : 'danger'}>
                                     {row.status === 'income' ? 'Einnahme' : 'Ausgabe'}

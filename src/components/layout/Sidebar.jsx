@@ -37,7 +37,7 @@ import { usePermission } from '../../context/PermissionContext';
 
 const Sidebar = ({ mobileOpen, onClose }) => {
     const { userRole } = useAuth();
-    const { isMobile, toggleViewMode } = useViewMode();
+    const { isMobile } = useViewMode();
     const [openSubMenus, setOpenSubMenus] = React.useState({});
     const location = useLocation();
     const navigate = useNavigate();
@@ -103,7 +103,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             subItems: [
                 { path: '/finance', label: 'Buchhaltung' },
                 { path: '/invoices', label: 'Rechnungen Fewo' },
-                { path: '/bank-reconciliation', label: 'Automatisierter Bankabgleich' }
+                // Noch kein echter Bankimport (Sandbox) – deutlich als Demo kennzeichnen
+                { path: '/bank-reconciliation', label: 'Automatisierter Bankabgleich', badge: 'Demo' }
             ]
         },
         { path: '/utility-costs', label: 'Nebenkosten', icon: Calculator, navKey: 'utility-costs' },
@@ -121,8 +122,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                 { path: '/ticket-board', label: 'Ticket-Board' },
                 { path: '/announcements', label: 'Aushänge' },
                 { path: '/investor-messages', label: 'Nachrichten' },
-                { path: '/documents', label: 'Dokumente' },
-                { path: '/object-calendar', label: 'Objektkalender' }
+                { path: '/documents', label: 'Dokumente', category: 'immobilien' },
+                { path: '/object-calendar', label: 'Objektkalender', category: 'immobilien' }
             ]
         },
         {
@@ -133,8 +134,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                 { path: '/investor-portal', label: 'Cockpit' },
                 { path: '/investor-portal?tab=deals', label: 'Neue Deals' },
                 { path: '/investor-portal?tab=calculator', label: 'Rechner' },
-                { path: '/loans', label: 'Finanzierungen' },
-                { path: '/renovation', label: 'Sanierungsmanager' }
+                { path: '/loans', label: 'Finanzierungen', category: 'finanzen' },
+                { path: '/renovation', label: 'Sanierungsmanager', category: 'immobilien' }
             ]
         },
         { path: '/settings', label: 'Einstellungen', icon: Settings },
@@ -164,15 +165,19 @@ const Sidebar = ({ mobileOpen, onClose }) => {
         if (item.type === 'divider') return true;
         if (!item.navKey) return true; // always show items without navKey (e.g. Einstellungen)
         if (!isVisible(item.navKey)) return false;
-        
+
         // Check portfolio share permissions
         const category = mapNavKeyToCategory(item.navKey);
         if (category !== 'dashboard' && !canRead(category)) {
             return false;
         }
-        
+
         return true;
-    });
+    }).map(item => {
+        // Untermenüpunkte mit eigener Kategorie (z. B. Finanzierungen -> finanzen) zusätzlich prüfen
+        if (!item.subItems) return item;
+        return { ...item, subItems: item.subItems.filter(sub => !sub.category || canRead(sub.category)) };
+    }).filter(item => !item.subItems || item.subItems.length > 0);
 
     // ── TENANT NAV ITEMS ────────────────────────────────────────────
     const tenantNavItems = [
@@ -192,17 +197,23 @@ const Sidebar = ({ mobileOpen, onClose }) => {
     };
 
     React.useEffect(() => {
-        // Auto-open sub-menus based on current path
-        const financeActive = ['/finance', '/invoices', '/bank-reconciliation'].some(p => location.pathname.startsWith(p));
-        const portalActive = ['/tenant-management', '/ticket-board', '/announcements', '/investor-messages', '/documents', '/object-calendar'].some(p => location.pathname.startsWith(p));
-        const investorPortalActive = ['/investor-portal', '/loans', '/renovation'].some(p => location.pathname.startsWith(p));
+        // Untermenü des aktuellen Pfads aufklappen (Pfade aus den Untermenüpunkten abgeleitet).
+        // Manuell geöffnete Untermenüs werden dabei nicht automatisch geschlossen.
+        const activeGroups = allInvestorNavItems
+            .filter(item => item.subItems && item.subItems.some(sub => {
+                const subPath = sub.path.split('?')[0];
+                return location.pathname === subPath || location.pathname.startsWith(subPath + '/');
+            }))
+            .map(item => item.label);
 
-        setOpenSubMenus(prev => ({
-            ...prev,
-            'Finanzen': financeActive,
-            'Mieterportal': portalActive,
-            'Investorportal': investorPortalActive
-        }));
+        if (activeGroups.length === 0) return;
+        setOpenSubMenus(prev => {
+            const next = { ...prev };
+            activeGroups.forEach(label => { next[label] = true; });
+            return next;
+        });
+        // allInvestorNavItems ist eine statische Liste
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.pathname]);
 
     const getPlanBadge = () => {
@@ -309,8 +320,11 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                         // Check if trial is expired or no subscription exists
                         const isTrialExpired = paywallReason === 'trial_expired' || paywallReason === 'no_subscription';
 
-                        // Tenants never see paywalls — their portal access is free
-                        const isLocked = userRole === 'tenant' ? false : (!hasFeature(featureKey) || isTrialExpired);
+                        // Tenants never see paywalls — their portal access is free.
+                        // Einstellungen (inkl. Abo-Verwaltung) bleiben immer erreichbar.
+                        const isLocked = (userRole === 'tenant' || item.path === '/settings')
+                            ? false
+                            : (!hasFeature(featureKey) || isTrialExpired);
 
                         const handleLockedClick = (e) => {
                             if (isLocked) {
@@ -360,13 +374,25 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                                                                 handleItemClick();
                                                             }}
                                                                 style={{
-                                                                    display: 'flex', alignItems: 'center', justification: 'space-between', padding: '6px 8px', borderRadius: '4px',
+                                                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', borderRadius: '4px',
                                                                     color: isLocked ? 'var(--text-disabled)' : (subActive ? 'var(--primary-color)' : 'var(--text-secondary)'),
                                                                     backgroundColor: subActive ? '#E0F2FE' : 'transparent', fontSize: '0.9rem', textDecoration: 'none', cursor: 'pointer',
                                                                     opacity: isLocked ? 0.7 : 1
                                                                 }}
                                                             >
                                                                 <span>{subItem.label}</span>
+                                                                {subItem.badge && (
+                                                                    <span
+                                                                        title="Demo-Modus: keine echte Bankanbindung"
+                                                                        style={{
+                                                                            marginLeft: '6px', padding: '1px 6px', borderRadius: '9999px',
+                                                                            fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.03em', textTransform: 'uppercase',
+                                                                            backgroundColor: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A', flexShrink: 0
+                                                                        }}
+                                                                    >
+                                                                        {subItem.badge}
+                                                                    </span>
+                                                                )}
                                                                 {isLocked && <Lock size={12} color="var(--primary-color)" style={{ marginLeft: 'auto' }} />}
                                                             </div>
                                                         </li>

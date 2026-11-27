@@ -1,12 +1,16 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Calendar, ZoomIn, ZoomOut } from 'lucide-react';
+import { parseLocalDate, calendarDayDiff, formatDateDE } from './renovationUtils';
 
 /**
  * Lightweight Gantt chart for renovation project trades.
  * Props:
- *   trades: array of { id, name, start_date, end_date, status, subtrades, depends_on }
+ *   trades: array of { id, name, start_date, end_date, status }
  *   onTradeClick: (tradeId) => void
- *   onDateChange: (tradeId, start_date, end_date) => void
+ *   isMobile: boolean
+ *
+ * Datumswerte (Typ date, 'YYYY-MM-DD') werden als lokale Kalendertage behandelt;
+ * Abstände werden in Kalendertagen gerechnet (keine Verschiebung durch UTC/Uhrzeit).
  */
 
 const COLORS = {
@@ -15,62 +19,73 @@ const COLORS = {
     completed: { bar: '#16a34a', bg: '#dcfce7', text: '#166534' },
 };
 
-const DAY_MS = 86400000;
+// Darstellungszeitraum begrenzen: ein Tippfehler im Jahr (z. B. 2062) erzeugt sonst
+// eine extrem breite Fläche. Max. 2 Jahre zurück und 3 Jahre voraus (ab heute).
+const MAX_PAST_DAYS = 2 * 366;
+const MAX_FUTURE_DAYS = 3 * 366;
 
-const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false }) => {
+const addDays = (date, days) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+
+const ZOOM_CONFIGS = [
+    { label: 'Monat', dayWidth: 8, headerFormat: 'month' },
+    { label: '2 Wochen', dayWidth: 16, headerFormat: 'week' },
+    { label: 'Woche', dayWidth: 32, headerFormat: 'day' },
+];
+
+const getWeekNumber = (d) => {
+    const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+    const week1 = new Date(date.getFullYear(), 0, 4);
+    return 1 + Math.round((calendarDayDiff(week1, date) - 3 + (week1.getDay() + 6) % 7) / 7);
+};
+
+const dateFormatter = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit' });
+const monthFormatter = new Intl.DateTimeFormat('de-DE', { month: 'short', year: '2-digit' });
+
+const GanttChart = ({ trades = [], onTradeClick, isMobile = false }) => {
     const containerRef = useRef(null);
     const [zoomLevel, setZoomLevel] = useState(isMobile ? 1 : 2); // 0=month, 1=2-week, 2=week
-    const [viewOffset, setViewOffset] = useState(0); // weeks offset from start
-
-    const zoomConfigs = [
-        { label: 'Monat', dayWidth: 8, headerFormat: 'month' },
-        { label: '2 Wochen', dayWidth: 16, headerFormat: 'week' },
-        { label: 'Woche', dayWidth: 32, headerFormat: 'day' },
-    ];
-    const zoom = zoomConfigs[zoomLevel];
+    const zoom = ZOOM_CONFIGS[zoomLevel];
 
     /* ─── Date range computation ─── */
-    const { startDate, endDate, totalDays, weeks } = useMemo(() => {
-        const now = new Date();
-        let earliest = new Date(now);
-        let latest = new Date(now);
+    const { today, startDate, totalDays, weeks } = useMemo(() => {
+        const todayLocal = parseLocalDate(new Date());
+        let earliest = todayLocal;
+        let latest = addDays(todayLocal, 0);
         latest.setMonth(latest.getMonth() + 3);
 
         trades.forEach(t => {
-            if (t.start_date) {
-                const s = new Date(t.start_date);
-                if (s < earliest) earliest = s;
-            }
-            if (t.end_date) {
-                const e = new Date(t.end_date);
-                if (e > latest) latest = e;
-            }
+            const s = parseLocalDate(t.start_date);
+            const e = parseLocalDate(t.end_date);
+            [s, e].forEach(d => {
+                if (!d) return;
+                if (d < earliest) earliest = d;
+                if (d > latest) latest = d;
+            });
         });
 
-        // Start at Monday before earliest
-        const start = new Date(earliest);
-        start.setDate(start.getDate() - start.getDay() + 1);
-        // Extend 2 weeks past latest
-        const end = new Date(latest);
-        end.setDate(end.getDate() + 14);
+        // Zeitraum begrenzen
+        const minStart = addDays(todayLocal, -MAX_PAST_DAYS);
+        const maxEnd = addDays(todayLocal, MAX_FUTURE_DAYS);
+        if (earliest < minStart) earliest = minStart;
+        if (latest > maxEnd) latest = maxEnd;
 
-        const totalDays = Math.ceil((end - start) / DAY_MS);
-        const weekCount = Math.ceil(totalDays / 7);
-        const weeks = [];
+        // Start at Monday on/before earliest (Sonntag: 6 Tage zurück, nicht 1 Tag vor)
+        const start = addDays(earliest, -((earliest.getDay() + 6) % 7));
+        // Extend 2 weeks past latest
+        const end = addDays(latest, 14);
+
+        const days = calendarDayDiff(start, end) + 1;
+        const weekCount = Math.ceil(days / 7);
+        const weekStarts = [];
         for (let i = 0; i < weekCount; i++) {
-            const weekStart = new Date(start);
-            weekStart.setDate(weekStart.getDate() + i * 7);
-            weeks.push(weekStart);
+            weekStarts.push(addDays(start, i * 7));
         }
 
-        return { startDate: start, endDate: end, totalDays, weeks };
+        return { today: todayLocal, startDate: start, totalDays: weekCount * 7, weeks: weekStarts };
     }, [trades]);
 
-    const dayToX = (date) => {
-        const d = new Date(date);
-        const diff = Math.round((d - startDate) / DAY_MS);
-        return diff * zoom.dayWidth;
-    };
+    const dayToX = (date) => calendarDayDiff(startDate, date) * zoom.dayWidth;
 
     const totalWidth = totalDays * zoom.dayWidth;
     const ROW_HEIGHT = 40;
@@ -78,7 +93,14 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
     const LABEL_WIDTH = isMobile ? 120 : 200;
 
     /* ─── Today line ─── */
-    const todayX = dayToX(new Date());
+    const todayX = dayToX(today);
+
+    /* ─── Beim Öffnen und beim Zoomen zu "Heute" scrollen ─── */
+    useEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        el.scrollLeft = Math.max(0, todayX - el.clientWidth / 3);
+    }, [todayX]);
 
     /* ─── Navigate ─── */
     const scroll = (dir) => {
@@ -88,19 +110,34 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
     };
 
     /* ─── Format header labels ─── */
-    const getWeekLabel = (weekStart) => {
-        const dateFormatter = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit' });
-        const monthFormatter = new Intl.DateTimeFormat('de-DE', { month: 'short', year: '2-digit' });
-        if (zoom.headerFormat === 'month') return monthFormatter.format(weekStart);
+    const getWeekLabel = (weekStart, i) => {
+        if (zoom.headerFormat === 'month') {
+            // Monatslabel nur in der ersten Woche eines Monats
+            const prev = i > 0 ? weeks[i - 1] : null;
+            if (prev && prev.getMonth() === weekStart.getMonth()) return '';
+            return monthFormatter.format(weekStart);
+        }
         return `KW ${getWeekNumber(weekStart)} · ${dateFormatter.format(weekStart)}`;
     };
 
-    const getWeekNumber = (d) => {
-        const date = new Date(d);
-        date.setHours(0, 0, 0, 0);
-        date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
-        const week1 = new Date(date.getFullYear(), 0, 4);
-        return 1 + Math.round(((date - week1) / DAY_MS - 3 + (week1.getDay() + 6) % 7) / 7);
+    /* ─── Bar geometry per trade ─── */
+    const getBar = (t) => {
+        const s = parseLocalDate(t.start_date);
+        const e = parseLocalDate(t.end_date);
+        if (!s || !e) return { kind: 'none' };
+        if (e < s) {
+            const x = Math.min(Math.max(0, dayToX(s)), Math.max(0, totalWidth - zoom.dayWidth * 3));
+            return { kind: 'invalid', left: x, s, e };
+        }
+        // Ende inklusive: ein Gewerk mit Start = Ende ist genau einen Tag breit
+        const rawLeft = dayToX(s);
+        const rawRight = dayToX(e) + zoom.dayWidth;
+        const left = Math.max(0, rawLeft);
+        const right = Math.min(totalWidth, rawRight);
+        if (right <= left) {
+            return { kind: 'outside', left: rawRight <= 0 ? 0 : Math.max(0, totalWidth - 20), s, e };
+        }
+        return { kind: 'bar', left, width: right - left, clipped: left !== rawLeft || right !== rawRight, s, e };
     };
 
     return (
@@ -151,47 +188,48 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
 
                 {/* Scrollable Gantt Area */}
                 <div ref={containerRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', position: 'relative' }}>
-                    <div style={{ width: totalWidth, minWidth: '100%' }}>
+                    <div style={{ width: totalWidth, minWidth: '100%', position: 'relative' }}>
                         {/* Header */}
                         <div style={{ height: HEADER_HEIGHT, display: 'flex', borderBottom: '1px solid var(--border-color)', position: 'relative' }}>
                             {weeks.map((w, i) => (
                                 <div key={i} style={{
                                     width: 7 * zoom.dayWidth, flexShrink: 0,
                                     borderRight: '1px solid var(--border-color)',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    display: 'flex', alignItems: 'center', justifyContent: zoom.headerFormat === 'month' ? 'flex-start' : 'center',
                                     fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 500,
+                                    whiteSpace: 'nowrap', overflow: 'visible', paddingLeft: zoom.headerFormat === 'month' ? '3px' : 0,
                                 }}>
-                                    {getWeekLabel(w)}
+                                    {getWeekLabel(w, i)}
                                 </div>
+                            ))}
+                        </div>
+
+                        {/* Week grid lines (einmalig für alle Zeilen) */}
+                        <div style={{ position: 'absolute', left: 0, top: HEADER_HEIGHT, width: totalWidth, height: trades.length * ROW_HEIGHT, pointerEvents: 'none' }}>
+                            {weeks.map((w, i) => (
+                                <div key={i} style={{
+                                    position: 'absolute', left: i * 7 * zoom.dayWidth, top: 0,
+                                    width: 7 * zoom.dayWidth, height: '100%',
+                                    borderRight: '1px solid var(--border-color)',
+                                    background: i % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.015)',
+                                }} />
                             ))}
                         </div>
 
                         {/* Rows */}
                         {trades.map(t => {
                             const col = COLORS[t.status] || COLORS.open;
-                            const hasRange = t.start_date && t.end_date;
-                            const barLeft = hasRange ? dayToX(t.start_date) : 0;
-                            const barWidth = hasRange ? Math.max(dayToX(t.end_date) - barLeft + zoom.dayWidth, zoom.dayWidth * 2) : 0;
+                            const bar = getBar(t);
 
                             return (
                                 <div key={t.id} style={{ height: ROW_HEIGHT, position: 'relative', borderBottom: '1px solid var(--border-color)' }}>
-                                    {/* Week grid lines */}
-                                    {weeks.map((w, i) => (
-                                        <div key={i} style={{
-                                            position: 'absolute', left: i * 7 * zoom.dayWidth, top: 0,
-                                            width: 7 * zoom.dayWidth, height: '100%',
-                                            borderRight: '1px solid var(--border-color)',
-                                            background: i % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.015)',
-                                        }} />
-                                    ))}
-
                                     {/* Bar */}
-                                    {hasRange && (
+                                    {bar.kind === 'bar' && (
                                         <div
                                             style={{
                                                 position: 'absolute',
-                                                left: barLeft, top: 8,
-                                                width: barWidth, height: ROW_HEIGHT - 16,
+                                                left: bar.left, top: 8,
+                                                width: bar.width, height: ROW_HEIGHT - 16,
                                                 borderRadius: '6px',
                                                 background: `linear-gradient(135deg, ${col.bar}, ${col.bar}dd)`,
                                                 boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
@@ -201,16 +239,47 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
                                                 padding: '0 6px',
                                                 cursor: 'pointer',
                                                 transition: 'opacity 0.15s',
+                                                borderStyle: bar.clipped ? 'dashed' : 'none',
+                                                borderWidth: bar.clipped ? '1px' : 0,
+                                                borderColor: '#fff',
                                             }}
                                             onClick={() => onTradeClick?.(t.id)}
-                                            title={`${t.name}: ${new Date(t.start_date).toLocaleDateString('de-DE')} – ${new Date(t.end_date).toLocaleDateString('de-DE')}`}
+                                            title={`${t.name}: ${formatDateDE(t.start_date)} – ${formatDateDE(t.end_date)}${bar.clipped ? ' (teilweise außerhalb des dargestellten Zeitraums)' : ''}`}
                                         >
-                                            {barWidth > 60 ? t.name : ''}
+                                            {bar.width > 60 ? t.name : ''}
                                         </div>
                                     )}
 
+                                    {/* Ungültiger Zeitraum: Ende vor Start */}
+                                    {bar.kind === 'invalid' && (
+                                        <div
+                                            onClick={() => onTradeClick?.(t.id)}
+                                            title={`${t.name}: Enddatum (${formatDateDE(t.end_date)}) liegt vor dem Startdatum (${formatDateDE(t.start_date)})`}
+                                            style={{
+                                                position: 'absolute', left: bar.left, top: 8, height: ROW_HEIGHT - 16,
+                                                padding: '0 8px', borderRadius: '6px', border: '1px dashed #dc2626',
+                                                background: '#fef2f2', color: '#dc2626', fontSize: '0.68rem', fontWeight: 700,
+                                                display: 'flex', alignItems: 'center', whiteSpace: 'nowrap', cursor: 'pointer',
+                                            }}
+                                        >
+                                            Ende vor Start
+                                        </div>
+                                    )}
+
+                                    {/* Zeitraum komplett außerhalb des dargestellten Bereichs */}
+                                    {bar.kind === 'outside' && (
+                                        <div
+                                            title={`${t.name}: ${formatDateDE(t.start_date)} – ${formatDateDE(t.end_date)} (außerhalb des dargestellten Zeitraums)`}
+                                            style={{
+                                                position: 'absolute', left: bar.left, top: ROW_HEIGHT / 2 - 2,
+                                                width: '20px', height: '4px', borderRadius: '2px',
+                                                border: '1px dashed var(--text-secondary)',
+                                            }}
+                                        />
+                                    )}
+
                                     {/* No-date placeholder */}
-                                    {!hasRange && (
+                                    {bar.kind === 'none' && (
                                         <div style={{
                                             position: 'absolute', left: todayX, top: ROW_HEIGHT / 2 - 1,
                                             width: '20px', height: '3px', borderRadius: '2px',
@@ -229,7 +298,7 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
                             pointerEvents: 'none',
                         }} />
                         <div style={{
-                            position: 'absolute', left: todayX - 18, top: 2,
+                            position: 'absolute', left: Math.max(0, todayX - 18), top: 2,
                             fontSize: '0.62rem', fontWeight: 700, color: '#ef4444',
                             background: '#fef2f2', padding: '1px 4px', borderRadius: '3px',
                             zIndex: 6, pointerEvents: 'none',
@@ -251,6 +320,10 @@ const GanttChart = ({ trades = [], onTradeClick, onDateChange, isMobile = false 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                     <div style={{ width: '12px', height: '2px', background: '#ef4444' }} />
                     Heute
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <div style={{ width: '12px', height: '10px', borderRadius: '3px', border: '1px dashed #dc2626', background: '#fef2f2' }} />
+                    Ende vor Start
                 </div>
             </div>
         </div>

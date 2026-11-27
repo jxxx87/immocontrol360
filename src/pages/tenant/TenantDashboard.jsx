@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -8,9 +9,37 @@ import {
     Trash2, Sparkles, Brush
 } from 'lucide-react';
 
+// Nur die Spalten, die das Mieter-Dashboard braucht – keine Vermieter-internen Objektdaten
+// (Marktwert, Investition, Eigenkapital, AfA, Soll-Miete, user_id des Vermieters).
+const UNIT_COLUMNS = 'id, unit_name, floor, sqm, rooms, property_id, property:properties(id, street, house_number, zip, city)';
+const LEASE_COLUMNS = `id, status, start_date, end_date, cold_rent, service_charge, heating_cost, other_costs, deposit, payment_due_day, unit_id, unit:units(${UNIT_COLUMNS})`;
+
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+const isActiveStatus = (status) => ['active', 'aktiv'].includes(String(status || '').toLowerCase());
+
+// Lokales Datum (nicht UTC) als YYYY-MM-DD
+const localDateString = (d = new Date()) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// 'YYYY-MM-DD' als lokales Datum parsen (new Date('YYYY-MM-DD') wäre UTC-Mitternacht)
+const parseLocalDate = (value) => {
+    if (!value) return null;
+    const str = String(value);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        const [y, m, d] = str.split('-').map(Number);
+        return new Date(y, m - 1, d);
+    }
+    const parsed = new Date(str);
+    return isNaN(parsed.getTime()) ? null : parsed;
+};
+
 const TenantDashboard = () => {
     const { user, roleData } = useAuth();
-    const [lease, setLease] = useState(null);
+    const [leases, setLeases] = useState([]);
+    const [leaseNotice, setLeaseNotice] = useState(null);
     const [unit, setUnit] = useState(null);
     const [property, setProperty] = useState(null);
     const [tenant, setTenant] = useState(null);
@@ -19,6 +48,9 @@ const TenantDashboard = () => {
     const [nextTask, setNextTask] = useState(null);
     const [nextCleaning, setNextCleaning] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [noTenancy, setNoTenancy] = useState(false);
+    const [reloadKey, setReloadKey] = useState(0);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -29,93 +61,122 @@ const TenantDashboard = () => {
             }
 
             try {
-                // If roleData is missing, fetch it directly
+                setLoading(true);
+                setLoadError(null);
+                setNoTenancy(false);
+
                 let tenantId = roleData?.tenant_id;
                 let unitId = roleData?.unit_id;
                 let propertyId = roleData?.property_id;
+                let leaseList = [];
+                let tenantRow = null;
+                let roleUnit = null;
 
-                if (!tenantId) {
+                // 1. Eingeschränkte Mieter-Sicht über die Datenbank-Funktion
+                const { data: tenancy, error: tenancyError, status: tenancyStatus } = await supabase.rpc('get_my_tenancy');
 
-                    const { data: roles, error: rolesError } = await supabase
-                        .from('user_roles')
-                        .select('tenant_id, unit_id, property_id')
-                        .eq('user_id', user.id)
-                        .eq('role', 'tenant')
-                        .limit(1);
-
-
-                    if (roles && roles.length > 0) {
-                        tenantId = roles[0].tenant_id;
-                        unitId = roles[0].unit_id;
-                        propertyId = roles[0].property_id;
+                if (!tenancyError) {
+                    if (!tenancy) {
+                        setNoTenancy(true);
+                        return;
                     }
-                }
+                    tenantId = tenancy.tenant_id;
+                    unitId = tenancy.unit_id || unitId;
+                    propertyId = tenancy.property_id || propertyId;
+                    leaseList = tenancy.leases || [];
+                    tenantRow = tenancy.tenant || null;
+                    roleUnit = tenancy.role_unit || null;
+                } else {
+                    if (!isMissingRpc(tenancyError, tenancyStatus)) throw tenancyError;
 
-                if (!tenantId) {
-                    setLoading(false);
-                    return;
-                }
+                    // Bisheriger Weg (Funktion noch nicht eingespielt) – mit expliziten Spaltenlisten
+                    if (!tenantId) {
+                        const { data: roles, error: rolesError } = await supabase
+                            .from('user_roles')
+                            .select('tenant_id, unit_id, property_id')
+                            .eq('user_id', user.id)
+                            .eq('role', 'tenant')
+                            .limit(1);
+                        if (rolesError) throw rolesError;
 
-                // Fetch lease
-                const { data: leases, error: leaseError } = await supabase
-                    .from('leases')
-                    .select('*, unit:units(*, property:properties(*))')
-                    .eq('tenant_id', tenantId)
-                    .in('status', ['active', 'Active', 'aktiv'])
-                    .limit(1);
+                        if (roles && roles.length > 0) {
+                            tenantId = roles[0].tenant_id;
+                            unitId = roles[0].unit_id;
+                            propertyId = roles[0].property_id;
+                        }
+                    }
 
+                    if (!tenantId) {
+                        setNoTenancy(true);
+                        return;
+                    }
 
-                let activeLease = leases?.[0];
-
-                if (!activeLease) {
-                    // Fallback: any lease
-                    const { data: anyLeases, error: anyError } = await supabase
+                    const { data: leaseData, error: leaseError } = await supabase
                         .from('leases')
-                        .select('*, unit:units(*, property:properties(*))')
+                        .select(LEASE_COLUMNS)
                         .eq('tenant_id', tenantId)
-                        .order('start_date', { ascending: false })
-                        .limit(1);
+                        .order('start_date', { ascending: false });
+                    if (leaseError) throw leaseError;
+                    leaseList = leaseData || [];
 
-                    activeLease = anyLeases?.[0];
-                }
+                    const { data: tenantData, error: tenantError } = await supabase
+                        .from('tenants')
+                        .select('id, first_name, last_name')
+                        .eq('id', tenantId)
+                        .maybeSingle();
+                    if (tenantError) throw tenantError;
+                    tenantRow = tenantData;
 
-                if (activeLease) {
-                    setLease(activeLease);
-                    setUnit(activeLease.unit);
-                    setProperty(activeLease.unit?.property);
-                } else if (unitId) {
-                    const { data: unitData } = await supabase
-                        .from('units')
-                        .select('*, property:properties(*)')
-                        .eq('id', unitId)
-                        .single();
-
-                    if (unitData) {
-                        setUnit(unitData);
-                        setProperty(unitData.property);
+                    if (leaseList.length === 0 && unitId) {
+                        const { data: unitData, error: unitError } = await supabase
+                            .from('units')
+                            .select(UNIT_COLUMNS)
+                            .eq('id', unitId)
+                            .maybeSingle();
+                        if (unitError) throw unitError;
+                        roleUnit = unitData;
                     }
                 }
 
-                // Fetch tenant info
-                const { data: tenantData, error: tenantError } = await supabase
-                    .from('tenants')
-                    .select('*')
-                    .eq('id', tenantId)
-                    .single();
+                // 2. Laufende Verträge (alle, z. B. Wohnung + Stellplatz); sonst letzter Vertrag mit Hinweis
+                const byStartDesc = (a, b) => String(b.start_date || '').localeCompare(String(a.start_date || ''));
+                let shownLeases = leaseList.filter(l => isActiveStatus(l.status)).sort(byStartDesc);
+                let notice = null;
+                if (shownLeases.length === 0 && leaseList.length > 0) {
+                    const latest = [...leaseList].sort(byStartDesc)[0];
+                    shownLeases = [latest];
+                    const endDate = parseLocalDate(latest.end_date);
+                    const endInfo = latest.end_date ? `, Mietende ${endDate ? endDate.toLocaleDateString('de-DE') : latest.end_date}` : '';
+                    notice = `Kein laufender Mietvertrag gefunden. Angezeigt wird Ihr letzter Vertrag (Status: ${latest.status || 'unbekannt'}${endInfo}).`;
+                } else if (shownLeases.length > 1) {
+                    notice = `Sie haben ${shownLeases.length} laufende Mietverträge – die Beträge sind zusammengerechnet.`;
+                }
 
-                setTenant(tenantData);
+                const primaryUnit = shownLeases[0]?.unit || roleUnit || null;
+                setLeases(shownLeases);
+                setLeaseNotice(notice);
+                setUnit(primaryUnit);
+                setProperty(primaryUnit?.property || null);
+                setTenant(tenantRow);
+
+                // Objekt/Einheit für den Kalender bevorzugt aus dem aktuellen Vertrag
+                if (primaryUnit?.id) unitId = primaryUnit.id;
+                if (primaryUnit?.property?.id || primaryUnit?.property_id) {
+                    propertyId = primaryUnit.property?.id || primaryUnit.property_id;
+                }
 
                 // Fetch recent tickets
-                const { data: ticketData } = await supabase
+                const { data: ticketData, error: ticketError } = await supabase
                     .from('tickets')
-                    .select('*')
+                    .select('id, title, status, created_at')
                     .eq('tenant_user_id', user.id)
                     .order('created_at', { ascending: false })
                     .limit(5);
+                if (ticketError) console.error('Tickets konnten nicht geladen werden:', ticketError);
                 setTickets(ticketData || []);
 
                 // Fetch next calendar events
-                const todayStr = new Date().toISOString().slice(0, 10);
+                const todayStr = localDateString();
                 if (propertyId) {
                     // Next waste pickup
                     const { data: wasteData } = await supabase
@@ -127,7 +188,7 @@ const TenantDashboard = () => {
                         .gte('event_date', todayStr)
                         .order('event_date')
                         .limit(1);
-                    if (wasteData?.[0]) setNextWaste(wasteData[0]);
+                    setNextWaste(wasteData?.[0] || null);
 
                     // Next cleaning
                     const { data: cleanData } = await supabase
@@ -139,7 +200,7 @@ const TenantDashboard = () => {
                         .gte('event_date', todayStr)
                         .order('event_date')
                         .limit(1);
-                    if (cleanData?.[0]) setNextCleaning(cleanData[0]);
+                    setNextCleaning(cleanData?.[0] || null);
 
                     // Next assigned task for this unit
                     if (unitId) {
@@ -152,19 +213,20 @@ const TenantDashboard = () => {
                             .gte('event_date', todayStr)
                             .order('event_date')
                             .limit(1);
-                        if (taskData?.[0]) setNextTask(taskData[0]);
+                        setNextTask(taskData?.[0] || null);
                     }
                 }
 
             } catch (err) {
                 console.error('🏠 Dashboard ERROR:', err);
+                setLoadError(err?.message || 'Unbekannter Fehler');
             } finally {
                 setLoading(false);
             }
         };
 
         fetchData();
-    }, [user, roleData]);
+    }, [user, roleData, reloadKey]);
 
     const formatCurrency = (val) => {
         return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(val || 0);
@@ -172,7 +234,8 @@ const TenantDashboard = () => {
 
     const formatDate = (dateStr) => {
         if (!dateStr) return '—';
-        return new Date(dateStr).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const d = parseLocalDate(dateStr);
+        return d ? d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
     };
 
     const statusLabels = {
@@ -189,7 +252,30 @@ const TenantDashboard = () => {
         );
     }
 
-    const totalRent = (lease?.cold_rent || 0) + (lease?.service_charge || 0) + (lease?.heating_cost || 0) + (lease?.other_costs || 0);
+    if (loadError) {
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '60vh', gap: '12px', textAlign: 'center', padding: '0 16px' }}>
+                <AlertCircle size={36} color="var(--danger-color)" />
+                <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Ihre Daten konnten nicht geladen werden.</div>
+                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{loadError}</div>
+                <button
+                    type="button"
+                    onClick={() => setReloadKey(k => k + 1)}
+                    className="btn btn-primary btn-md"
+                >
+                    Erneut versuchen
+                </button>
+            </div>
+        );
+    }
+
+    const sumOf = (field) => leases.reduce((acc, l) => acc + (Number(l?.[field]) || 0), 0);
+    const hasLease = leases.length > 0;
+    const primaryLease = leases[0] || null;
+    const coldRentTotal = sumOf('cold_rent');
+    const sideCostsTotal = sumOf('service_charge') + sumOf('heating_cost') + sumOf('other_costs');
+    const totalRent = coldRentTotal + sideCostsTotal;
+    const showAmount = (val) => (hasLease ? formatCurrency(val) : '—');
 
     return (
         <div>
@@ -224,8 +310,25 @@ const TenantDashboard = () => {
                         <div style={{ fontWeight: 700, marginBottom: '2px' }}>Passwort einrichten erforderlich</div>
                         <div>
                             Richten Sie bitte ein Passwort ein, damit Sie sich in Zukunft bequem ohne E-Mail-Link anmelden können.
-                            Wechseln Sie hierzu zum Menüpunkt <a href="/tenant/stammdaten" style={{ color: '#B45309', fontWeight: 600, textDecoration: 'underline' }}>Stammdaten</a>.
+                            Wechseln Sie hierzu zum Menüpunkt <Link to="/tenant/stammdaten" style={{ color: '#B45309', fontWeight: 600, textDecoration: 'underline' }}>Stammdaten</Link>.
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Hinweise zum Mietverhältnis */}
+            {(noTenancy || leaseNotice || !hasLease) && (
+                <div style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '12px',
+                    padding: '14px 18px', borderRadius: 'var(--radius-lg)',
+                    backgroundColor: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2)',
+                    color: 'var(--text-primary)', fontSize: '0.88rem', lineHeight: 1.5, marginBottom: '20px'
+                }}>
+                    <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px', color: '#3B82F6' }} />
+                    <div>
+                        {noTenancy
+                            ? 'Ihrem Konto ist noch kein Mietverhältnis zugeordnet. Bitte wenden Sie sich an Ihren Vermieter.'
+                            : (leaseNotice || 'Zu Ihrem Mietverhältnis ist noch kein Mietvertrag hinterlegt.')}
                     </div>
                 </div>
             )}
@@ -249,7 +352,7 @@ const TenantDashboard = () => {
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Nächste Reinigung</div>
                                     <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-primary)' }}>
-                                        {new Date(nextCleaning.event_date).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
+                                        {(parseLocalDate(nextCleaning.event_date) || new Date(nextCleaning.event_date)).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
                                     </div>
                                     {nextCleaning.assigned_unit_name && <div style={{ fontSize: '0.82rem', color: '#3B82F6', fontWeight: 500, marginTop: '2px' }}>{nextCleaning.assigned_unit_name}</div>}
                                 </div>
@@ -268,7 +371,7 @@ const TenantDashboard = () => {
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Nächste Müllabholung</div>
                                     <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-primary)' }}>
-                                        {new Date(nextWaste.event_date).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
+                                        {(parseLocalDate(nextWaste.event_date) || new Date(nextWaste.event_date)).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
                                     </div>
                                     <div style={{ fontSize: '0.82rem', color: '#F97316', fontWeight: 500, marginTop: '2px' }}>{nextWaste.title}</div>
                                     {nextWaste.assigned_unit_name && <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>Einheit: {nextWaste.assigned_unit_name}</div>}
@@ -291,7 +394,7 @@ const TenantDashboard = () => {
                                         {nextTask.title}
                                     </div>
                                     <div style={{ fontSize: '0.82rem', color: nextTask.event_type === 'cleaning' ? '#3B82F6' : '#8B5CF6', fontWeight: 500, marginTop: '2px' }}>
-                                        {new Date(nextTask.event_date).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
+                                        {(parseLocalDate(nextTask.event_date) || new Date(nextTask.event_date)).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: 'long' })}
                                     </div>
                                     {nextTask.assigned_unit_name && <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>Einheit: {nextTask.assigned_unit_name}</div>}
                                 </div>
@@ -319,7 +422,7 @@ const TenantDashboard = () => {
                         {property.street} {property.house_number}
                     </div>
                     <div style={{ fontSize: '1rem', opacity: 0.9 }}>
-                        {property.zip_code} {property.city}
+                        {property.zip} {property.city}
                     </div>
                     <div style={{
                         marginTop: '14px', padding: '8px 16px',
@@ -341,29 +444,29 @@ const TenantDashboard = () => {
                 <KPICard
                     icon={<Euro size={20} />}
                     label="Gesamtmiete"
-                    value={formatCurrency(totalRent)}
+                    value={showAmount(totalRent)}
                     sublabel="monatlich"
                     accent="#0066CC"
                 />
                 <KPICard
                     icon={<Euro size={20} />}
                     label="Kaltmiete"
-                    value={formatCurrency(lease?.cold_rent)}
+                    value={showAmount(coldRentTotal)}
                     sublabel="Nettomiete"
                     accent="#10B981"
                 />
                 <KPICard
                     icon={<Euro size={20} />}
                     label="Nebenkosten"
-                    value={formatCurrency((lease?.service_charge || 0) + (lease?.heating_cost || 0) + (lease?.other_costs || 0))}
+                    value={showAmount(sideCostsTotal)}
                     sublabel="NK + Heizung + Sonstige"
                     accent="#F59E0B"
                 />
                 <KPICard
                     icon={<Calendar size={20} />}
                     label="Mietbeginn"
-                    value={formatDate(lease?.start_date)}
-                    sublabel={lease?.end_date ? `bis ${formatDate(lease.end_date)}` : 'Unbefristet'}
+                    value={formatDate(primaryLease?.start_date)}
+                    sublabel={!primaryLease ? '' : (primaryLease.end_date ? `bis ${formatDate(primaryLease.end_date)}` : 'Unbefristet')}
                     accent="#8B5CF6"
                 />
             </div>
@@ -381,18 +484,32 @@ const TenantDashboard = () => {
                         <FileText size={18} color="var(--primary-color)" />
                         Vertragsdetails
                     </h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                        <DetailRow label="Kaltmiete" value={formatCurrency(lease?.cold_rent)} />
-                        <DetailRow label="Betriebskosten" value={formatCurrency(lease?.service_charge)} />
-                        <DetailRow label="Heizkosten" value={formatCurrency(lease?.heating_cost)} />
-                        <DetailRow label="Sonstige Kosten" value={formatCurrency(lease?.other_costs)} />
-                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                        <DetailRow label="Gesamtmiete" value={formatCurrency(totalRent)} bold />
-                        <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                        <DetailRow label="Mietbeginn" value={formatDate(lease?.start_date)} />
-                        <DetailRow label="Mietende" value={lease?.end_date ? formatDate(lease.end_date) : 'Unbefristet'} />
-                        <DetailRow label="Kaution" value={lease?.deposit ? formatCurrency(lease.deposit) : '—'} />
-                    </div>
+                    {!hasLease ? (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
+                            Kein Mietvertrag hinterlegt.
+                        </div>
+                    ) : leases.map((lease, idx) => {
+                        const leaseTotal = (Number(lease.cold_rent) || 0) + (Number(lease.service_charge) || 0) + (Number(lease.heating_cost) || 0) + (Number(lease.other_costs) || 0);
+                        return (
+                            <div key={lease.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: idx > 0 ? '20px' : 0, paddingTop: idx > 0 ? '16px' : 0, borderTop: idx > 0 ? '1px solid var(--border-color)' : 'none' }}>
+                                {leases.length > 1 && (
+                                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                        {lease.unit?.unit_name ? `Einheit: ${lease.unit.unit_name}` : `Vertrag ${idx + 1}`}
+                                    </div>
+                                )}
+                                <DetailRow label="Kaltmiete" value={formatCurrency(lease.cold_rent)} />
+                                <DetailRow label="Betriebskosten" value={formatCurrency(lease.service_charge)} />
+                                <DetailRow label="Heizkosten" value={formatCurrency(lease.heating_cost)} />
+                                <DetailRow label="Sonstige Kosten" value={formatCurrency(lease.other_costs)} />
+                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                <DetailRow label="Gesamtmiete" value={formatCurrency(leaseTotal)} bold />
+                                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                <DetailRow label="Mietbeginn" value={formatDate(lease.start_date)} />
+                                <DetailRow label="Mietende" value={lease.end_date ? formatDate(lease.end_date) : 'Unbefristet'} />
+                                <DetailRow label="Kaution" value={lease.deposit ? formatCurrency(lease.deposit) : '—'} />
+                            </div>
+                        );
+                    })}
                 </div>
 
                 {/* Recent Tickets */}

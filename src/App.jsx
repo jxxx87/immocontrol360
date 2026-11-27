@@ -28,7 +28,6 @@ import { CloudCallback } from './pages/settings/CloudCallback';
 import Import from './pages/Import';
 import Privacy from './pages/Privacy';
 import Terms from './pages/Terms';
-import PlaceholderPage from './pages/PlaceholderPage';
 import BuyAndHold from './pages/investor/BuyAndHold';
 import FixAndFlip from './pages/investor/FixAndFlip';
 import TaxAndExit from './pages/investor/TaxAndExit';
@@ -42,11 +41,11 @@ import FloorPlanEditor from './pages/renovation/FloorPlanEditor';
 import PdfTemplateEditor from './pages/pdf-template/PdfTemplateEditor';
 import Login from './pages/auth/Login';
 import Register from './pages/auth/Register';
-import ResetPassword from './pages/auth/ResetPassword';
+import PasswordRecovery from './components/layout/PasswordRecovery';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PortfolioProvider } from './context/PortfolioContext';
 import { PermissionProvider } from './context/PermissionContext';
-import { ProtectedRoute } from './ProtectedRoute';
+import { ProtectedRoute, InvestorRoute, TenantRoute } from './ProtectedRoute';
 import { ViewModeProvider } from './context/ViewModeContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { SubscriptionProvider } from './context/SubscriptionContext';
@@ -83,6 +82,10 @@ const RoleBasedIndex = () => {
   return <Dashboard />;
 };
 
+// Kurzformen für die Routen-Guards (Rolle + Leserecht der Freigabe-Kategorie)
+const inv = (element, category) => <InvestorRoute category={category}>{element}</InvestorRoute>;
+const ten = (element) => <TenantRoute>{element}</TenantRoute>;
+
 function App() {
   return (
     <Router>
@@ -96,7 +99,9 @@ function App() {
                     {/* Public Auth Routes */}
                     <Route path="/login" element={<AuthRoute><Login /></AuthRoute>} />
                     <Route path="/register" element={<AuthRoute><Register /></AuthRoute>} />
-                    <Route path="/reset-password" element={<AuthRoute><ResetPassword /></AuthRoute>} />
+                    {/* Nicht hinter AuthRoute: der Reset-Link meldet an, danach folgt "Neues Passwort festlegen" */}
+                    <Route path="/reset-password" element={<PasswordRecovery />} />
+                    <Route path="/update-password" element={<PasswordRecovery />} />
                     <Route path="/billing/success" element={<BillingSuccess />} />
                     <Route path="/privacy" element={<Privacy />} />
                     <Route path="/terms" element={<Terms />} />
@@ -108,61 +113,63 @@ function App() {
                     {/* Protected App Routes */}
                     <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
                       <Route index element={<RoleBasedIndex />} />
-                      <Route path="properties" element={<Properties />} />
+                      <Route path="properties" element={inv(<Properties />, 'immobilien')} />
 
-                      <Route path="tenants" element={<Tenants />} />
-                      <Route path="tenants/:id" element={<TenantDetail />} />
-                      <Route path="forderungen" element={<Claims />} />
-                      <Route path="forderungen/:claimId" element={<ClaimDetail />} />
-                      <Route path="finance" element={<Finance />} />
-                      <Route path="bank-reconciliation" element={<BankReconciliation />} />
-                      <Route path="loans" element={<Loans />} />
-                      <Route path="utility-costs" element={<UtilityCosts />} />
-                      <Route path="invoices" element={<Invoices />} />
-                      <Route path="invoices/new" element={<InvoiceForm />} />
-                      <Route path="invoices/edit/:id" element={<InvoiceForm />} />
-                      <Route path="meters" element={<Meters />} />
-                      <Route path="contacts" element={<Contacts />} />
-                      <Route path="documents" element={<Documents />} />
-                      <Route path="cloud-documents" element={<CloudExplorer />} />
-                      <Route path="settings" element={<Settings />} />
-                      <Route path="settings/cloud/callback" element={<CloudCallback />} />
-                      <Route path="security" element={<PlaceholderPage title="Sicherheit" />} />
-                      <Route path="import" element={<Import />} />
-                      <Route path="help" element={<PlaceholderPage title="Hilfe" />} />
+                      <Route path="tenants" element={inv(<Tenants />, 'mietverhaeltnisse')} />
+                      <Route path="tenants/:id" element={inv(<TenantDetail />, 'mietverhaeltnisse')} />
+                      <Route path="forderungen" element={inv(<Claims />, 'finanzen')} />
+                      <Route path="forderungen/:claimId" element={inv(<ClaimDetail />, 'finanzen')} />
+                      <Route path="finance" element={inv(<Finance />, 'finanzen')} />
+                      <Route path="bank-reconciliation" element={inv(<BankReconciliation />, 'finanzen')} />
+                      <Route path="loans" element={inv(<Loans />, 'finanzen')} />
+                      <Route path="utility-costs" element={inv(<UtilityCosts />, 'nebenkosten')} />
+                      <Route path="invoices" element={inv(<Invoices />, 'finanzen')} />
+                      <Route path="invoices/new" element={inv(<InvoiceForm />, 'finanzen')} />
+                      <Route path="invoices/edit/:id" element={inv(<InvoiceForm />, 'finanzen')} />
+                      <Route path="meters" element={inv(<Meters />, 'zaehler')} />
+                      <Route path="contacts" element={inv(<Contacts />, 'kontakte')} />
+                      <Route path="documents" element={inv(<Documents />, 'immobilien')} />
+                      <Route path="cloud-documents" element={inv(<CloudExplorer />, 'immobilien')} />
+                      <Route path="settings" element={inv(<Settings />)} />
+                      <Route path="settings/cloud/callback" element={inv(<CloudCallback />)} />
+                      {/* Frühere Platzhalter-Seiten: auf die passenden Einstellungs-Reiter umleiten */}
+                      <Route path="security" element={inv(<Navigate to="/settings" replace state={{ activeTab: 'security' }} />)} />
+                      <Route path="import" element={inv(<Import />)} />
+                      <Route path="help" element={inv(<Navigate to="/settings" replace state={{ activeTab: 'help' }} />)} />
 
                       {/* ── Investor Portal Routes ── */}
-                      <Route path="letting" element={<Letting />} />
-                      <Route path="tenant-management" element={<TenantManagement />} />
-                      <Route path="ticket-board" element={<TicketKanban />} />
-                      <Route path="announcements" element={<Announcements />} />
-                      <Route path="investor-messages" element={<InvestorMessages />} />
-                      <Route path="object-calendar" element={<ObjectCalendar />} />
+                      <Route path="letting" element={inv(<Letting />, 'mieterportal')} />
+                      <Route path="tenant-management" element={inv(<TenantManagement />, 'mieterportal')} />
+                      <Route path="ticket-board" element={inv(<TicketKanban />, 'mieterportal')} />
+                      <Route path="announcements" element={inv(<Announcements />, 'mieterportal')} />
+                      <Route path="investor-messages" element={inv(<InvestorMessages />, 'mieterportal')} />
+                      {/* Objektkalender wird auch im Mieterportal genutzt */}
+                      <Route path="object-calendar" element={<InvestorRoute category="immobilien" allowTenant><ObjectCalendar /></InvestorRoute>} />
 
                       {/* ── Investorportal Routes ── */}
-                      <Route path="buy-and-hold" element={<BuyAndHold />} />
-                      <Route path="fix-and-flip" element={<FixAndFlip />} />
-                      <Route path="tax-and-exit" element={<TaxAndExit />} />
-                      <Route path="asset-management" element={<AssetManagement />} />
-                      <Route path="investor-portal" element={<InvestorPortal />} />
+                      <Route path="buy-and-hold" element={inv(<BuyAndHold />, 'investorportal')} />
+                      <Route path="fix-and-flip" element={inv(<FixAndFlip />, 'investorportal')} />
+                      <Route path="tax-and-exit" element={inv(<TaxAndExit />, 'investorportal')} />
+                      <Route path="asset-management" element={inv(<AssetManagement />, 'investorportal')} />
+                      <Route path="investor-portal" element={inv(<InvestorPortal />, 'investorportal')} />
 
                       {/* ── Sanierungsmanager Routes ── */}
-                      <Route path="renovation" element={<RenovationManager />} />
-                      <Route path="renovation/new" element={<RenovationWizard />} />
-                      <Route path="renovation/:id" element={<RenovationProjectDetail />} />
-                      <Route path="renovation/calculator/:id" element={<RenovationCalculatorDetail />} />
-                      <Route path="renovation/floorplan/:id" element={<FloorPlanEditor />} />
+                      <Route path="renovation" element={inv(<RenovationManager />, 'immobilien')} />
+                      <Route path="renovation/new" element={inv(<RenovationWizard />, 'immobilien')} />
+                      <Route path="renovation/:id" element={inv(<RenovationProjectDetail />, 'immobilien')} />
+                      <Route path="renovation/calculator/:id" element={inv(<RenovationCalculatorDetail />, 'immobilien')} />
+                      <Route path="renovation/floorplan/:id" element={inv(<FloorPlanEditor />, 'immobilien')} />
 
                       {/* ── PDF Template Route ── */}
-                      <Route path="portfolio/settings/pdf-template" element={<PdfTemplateEditor />} />
+                      <Route path="portfolio/settings/pdf-template" element={inv(<PdfTemplateEditor />)} />
 
                       {/* ── Tenant Portal Routes ── */}
-                      <Route path="tenant" element={<TenantDashboard />} />
-                      <Route path="tenant/tickets" element={<TenantTickets />} />
-                      <Route path="tenant/messages" element={<TenantMessages />} />
-                      <Route path="tenant/announcements" element={<TenantAnnouncements />} />
-                      <Route path="tenant/documents" element={<TenantDocuments />} />
-                      <Route path="tenant/stammdaten" element={<TenantStamdaten />} />
+                      <Route path="tenant" element={ten(<TenantDashboard />)} />
+                      <Route path="tenant/tickets" element={ten(<TenantTickets />)} />
+                      <Route path="tenant/messages" element={ten(<TenantMessages />)} />
+                      <Route path="tenant/announcements" element={ten(<TenantAnnouncements />)} />
+                      <Route path="tenant/documents" element={ten(<TenantDocuments />)} />
+                      <Route path="tenant/stammdaten" element={ten(<TenantStamdaten />)} />
                     </Route>
                     {/* Catch-all route to redirect back to main index */}
                     <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,41 +1,75 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 
 const ViewModeContext = createContext();
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useViewMode = () => useContext(ViewModeContext);
+
+const STORAGE_KEY = 'viewMode';
+const MOBILE_BREAKPOINT = 768;
+
+const isNativePlatform = () => !!window.Capacitor?.isNativePlatform?.();
+const isNarrowWindow = () => window.innerWidth < MOBILE_BREAKPOINT;
+
+// Gespeicherte Wahl: 'mobile' | 'desktop' | null (= automatisch nach Fensterbreite)
+const readStoredPreference = () => {
+    try {
+        const stored = window.localStorage.getItem(STORAGE_KEY);
+        return stored === 'mobile' || stored === 'desktop' ? stored : null;
+    } catch {
+        return null;
+    }
+};
+
+const writeStoredPreference = (preference) => {
+    try {
+        if (preference) window.localStorage.setItem(STORAGE_KEY, preference);
+        else window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+        // Speicher nicht verfügbar (z.B. privater Modus) – die Wahl gilt dann bis zum Neuladen
+    }
+};
 
 export const ViewModeProvider = ({ children }) => {
     // On Capacitor / real mobile devices, always use mobile mode
-    const [isMobile, setIsMobile] = useState(() => {
-        // If running inside Capacitor (native app), always mobile
-        if (window.Capacitor?.isNativePlatform?.()) return true;
-        // Otherwise check screen width
-        return window.innerWidth < 768;
-    });
+    const [isNative] = useState(isNativePlatform);
+    const [preference, setPreference] = useState(readStoredPreference);
+    const [isNarrow, setIsNarrow] = useState(isNarrowWindow);
 
-    // Listen for resize on web only (not in native app)
+    // Fensterbreite immer verfolgen (nicht in der nativen App); wirkt nur im Automatik-Modus
     useEffect(() => {
-        if (window.Capacitor?.isNativePlatform?.()) return;
-        const handleResize = () => {
-            if (!localStorage.getItem('viewMode')) {
-                setIsMobile(window.innerWidth < 768);
-            }
-        };
+        if (isNative) return undefined;
+        const handleResize = () => setIsNarrow(isNarrowWindow());
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
+    }, [isNative]);
+
+    const isMobile = isNative ? true : (preference ? preference === 'mobile' : isNarrow);
+
+    const toggleViewMode = useCallback(() => {
+        if (isNative) return; // No toggle in native app
+        const next = isMobile ? 'desktop' : 'mobile';
+        writeStoredPreference(next);
+        setPreference(next);
+    }, [isNative, isMobile]);
+
+    // Zurück zur Automatik (Ansicht folgt wieder der Fensterbreite)
+    const resetViewMode = useCallback(() => {
+        writeStoredPreference(null);
+        setPreference(null);
+        setIsNarrow(isNarrowWindow());
     }, []);
 
-    const toggleViewMode = () => {
-        if (window.Capacitor?.isNativePlatform?.()) return; // No toggle in native app
-        setIsMobile(prev => {
-            const next = !prev;
-            localStorage.setItem('viewMode', next ? 'mobile' : 'desktop');
-            return next;
-        });
-    };
+    const value = useMemo(() => ({
+        isMobile,
+        toggleViewMode,
+        resetViewMode,
+        // 'auto' | 'mobile' | 'desktop' | 'native'
+        viewModePreference: isNative ? 'native' : (preference || 'auto')
+    }), [isMobile, toggleViewMode, resetViewMode, isNative, preference]);
 
     return (
-        <ViewModeContext.Provider value={{ isMobile, toggleViewMode }}>
+        <ViewModeContext.Provider value={value}>
             {children}
         </ViewModeContext.Provider>
     );

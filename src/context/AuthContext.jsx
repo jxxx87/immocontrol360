@@ -1,7 +1,146 @@
-import React, { createContext, useState, useEffect, useContext } from 'react';
+import React, { createContext, useState, useEffect, useContext, useRef, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 
 const AuthContext = createContext();
+
+// PostgREST meldet eine (noch) nicht eingespielte Datenbank-Funktion mit PGRST202 bzw. HTTP 404.
+const isMissingFunction = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+const toRoleData = (row) => ({
+    unit_id: row?.unit_id ?? null,
+    property_id: row?.property_id ?? null,
+    tenant_id: row?.tenant_id ?? null,
+    id: row?.id ?? null
+});
+
+// ?code= auf diesen Pfaden stammt nicht von Supabase Auth (OAuth-Rückkehr der Cloud-Anbindung)
+const FOREIGN_CODE_PATHS = ['/settings/cloud/callback'];
+const isForeignCodePath = () => FOREIGN_CODE_PATHS.some(p => window.location.pathname.startsWith(p));
+
+// Bisheriger Weg (solange die Datenbank-Funktion accept_tenant_invitation noch nicht
+// eingespielt ist): offene Einladung suchen und Mieterrolle selbst anlegen.
+// Vermieter-Konten (eigene Portfolios) werden dabei nie in Mieter-Konten umgewandelt.
+const acceptInvitationLegacy = async (userId, email) => {
+    const userEmail = (email || (await supabase.auth.getUser())?.data?.user?.email || '').trim().toLowerCase();
+    if (!userEmail) return null;
+
+    // Einladungen werden kleingeschrieben gespeichert; eq statt ilike (keine Platzhalter)
+    const { data: invitations, error: invError } = await supabase
+        .from('tenant_invitations')
+        .select('*')
+        .eq('email', userEmail)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+        .limit(1);
+    if (invError) throw invError;
+
+    const invitation = invitations?.[0];
+    if (!invitation?.tenant_id) return null;
+
+    const { count: portfolioCount, error: portfolioError } = await supabase
+        .from('portfolios')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId);
+    if (portfolioError) throw portfolioError;
+    if ((portfolioCount || 0) > 0) return null;
+
+    const { data: newRole, error: roleError } = await supabase
+        .from('user_roles')
+        .insert({
+            user_id: userId,
+            role: 'tenant',
+            tenant_id: invitation.tenant_id,
+            unit_id: invitation.unit_id,
+            property_id: invitation.property_id
+        })
+        .select()
+        .single();
+
+    if (roleError) {
+        // Parallel bereits angelegt (UNIQUE user_id) → vorhandene Zeile verwenden
+        if (roleError.code === '23505') {
+            const { data: existing } = await supabase
+                .from('user_roles')
+                .select('*')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: true })
+                .limit(1);
+            return existing?.[0] || null;
+        }
+        console.warn('Mieterrolle konnte nicht angelegt werden:', roleError.message);
+        return null;
+    }
+
+    // Einladung als angenommen markieren (neue DB erledigt das per Trigger)
+    await supabase
+        .from('tenant_invitations')
+        .update({ status: 'accepted' })
+        .eq('id', invitation.id);
+
+    return newRole;
+};
+
+// Ermittelt die Rolle eines Kontos. Wirft bei Fehlern, statt eine Rolle zu raten.
+const resolveRole = async (userId, email) => {
+    const { data: rows, error } = await supabase
+        .from('user_roles')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true })
+        .limit(1);
+    if (error) throw error;
+
+    const row = rows?.[0];
+    if (row) return { role: row.role, data: toRoleData(row) };
+
+    // Keine Rolle → offene Mieter-Einladung serverseitig annehmen
+    const { data: accepted, error: rpcError, status } = await supabase.rpc('accept_tenant_invitation');
+    if (!rpcError) {
+        if (accepted?.role) return { role: accepted.role, data: toRoleData(accepted) };
+        return { role: 'investor', data: null };
+    }
+    if (!isMissingFunction(rpcError, status)) throw rpcError;
+
+    const legacyRole = await acceptInvitationLegacy(userId, email);
+    if (legacyRole) return { role: legacyRole.role || 'tenant', data: toRoleData(legacyRole) };
+
+    // Keine Einladung → bestehendes Konto → Vermieter
+    return { role: 'investor', data: null };
+};
+
+const RoleLoadError = ({ message, onRetry, onSignOut }) => (
+    <div style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '24px', boxSizing: 'border-box', fontFamily: 'Inter, sans-serif', background: '#f8fafc'
+    }}>
+        <div style={{
+            maxWidth: '440px', width: '100%', textAlign: 'center', backgroundColor: '#fff',
+            border: '1px solid #e2e8f0', borderRadius: '16px', padding: '32px'
+        }}>
+            <h1 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e293b', marginBottom: '12px' }}>
+                Anmeldung konnte nicht abgeschlossen werden
+            </h1>
+            <p style={{ color: '#64748b', fontSize: '0.92rem', lineHeight: 1.5, marginBottom: '8px' }}>
+                Ihre Zugangsrolle (Vermieter oder Mieter) konnte nicht geladen werden.
+                Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.
+            </p>
+            {message && (
+                <p style={{ color: '#94a3b8', fontSize: '0.78rem', marginBottom: '20px', wordBreak: 'break-word' }}>
+                    Technischer Hinweis: {message}
+                </p>
+            )}
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                <button type="button" className="btn btn-primary btn-md" onClick={onRetry}>
+                    Erneut versuchen
+                </button>
+                <button type="button" className="btn btn-secondary btn-md" onClick={onSignOut}>
+                    Abmelden
+                </button>
+            </div>
+        </div>
+    </div>
+);
 
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
@@ -10,111 +149,102 @@ export const AuthProvider = ({ children }) => {
     const [userRole, setUserRole] = useState(null); // 'investor' | 'tenant'
     const [roleData, setRoleData] = useState(null); // { unit_id, property_id, tenant_id }
     const [roleLoading, setRoleLoading] = useState(true);
+    const [roleError, setRoleError] = useState(null);
 
-    // Fetch user role from user_roles table
-    const fetchUserRole = async (userId, email = null) => {
-        if (!userId) {
-            setUserRole('investor'); // Default
-            setRoleData(null);
-            setRoleLoading(false);
-            return;
-        }
+    const currentUserIdRef = useRef(null);       // aktuell angemeldetes Konto
+    const loadedRoleUserRef = useRef(null);      // Konto, für das die Rolle geladen ist
+    const roleRequestRef = useRef({ userId: null, promise: null });
 
-        try {
-            const { data, error } = await supabase
-                .from('user_roles')
-                .select('*')
-                .eq('user_id', userId)
-                .maybeSingle();
-
-            if (error) {
-                console.warn('Could not fetch user role (table may not exist yet):', error.message);
-                setUserRole('investor');
-                setRoleData(null);
-            } else if (data) {
-                setUserRole(data.role);
-                setRoleData({
-                    unit_id: data.unit_id,
-                    property_id: data.property_id,
-                    tenant_id: data.tenant_id,
-                    id: data.id
-                });
-            } else {
-                // No role entry → check if this is a new tenant from an invitation
-                const userEmail = email || (await supabase.auth.getUser())?.data?.user?.email;
-
-                if (userEmail) {
-                    const { data: invitation } = await supabase
-                        .from('tenant_invitations')
-                        .select('*')
-                        .ilike('email', userEmail)
-                        .eq('status', 'pending')
-                        .maybeSingle();
-
-                    if (invitation) {
-                        // Auto-create tenant role from invitation
-                        const { data: newRole, error: roleError } = await supabase
-                            .from('user_roles')
-                            .insert({
-                                user_id: userId,
-                                role: 'tenant',
-                                tenant_id: invitation.tenant_id,
-                                unit_id: invitation.unit_id,
-                                property_id: invitation.property_id
-                            })
-                            .select()
-                            .single();
-
-                        if (!roleError && newRole) {
-                            // Mark invitation as accepted
-                            await supabase
-                                .from('tenant_invitations')
-                                .update({ status: 'accepted' })
-                                .eq('id', invitation.id);
-
-                            setUserRole('tenant');
-                            setRoleData({
-                                unit_id: newRole.unit_id,
-                                property_id: newRole.property_id,
-                                tenant_id: newRole.tenant_id,
-                                id: newRole.id
-                            });
-                            return; // Exit early, role is set
-                        }
-                    }
-                }
-
-                // No invitation found → existing user → default to investor
-                setUserRole('investor');
-                setRoleData(null);
+    // Session immer übernehmen (frisches Token); das user-Objekt nur ersetzen, wenn es sich
+    // inhaltlich geändert hat – sonst laden alle Kontexte mit [user] bei jedem Token-Refresh neu.
+    const applySession = useCallback((nextSession) => {
+        const nextUser = nextSession?.user ?? null;
+        currentUserIdRef.current = nextUser?.id ?? null;
+        setSession(nextSession);
+        setUser(prev => {
+            if (prev && nextUser && prev.id === nextUser.id && JSON.stringify(prev) === JSON.stringify(nextUser)) {
+                return prev;
             }
-        } catch (err) {
-            console.warn('Error fetching user role:', err);
-            setUserRole('investor');
-            setRoleData(null);
-        } finally {
-            setRoleLoading(false);
+            return nextUser;
+        });
+    }, []);
+
+    const resetRole = useCallback(() => {
+        loadedRoleUserRef.current = null;
+        setUserRole(null);
+        setRoleData(null);
+        setRoleError(null);
+        setRoleLoading(false);
+    }, []);
+
+    // Rolle laden: je Konto nur einmal (parallele Aufrufe werden zusammengelegt),
+    // erneut nur mit force (refetchRole / „Erneut versuchen").
+    const fetchUserRole = useCallback((userId, email = null, { force = false } = {}) => {
+        if (!userId) {
+            resetRole();
+            return Promise.resolve();
         }
-    };
+        if (!force && loadedRoleUserRef.current === userId) return Promise.resolve();
+        if (roleRequestRef.current.userId === userId && roleRequestRef.current.promise) {
+            return roleRequestRef.current.promise;
+        }
+
+        // Neues Konto: bis zur Rolle nichts rendern (sonst sieht ein Mieter kurz die Vermieter-Ansicht)
+        if (loadedRoleUserRef.current !== userId) setRoleLoading(true);
+
+        const promise = (async () => {
+            let lastError = null;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const result = await resolveRole(userId, email);
+                    if (currentUserIdRef.current !== userId) return; // inzwischen abgemeldet/gewechselt
+                    setUserRole(result.role);
+                    setRoleData(result.data);
+                    setRoleError(null);
+                    loadedRoleUserRef.current = userId;
+                    return;
+                } catch (err) {
+                    lastError = err;
+                    if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1200));
+                }
+            }
+            console.warn('Could not fetch user role:', lastError);
+            if (currentUserIdRef.current !== userId) return;
+            // Bereits bekannte Rolle behalten; ohne Rolle nicht raten (kein stilles 'investor')
+            if (loadedRoleUserRef.current !== userId) {
+                setUserRole(null);
+                setRoleData(null);
+                setRoleError(lastError?.message || 'Unbekannter Fehler');
+            }
+        })().finally(() => {
+            if (roleRequestRef.current.promise === promise) {
+                roleRequestRef.current = { userId: null, promise: null };
+            }
+            if (currentUserIdRef.current === userId) setRoleLoading(false);
+        });
+
+        roleRequestRef.current = { userId, promise };
+        return promise;
+    }, [resetRole]);
 
     useEffect(() => {
+        let cancelled = false;
+
         // ── Handle Magic Link PKCE callback ──
         // Supabase magic links redirect with ?code=... which must be exchanged
         const handleAuthCallback = async () => {
             const params = new URLSearchParams(window.location.search);
             const code = params.get('code');
-            const hashParams = new URLSearchParams(window.location.hash.substring(1));
-            const accessToken = hashParams.get('access_token');
 
-            if (code) {
+            if (code && !isForeignCodePath()) {
                 // PKCE flow: exchange code for session
                 try {
                     const { data, error } = await supabase.auth.exchangeCodeForSession(code);
                     if (error) {
                         console.error('Error exchanging code for session:', error);
                     } else if (data.session) {
-                        setSession(data.session);
-                        setUser(data.session.user);
+                        if (cancelled) return;
+                        applySession(data.session);
                         setLoading(false);
                         fetchUserRole(data.session.user.id, data.session.user.email);
                         // Clean up URL
@@ -126,49 +256,47 @@ export const AuthProvider = ({ children }) => {
                 }
             }
 
-            // No immediate replaceState for accessToken, let getSession read it.
-
-            // Check active sessions
-            supabase.auth.getSession().then(({ data: { session } }) => {
-                setSession(session);
-                setUser(session?.user ?? null);
-                setLoading(false);
-                if (session?.user) {
-                    fetchUserRole(session.user.id, session.user.email);
-                } else {
-                    setRoleLoading(false);
-                }
-            });
+            // Check active sessions (liest auch einen access_token aus dem URL-Hash)
+            const { data: { session: activeSession } } = await supabase.auth.getSession();
+            if (cancelled) return;
+            applySession(activeSession);
+            setLoading(false);
+            if (activeSession?.user) {
+                fetchUserRole(activeSession.user.id, activeSession.user.email);
+            } else {
+                setRoleLoading(false);
+            }
         };
 
         handleAuthCallback();
 
         // Listen for changes on auth state (sign in, sign out, etc.)
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-            setSession(session);
-            setUser(session?.user ?? null);
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
+            applySession(nextSession);
             setLoading(false);
-            if (session?.user) {
-                fetchUserRole(session.user.id, session.user.email);
+            if (nextSession?.user) {
+                // lädt nur bei neuem Konto (Token-Refresh/Tab-Fokus lösen keinen Neuabruf aus)
+                fetchUserRole(nextSession.user.id, nextSession.user.email);
                 // Clean up URL parameters (code or access token hash) if present, after session is active
                 const params = new URLSearchParams(window.location.search);
-                if (params.get('code') || window.location.hash.includes('access_token')) {
+                if ((params.get('code') && !isForeignCodePath()) || window.location.hash.includes('access_token')) {
                     window.history.replaceState({}, '', window.location.pathname);
                 }
             } else {
-                setUserRole(null);
-                setRoleData(null);
-                setRoleLoading(false);
+                resetRole();
             }
         });
 
-        return () => subscription.unsubscribe();
-    }, []);
+        return () => {
+            cancelled = true;
+            subscription.unsubscribe();
+        };
+    }, [applySession, fetchUserRole, resetRole]);
 
     const isInvestor = userRole === 'investor';
     const isTenant = userRole === 'tenant';
 
-    const value = {
+    const value = useMemo(() => ({
         signUp: (data) => supabase.auth.signUp(data),
         signIn: (data) => supabase.auth.signInWithPassword(data),
         signInWithGoogle: () => supabase.auth.signInWithOAuth({ provider: 'google' }),
@@ -183,14 +311,23 @@ export const AuthProvider = ({ children }) => {
         userRole,
         roleData,
         roleLoading,
+        roleError,
         isInvestor,
         isTenant,
-        refetchRole: () => user && fetchUserRole(user.id, user.email)
-    };
+        refetchRole: () => user && fetchUserRole(user.id, user.email, { force: true })
+    }), [user, session, loading, userRole, roleData, roleLoading, roleError, isInvestor, isTenant, fetchUserRole]);
+
+    const showRoleError = !!roleError && !!user;
 
     return (
         <AuthContext.Provider value={value}>
-            {!loading && !roleLoading && children}
+            {!loading && !roleLoading && (showRoleError ? (
+                <RoleLoadError
+                    message={roleError}
+                    onRetry={() => fetchUserRole(user.id, user.email, { force: true })}
+                    onSignOut={() => supabase.auth.signOut()}
+                />
+            ) : children)}
         </AuthContext.Provider>
     );
 };

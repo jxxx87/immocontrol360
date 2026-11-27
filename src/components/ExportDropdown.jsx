@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ChevronDown, FileText, Settings2, Palette } from 'lucide-react';
 import ExportModal from './ExportModal';
-import { getColumnsForPreset } from '../lib/reportConfigs';
+import { REPORT_CONFIGS, getColumnsForPreset, getDefaultExportOptions } from '../lib/reportConfigs';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePortfolio } from '../context/PortfolioContext';
 import { usePdfTemplate } from '../lib/usePdfTemplate';
@@ -11,6 +11,7 @@ import { usePdfTemplate } from '../lib/usePdfTemplate';
 const ExportDropdown = ({
     reportType,
     data = [],
+    allData = null,
     unitData = null,
     properties = [],
     currentFilters = {},
@@ -21,6 +22,8 @@ const ExportDropdown = ({
 }) => {
     const [open, setOpen] = useState(false);
     const [modalOpen, setModalOpen] = useState(false);
+    const [modalPreset, setModalPreset] = useState('compact');
+    const [modalKey, setModalKey] = useState(0);
     const ref = useRef(null);
     const navigate = useNavigate();
     const location = useLocation();
@@ -37,18 +40,47 @@ const ExportDropdown = ({
         return () => document.removeEventListener('mousedown', handler);
     }, [open]);
 
-    // Quick export handlers
+    // Dialog neu aufbauen (frische Voreinstellungen, gewünschtes Spalten-Preset)
+    const openModal = (preset = 'compact') => {
+        setModalPreset(preset);
+        setModalKey(k => k + 1);
+        setModalOpen(true);
+    };
+
+    // Quick export handlers – gleiche Voreinstellungen wie im Dialog (REPORT_CONFIGS)
     const handleQuickExport = (preset) => {
         setOpen(false);
-        const columns = getColumnsForPreset(reportType, preset);
-        generateClientPdf({
-            reportType,
-            data,
-            selectedColumns: columns,
-            showSums: true,
-            portfolioName: portfolio?.name || '',
-            template: pdfTemplate,
-        });
+        const config = REPORT_CONFIGS[reportType];
+        // Berichte mit personenbezogenen Daten: Dialog öffnen, damit über die DSGVO-Anonymisierung entschieden wird
+        if (config?.dsgvoRelevant) {
+            openModal(preset);
+            return;
+        }
+        if (!data || data.length === 0) {
+            alert('Keine Daten zum Exportieren vorhanden.');
+            return;
+        }
+        try {
+            const defaults = getDefaultExportOptions(reportType);
+            generateClientPdf({
+                reportType,
+                data,
+                selectedColumns: getColumnsForPreset(reportType, preset),
+                // Keine feste Ausrichtung: wie bisher entscheidet die PDF-Vorlage bzw. der Bericht-Standard
+                // ('auto' aus dem Dialog würde die in der Vorlage gewählte Ausrichtung übergehen)
+                orientation: null,
+                showSums: defaults.showSums,
+                groupByProperty: defaults.groupByProperty,
+                dsgvoAnonymize: defaults.dsgvoAnonymize,
+                extraOptions: defaults.extraOptions,
+                unitData,
+                portfolioName: portfolio?.name || '',
+                template: pdfTemplate,
+            });
+        } catch (err) {
+            console.error('PDF quick export error:', err);
+            alert('PDF konnte nicht erstellt werden: ' + (err?.message || err));
+        }
     };
 
     const btnStyle = {
@@ -110,7 +142,7 @@ const ExportDropdown = ({
                         style={itemStyle}
                         onMouseEnter={e => e.currentTarget.style.background = 'var(--background-color)'}
                         onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                        onClick={() => { setOpen(false); setModalOpen(true); }}
+                        onClick={() => { setOpen(false); openModal('compact'); }}
                     >
                         <Settings2 size={15} color="var(--text-secondary)" />
                         <div>
@@ -138,10 +170,13 @@ const ExportDropdown = ({
             )}
 
             <ExportModal
+                key={modalKey}
                 isOpen={modalOpen}
                 onClose={() => setModalOpen(false)}
                 reportType={reportType}
                 data={data}
+                allData={allData}
+                initialPreset={modalPreset}
                 unitData={unitData}
                 properties={properties}
                 currentFilters={currentFilters}

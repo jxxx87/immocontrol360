@@ -1,65 +1,91 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { translateError } from '../../lib/errorTranslator';
+import { openSignedUrlInNewTab } from '../../lib/storageFiles';
 import { Files, FileText, Download, Folder, Lock, Globe } from 'lucide-react';
 
 const TenantDocuments = () => {
-    const { user, roleData } = useAuth();
+    const { roleData } = useAuth();
     const [generalDocs, setGeneralDocs] = useState([]);
     const [personalDocs, setPersonalDocs] = useState([]);
     const [activeTab, setActiveTab] = useState('general');
     const [loading, setLoading] = useState(true);
+    const [errorMessage, setErrorMessage] = useState(null);
+
+    const propertyId = roleData?.property_id;
+    const tenantId = roleData?.tenant_id;
 
     useEffect(() => {
+        let cancelled = false;
         const fetchDocuments = async () => {
-            if (!roleData?.property_id) {
+            if (!propertyId) {
                 setLoading(false);
                 return;
             }
 
             try {
-                // Fetch general documents (for the whole property)
-                const { data: generalData } = await supabase
+                // Allgemein: Dokumente des Objekts ohne Mieterbezug (wie die Freigabe in der
+                // Datenbank: tenant_id IS NULL). Persönlich: genau die eigenen (tenant_id),
+                // nicht nach Einheit – sonst fehlen Dokumente nach Umzug/ohne Einheit.
+                const generalPromise = supabase
                     .from('documents')
                     .select('*')
-                    .eq('property_id', roleData.property_id)
-                    .is('unit_id', null)
+                    .eq('property_id', propertyId)
+                    .is('tenant_id', null)
                     .order('created_at', { ascending: false });
 
-                setGeneralDocs(generalData || []);
-
-                // Fetch personal documents (for this specific unit)
-                if (roleData.unit_id) {
-                    const { data: personalData } = await supabase
+                const personalPromise = tenantId
+                    ? supabase
                         .from('documents')
                         .select('*')
-                        .eq('unit_id', roleData.unit_id)
-                        .order('created_at', { ascending: false });
+                        .eq('tenant_id', tenantId)
+                        .order('created_at', { ascending: false })
+                    : Promise.resolve({ data: [], error: null });
 
-                    setPersonalDocs(personalData || []);
+                const [generalRes, personalRes] = await Promise.all([generalPromise, personalPromise]);
+                if (cancelled) return;
+
+                const loadError = generalRes.error || personalRes.error;
+                if (loadError) {
+                    console.error('Error fetching documents:', loadError);
+                    setErrorMessage(`Dokumente konnten nicht geladen werden: ${translateError(loadError)}`);
+                } else {
+                    setErrorMessage(null);
                 }
+                setGeneralDocs(generalRes.data || []);
+                setPersonalDocs(personalRes.data || []);
             } catch (err) {
                 console.error('Error fetching documents:', err);
+                if (!cancelled) setErrorMessage(`Dokumente konnten nicht geladen werden: ${translateError(err)}`);
             } finally {
-                setLoading(false);
+                if (!cancelled) setLoading(false);
             }
         };
 
         fetchDocuments();
-    }, [roleData]);
+        return () => { cancelled = true; };
+    }, [propertyId, tenantId]);
 
     const handleDownload = async (doc) => {
         const path = doc.file_path || doc.storage_path;
-        if (path) {
-            const { data } = await supabase.storage
+        if (!path) {
+            setErrorMessage('Zu diesem Dokument ist keine Datei hinterlegt.');
+            return;
+        }
+        // Fenster noch im Klick öffnen (sonst blockiert iOS Safari den Download)
+        const err = await openSignedUrlInNewTab(async () => {
+            const { data, error } = await supabase.storage
                 .from('documents')
                 .createSignedUrl(path, 3600);
-
-            if (data?.signedUrl) {
-                window.open(data.signedUrl, '_blank');
-            }
-        } else if (doc.file_url) {
-            window.open(doc.file_url, '_blank');
+            if (error) throw error;
+            return data?.signedUrl;
+        });
+        if (err) {
+            console.error('Download error:', err);
+            setErrorMessage(`Das Dokument konnte nicht geöffnet werden: ${translateError(err)}`);
+        } else {
+            setErrorMessage(null);
         }
     };
 
@@ -95,6 +121,16 @@ const TenantDocuments = () => {
                     Ihre Unterlagen und allgemeine Hausdokumente
                 </p>
             </div>
+
+            {errorMessage && (
+                <div role="alert" style={{
+                    padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)',
+                    border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+                    color: '#B91C1C', fontSize: '0.85rem'
+                }}>
+                    {errorMessage}
+                </div>
+            )}
 
             {/* Tabs */}
             <div style={{

@@ -1,3 +1,6 @@
+/* Open Sans für die Briefseiten (Vorlagen-Editor). Hinweis: Wird noch vom Google-CDN geladen –
+   Umstellung auf lokale Schriftdateien muss zusammen mit allen Druckfenstern erfolgen
+   (gleiche Schriftversion in Editor und Druck, sonst andere Seitenumbrüche). */
 @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap');
 
 @keyframes spin {
@@ -13,12 +16,6 @@
 .animate-spin {
   animation: spin 1s linear infinite;
 }
-
-/* Rest of the CSS remains the same, assuming we append or I need to read first to be safe.
-   Actually, I should have read index.css first to append.
-   But since I overwrote it previously with a full set, I have the full set in my context.
-   I will write the FULL content including the new keyframes.
-*/
 
 :root {
   /* Colors - Fresher Look */
@@ -103,8 +100,10 @@ body {
   /* Slightly thicker by default */
   color: var(--text-primary);
   background: linear-gradient(135deg, #f1f5f9 0%, #ffffff 100%);
+  background-color: var(--background-color);
   background-attachment: fixed;
   min-height: 100vh;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -160,7 +159,6 @@ tbody tr:hover {
   transition: background-color 0.2s ease;
 }
 
-/* ── DARK MODE REFINEMENT ──────────────────────────────────── */
 /* ── DARK MODE REFINEMENT (Black Glass Look) ────────────────── */
 [data-theme="dark"] {
   --primary-color: #38bdf8;
@@ -219,17 +217,17 @@ tbody tr:hover {
 
 /* Dark Mode Overrides for Specific Elements */
 [data-theme="dark"] th {
-  background-color: rgba(0, 0, 0, 0.4) !important;
-  border-bottom: 1px solid var(--glass-border);
+  background-color: #161B22 !important;
+  border-bottom: 1px solid var(--border-color);
   color: var(--text-secondary);
 }
 
 [data-theme="dark"] input,
 [data-theme="dark"] select,
 [data-theme="dark"] textarea {
-  background-color: var(--input-bg) !important;
-  border: 1px solid var(--glass-border) !important;
-  color: var(--text-primary);
+  background-color: #0D1117 !important;
+  border: 1px solid #30363D !important;
+  color: var(--text-primary) !important;
 }
 
 [data-theme="dark"] input:focus,
@@ -245,41 +243,16 @@ tbody tr:hover {
   /* Stronger shadow for depth in dark mode */
 }
 
-/* Transitions */
-[data-theme="dark"] *,
-[data-theme="dark"] *::before,
-[data-theme="dark"] *::after {
-  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.15s ease;
-}
-
-/* Border Overrides - Removing hard white/light outlines */
-[data-theme="dark"] [style*="border"],
-[data-theme="dark"] [style*="border-bottom"],
-[data-theme="dark"] [style*="borderBottom"],
-[data-theme="dark"] [style*="border-top"],
-[data-theme="dark"] [style*="border-left"],
-[data-theme="dark"] [style*="border-right"],
-[data-theme="dark"] [style*="borderColor: '#eee'"],
-[data-theme="dark"] [style*="border-color: #eee"],
-[data-theme="dark"] [style*="border: 1px solid #eee"],
-[data-theme="dark"] [style*="border: 1px solid #E5E7EB"] {
+/* Border Overrides - Removing hard white/light outlines.
+   Hinweis: Inline-Styles stehen im DOM als serialisiertes CSS ("border-bottom: 1px solid rgb(...)"),
+   Selektoren in JSX-Schreibweise oder mit Hex-Farben treffen daher nie – "border" deckt alle Rahmen ab. */
+[data-theme="dark"] [style*="border"] {
   border-color: var(--border-color) !important;
 }
 
 /* Specific component darkening */
-[data-theme="dark"] input,
-[data-theme="dark"] select,
-[data-theme="dark"] textarea {
-  background-color: #0D1117 !important;
-  color: var(--text-primary) !important;
-  border-color: #30363D !important;
-}
-
 [data-theme="dark"] [class*="card"],
-[data-theme="dark"] div[style*="backgroundColor: white"],
-[data-theme="dark"] div[style*="background-color: white"],
-[data-theme="dark"] div[style*="backgroundColor: '#FFF'"],
-[data-theme="dark"] div[style*="background-color: #fff"] {
+[data-theme="dark"] div[style*="background-color: white"] {
   background-color: var(--surface-color) !important;
   border-color: var(--border-color) !important;
 }
@@ -294,9 +267,9 @@ tbody tr:hover {
   color: var(--primary-color) !important;
 }
 
-/* Modals */
+/* Modals (die gemeinsame Modal-Komponente .ui-modal setzt ihre Flächen selbst) */
 [data-theme="dark"] .modal-content,
-[data-theme="dark"] [role="dialog"]>div {
+[data-theme="dark"] [role="dialog"]:not(.ui-modal)>div {
   background-color: var(--surface-color) !important;
   border: 1px solid var(--border-color) !important;
 }
@@ -319,38 +292,19 @@ tbody tr:hover {
   border: 1px solid var(--border-color) !important;
 }
 
-/* Badge Logic Cleanup */
-[data-theme="dark"] [style*="backgroundColor: '#E0F2FE'"],
-[data-theme="dark"] [style*="backgroundColor: '#F0F9FF'"] {
-  background-color: rgba(56, 139, 253, 0.15) !important;
-  color: #58a6ff !important;
-}
-
-[data-theme="dark"] [style*="backgroundColor: '#FEE2E2'"],
-[data-theme="dark"] [style*="backgroundColor: '#FEF2F2'"] {
-  background-color: rgba(248, 81, 73, 0.1) !important;
-  color: #ff7b72 !important;
-}
-
-[data-theme="dark"] [style*="backgroundColor: '#ECFDF5'"] {
-  background-color: rgba(63, 185, 80, 0.1) !important;
-  color: #7ee787 !important;
-}
-
-/* Global Transitions for Premium Feel */
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-body {
-  font-family: var(--font-family);
-  background-color: var(--background-color);
-  color: var(--text-primary);
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
+/* Sanfte Farbwechsel nur auf interaktiven Flächen – nicht per Universalselektor
+   (kostet bei großen Listen, im Editor und in der Android-WebView Rechenzeit) */
+button,
+[role="button"],
+.card,
+.table-container {
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 a {
@@ -472,12 +426,11 @@ button {
 }
 
 /* Table Styles - Global for consistency */
+/* Kein backdrop-filter auf Tabellen: liegen ohnehin auf Glas-Karten, der Weichzeichner kostet nur Leistung */
 table {
   width: 100%;
   border-collapse: collapse;
   background-color: var(--glass-bg);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   border-radius: var(--radius-md);
   overflow: hidden;
   box-shadow: var(--shadow-sm);
@@ -514,12 +467,6 @@ tr:last-child td {
 }
 
 /* ── DARK MODE TAG OVERRIDES ──────────────────────────────── */
-[data-theme="dark"] th {
-  background-color: #161B22 !important;
-  color: var(--text-secondary);
-  border-bottom-color: var(--border-color);
-}
-
 [data-theme="dark"] td {
   border-bottom-color: var(--border-color);
 }
@@ -531,23 +478,6 @@ tr:last-child td {
 [data-theme="dark"] hr {
   border-color: var(--border-color);
   opacity: 0.3;
-}
-
-/* Catching any hardcoded Light Gray in inline styles */
-[data-theme="dark"] [style*="background-color: #F9FAFB"],
-[data-theme="dark"] [style*="backgroundColor: '#F9FAFB'"],
-[data-theme="dark"] [style*="background-color: #f3f4f6"],
-[data-theme="dark"] [style*="backgroundColor: '#F3F4F6'"],
-[data-theme="dark"] [style*="background-color: #f9fafb"] {
-  background-color: #0D1117 !important;
-}
-
-[data-theme="dark"] [style*="border: 1px solid #eee"],
-[data-theme="dark"] [style*="border: 1px solid #EEE"],
-[data-theme="dark"] [style*="borderBottom: '1px solid #eee'"],
-[data-theme="dark"] [style*="borderBottom: '1px solid #EEE'"],
-[data-theme="dark"] [style*="border-bottom: 1px solid #eee"] {
-  border-color: var(--border-color) !important;
 }
 
 /* Button overrides in Dark Mode */
@@ -594,14 +524,13 @@ tr:last-child td {
   /* ALL cards: prevent overflow, full width */
   /* Exclude flex column containers (modals) that need overflow:hidden and fixed height */
   [class*="card"],
-  div[style*="border-radius"]:not([style*="flex-direction"]):not([style*="flexDirection"]):not([style*="position: fixed"]):not([style*="position:fixed"]) {
+  div[style*="border-radius"]:not([style*="flex-direction"]):not([style*="position: fixed"]):not([style*="position:fixed"]) {
     max-width: 100% !important;
     overflow: visible !important;
     height: auto !important;
   }
 
   /* Grids: force single column on mobile (but NOT calendar grids) */
-  div[style*="gridTemplateColumns: repeat"]:not(.cal-grid),
   div[style*="grid-template-columns: repeat"]:not(.cal-grid) {
     grid-template-columns: 1fr !important;
   }
@@ -613,29 +542,39 @@ tr:last-child td {
   }
 
   /* Two-column grids: allow 2 cols but smaller gap */
-  div[style*="gridTemplateColumns: '1fr 1fr'"],
   div[style*="grid-template-columns: 1fr 1fr"] {
     gap: 8px !important;
   }
 
-  /* Tables: horizontal scroll wrapper */
+  /* Tables: horizontal scroll.
+     Ohne eigenen Scroll-Wrapper scrollt die Tabelle selbst (display:block). Kopf und Zeilen bleiben
+     dabei EINE Tabelle (anonyme Tabellenbox), damit die Spalten fluchten und colSpan funktioniert. */
   table {
     display: block;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+  }
+
+  /* Tabellen in einem eigenen Scroll-Wrapper (overflowX: 'auto') behalten das normale Tabellenlayout */
+  [style*="overflow-x: auto"]:not([style*="border-radius"]):not([class*="card"]) > table {
+    display: table;
+  }
+
+  /* Briefseiten / Vorlagen-Editor / PDF-Dokumente: Tabellen wie im Druck (kein Mobil-Layout) */
+  .letter-page table,
+  .tiptap table,
+  .nk-doc table,
+  .ic-invoice-doc table {
+    display: table;
+    overflow-x: hidden;
+  }
+
+  table:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *) {
     font-size: 0.78rem !important;
   }
 
-  thead,
-  tbody,
-  tr {
-    display: table;
-    width: 100%;
-    table-layout: auto;
-  }
-
-  th,
-  td {
+  th:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *),
+  td:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *) {
     padding: 8px 10px !important;
     font-size: 0.78rem !important;
   }
@@ -685,8 +624,7 @@ tr:last-child td {
   }
 
   /* Flex rows that overflow: allow wrapping (only horizontal flex, NOT column) */
-  div[style*="flex-direction: row"],
-  div[style*="flexDirection: row"] {
+  div[style*="flex-direction: row"] {
     flex-wrap: wrap;
   }
 
@@ -779,8 +717,10 @@ input.search-input-padding {
   margin: 0 auto !important;
   background: #ffffff !important;
   color: #000000 !important;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08) !important;
-  border: 1px solid #cbd5e1 !important;
+  /* Seitenrand als Schatten-Linie statt border: belegt keinen Platz, die Inhaltsfläche
+     ist damit exakt so groß wie auf dem gedruckten Blatt (border-box hätte 2px abgezogen) */
+  border: none !important;
+  box-shadow: 0 0 0 1px #cbd5e1, 0 4px 20px rgba(0, 0, 0, 0.08) !important;
   border-radius: 4px !important;
   font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif !important;
   font-size: 11pt !important;
@@ -926,18 +866,24 @@ input.search-input-padding {
   width: 30%;
 }
 
-/* Variable Chip Style */
+/* Variable Chip Style
+   Geometrie-neutral (WYSIWYG): Im Druck steht an dieser Stelle normaler Fließtext. Daher kein
+   Innenabstand, kein Rahmen, gleiche Schriftgröße/-stärke wie der umgebende Text und inline
+   (darf wie Text umbrechen). Hervorhebung nur über Hintergrund und eine Schatten-Linie,
+   die keinen Platz belegt. */
 .variable-chip {
   background-color: #e0f2fe !important;
   color: #0369a1 !important;
-  border: 1px solid #bae6fd !important;
-  border-radius: 4px !important;
-  padding: 1px 6px !important;
-  font-weight: 600 !important;
-  font-size: 90% !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 2px !important;
+  border: none !important;
+  border-radius: 3px !important;
+  padding: 0 !important;
+  margin: 0;
+  box-shadow: 0 0 0 1px #bae6fd;
+  font-weight: inherit !important;
+  font-size: inherit !important;
+  display: inline !important;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
   cursor: default !important;
 }
 
@@ -1042,22 +988,24 @@ input.search-input-padding {
   border: 1px solid #bae6fd !important;
   border-radius: 6px !important;
   padding: 8px 12px !important;
+  box-shadow: none;
   color: #0369a1 !important;
   font-weight: normal !important;
   user-select: none !important;
 }
 
+/* Mehrzeilige Platzhalter (Adresse, Bankverbindung mit echten \n): wie der aufgelöste Text im
+   Druck – inline mit Zeilenumbrüchen, Zeilenhöhe des umgebenden Blocks, ohne Innenabstand/Rahmen */
 .variable-chip.multiline-variable {
-  display: inline-block !important;
-  max-width: 100% !important;
+  display: inline !important;
   background-color: #e0f2fe !important;
-  border: 1px solid #bae6fd !important;
-  border-radius: 4px !important;
-  padding: 6px 10px !important;
+  border: none !important;
+  border-radius: 3px !important;
+  padding: 0 !important;
   color: #0369a1 !important;
-  font-weight: normal !important;
+  font-weight: inherit !important;
   font-family: inherit !important;
   white-space: pre-wrap !important;
-  line-height: 1.4 !important;
-  vertical-align: top !important;
+  line-height: inherit !important;
+  vertical-align: baseline !important;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
@@ -8,9 +8,132 @@ import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import { createPortal } from 'react-dom';
-import { Scale, Plus, AlertCircle, CheckCircle2, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical, Settings as SettingsIcon, CreditCard } from 'lucide-react';
+import { Scale, Plus, AlertCircle, Clock, Ban, ArrowRight, ArrowLeft, ChevronDown, ChevronRight, Edit, Trash2, Eye, MoreVertical, Settings as SettingsIcon, CreditCard } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ExportDropdown from '../components/ExportDropdown';
+import {
+    num, round2, toLocalDateString, parseLocalDate, formatDateDE, getDelayDays,
+    shiftToBusinessDay, daysBetween, translateClaimError
+} from '../lib/claimPdfGenerator';
+
+// Eine Tabelle für Status-Badge und Export
+const STATUS_CONFIG = {
+    draft: { label: 'Entwurf', variant: 'default' },
+    open: { label: 'Offen', variant: 'blue' },
+    sent: { label: 'Versendet', variant: 'blue' },
+    action_required: { label: 'Aktion erforderlich', variant: 'danger' },
+    payment_plan_requested: { label: 'Ratenzahlung angefragt', variant: 'warning' },
+    payment_plan_active: { label: 'Ratenzahlung aktiv', variant: 'success' },
+    settled: { label: 'Erledigt', variant: 'success' },
+    cancelled: { label: 'Storniert', variant: 'default' },
+    archived: { label: 'Archiviert', variant: 'default' }
+};
+
+const CLOSED_STATUSES_FILTER = '("settled","cancelled","archived")';
+const HIDDEN_STATUSES_FILTER = '("cancelled","archived")';
+const PAGE_SIZE = 1000;
+const IN_CHUNK_SIZE = 100;
+const MAX_INTEREST_RATE = 20; // Plausibilitätsgrenze in % p.a.
+const MAX_DEADLINE_DAYS = 365;
+const DEFAULT_FORM = { fee_amount: 5.00, interest_rate: 5.0000, deadline_days: 7, note: '' };
+const DEFAULT_INSTALLMENT_OPTIONS = [
+    { months: 3, surcharge_percent: 7.00 },
+    { months: 6, surcharge_percent: 9.00 },
+    { months: 12, surcharge_percent: 12.00 }
+];
+
+// Alle Zeilen seitenweise laden (PostgREST liefert höchstens 1000 Zeilen je Abfrage)
+const fetchAllRows = async (buildQuery) => {
+    const rows = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+        const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+        if (error) throw error;
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE_SIZE) break;
+    }
+    return rows;
+};
+
+// IN-Abfragen in Blöcken (lange ID-Listen sprengen sonst die URL-Länge)
+const fetchInChunks = async (ids, buildQuery) => {
+    const rows = [];
+    for (let i = 0; i < ids.length; i += IN_CHUNK_SIZE) {
+        const { data, error } = await buildQuery(ids.slice(i, i + IN_CHUNK_SIZE));
+        if (error) throw error;
+        rows.push(...(data || []));
+    }
+    return rows;
+};
+
+const normalizeIban = (value) => String(value || '').replace(/\s+/g, '').toUpperCase();
+const isValidIban = (iban) => {
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+    const rearranged = iban.slice(4) + iban.slice(0, 4);
+    let remainder = 0;
+    for (const ch of rearranged) {
+        const digits = ch >= 'A' && ch <= 'Z' ? String(ch.charCodeAt(0) - 55) : ch;
+        for (const digit of digits) remainder = (remainder * 10 + Number(digit)) % 97;
+    }
+    return remainder === 1;
+};
+const normalizeBic = (value) => String(value || '').replace(/\s+/g, '').toUpperCase();
+const isValidBic = (bic) => /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic);
+
+// Fälligkeit einer Monatsmiete: rent_ledger.due_date, sonst Fälligkeitstag des Mietvertrags (begrenzt auf das Monatsende)
+const getLedgerDueDate = (ledger) => {
+    if (ledger.due_date) return parseLocalDate(ledger.due_date);
+    const period = parseLocalDate(ledger.period_month);
+    if (!period) return null;
+    const dueDay = Number(ledger.leases?.payment_due_day) || 3;
+    const lastDay = new Date(period.getFullYear(), period.getMonth() + 1, 0).getDate();
+    return new Date(period.getFullYear(), period.getMonth(), Math.min(Math.max(1, dueDay), lastDay));
+};
+
+// Im Verzug erst ab dem Tag nach der (nach § 193 BGB ggf. verschobenen) Fälligkeit
+const isLedgerOverdue = (ledger, today) => {
+    const due = getLedgerDueDate(ledger);
+    if (!due) return true;
+    return daysBetween(shiftToBusinessDay(due), today) > 0;
+};
+
+const getLedgerOpenAmount = (ledger) => round2(num(ledger.expected_rent) - num(ledger.paid_amount));
+
+// Verzugszinsen bis heute – EINE Funktion für Vorschau und Anlage
+const calculateCreationInterest = (ledgerItems, manualRows, ratePercent, today) => {
+    const rate = num(ratePercent) / 100;
+    if (!(rate > 0)) return 0;
+    let total = 0;
+    ledgerItems.forEach(l => {
+        const open = Math.max(0, getLedgerOpenAmount(l));
+        const due = getLedgerDueDate(l);
+        if (open > 0 && due) total += open * rate * getDelayDays(due, today) / 365;
+    });
+    manualRows.forEach(item => {
+        const open = num(item.amount);
+        if (item.dueDate && open > 0 && parseLocalDate(item.dueDate)) {
+            total += open * rate * getDelayDays(item.dueDate, today) / 365;
+        }
+    });
+    return round2(total);
+};
+
+// Manuelle Positionen prüfen: leere Zeilen ignorieren, Bezeichnung Pflicht, Betrag > 0 (2 Nachkommastellen)
+const cleanManualItems = (rows) => {
+    const errors = [];
+    const cleaned = [];
+    rows.forEach((row, idx) => {
+        const description = String(row.description || '').trim();
+        const rawAmount = row.amount;
+        const amountEmpty = rawAmount === '' || rawAmount === null || rawAmount === undefined;
+        if (!description && amountEmpty && !row.dueDate) return;
+        const amount = round2(parseFloat(rawAmount));
+        if (!description) errors.push(`Position ${idx + 1}: Bitte eine Bezeichnung angeben.`);
+        if (amountEmpty || !(amount > 0)) errors.push(`Position ${idx + 1}: Bitte einen Betrag größer als 0 angeben.`);
+        if (row.dueDate && !parseLocalDate(row.dueDate)) errors.push(`Position ${idx + 1}: Das Fälligkeitsdatum ist ungültig.`);
+        cleaned.push({ description, amount, item_type: row.item_type || 'other', dueDate: row.dueDate || '' });
+    });
+    return { cleaned, errors };
+};
 
 const Claims = () => {
     const { user } = useAuth();
@@ -22,35 +145,31 @@ const Claims = () => {
     const [activeDropdown, setActiveDropdown] = useState(null);
     const [activeDropdownClaim, setActiveDropdownClaim] = useState(null);
     const [menuPos, setMenuPos] = useState({ top: 0, left: 0, openUp: false });
-    
-    const [kpis, setKpis] = useState({
-        openCount: 0,
-        totalDue: 0,
-        actionRequiredCount: 0,
-        paymentPlanCount: 0
-    });
+    const loadRequestRef = useRef(0);
+
+    const [kpis, setKpis] = useState({ totalUrsprung: 0, totalGetilgt: 0, totalOffen: 0 });
 
     // Create Modal States
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [createStep, setCreateStep] = useState(1);
     const [openLedgers, setOpenLedgers] = useState([]);
     const [loadingLedgers, setLoadingLedgers] = useState(false);
-    
+    const [ledgerLoadError, setLedgerLoadError] = useState(null);
+    const [notDueCount, setNotDueCount] = useState(0);
+
     const [selectedLedgerIds, setSelectedLedgerIds] = useState([]);
     const [selectedLeaseId, setSelectedLeaseId] = useState('');
     const [buildingFilter, setBuildingFilter] = useState('');
     const [manualItems, setManualItems] = useState([]);
     const [allLeases, setAllLeases] = useState([]);
-    
+    const [existingClaim, setExistingClaim] = useState(null);
+    const [checkingExistingClaim, setCheckingExistingClaim] = useState(false);
+    const autoAdjustedFormRef = useRef(false);
+
     const [expandedTenant, setExpandedTenant] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    const [form, setForm] = useState({
-        fee_amount: 5.00,
-        interest_rate: 5.0000,
-        deadline_days: 7,
-        note: ''
-    });
+    const [form, setForm] = useState(DEFAULT_FORM);
 
     // Edit Modal States
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -62,71 +181,120 @@ const Claims = () => {
         accumulated_unpaid_fees: 0
     });
 
+    // Storno Modal
+    const [cancelTarget, setCancelTarget] = useState(null);
+    const [cancelReason, setCancelReason] = useState('');
+
     // Portal Settings States
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
     const [portalSettings, setPortalSettings] = useState({
         claim_portal_allow_installments: true,
-        claim_portal_installment_options: [
-            { months: 3, surcharge_percent: 7.00 },
-            { months: 6, surcharge_percent: 9.00 },
-            { months: 12, surcharge_percent: 12.00 }
-        ],
+        claim_portal_installment_options: DEFAULT_INSTALLMENT_OPTIONS,
         bank_account_holder: '',
         iban: '',
         bic: ''
     });
+    const [portalSettingsOriginal, setPortalSettingsOriginal] = useState(null);
+    const [portalSettingsError, setPortalSettingsError] = useState(null);
     const [loadingSettings, setLoadingSettings] = useState(false);
 
     const loadPortalSettings = async () => {
         setLoadingSettings(true);
+        setPortalSettingsError(null);
+        setPortalSettingsOriginal(null);
         try {
+            if (!user?.id) throw new Error('Nicht angemeldet');
             const { data, error } = await supabase
                 .from('profiles')
                 .select('claim_portal_allow_installments, claim_portal_installment_options, bank_account_holder, iban, bic')
                 .eq('id', user.id)
-                .single();
+                .maybeSingle();
             if (error) throw error;
-            if (data) {
-                setPortalSettings({
-                    claim_portal_allow_installments: data.claim_portal_allow_installments ?? true,
-                    claim_portal_installment_options: data.claim_portal_installment_options || [
-                        { months: 3, surcharge_percent: 7.00 },
-                        { months: 6, surcharge_percent: 9.00 },
-                        { months: 12, surcharge_percent: 12.00 }
-                    ],
-                    bank_account_holder: data.bank_account_holder || '',
-                    iban: data.iban || '',
-                    bic: data.bic || ''
-                });
-            }
+            if (!data) throw new Error('Profil nicht gefunden');
+            const loaded = {
+                claim_portal_allow_installments: data.claim_portal_allow_installments ?? true,
+                claim_portal_installment_options: Array.isArray(data.claim_portal_installment_options)
+                    ? data.claim_portal_installment_options.map(o => ({ ...o }))
+                    : DEFAULT_INSTALLMENT_OPTIONS.map(o => ({ ...o })),
+                bank_account_holder: data.bank_account_holder || '',
+                iban: data.iban || '',
+                bic: data.bic || ''
+            };
+            setPortalSettings(loaded);
+            setPortalSettingsOriginal(loaded);
         } catch (err) {
             console.error(err);
+            setPortalSettingsError('Die Einstellungen konnten nicht geladen werden. Speichern ist gesperrt, damit hinterlegte Bankdaten nicht überschrieben werden.');
         } finally {
             setLoadingSettings(false);
         }
     };
 
     const handleSavePortalSettings = async () => {
+        if (isSubmitting || loadingSettings) return;
+        if (portalSettingsError || !portalSettingsOriginal) {
+            alert('Die Einstellungen wurden nicht vollständig geladen und können daher nicht gespeichert werden.');
+            return;
+        }
+
+        const errors = [];
+        const iban = normalizeIban(portalSettings.iban);
+        const bic = normalizeBic(portalSettings.bic);
+        if (iban && !isValidIban(iban)) errors.push('Die IBAN ist ungültig (Prüfsumme oder Format).');
+        if (bic && !isValidBic(bic)) errors.push('Die BIC ist ungültig (8 oder 11 Zeichen).');
+        const options = portalSettings.claim_portal_installment_options || [];
+        options.forEach((opt, idx) => {
+            const months = Number(opt.months);
+            const surcharge = Number(opt.surcharge_percent);
+            if (!Number.isInteger(months) || months < 2 || months > 48) errors.push(`Raten-Vorschlag ${idx + 1}: Anzahl Raten muss eine ganze Zahl zwischen 2 und 48 sein.`);
+            if (!Number.isFinite(surcharge) || surcharge < 0 || surcharge > 100) errors.push(`Raten-Vorschlag ${idx + 1}: Aufschlag muss zwischen 0 und 100 % liegen.`);
+        });
+        if (errors.length > 0) {
+            alert('Bitte prüfen Sie Ihre Eingaben:\n\n' + errors.join('\n'));
+            return;
+        }
+
+        // Nur geänderte Felder schreiben
+        const original = portalSettingsOriginal;
+        const payload = {};
+        if (portalSettings.claim_portal_allow_installments !== original.claim_portal_allow_installments) {
+            payload.claim_portal_allow_installments = portalSettings.claim_portal_allow_installments;
+        }
+        const normalizedOptions = options.map(o => ({ months: Number(o.months), surcharge_percent: round2(o.surcharge_percent) }));
+        if (JSON.stringify(normalizedOptions) !== JSON.stringify(original.claim_portal_installment_options.map(o => ({ months: Number(o.months), surcharge_percent: round2(o.surcharge_percent) })))) {
+            payload.claim_portal_installment_options = normalizedOptions;
+        }
+        const holder = String(portalSettings.bank_account_holder || '').trim();
+        if (holder !== String(original.bank_account_holder || '').trim()) payload.bank_account_holder = holder;
+        if (iban !== normalizeIban(original.iban)) payload.iban = iban;
+        if (bic !== normalizeBic(original.bic)) payload.bic = bic;
+
+        if (Object.keys(payload).length === 0) {
+            setIsSettingsModalOpen(false);
+            return;
+        }
+        if (payload.iban === '' && normalizeIban(original.iban) &&
+            !window.confirm('Die IBAN wurde geleert. Ohne Bankverbindung erscheint auf Mahnschreiben und im Mieterportal keine Kontoverbindung. Trotzdem speichern?')) {
+            return;
+        }
+
+        setIsSubmitting(true);
         try {
-            const { error } = await supabase.from('profiles').update({
-                claim_portal_allow_installments: portalSettings.claim_portal_allow_installments,
-                claim_portal_installment_options: portalSettings.claim_portal_installment_options,
-                bank_account_holder: portalSettings.bank_account_holder,
-                iban: portalSettings.iban,
-                bic: portalSettings.bic
-            }).eq('id', user.id);
+            const { error } = await supabase.from('profiles').update(payload).eq('id', user.id);
             if (error) throw error;
             setIsSettingsModalOpen(false);
             alert('Einstellungen gespeichert.');
         } catch (err) {
-            alert('Fehler: ' + err.message);
+            alert('Fehler: ' + translateClaimError(err));
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
     const addInstallmentOption = () => {
         setPortalSettings(prev => ({
             ...prev,
-            claim_portal_installment_options: [...prev.claim_portal_installment_options, { months: 12, surcharge_percent: 10.00 }]
+            claim_portal_installment_options: [...prev.claim_portal_installment_options, { months: 12, surcharge_percent: 0 }]
         }));
     };
 
@@ -138,13 +306,17 @@ const Claims = () => {
     };
 
     const updateInstallmentOption = (index, field, value) => {
-        const newOptions = [...portalSettings.claim_portal_installment_options];
-        newOptions[index][field] = parseFloat(value) || 0;
-        setPortalSettings(prev => ({ ...prev, claim_portal_installment_options: newOptions }));
+        setPortalSettings(prev => ({
+            ...prev,
+            claim_portal_installment_options: prev.claim_portal_installment_options.map((opt, i) => (
+                i === index ? { ...opt, [field]: value === '' ? '' : Number(value) } : opt
+            ))
+        }));
     };
 
     useEffect(() => {
         loadData();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedPortfolioID]);
 
     useEffect(() => {
@@ -153,264 +325,194 @@ const Claims = () => {
         return () => window.removeEventListener('click', handleClickOutside);
     }, []);
 
+    const calculateKpis = (activeClaims) => {
+        let totalUrsprung = 0;
+        let totalGetilgt = 0;
+        let totalOffen = 0;
 
-    const fetchAndMergeClaims = async () => {
-        // Fetch claims with tenant and lease data
-        let claimsQuery = supabase
-            .from('claims')
-            .select(`
-                id, status, escalation_level, deadline, next_action_at, created_at,
-                interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
-                tenants ( first_name, last_name ),
-                leases!inner ( 
-                    id, 
-                    units!inner ( 
-                        unit_name,
-                        properties!inner ( id, portfolio_id, street, house_number, zip, city )
-                    ) 
-                )
-            `)
-            .order('created_at', { ascending: false });
-
-        if (selectedPortfolioID) {
-            claimsQuery = claimsQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
-        }
-
-        const { data: claimsData, error: claimsError } = await claimsQuery;
-
-        if (claimsError) throw claimsError;
-
-        const allActiveClaimIds = claimsData ? claimsData.map(c => c.id) : [];
-
-        // Fetch totals from view (filtered by active claim IDs)
-        let totalsData = [];
-        if (allActiveClaimIds.length > 0) {
-            const { data: tData, error: totalsError } = await supabase
-                .from('claim_totals_view')
-                .select('*')
-                .in('claim_id', allActiveClaimIds);
-            if (totalsError) throw totalsError;
-            totalsData = tData || [];
-        }
-
-        // Fetch active payment plans (including fees_at_creation, interest_at_creation) for active claims
-        let plansData = [];
-        if (allActiveClaimIds.length > 0) {
-            const { data: pData, error: plansError } = await supabase
-                .from('payment_plans')
-                .select('id, claim_id, total_amount, created_at, fees_at_creation, interest_at_creation')
-                .eq('status', 'active')
-                .in('claim_id', allActiveClaimIds);
-            if (plansError) throw plansError;
-            plansData = pData || [];
-        }
-            
-        // Fetch installments for these plans
-        let installmentsData = [];
-        let allClaimItems = [];
-        if (plansData && plansData.length > 0) {
-            const planIds = plansData.map(p => p.id);
-            const { data: instData } = await supabase
-                .from('payment_plan_installments')
-                .select('payment_plan_id, paid_amount')
-                .in('payment_plan_id', planIds);
-            installmentsData = instData || [];
-        }
-
-        // Fetch totals for ALL active claims
-        let itemsTotalsData = [];
-        let originalItemsData = [];
-        if (allActiveClaimIds.length > 0) {
-            const { data: iTotals } = await supabase
-                .from('claim_item_totals_view')
-                .select('claim_item_id, claim_id, open_amount, original_amount, paid_principal')
-                .in('claim_id', allActiveClaimIds);
-            itemsTotalsData = iTotals || [];
-                
-            // Fetch original items for created_at
-            const { data: oItems } = await supabase
-                .from('claim_items')
-                .select('id, created_at, fee_amount, interest_amount')
-                .in('claim_id', allActiveClaimIds);
-            originalItemsData = oItems || [];
-        }
-
-        // Merge them locally
-        if (itemsTotalsData && originalItemsData) {
-            allClaimItems = itemsTotalsData.map(tot => {
-                const orig = originalItemsData.find(o => o.id === tot.claim_item_id);
-                return {
-                    ...tot,
-                    created_at: orig ? orig.created_at : null,
-                    claim_items: orig ? { fee_amount: orig.fee_amount, interest_amount: orig.interest_amount } : {}
-                };
-            });
-        }
-
-        const calcItemTotal = (itemList) => {
-            let ursprung = 0;
-            let getilgt = 0;
-            let offen = 0;
-            itemList.forEach(item => {
-                const baseAmt = Number(item.original_amount || 0);
-                const feeAmt = Number(item.claim_items?.fee_amount || 0);
-                const intAmt = Number(item.claim_items?.interest_amount || 0);
-                const itemTotal = baseAmt + feeAmt + intAmt;
-                
-                const paidPrincipal = Number(item.paid_principal || 0);
-                let paidTotal = 0;
-                if (paidPrincipal > 0 || item.open_amount === 0) {
-                    paidTotal = feeAmt + intAmt + paidPrincipal;
-                }
-                if (item.open_amount === 0) {
-                    paidTotal = itemTotal;
-                }
-                const openTotal = Math.max(0, itemTotal - paidTotal);
-
-                ursprung += itemTotal;
-                getilgt += paidTotal;
-                offen += openTotal;
-            });
-            return { ursprung, getilgt, offen };
-        };
-
-        // Merge data
-        const merged = (claimsData || []).map(claim => {
-            let totals = (totalsData || []).find(t => t.claim_id === claim.id) || {};
-            
-            const claimItems = allClaimItems.filter(i => i.claim_id === claim.id);
-            const itemCount = claimItems.length;
-
-            let claimTotalUrsprung = 0;
-            let claimTotalGetilgt = 0;
-            let claimTotalOffen = 0;
-
-            const plan = (plansData || []).find(p => p.claim_id === claim.id);
-            if (plan) {
-                const planInst = installmentsData.filter(i => i.payment_plan_id === plan.id);
-                const planPaid = planInst.reduce((sum, inst) => sum + Number(inst.paid_amount || 0), 0);
-                const planTotal = Number(plan.total_amount || 0);
-                const planOpen = Math.max(0, planTotal - planPaid);
-                
-                const newItems = claimItems.filter(item => new Date(item.created_at) > new Date(plan.created_at || '2026-01-01'));
-                const newItemsCalc = calcItemTotal(newItems);
-                
-                claimTotalUrsprung = planTotal + newItemsCalc.ursprung;
-                claimTotalGetilgt = planPaid + newItemsCalc.getilgt;
-                claimTotalOffen = planOpen + newItemsCalc.offen;
-            } else {
-                const allItemsCalc = calcItemTotal(claimItems);
-                claimTotalUrsprung = allItemsCalc.ursprung;
-                claimTotalGetilgt = allItemsCalc.getilgt;
-                claimTotalOffen = allItemsCalc.offen;
-            }
-            
-            return { 
-                ...claim, 
-                ...totals, 
-                itemCount, 
-                totalUrsprung: claimTotalUrsprung, 
-                totalGetilgt: claimTotalGetilgt, 
-                totalOffen: claimTotalOffen 
-            };
+        activeClaims.forEach(claim => {
+            totalUrsprung += num(claim.totalUrsprung);
+            totalGetilgt += num(claim.totalGetilgt);
+            totalOffen += num(claim.totalOffen);
         });
 
-        // Filter out cancelled and archived claims from the main view (optional, but good for UI)
-        const activeClaims = merged.filter(c => !['cancelled', 'archived'].includes(c.status));
-
-        setClaims(activeClaims);
-        calculateKpis(activeClaims);
+        setKpis({ totalUrsprung: round2(totalUrsprung), totalGetilgt: round2(totalGetilgt), totalOffen: round2(totalOffen) });
     };
 
-    const loadData = async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            // 1. Overdue-Status im Hintergrund aktualisieren (non-blocking)
-            supabase.rpc('update_overdue_claims_status').then(({ data, error }) => {
-                if (error) {
-                    console.warn('Could not update overdue claims status:', error);
-                } else if (data && data > 0) {
-                    console.log(`Updated ${data} overdue claims in background. Reloading silently...`);
-                    fetchAndMergeClaims().catch(err => console.error('Silent reload failed:', err));
-                }
-            });
-
-            // 2. Daten sofort laden
-            await fetchAndMergeClaims();
-        } catch (err) {
-            console.error('Error loading claims:', err);
-            setError(err.message || 'Fehler beim Laden der Forderungen');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const loadOpenLedgers = async () => {
-        setLoadingLedgers(true);
-        try {
-            const { error: syncError } = await supabase.rpc('sync_all_rent_ledgers');
-            if (syncError) console.warn('Sync ledger warning:', syncError);
-
-            let ledgerQuery = supabase
-                .from('rent_ledger')
+    // Summen ausschließlich aus claim_totals_view (gleiche Quelle wie Forderungsakte und Mieterportal)
+    const fetchAndMergeClaims = async (requestId) => {
+        const claimsData = await fetchAllRows(() => {
+            let claimsQuery = supabase
+                .from('claims')
                 .select(`
-                    id, period_month, expected_rent, paid_amount, due_date,
+                    id, user_id, status, escalation_level, deadline, next_action_at, created_at,
+                    interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
+                    tenants ( first_name, last_name ),
                     leases!inner (
                         id,
                         units!inner (
                             unit_name,
                             properties!inner ( id, portfolio_id, street, house_number, zip, city )
-                        ),
-                        tenants ( first_name, last_name )
+                        )
                     )
                 `)
-                .eq('status', 'open')
-                .order('period_month', { ascending: false });
+                .not('status', 'in', HIDDEN_STATUSES_FILTER)
+                .order('created_at', { ascending: false })
+                .order('id', { ascending: true });
 
             if (selectedPortfolioID) {
-                ledgerQuery = ledgerQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
+                claimsQuery = claimsQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
             }
+            return claimsQuery;
+        });
+        if (requestId !== loadRequestRef.current) return;
 
-            const { data: ledgerData, error: ledgerError } = await ledgerQuery;
+        const claimIds = claimsData.map(c => c.id);
+        const totalsRows = claimIds.length > 0
+            ? await fetchInChunks(claimIds, (chunk) => supabase
+                .from('claim_totals_view')
+                .select('claim_id, principal_paid, fees_paid, interest_paid, current_principal_open, total_fees_open, total_interest_open, total_due')
+                .in('claim_id', chunk))
+            : [];
+        if (requestId !== loadRequestRef.current) return;
 
-            if (ledgerError) throw ledgerError;
+        const totalsById = new Map(totalsRows.map(t => [t.claim_id, t]));
+        const merged = claimsData.map(claim => {
+            const t = totalsById.get(claim.id) || null;
+            const totalOffen = round2(t?.total_due);
+            const totalGetilgt = round2(num(t?.principal_paid) + num(t?.fees_paid) + num(t?.interest_paid));
+            return {
+                ...claim,
+                hasTotals: !!t,
+                totalOffen,
+                totalGetilgt,
+                totalUrsprung: round2(totalOffen + totalGetilgt),
+                feesOpen: round2(t?.total_fees_open),
+                interestOpen: round2(t?.total_interest_open)
+            };
+        });
 
-            const { data: activeClaims, error: claimsError } = await supabase
+        setClaims(merged);
+        calculateKpis(merged);
+    };
+
+    const loadData = async () => {
+        const requestId = ++loadRequestRef.current;
+        setLoading(true);
+        setError(null);
+        try {
+            // 1. Overdue-Status im Hintergrund aktualisieren (non-blocking); veraltete Antworten werden verworfen
+            supabase.rpc('update_overdue_claims_status').then(({ data, error }) => {
+                if (requestId !== loadRequestRef.current) return;
+                if (error) {
+                    console.warn('Could not update overdue claims status:', error);
+                } else if (data && data > 0) {
+                    fetchAndMergeClaims(requestId).catch(err => {
+                        console.error('Silent reload failed:', err);
+                        if (requestId === loadRequestRef.current) setError(translateClaimError(err, 'Fehler beim Aktualisieren der Forderungen'));
+                    });
+                }
+            }).catch(err => console.warn('Could not update overdue claims status:', err));
+
+            // 2. Daten sofort laden
+            await fetchAndMergeClaims(requestId);
+        } catch (err) {
+            console.error('Error loading claims:', err);
+            if (requestId === loadRequestRef.current) setError(translateClaimError(err, 'Fehler beim Laden der Forderungen'));
+        } finally {
+            if (requestId === loadRequestRef.current) setLoading(false);
+        }
+    };
+
+    const loadOpenLedgers = async () => {
+        setLoadingLedgers(true);
+        setLedgerLoadError(null);
+        setNotDueCount(0);
+        try {
+            const { error: syncError } = await supabase.rpc('sync_all_rent_ledgers');
+            if (syncError) console.warn('Sync ledger warning:', syncError);
+
+            const ledgerData = await fetchAllRows(() => {
+                let ledgerQuery = supabase
+                    .from('rent_ledger')
+                    .select(`
+                        id, period_month, expected_rent, paid_amount, due_date,
+                        leases!inner (
+                            id, user_id, payment_due_day,
+                            units!inner (
+                                unit_name,
+                                properties!inner ( id, portfolio_id, street, house_number, zip, city )
+                            ),
+                            tenants ( first_name, last_name )
+                        )
+                    `)
+                    .eq('status', 'open')
+                    .order('period_month', { ascending: false })
+                    .order('id', { ascending: true });
+
+                if (selectedPortfolioID) {
+                    ledgerQuery = ledgerQuery.eq('leases.units.properties.portfolio_id', selectedPortfolioID);
+                }
+                return ledgerQuery;
+            });
+
+            // Mietmonate in aktiven Forderungen ausschließen: altes Einzelfeld rent_ledger_id UND Liste rent_ledger_ids
+            const activeClaimItems = await fetchAllRows(() => supabase
                 .from('claim_items')
-                .select('rent_ledger_id, claims!inner(status)')
-                .not('claims.status', 'in', '("settled","cancelled","archived")')
-                .not('rent_ledger_id', 'is', null);
+                .select('id, rent_ledger_id, rent_ledger_ids, claims!inner(status)')
+                .not('claims.status', 'in', CLOSED_STATUSES_FILTER)
+                .order('id', { ascending: true }));
 
-            if (claimsError) throw claimsError;
+            const excludedIds = new Set();
+            activeClaimItems.forEach(ci => {
+                if (ci.rent_ledger_id) excludedIds.add(ci.rent_ledger_id);
+                if (Array.isArray(ci.rent_ledger_ids)) ci.rent_ledger_ids.forEach(id => { if (id) excludedIds.add(id); });
+            });
 
-            const excludedIds = (activeClaims || []).map(c => c.rent_ledger_id);
-            const available = (ledgerData || []).filter(l => !excludedIds.includes(l.id));
+            const today = new Date();
+            let notDue = 0;
+            const available = ledgerData.filter(l => {
+                if (excludedIds.has(l.id)) return false;
+                if (getLedgerOpenAmount(l) <= 0) return false;
+                // Noch nicht fällige Mieten (kein Verzug) nicht zur Anmahnung anbieten
+                if (!isLedgerOverdue(l, today)) {
+                    notDue++;
+                    return false;
+                }
+                return true;
+            });
 
             setOpenLedgers(available);
-            
-            // Fetch all active leases for manual claims
-            let leasesQuery = supabase
-                .from('leases')
-                .select(`
-                    id, 
-                    tenants (first_name, last_name),
-                    units!inner (unit_name, properties!inner (id, portfolio_id, street, house_number, city))
-                `)
-                .eq('status', 'active');
-
-            if (selectedPortfolioID) {
-                leasesQuery = leasesQuery.eq('units.properties.portfolio_id', selectedPortfolioID);
-            }
-
-            const { data: leasesData, error: leasesError } = await leasesQuery;
-                
-            if (!leasesError && leasesData) {
-                setAllLeases(leasesData);
-            }
+            setNotDueCount(notDue);
         } catch (err) {
             console.error('Error loading ledgers:', err);
-            alert('Fehler beim Laden offener Mieten.');
+            setOpenLedgers([]);
+            setLedgerLoadError('Offene Mieten konnten nicht geladen werden: ' + translateClaimError(err));
+        }
+
+        try {
+            // Fetch all active leases for manual claims
+            const leasesData = await fetchAllRows(() => {
+                let leasesQuery = supabase
+                    .from('leases')
+                    .select(`
+                        id, user_id,
+                        tenants (first_name, last_name),
+                        units!inner (unit_name, properties!inner (id, portfolio_id, street, house_number, city))
+                    `)
+                    .eq('status', 'active')
+                    .order('id', { ascending: true });
+
+                if (selectedPortfolioID) {
+                    leasesQuery = leasesQuery.eq('units.properties.portfolio_id', selectedPortfolioID);
+                }
+                return leasesQuery;
+            });
+            setAllLeases(leasesData);
+        } catch (err) {
+            console.error('Error loading leases:', err);
+            setAllLeases([]);
+            setLedgerLoadError(prev => (prev ? prev + ' ' : '') + 'Mietverträge für freie Forderungen konnten nicht geladen werden.');
         } finally {
             setLoadingLedgers(false);
         }
@@ -423,70 +525,139 @@ const Claims = () => {
         setBuildingFilter('');
         setManualItems([]);
         setExpandedTenant(null);
-        setForm({ fee_amount: 5.00, interest_rate: 5.0000, deadline_days: 7, note: '' });
+        setExistingClaim(null);
+        autoAdjustedFormRef.current = false;
+        setForm(DEFAULT_FORM);
         setIsCreateModalOpen(true);
         loadOpenLedgers();
     };
 
+    const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
+    const selectedLedgerLeaseIds = Array.from(new Set(selectedLedgerItems.map(l => l.leases?.id).filter(Boolean)));
+    const targetLeaseIdForCreate = selectedLeaseId || (selectedLedgerLeaseIds.length === 1 ? selectedLedgerLeaseIds[0] : '');
+    const canProceedToStep2 = !!selectedLeaseId || (selectedLedgerIds.length > 0 && selectedLedgerLeaseIds.length === 1);
+
+    const findActiveClaimForLease = async (leaseId) => {
+        const { data, error } = await supabase
+            .from('claims')
+            .select('id, created_at, updated_at, status, interest_rate, interest_start_date, accumulated_unpaid_interest')
+            .eq('lease_id', leaseId)
+            .not('status', 'in', CLOSED_STATUSES_FILTER)
+            .order('created_at', { ascending: false })
+            .limit(1);
+        if (error) throw error;
+        return data && data.length > 0 ? data[0] : null;
+    };
+
+    const goToStep2 = async () => {
+        if (!canProceedToStep2) return;
+        setCreateStep(2);
+        setExistingClaim(null);
+        setCheckingExistingClaim(true);
+        try {
+            const existing = await findActiveClaimForLease(targetLeaseIdForCreate);
+            setExistingClaim(existing);
+            if (existing) {
+                // Beim Anhängen gilt der Zinssatz der bestehenden Akte; erneute Mahnkosten nur bewusst eintragen
+                setForm(prev => ({ ...prev, interest_rate: existing.interest_rate ?? prev.interest_rate, fee_amount: 0 }));
+                autoAdjustedFormRef.current = true;
+            } else if (autoAdjustedFormRef.current) {
+                setForm(prev => ({ ...prev, interest_rate: DEFAULT_FORM.interest_rate, fee_amount: DEFAULT_FORM.fee_amount }));
+                autoAdjustedFormRef.current = false;
+            }
+        } catch (err) {
+            console.warn('Bestehende Forderung konnte nicht geprüft werden:', err);
+        } finally {
+            setCheckingExistingClaim(false);
+        }
+    };
+
+    // Laufende Zinsen der bestehenden Akte bis heute festschreiben, bevor neue Positionen angehängt werden.
+    // Sonst verzinst claim_totals_view die neuen Positionen rückwirkend ab dem alten Zinsbeginn (doppelt zu den
+    // bereits bis heute berechneten Zinsen). Wertneutral: offener Zinsbetrag bleibt gleich.
+    const capitalizeRunningInterest = async (existing, todayStr) => {
+        if (!existing.interest_start_date || existing.interest_start_date >= todayStr) return;
+        const { data: t, error } = await supabase
+            .from('claim_totals_view')
+            .select('live_interest_since_start')
+            .eq('claim_id', existing.id)
+            .maybeSingle();
+        if (error) throw error;
+        const live = round2(t?.live_interest_since_start);
+        // Schutz gegen gleichzeitige Änderung über Zinsbeginn + updated_at (kein Gleichheitsvergleich auf
+        // numeric-Beträge: ungerundete Werte verlieren als JS-Zahl Stellen und würden nie übereinstimmen)
+        let updateQuery = supabase
+            .from('claims')
+            .update({
+                accumulated_unpaid_interest: round2(num(existing.accumulated_unpaid_interest) + live),
+                interest_start_date: todayStr,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', existing.id)
+            .eq('interest_start_date', existing.interest_start_date);
+        updateQuery = existing.updated_at
+            ? updateQuery.eq('updated_at', existing.updated_at)
+            : updateQuery.is('updated_at', null);
+        const { data: updated, error: updateError } = await updateQuery.select('id');
+        if (updateError) throw updateError;
+        if (!updated || updated.length === 0) {
+            throw new Error('Die bestehende Forderungsakte wurde zwischenzeitlich geändert. Bitte versuchen Sie es erneut.');
+        }
+    };
+
     const handleCreateClaim = async () => {
-        if (selectedLedgerIds.length === 0 && manualItems.length === 0) {
+        if (isSubmitting) return;
+        const { cleaned: cleanedManualItems, errors: manualErrors } = cleanManualItems(manualItems);
+        if (manualErrors.length > 0) {
+            alert('Bitte prüfen Sie die manuellen Positionen:\n\n' + manualErrors.join('\n'));
+            return;
+        }
+        if (selectedLedgerIds.length === 0 && cleanedManualItems.length === 0) {
             alert('Bitte wählen Sie mindestens eine Miete aus oder fügen Sie eine manuelle Position hinzu.');
             return;
         }
-        
-        let targetLeaseId = selectedLeaseId;
-        if (!targetLeaseId && selectedLedgerIds.length > 0) {
-            const firstLedger = openLedgers.find(l => l.id === selectedLedgerIds[0]);
-            if (firstLedger) targetLeaseId = firstLedger.leases?.id;
+        if (!targetLeaseIdForCreate) {
+            alert('Kein eindeutiger Mietvertrag zugeordnet. Bitte nur Mieten eines Mietvertrags auswählen.');
+            return;
         }
-        
-        if (!targetLeaseId) {
-            alert('Kein Mietvertrag zugeordnet.');
+
+        const rateInput = parseFloat(form.interest_rate);
+        if (!Number.isFinite(rateInput) || rateInput < 0 || rateInput > MAX_INTEREST_RATE) {
+            alert(`Bitte einen Zinssatz zwischen 0 und ${MAX_INTEREST_RATE} % p.a. angeben.`);
+            return;
+        }
+        const feeInput = form.fee_amount === '' ? 0 : parseFloat(form.fee_amount);
+        if (!Number.isFinite(feeInput) || feeInput < 0) {
+            alert('Die Mahnkosten müssen 0 oder ein positiver Betrag sein.');
+            return;
+        }
+        const deadlineDays = Number(form.deadline_days);
+        if (!Number.isInteger(deadlineDays) || deadlineDays < 1 || deadlineDays > MAX_DEADLINE_DAYS) {
+            alert(`Bitte eine Frist zwischen 1 und ${MAX_DEADLINE_DAYS} Tagen angeben.`);
             return;
         }
 
         setIsSubmitting(true);
         try {
-            const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
-            const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
-            let calculatedInterest = 0;
-            const todayDate = new Date();
-            
-            selectedLedgerItems.forEach(l => {
-                const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
-                let dueDate = l.due_date ? new Date(l.due_date) : null;
-                if (!dueDate && l.period_month) {
-                    const d = new Date(l.period_month);
-                    dueDate = new Date(d.getFullYear(), d.getMonth(), 5);
-                }
-                if (dueDate && todayDate > dueDate) {
-                    const diffTime = todayDate - dueDate;
-                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                    calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
-                }
-            });
+            const today = new Date();
+            const todayStr = toLocalDateString(today);
 
-            manualItems.forEach(item => {
-                const openAmount = Number(item.amount || 0);
-                if (item.dueDate && openAmount > 0) {
-                    const dueDate = new Date(item.dueDate);
-                    if (todayDate > dueDate) {
-                        const diffTime = todayDate - dueDate;
-                        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                        calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
-                    }
-                }
-            });
+            // Besteht bereits eine aktive Akte, hängt create_claim_advanced die Positionen dort an
+            const existing = await findActiveClaimForLease(targetLeaseIdForCreate);
+            const effectiveRate = existing ? num(existing.interest_rate) : rateInput;
+            const calculatedInterest = calculateCreationInterest(selectedLedgerItems, cleanedManualItems, effectiveRate, today);
+
+            if (existing) await capitalizeRunningInterest(existing, todayStr);
 
             const { error: rpcError } = await supabase.rpc('create_claim_advanced', {
-                p_lease_id: targetLeaseId,
+                p_lease_id: targetLeaseIdForCreate,
                 p_rent_ledger_ids: selectedLedgerIds.length > 0 ? selectedLedgerIds : null,
-                p_manual_items: manualItems,
-                p_fee_amount: parseFloat(form.fee_amount) || 0,
-                p_interest_rate: parseFloat(form.interest_rate) || 0,
+                p_manual_items: cleanedManualItems,
+                p_fee_amount: round2(feeInput),
+                p_interest_rate: effectiveRate,
                 p_accumulated_interest: calculatedInterest,
-                p_interest_start_date: todayDate.toISOString().split('T')[0],
-                p_deadline_days: parseInt(form.deadline_days, 10) || 7,
+                p_interest_start_date: todayStr,
+                p_deadline_days: deadlineDays,
                 p_note: form.note || ''
             });
 
@@ -494,10 +665,12 @@ const Claims = () => {
 
             setIsCreateModalOpen(false);
             loadData();
-            alert('Forderung wurde erfolgreich erstellt!');
+            alert(existing
+                ? 'Die Positionen wurden an die bestehende Forderungsakte dieses Mietvertrags angehängt.'
+                : 'Forderung wurde erfolgreich erstellt!');
         } catch (err) {
             console.error('Error creating claim:', err);
-            alert('Fehler: ' + (err.message || 'Forderung konnte nicht erstellt werden.'));
+            alert('Fehler: ' + translateClaimError(err, 'Forderung konnte nicht erstellt werden.'));
         } finally {
             setIsSubmitting(false);
         }
@@ -507,24 +680,37 @@ const Claims = () => {
         setEditingClaim(claim);
         setEditForm({
             deadline: claim.deadline ? claim.deadline.split('T')[0] : '',
-            interest_rate: claim.interest_rate || 5,
-            accumulated_unpaid_interest: claim.accumulated_unpaid_interest || 0,
-            accumulated_unpaid_fees: claim.accumulated_unpaid_fees || 0
+            interest_rate: claim.interest_rate ?? '',
+            accumulated_unpaid_interest: claim.accumulated_unpaid_interest ?? 0,
+            accumulated_unpaid_fees: claim.accumulated_unpaid_fees ?? 0
         });
         setIsEditModalOpen(true);
     };
 
     const handleEditClaim = async () => {
-        if (!editingClaim) return;
+        if (!editingClaim || isSubmitting) return;
+        const rate = parseFloat(editForm.interest_rate);
+        const interest = parseFloat(editForm.accumulated_unpaid_interest);
+        const fees = parseFloat(editForm.accumulated_unpaid_fees);
+        const errors = [];
+        if (!Number.isFinite(rate) || rate < 0 || rate > MAX_INTEREST_RATE) errors.push(`Zinssatz: bitte einen Wert zwischen 0 und ${MAX_INTEREST_RATE} % p.a. angeben.`);
+        if (!Number.isFinite(interest) || interest < 0) errors.push('Verbuchte Zinsen: bitte 0 oder einen positiven Betrag angeben.');
+        if (!Number.isFinite(fees) || fees < 0) errors.push('Mahnkosten: bitte 0 oder einen positiven Betrag angeben.');
+        if (editForm.deadline && !parseLocalDate(editForm.deadline)) errors.push('Fristdatum ist ungültig.');
+        if (errors.length > 0) {
+            alert('Bitte prüfen Sie Ihre Eingaben:\n\n' + errors.join('\n'));
+            return;
+        }
+
         setIsSubmitting(true);
         try {
             const { error } = await supabase
                 .from('claims')
                 .update({
-                    deadline: editForm.deadline,
-                    interest_rate: parseFloat(editForm.interest_rate),
-                    accumulated_unpaid_interest: parseFloat(editForm.accumulated_unpaid_interest),
-                    accumulated_unpaid_fees: parseFloat(editForm.accumulated_unpaid_fees),
+                    deadline: editForm.deadline || null,
+                    interest_rate: rate,
+                    accumulated_unpaid_interest: round2(interest),
+                    accumulated_unpaid_fees: round2(fees),
                     updated_at: new Date().toISOString()
                 })
                 .eq('id', editingClaim.id);
@@ -537,64 +723,115 @@ const Claims = () => {
             alert('Forderung erfolgreich aktualisiert!');
         } catch (err) {
             console.error('Error updating claim:', err);
-            alert('Fehler beim Aktualisieren: ' + err.message);
+            alert('Fehler beim Aktualisieren: ' + translateClaimError(err));
         } finally {
             setIsSubmitting(false);
         }
     };
 
-    const handleCancelClaim = async (claimId) => {
-        if (!window.confirm('Möchten Sie diese Forderung wirklich stornieren/löschen? Die Mieten werden dadurch wieder als offen markiert und können neu angemahnt werden.')) {
-            return;
-        }
-        
-        try {
-            const { error } = await supabase
-                .from('claims')
-                .update({ 
-                    status: 'cancelled', 
-                    cancelled_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString()
-                })
-                .eq('id', claimId);
-
-            if (error) throw error;
-            
-            loadData();
-            alert('Forderung wurde erfolgreich storniert/gelöscht.');
-        } catch (err) {
-            console.error('Error cancelling claim:', err);
-            alert('Fehler beim Löschen: ' + err.message);
-        }
+    const openCancelModal = (claim) => {
+        setCancelTarget(claim);
+        setCancelReason('');
     };
 
-    const calculateKpis = (activeClaims) => {
-        let totalUrsprung = 0;
-        let totalGetilgt = 0;
-        let totalOffen = 0;
+    // Storno: Ratenplan beenden, Portal-Link sperren, Forderung mit Grund stornieren, Ereignis protokollieren.
+    // Bereits gebuchte Zahlungen bleiben gebucht.
+    const handleConfirmCancel = async () => {
+        if (!cancelTarget || isSubmitting) return;
+        const reason = cancelReason.trim();
+        if (!reason) {
+            alert('Bitte geben Sie einen Stornierungsgrund an.');
+            return;
+        }
+        setIsSubmitting(true);
+        const claimId = cancelTarget.id;
+        const nowIso = new Date().toISOString();
+        try {
+            const { data: plans, error: planError } = await supabase
+                .from('payment_plans')
+                .select('id')
+                .eq('claim_id', claimId)
+                .eq('status', 'active');
+            if (planError) throw planError;
 
-        activeClaims.forEach(claim => {
-            totalUrsprung += (claim.totalUrsprung || 0);
-            totalGetilgt += (claim.totalGetilgt || 0);
-            totalOffen += (claim.totalOffen || 0);
-        });
+            for (const plan of plans || []) {
+                const { error: instError } = await supabase
+                    .from('payment_plan_installments')
+                    .update({ status: 'cancelled', updated_at: nowIso })
+                    .eq('payment_plan_id', plan.id)
+                    .in('status', ['open', 'partial', 'overdue']);
+                let planError = instError;
+                if (!planError) {
+                    const { error: planUpdateError } = await supabase
+                        .from('payment_plans')
+                        .update({ status: 'cancelled', cancelled_at: nowIso, cancelled_by: user?.id || null, cancellation_reason: reason, updated_at: nowIso })
+                        .eq('id', plan.id);
+                    planError = planUpdateError;
+                }
+                if (planError) {
+                    // Künftiger DB-Stand: Ratenpläne sind nur noch per RPC änderbar -> Plan über reverse_payment_plan beenden
+                    if (/Ratenpläne können nur über/i.test(String(planError.message || ''))) {
+                        const { error: reverseError } = await supabase.rpc('reverse_payment_plan', { p_claim_id: claimId });
+                        if (reverseError && !String(reverseError.message || '').includes('Kein aktiver Ratenplan')) throw reverseError;
+                        break; // reverse_payment_plan beendet den aktiven Plan der Forderung
+                    }
+                    throw planError;
+                }
+            }
 
-        setKpis({ totalUrsprung, totalGetilgt, totalOffen });
+            // Portal-Link sperren (nur für den Portfolio-Eigentümer erlaubt; Fehler hier sind nicht kritisch)
+            const { error: linkError } = await supabase
+                .from('claim_access_links')
+                .update({ is_active: false, revoked_at: nowIso })
+                .eq('claim_id', claimId)
+                .eq('is_active', true);
+            if (linkError) console.warn('Portal-Link konnte nicht deaktiviert werden:', linkError);
+
+            const { data: updated, error } = await supabase
+                .from('claims')
+                .update({
+                    status: 'cancelled',
+                    cancelled_at: nowIso,
+                    cancelled_by: user?.id || null,
+                    cancellation_reason: reason,
+                    updated_at: nowIso
+                })
+                .eq('id', claimId)
+                .select('id');
+
+            if (error) throw error;
+            if (!updated || updated.length === 0) throw new Error('Sie haben keine Berechtigung, diese Forderung zu stornieren.');
+
+            const { error: eventError } = await supabase.from('claim_events').insert([{
+                user_id: cancelTarget.user_id || user?.id,
+                claim_id: claimId,
+                event_type: 'cancelled',
+                description: 'Forderung storniert',
+                event_metadata: {
+                    old_status: cancelTarget.status,
+                    new_status: 'cancelled',
+                    reason,
+                    cancelled_payment_plan_ids: (plans || []).map(p => p.id)
+                }
+            }]);
+            if (eventError) console.warn('Storno-Ereignis konnte nicht gespeichert werden:', eventError);
+
+            setCancelTarget(null);
+            loadData();
+            alert(eventError
+                ? 'Forderung wurde storniert. Hinweis: Der Historien-Eintrag konnte nicht gespeichert werden.'
+                : 'Forderung wurde storniert.');
+        } catch (err) {
+            console.error('Error cancelling claim:', err);
+            loadData();
+            alert('Fehler beim Stornieren: ' + translateClaimError(err));
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const getStatusBadge = (status) => {
-        const mapping = {
-            draft: { label: 'Entwurf', variant: 'default' },
-            open: { label: 'Offen', variant: 'blue' },
-            sent: { label: 'Versendet', variant: 'blue' },
-            action_required: { label: 'Aktion erforderlich', variant: 'danger' },
-            payment_plan_requested: { label: 'Ratenzahlung angefragt', variant: 'warning' },
-            payment_plan_active: { label: 'Ratenzahlung aktiv', variant: 'success' },
-            settled: { label: 'Erledigt', variant: 'success' },
-            cancelled: { label: 'Storniert', variant: 'default' },
-            archived: { label: 'Archiviert', variant: 'default' }
-        };
-        const config = mapping[status] || { label: status, variant: 'default' };
+        const config = STATUS_CONFIG[status] || { label: status, variant: 'default' };
         return <Badge variant={config.variant}>{config.label}</Badge>;
     };
 
@@ -604,7 +841,7 @@ const Claims = () => {
 
     const formatDate = (dateString) => {
         if (!dateString) return '-';
-        return new Date(dateString).toLocaleDateString('de-DE');
+        return formatDateDE(dateString) || '-';
     };
 
     const getTenantName = (tenant) => {
@@ -627,7 +864,7 @@ const Claims = () => {
             acc[leaseId] = { lease: ledger.leases, tenant: ledger.leases?.tenants, ledgers: [], totalOpen: 0 };
         }
         acc[leaseId].ledgers.push(ledger);
-        acc[leaseId].totalOpen += (Number(ledger.expected_rent || 0) - Number(ledger.paid_amount || 0));
+        acc[leaseId].totalOpen = round2(acc[leaseId].totalOpen + getLedgerOpenAmount(ledger));
         return acc;
     }, {});
 
@@ -635,9 +872,15 @@ const Claims = () => {
         setExpandedTenant(expandedTenant === leaseId ? null : leaseId);
     };
 
+    // Eine Forderung betrifft genau einen Mietvertrag: Auswahl eines anderen Vertrags startet die Auswahl neu
     const toggleLedgerSelection = (ledgerId, leaseId) => {
         setSelectedLeaseId(''); // Clear manual lease selection
-        setSelectedLedgerIds(prev => prev.includes(ledgerId) ? prev.filter(id => id !== ledgerId) : [...prev, ledgerId]);
+        setSelectedLedgerIds(prev => {
+            if (prev.includes(ledgerId)) return prev.filter(id => id !== ledgerId);
+            const prevLeaseIds = new Set(openLedgers.filter(l => prev.includes(l.id)).map(l => l.leases?.id || 'unknown'));
+            if (prevLeaseIds.size > 0 && !prevLeaseIds.has(leaseId)) return [ledgerId];
+            return [...prev, ledgerId];
+        });
     };
 
     const toggleAllForLease = (leaseId, ledgerIds) => {
@@ -650,8 +893,7 @@ const Claims = () => {
         }
     };
 
-    const selectedLedgerItems = openLedgers.filter(l => selectedLedgerIds.includes(l.id));
-    const totalPrincipalSelected = selectedLedgerItems.reduce((sum, l) => sum + (Number(l.expected_rent || 0) - Number(l.paid_amount || 0)), 0);
+    const totalPrincipalSelected = round2(selectedLedgerItems.reduce((sum, l) => sum + getLedgerOpenAmount(l), 0));
 
     return (
         <div style={{ padding: 'var(--spacing-lg)' }}>
@@ -671,17 +913,17 @@ const Claims = () => {
                             const prop = propData ? `${propData.street} ${propData.house_number}`.trim() : '';
                             const unit = claim.leases?.units?.unit_name || '';
                             const immobilie = prop && unit ? `${prop} / ${unit}` : (prop || unit || '–');
-                            
+
                             return {
                                 property_id: propData?.id,
                                 mietername: getTenantName(claim.tenants),
                                 immobilie,
                                 ursprung: claim.totalUrsprung || 0,
                                 offen: claim.totalOffen || 0,
-                                status: claim.status === 'open' ? 'Offen' : claim.status === 'overdue' ? 'Überfällig' : claim.status === 'paid' ? 'Bezahlt' : claim.status === 'payment_plan' ? 'Ratenzahlung' : claim.status,
+                                status: STATUS_CONFIG[claim.status]?.label || claim.status,
                                 frist: claim.deadline || '',
-                                gebuehren: claim.accumulated_unpaid_fees || 0,
-                                zinsen: claim.accumulated_unpaid_interest || 0,
+                                gebuehren: claim.feesOpen || 0,
+                                zinsen: claim.interestOpen || 0,
                                 erstellt_am: claim.created_at || '',
                                 _propertyLabel: prop || '–',
                             };
@@ -693,9 +935,9 @@ const Claims = () => {
                             })}
                         totalRows={claims.length}
                     />
-                    <Button 
-                        variant="secondary" 
-                        onClick={() => { loadPortalSettings(); setIsSettingsModalOpen(true); }} 
+                    <Button
+                        variant="secondary"
+                        onClick={() => { loadPortalSettings(); setIsSettingsModalOpen(true); }}
                         style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
                     >
                         <SettingsIcon size={18} />
@@ -714,7 +956,7 @@ const Claims = () => {
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Ursprung</div>
                     <div style={{ fontSize: '1.75rem', fontWeight: 700 }}>{formatCurrency(kpis.totalUrsprung || 0)}</div>
                 </Card>
-                
+
                 <Card style={{ padding: 'var(--spacing-lg)', borderLeft: '4px solid #10B981' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Getilgt</div>
                     <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#059669' }}>{formatCurrency(kpis.totalGetilgt || 0)}</div>
@@ -731,7 +973,7 @@ const Claims = () => {
                 <div style={{ padding: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color)' }}>
                     <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Aktive Forderungen</h2>
                 </div>
-                
+
                 {error && (
                     <div style={{ margin: 'var(--spacing-lg)', padding: 'var(--spacing-md)', backgroundColor: '#FEE2E2', color: '#991B1B', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <Ban size={20} />
@@ -762,8 +1004,8 @@ const Claims = () => {
                             </thead>
                             <tbody>
                                 {claims.map((claim) => (
-                                    <tr 
-                                        key={claim.id} 
+                                    <tr
+                                        key={claim.id}
                                         onClick={() => navigate(`/forderungen/${claim.id}`)}
                                         style={{ borderBottom: '1px solid var(--border-color)', transition: 'background-color 0.2s', cursor: 'pointer' }}
                                         onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F9FAFB'}
@@ -771,25 +1013,23 @@ const Claims = () => {
                                     >
                                         <td style={{ padding: '16px', fontSize: '0.95rem', fontWeight: 500 }}>{getTenantName(claim.tenants)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>{getLeaseName(claim.leases)}</td>
-                                        <td style={{ padding: '16px' }}>{claim.itemCount > 1 ? <span style={{ color: 'var(--text-secondary)' }}>-</span> : getStatusBadge(claim.status)}</td>
+                                        <td style={{ padding: '16px' }}>{getStatusBadge(claim.status)}</td>
                                         <td style={{ padding: '16px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                            {claim.itemCount > 1 ? <span>-</span> : (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                    <Clock size={14} />
-                                                    {formatDate(claim.deadline)}
-                                                </div>
-                                            )}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <Clock size={14} />
+                                                {formatDate(claim.deadline)}
+                                            </div>
                                         </td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(claim.totalUrsprung)}</td>
-                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(claim.totalGetilgt)}</td>
+                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right' }}>{claim.hasTotals ? formatCurrency(claim.totalUrsprung) : '—'}</td>
+                                        <td style={{ padding: '16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{claim.hasTotals ? formatCurrency(claim.totalGetilgt) : '—'}</td>
                                         <td style={{ padding: '16px', fontSize: '0.95rem', textAlign: 'right', fontWeight: 600, color: 'var(--text-primary)' }}>
-                                            {formatCurrency(claim.totalOffen)}
+                                            {claim.hasTotals ? formatCurrency(claim.totalOffen) : '—'}
                                         </td>
                                         <td style={{ padding: '16px', textAlign: 'right' }}>
                                             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                                                <button 
-                                                    onClick={(e) => { 
-                                                        e.stopPropagation(); 
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
                                                         if (activeDropdown === claim.id) {
                                                             setActiveDropdown(null);
                                                             setActiveDropdownClaim(null);
@@ -827,7 +1067,7 @@ const Claims = () => {
                         <>
                             <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                    <strong>Hinweis zur Miete:</strong> Die Werte für "Ursprung", "Getilgt" und "Rest Miete" basieren auf der Buchhaltung (Mietkonto). 
+                                    <strong>Hinweis zur Miete:</strong> Die Werte für "Ursprung", "Getilgt" und "Rest Miete" basieren auf der Buchhaltung (Mietkonto).
                                     Wenn Sie die Miete oder eine Zahlung anpassen möchten, tun Sie dies bitte im Reiter "Finanzen". Diese Forderung aktualisiert sich dann automatisch!
                                 </p>
                             </div>
@@ -835,40 +1075,40 @@ const Claims = () => {
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Fristdatum</label>
-                                    <Input 
-                                        type="date" 
-                                        value={editForm.deadline} 
-                                        onChange={e => setEditForm({...editForm, deadline: e.target.value})} 
+                                    <Input
+                                        type="date"
+                                        value={editForm.deadline}
+                                        onChange={e => setEditForm({...editForm, deadline: e.target.value})}
                                     />
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (% p.a.)</label>
-                                    <Input 
-                                        type="number" step="0.0001" min="0" 
-                                        value={editForm.interest_rate} 
-                                        onChange={e => setEditForm({...editForm, interest_rate: e.target.value})} 
+                                    <Input
+                                        type="number" step="0.0001" min="0" max={MAX_INTEREST_RATE}
+                                        value={editForm.interest_rate}
+                                        onChange={e => setEditForm({...editForm, interest_rate: e.target.value})}
                                     />
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Verbuchte Zinsen (€)</label>
-                                    <Input 
-                                        type="number" step="0.01" min="0" 
-                                        value={editForm.accumulated_unpaid_interest} 
-                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_interest: e.target.value})} 
+                                    <Input
+                                        type="number" step="0.01" min="0"
+                                        value={editForm.accumulated_unpaid_interest}
+                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_interest: e.target.value})}
                                     />
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Mahnkosten (€)</label>
-                                    <Input 
-                                        type="number" step="0.01" min="0" 
-                                        value={editForm.accumulated_unpaid_fees} 
-                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_fees: e.target.value})} 
+                                    <Input
+                                        type="number" step="0.01" min="0"
+                                        value={editForm.accumulated_unpaid_fees}
+                                        onChange={e => setEditForm({...editForm, accumulated_unpaid_fees: e.target.value})}
                                     />
                                 </div>
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-xl)' }}>
-                                <Button variant="secondary" onClick={() => setIsEditModalOpen(false)}>Abbrechen</Button>
+                                <Button variant="secondary" onClick={() => setIsEditModalOpen(false)} disabled={isSubmitting}>Abbrechen</Button>
                                 <Button onClick={handleEditClaim} disabled={isSubmitting} style={{ backgroundColor: '#1E40AF', color: 'white' }}>
                                     {isSubmitting ? 'Wird gespeichert...' : 'Änderungen speichern'}
                                 </Button>
@@ -876,6 +1116,49 @@ const Claims = () => {
                         </>
                     )}
                 </div>
+            </Modal>
+
+            {/* Storno Modal */}
+            <Modal isOpen={!!cancelTarget} onClose={() => !isSubmitting && setCancelTarget(null)} title="Forderung stornieren">
+                {cancelTarget && (
+                    <div style={{ padding: 'var(--spacing-md) 0', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={{ padding: '12px 16px', backgroundColor: '#F9FAFB', borderRadius: '8px', border: '1px solid var(--border-color)', fontSize: '0.9rem' }}>
+                            <div style={{ fontWeight: 600 }}>{getTenantName(cancelTarget.tenants)}</div>
+                            <div style={{ color: 'var(--text-secondary)' }}>{getLeaseName(cancelTarget.leases)}</div>
+                            {cancelTarget.hasTotals && (
+                                <div style={{ marginTop: '6px' }}>Offen: <strong>{formatCurrency(cancelTarget.totalOffen)}</strong></div>
+                            )}
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '8px', fontSize: '0.85rem', color: '#92400E' }}>
+                            <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                                <li>Die Forderung wird storniert und erscheint nicht mehr in der Liste der aktiven Forderungen.</li>
+                                <li>Die betroffenen Mietmonate können danach erneut in einer Forderung erfasst werden; am Mietkonto selbst wird nichts geändert.</li>
+                                {cancelTarget.status === 'payment_plan_active' && <li>Die aktive Ratenzahlungsvereinbarung wird beendet, offene Raten werden storniert.</li>}
+                                {cancelTarget.totalGetilgt > 0 && (
+                                    <li>Bereits gebuchte Zahlungen ({formatCurrency(cancelTarget.totalGetilgt)}) bleiben gebucht und werden nicht zurückgebucht.</li>
+                                )}
+                                <li>Ein aktiver Portal-Link wird deaktiviert.</li>
+                                <li>Die Stornierung kann in der App nicht rückgängig gemacht werden.</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Stornierungsgrund (Pflichtfeld)</label>
+                            <textarea
+                                value={cancelReason}
+                                onChange={(e) => setCancelReason(e.target.value)}
+                                placeholder="z. B. Forderung irrtümlich angelegt, Zahlung außerhalb der App eingegangen"
+                                style={{ width: '100%', minHeight: '80px', padding: '8px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
+                            />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+                            <Button variant="secondary" onClick={() => setCancelTarget(null)} disabled={isSubmitting}>Abbrechen</Button>
+                            <Button onClick={handleConfirmCancel} disabled={isSubmitting || !cancelReason.trim()} style={{ backgroundColor: '#991B1B', color: 'white' }}>
+                                {isSubmitting ? 'Wird storniert...' : 'Forderung stornieren'}
+                            </Button>
+                        </div>
+                    </div>
+                )}
             </Modal>
 
             {/* Create Modal */}
@@ -886,12 +1169,19 @@ const Claims = () => {
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--spacing-lg)' }}>
                                 Wählen Sie einen Mieter aus, um eine gebündelte oder einzelne Forderung zu erstellen.
                             </p>
-                            
+
+                            {ledgerLoadError && (
+                                <div style={{ display: 'flex', gap: '8px', padding: '12px', marginBottom: '16px', backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', fontSize: '0.85rem', color: '#991B1B' }}>
+                                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                    <div>{ledgerLoadError}</div>
+                                </div>
+                            )}
+
                             {loadingLedgers ? (
                                 <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center' }}>Lade offene Mieten...</div>
                             ) : openLedgers.length === 0 ? (
                                 <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
-                                    Es gibt aktuell keine offenen Mieten, die noch nicht in Bearbeitung sind.
+                                    Es gibt aktuell keine offenen, bereits fälligen Mieten, die noch nicht in Bearbeitung sind.
                                 </div>
                             ) : (
                                 <div style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
@@ -900,20 +1190,20 @@ const Claims = () => {
                                         const ledgerIds = group.ledgers.map(l => l.id);
                                         const allSelected = ledgerIds.every(id => selectedLedgerIds.includes(id));
                                         const someSelected = ledgerIds.some(id => selectedLedgerIds.includes(id));
-                                        
+
                                         return (
                                             <div key={leaseId} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                                <div 
-                                                    style={{ 
-                                                        display: 'flex', alignItems: 'center', padding: '12px 16px', 
+                                                <div
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', padding: '12px 16px',
                                                         backgroundColor: (someSelected || allSelected) ? '#EFF6FF' : '#F9FAFB',
                                                         cursor: 'pointer'
                                                     }}
                                                     onClick={() => toggleTenantExpand(leaseId)}
                                                 >
                                                     <div style={{ marginRight: '12px' }} onClick={e => e.stopPropagation()}>
-                                                        <input 
-                                                            type="checkbox" 
+                                                        <input
+                                                            type="checkbox"
                                                             checked={allSelected}
                                                             ref={input => { if(input) input.indeterminate = (someSelected && !allSelected) }}
                                                             onChange={() => toggleAllForLease(leaseId, ledgerIds)}
@@ -938,19 +1228,23 @@ const Claims = () => {
                                                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
                                                             <tbody>
                                                                 {group.ledgers.map(l => {
-                                                                    const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
+                                                                    const openAmount = getLedgerOpenAmount(l);
                                                                     const monthStr = l.period_month ? l.period_month.substring(0, 7) : '';
                                                                     const isSelected = selectedLedgerIds.includes(l.id);
+                                                                    const dueDate = getLedgerDueDate(l);
                                                                     return (
                                                                         <tr key={l.id} style={{ borderBottom: '1px solid #E5E7EB' }}>
                                                                             <td style={{ padding: '8px 0', width: '30px' }}>
-                                                                                <input 
-                                                                                    type="checkbox" 
+                                                                                <input
+                                                                                    type="checkbox"
                                                                                     checked={isSelected}
                                                                                     onChange={() => toggleLedgerSelection(l.id, leaseId)}
                                                                                 />
                                                                             </td>
-                                                                            <td style={{ padding: '8px 0' }}>Miete {monthStr}</td>
+                                                                            <td style={{ padding: '8px 0' }}>
+                                                                                Miete {monthStr}
+                                                                                {dueDate && <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginLeft: '8px' }}>fällig {dueDate.toLocaleDateString('de-DE')}</span>}
+                                                                            </td>
                                                                             <td style={{ padding: '8px 0', textAlign: 'right', fontWeight: 500 }}>{formatCurrency(openAmount)}</td>
                                                                         </tr>
                                                                     )
@@ -965,13 +1259,19 @@ const Claims = () => {
                                 </div>
                             )}
 
+                            {!loadingLedgers && notDueCount > 0 && (
+                                <div style={{ marginTop: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                    {notDueCount} {notDueCount === 1 ? 'Miete ist' : 'Mieten sind'} noch nicht fällig bzw. noch nicht im Verzug und {notDueCount === 1 ? 'wird' : 'werden'} deshalb nicht zur Anmahnung angeboten.
+                                </div>
+                            )}
+
                             <div style={{ marginTop: '24px', padding: '16px', backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
                                 <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '12px' }}>Freie Forderung (z.B. Betriebskosten)</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                                     Erstellen Sie eine Forderungsakte ohne offene Miete, z.B. für Nachzahlungen.
                                 </p>
                                 <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                                    <select 
+                                    <select
                                         style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
                                         value={buildingFilter}
                                         onChange={(e) => {
@@ -986,7 +1286,7 @@ const Claims = () => {
                                     </select>
                                 </div>
                                 <div style={{ display: 'flex', gap: '8px' }}>
-                                    <select 
+                                    <select
                                         style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #D1D5DB' }}
                                         value={selectedLeaseId}
                                         onChange={(e) => {
@@ -1006,7 +1306,7 @@ const Claims = () => {
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: 'var(--spacing-lg)' }}>
                                 <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                                <Button onClick={() => setCreateStep(2)} disabled={selectedLedgerIds.length === 0 && !selectedLeaseId} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Button onClick={goToStep2} disabled={!canProceedToStep2} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     Weiter <ArrowRight size={16} />
                                 </Button>
                             </div>
@@ -1016,68 +1316,56 @@ const Claims = () => {
                     {createStep === 2 && (
                         <div>
                             {(() => {
-                                const targetLease = selectedLeaseId 
+                                const targetLease = selectedLeaseId
                                     ? allLeases.find(l => l.id === selectedLeaseId)
-                                    : openLedgers.find(l => l.id === selectedLedgerIds[0])?.leases;
-                                const interestRateDecimal = (parseFloat(form.interest_rate) || 0) / 100;
-                                let calculatedInterest = 0;
+                                    : selectedLedgerItems[0]?.leases;
                                 const todayDate = new Date();
-                                
-                                selectedLedgerItems.forEach(l => {
-                                    const openAmount = Number(l.expected_rent || 0) - Number(l.paid_amount || 0);
-                                    let dueDate = l.due_date ? new Date(l.due_date) : null;
-                                    if (!dueDate && l.period_month) {
-                                        const d = new Date(l.period_month);
-                                        dueDate = new Date(d.getFullYear(), d.getMonth(), 5);
-                                    }
-                                    if (dueDate && todayDate > dueDate) {
-                                        const diffTime = todayDate - dueDate;
-                                        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                                        calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
-                                    }
-                                });
+                                const effectiveRate = existingClaim ? num(existingClaim.interest_rate) : num(form.interest_rate);
+                                const previewManual = manualItems.map(item => ({ amount: parseFloat(item.amount) || 0, dueDate: item.dueDate }));
+                                const calculatedInterest = calculateCreationInterest(selectedLedgerItems, previewManual, effectiveRate, todayDate);
 
-                                manualItems.forEach(item => {
-                                    const openAmount = Number(item.amount || 0);
-                                    if (item.dueDate && openAmount > 0) {
-                                        const dueDate = new Date(item.dueDate);
-                                        if (todayDate > dueDate) {
-                                            const diffTime = todayDate - dueDate;
-                                            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                                            calculatedInterest += openAmount * interestRateDecimal * (diffDays / 365);
-                                        }
-                                    }
-                                });
-
-                                const totalManual = manualItems.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
-                                const total = totalPrincipalSelected + totalManual + Number(form.fee_amount || 0) + calculatedInterest;
+                                const totalManual = round2(manualItems.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0));
+                                const total = round2(totalPrincipalSelected + totalManual + Math.max(0, num(form.fee_amount)) + calculatedInterest);
                                 const deadlineDate = new Date();
-                                deadlineDate.setDate(deadlineDate.getDate() + Number(form.deadline_days || 0));
+                                deadlineDate.setDate(deadlineDate.getDate() + (parseInt(form.deadline_days, 10) || 0));
 
                                 return (
                                     <>
+                                        {checkingExistingClaim && (
+                                            <div style={{ marginBottom: '12px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Prüfe bestehende Forderungsakten …</div>
+                                        )}
+                                        {existingClaim && (
+                                            <div style={{ display: 'flex', gap: '8px', padding: '12px', marginBottom: 'var(--spacing-lg)', backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '0.85rem', color: '#1E3A8A' }}>
+                                                <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                                <div>
+                                                    Für diesen Mietvertrag besteht bereits eine offene Forderungsakte (angelegt am {formatDate(existingClaim.created_at)}, Status: {STATUS_CONFIG[existingClaim.status]?.label || existingClaim.status}).
+                                                    Die neuen Positionen werden <strong>an diese Akte angehängt</strong>. Es gilt deren Zinssatz ({num(existingClaim.interest_rate).toLocaleString('de-DE', { maximumFractionDigits: 4 })} % p.a.); die bis heute aufgelaufenen Zinsen der Akte werden dabei festgeschrieben.
+                                                    Mahnkosten sind voreingestellt auf 0 € – bitte nur eintragen, wenn tatsächlich weitere Kosten entstanden sind.
+                                                </div>
+                                            </div>
+                                        )}
                                         <div style={{ backgroundColor: '#F3F4F6', padding: '16px', borderRadius: '8px', marginBottom: 'var(--spacing-lg)' }}>
                                             <h3 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
                                                 Zusammenfassung ({targetLease ? getTenantName(targetLease.tenants) : ''})
                                             </h3>
-                                            
+
                                             {selectedLedgerIds.length > 0 && (
                                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                                                     <span>Offene Mieten ({selectedLedgerIds.length} {selectedLedgerIds.length === 1 ? 'Monat' : 'Monate'}):</span>
                                                     <span style={{ fontWeight: 600 }}>{formatCurrency(totalPrincipalSelected)}</span>
                                                 </div>
                                             )}
-                                            
+
                                             {manualItems.map((item, idx) => (
                                                 <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', paddingLeft: '8px', borderLeft: '2px solid #D1D5DB' }}>
                                                     <span>{item.description || 'Manuelle Position'}:</span>
-                                                    <span style={{ fontWeight: 600 }}>{formatCurrency(item.amount)}</span>
+                                                    <span style={{ fontWeight: 600 }}>{formatCurrency(parseFloat(item.amount) || 0)}</span>
                                                 </div>
                                             ))}
-                                            
+
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', marginTop: '12px' }}>
                                                 <span>Mahnkosten:</span>
-                                                <span style={{ fontWeight: 600 }}>{formatCurrency(form.fee_amount)}</span>
+                                                <span style={{ fontWeight: 600 }}>{formatCurrency(Math.max(0, num(form.fee_amount)))}</span>
                                             </div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', color: '#B45309' }}>
                                                 <span>Verzugszinsen (bis heute):</span>
@@ -1085,69 +1373,70 @@ const Claims = () => {
                                             </div>
                                             <div style={{ borderTop: '1px solid #D1D5DB', margin: '8px 0' }}></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#991B1B', fontSize: '1.1rem' }}>
-                                                <span style={{ fontWeight: 600 }}>Gesamtforderung (heute):</span>
+                                                <span style={{ fontWeight: 600 }}>{existingClaim ? 'Zusätzliche Forderung (heute):' : 'Gesamtforderung (heute):'}</span>
                                                 <span style={{ fontWeight: 700 }}>{formatCurrency(total)}</span>
                                             </div>
+                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                                                Zinsen werden je Monat ab dem Tag nach der Fälligkeit berechnet (fällt diese auf ein Wochenende oder einen bundesweiten Feiertag, ab dem Tag nach dem nächsten Werktag).
+                                            </div>
                                         </div>
-                                        
+
                                         <div style={{ marginBottom: '24px' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                                                 <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>Manuelle Positionen (Optional)</label>
-                                                <Button 
-                                                    variant="secondary" 
+                                                <Button
+                                                    variant="secondary"
                                                     size="sm"
-                                                    onClick={() => setManualItems([...manualItems, { description: '', amount: '', item_type: 'other', dueDate: '' }])}
+                                                    onClick={() => setManualItems(prev => [...prev, { description: '', amount: '', item_type: 'other', dueDate: '' }])}
                                                     style={{ padding: '4px 8px', fontSize: '0.8rem' }}
                                                 >
                                                     <Plus size={14} /> Position hinzufügen
                                                 </Button>
                                             </div>
-                                            
+
                                             {manualItems.length > 0 && (
                                                 <div style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '4px' }}>
-                                                    <div style={{ flex: 2, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Bezeichnung</div>
+                                                    <div style={{ flex: 2, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Bezeichnung *</div>
                                                     <div style={{ flex: 1, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Fällig am</div>
-                                                    <div style={{ flex: 1, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Betrag (€)</div>
+                                                    <div style={{ flex: 1, fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Betrag (€) *</div>
                                                     <div style={{ width: '24px' }}></div>
                                                 </div>
                                             )}
-                                            
+
                                             {manualItems.map((item, idx) => (
                                                 <div key={idx} style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
-                                                    <Input 
-                                                        placeholder="z.B. Betriebskosten 2024" 
+                                                    <Input
+                                                        placeholder="z.B. Betriebskosten 2024"
                                                         value={item.description}
                                                         onChange={e => {
-                                                            const newItems = [...manualItems];
-                                                            newItems[idx].description = e.target.value;
-                                                            setManualItems(newItems);
+                                                            const value = e.target.value;
+                                                            setManualItems(prev => prev.map((it, i) => (i === idx ? { ...it, description: value } : it)));
                                                         }}
                                                         style={{ flex: 2 }}
                                                     />
-                                                    <Input 
+                                                    <Input
                                                         type="date"
                                                         value={item.dueDate || ''}
                                                         onChange={e => {
-                                                            const newItems = [...manualItems];
-                                                            newItems[idx].dueDate = e.target.value;
-                                                            setManualItems(newItems);
+                                                            const value = e.target.value;
+                                                            setManualItems(prev => prev.map((it, i) => (i === idx ? { ...it, dueDate: value } : it)));
                                                         }}
                                                         style={{ flex: 1 }}
                                                     />
-                                                    <Input 
-                                                        type="number" step="0.01" 
-                                                        placeholder="0,00" 
-                                                        value={item.amount === '' || item.amount === 0 ? '' : item.amount}
+                                                    <Input
+                                                        type="number" step="0.01" min="0.01"
+                                                        placeholder="0,00"
+                                                        value={item.amount}
                                                         onChange={e => {
-                                                            const newItems = [...manualItems];
-                                                            newItems[idx].amount = e.target.value === '' ? '' : (parseFloat(e.target.value) || 0);
-                                                            setManualItems(newItems);
+                                                            const value = e.target.value;
+                                                            setManualItems(prev => prev.map((it, i) => (i === idx ? { ...it, amount: value } : it)));
                                                         }}
                                                         style={{ flex: 1 }}
                                                     />
-                                                    <button 
-                                                        onClick={() => setManualItems(manualItems.filter((_, i) => i !== idx))}
+                                                    <button
+                                                        onClick={() => setManualItems(prev => prev.filter((_, i) => i !== idx))}
                                                         style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', padding: '4px' }}
+                                                        title="Position entfernen"
                                                     >
                                                         <Trash2 size={16} />
                                                     </button>
@@ -1158,29 +1447,36 @@ const Claims = () => {
                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                             <div>
                                                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Zinssatz (% p.a.)</label>
-                                                <Input 
-                                                    type="number" step="0.0001" min="0" 
-                                                    value={form.interest_rate} 
-                                                    onChange={e => setForm({...form, interest_rate: e.target.value})} 
+                                                <Input
+                                                    type="number" step="0.0001" min="0" max={MAX_INTEREST_RATE}
+                                                    value={form.interest_rate}
+                                                    disabled={!!existingClaim}
+                                                    onChange={e => setForm({...form, interest_rate: e.target.value})}
                                                 />
                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                                    Zinsen bis heute werden automatisch aus {form.interest_rate}% berechnet.
+                                                    {existingClaim
+                                                        ? 'Es gilt der Zinssatz der bestehenden Akte.'
+                                                        : `Zinsen bis heute werden automatisch aus ${form.interest_rate}% berechnet.`}
+                                                    {' '}Gesetzlicher Verzugszins gegenüber Verbrauchern: 5 Prozentpunkte über dem jeweils gültigen Basiszinssatz (§ 288 Abs. 1 BGB) – bitte den Satz prüfen.
                                                 </div>
                                             </div>
                                             <div>
                                                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Mahnkosten (€)</label>
-                                                <Input 
-                                                    type="number" step="0.01" min="0" 
-                                                    value={form.fee_amount} 
-                                                    onChange={e => setForm({...form, fee_amount: e.target.value})} 
+                                                <Input
+                                                    type="number" step="0.01" min="0"
+                                                    value={form.fee_amount}
+                                                    onChange={e => setForm({...form, fee_amount: e.target.value})}
                                                 />
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                    Bitte nur angemessene, tatsächlich entstandene Kosten ansetzen (z. B. Porto/Druck).
+                                                </div>
                                             </div>
                                             <div>
                                                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Frist (Tage)</label>
-                                                <Input 
-                                                    type="number" min="1" 
-                                                    value={form.deadline_days} 
-                                                    onChange={e => setForm({...form, deadline_days: e.target.value})} 
+                                                <Input
+                                                    type="number" min="1" max={MAX_DEADLINE_DAYS} step="1"
+                                                    value={form.deadline_days}
+                                                    onChange={e => setForm({...form, deadline_days: e.target.value})}
                                                 />
                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
                                                     Fristdatum: {deadlineDate.toLocaleDateString('de-DE')}
@@ -1188,21 +1484,21 @@ const Claims = () => {
                                             </div>
                                             <div style={{ gridColumn: 'span 2' }}>
                                                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Interne Notiz (Optional)</label>
-                                                <Input 
-                                                    type="text" 
+                                                <Input
+                                                    type="text"
                                                     placeholder="Notiz zur Forderung"
-                                                    value={form.note} 
-                                                    onChange={e => setForm({...form, note: e.target.value})} 
+                                                    value={form.note}
+                                                    onChange={e => setForm({...form, note: e.target.value})}
                                                 />
                                             </div>
                                         </div>
 
                                         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 'var(--spacing-xl)' }}>
-                                            <Button variant="secondary" onClick={() => setCreateStep(1)} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <Button variant="secondary" onClick={() => setCreateStep(1)} disabled={isSubmitting} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                 <ArrowLeft size={16} /> Zurück
                                             </Button>
-                                            <Button onClick={handleCreateClaim} disabled={isSubmitting} style={{ backgroundColor: '#991B1B', color: 'white' }}>
-                                                {isSubmitting ? 'Wird erstellt...' : 'Forderung erstellen'}
+                                            <Button onClick={handleCreateClaim} disabled={isSubmitting || checkingExistingClaim} style={{ backgroundColor: '#991B1B', color: 'white' }}>
+                                                {isSubmitting ? 'Wird erstellt...' : existingClaim ? 'An Akte anhängen' : 'Forderung erstellen'}
                                             </Button>
                                         </div>
                                     </>
@@ -1232,7 +1528,7 @@ const Claims = () => {
                         flexDirection: 'column',
                         padding: '4px'
                     }}>
-                        <button 
+                        <button
                             onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); navigate(`/forderungen/${activeDropdownClaim.id}`); }}
                             style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
                             onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
@@ -1240,7 +1536,7 @@ const Claims = () => {
                         >
                             <Eye size={16} /> Akte öffnen
                         </button>
-                        <button 
+                        <button
                             onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(activeDropdownClaim); }}
                             style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
                             onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
@@ -1249,8 +1545,8 @@ const Claims = () => {
                             <Edit size={16} /> Bearbeiten
                         </button>
                         <div style={{ height: '1px', backgroundColor: 'var(--border-color, #E5E7EB)', margin: '4px 0' }} />
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); handleCancelClaim(activeDropdownClaim.id); }}
+                        <button
+                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openCancelModal(activeDropdownClaim); }}
                             style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B', borderRadius: '6px' }}
                             onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.06)'}
                             onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -1263,16 +1559,27 @@ const Claims = () => {
             )}
 
             {/* Portal Settings Modal */}
-            <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="Forderungsportal Einstellungen">
+            <Modal isOpen={isSettingsModalOpen} onClose={() => !isSubmitting && setIsSettingsModalOpen(false)} title="Forderungsportal Einstellungen">
                 <div style={{ padding: 'var(--spacing-lg)' }}>
                     {loadingSettings ? (
                         <div style={{ textAlign: 'center', padding: '20px' }}>Lade Einstellungen...</div>
+                    ) : portalSettingsError ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', fontSize: '0.9rem', color: '#991B1B' }}>
+                                <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                <div>{portalSettingsError}</div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--spacing-md)' }}>
+                                <Button variant="secondary" onClick={() => setIsSettingsModalOpen(false)}>Schließen</Button>
+                                <Button onClick={loadPortalSettings}>Erneut laden</Button>
+                            </div>
+                        </div>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-lg)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '16px', backgroundColor: '#F9FAFB', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                                <input 
-                                    type="checkbox" 
-                                    id="allow_installments" 
+                                <input
+                                    type="checkbox"
+                                    id="allow_installments"
                                     checked={portalSettings.claim_portal_allow_installments}
                                     onChange={(e) => setPortalSettings({ ...portalSettings, claim_portal_allow_installments: e.target.checked })}
                                     style={{ width: '18px', height: '18px' }}
@@ -1296,18 +1603,18 @@ const Claims = () => {
                                             <div key={index} style={{ display: 'flex', alignItems: 'flex-end', gap: '12px', paddingBottom: '12px', borderBottom: index < portalSettings.claim_portal_installment_options.length - 1 ? '1px dashed #E5E7EB' : 'none' }}>
                                                 <div style={{ flex: 1 }}>
                                                     <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Anzahl Raten</label>
-                                                    <Input 
-                                                        type="number" 
-                                                        min="2" max="48"
+                                                    <Input
+                                                        type="number"
+                                                        min="2" max="48" step="1"
                                                         value={opt.months}
                                                         onChange={(e) => updateInstallmentOption(index, 'months', e.target.value)}
                                                     />
                                                 </div>
                                                 <div style={{ flex: 1 }}>
                                                     <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Aufschlag (%)</label>
-                                                    <Input 
-                                                        type="number" 
-                                                        step="0.01"
+                                                    <Input
+                                                        type="number"
+                                                        step="0.01" min="0" max="100"
                                                         value={opt.surcharge_percent}
                                                         onChange={(e) => updateInstallmentOption(index, 'surcharge_percent', e.target.value)}
                                                     />
@@ -1320,6 +1627,9 @@ const Claims = () => {
                                         {portalSettings.claim_portal_installment_options.length === 0 && (
                                             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>Keine Vorschläge definiert. Der Mieter wird keine Auswahl haben.</p>
                                         )}
+                                        <div style={{ fontSize: '0.78rem', color: '#92400E', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '8px 10px' }}>
+                                            Hinweis: Ein Aufschlag für eine Ratenzahlung gegenüber Wohnraummietern (Verbrauchern) kann als entgeltlicher Zahlungsaufschub den Vorschriften über Verbraucherkredite (§ 506 BGB) unterliegen – mit Informationspflichten und Widerrufsrecht. Bitte rechtlich prüfen lassen; im Zweifel 0 % verwenden.
+                                        </div>
                                     </div>
                                 </div>
                             )}
@@ -1335,8 +1645,8 @@ const Claims = () => {
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                                     <div>
                                         <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Kontoinhaber</label>
-                                        <Input 
-                                            type="text" 
+                                        <Input
+                                            type="text"
                                             placeholder="z.B. Max Mustermann"
                                             value={portalSettings.bank_account_holder}
                                             onChange={(e) => setPortalSettings({ ...portalSettings, bank_account_holder: e.target.value })}
@@ -1345,29 +1655,37 @@ const Claims = () => {
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                                         <div>
                                             <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>IBAN</label>
-                                            <Input 
-                                                type="text" 
+                                            <Input
+                                                type="text"
                                                 placeholder="DE89..."
                                                 value={portalSettings.iban}
                                                 onChange={(e) => setPortalSettings({ ...portalSettings, iban: e.target.value })}
                                             />
+                                            {normalizeIban(portalSettings.iban) && !isValidIban(normalizeIban(portalSettings.iban)) && (
+                                                <div style={{ fontSize: '0.75rem', color: '#B91C1C', marginTop: '-8px' }}>IBAN ungültig</div>
+                                            )}
                                         </div>
                                         <div>
                                             <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>BIC</label>
-                                            <Input 
-                                                type="text" 
+                                            <Input
+                                                type="text"
                                                 placeholder="z.B. GENO..."
                                                 value={portalSettings.bic}
                                                 onChange={(e) => setPortalSettings({ ...portalSettings, bic: e.target.value })}
                                             />
+                                            {normalizeBic(portalSettings.bic) && !isValidBic(normalizeBic(portalSettings.bic)) && (
+                                                <div style={{ fontSize: '0.75rem', color: '#B91C1C', marginTop: '-8px' }}>BIC ungültig</div>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--spacing-md)', marginTop: '24px' }}>
-                                <Button variant="secondary" onClick={() => setIsSettingsModalOpen(false)}>Abbrechen</Button>
-                                <Button onClick={handleSavePortalSettings}>Speichern</Button>
+                                <Button variant="secondary" onClick={() => setIsSettingsModalOpen(false)} disabled={isSubmitting}>Abbrechen</Button>
+                                <Button onClick={handleSavePortalSettings} disabled={isSubmitting || !portalSettingsOriginal}>
+                                    {isSubmitting ? 'Wird gespeichert...' : 'Speichern'}
+                                </Button>
                             </div>
                         </div>
                     )}

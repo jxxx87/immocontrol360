@@ -1,10 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { translateError } from '../lib/errorTranslator';
+import {
+    FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
+    prepareUploadBody, openSignedUrlInNewTab, isImageName
+} from '../lib/storageFiles';
 import {
     Plus, X, Upload, FileText, Image as ImageIcon, Trash2, Download,
-    Building2, Globe, Lock, Users, Folder, Loader, Search
+    Building2, Globe, Lock, Users, Folder, Loader, AlertCircle
 } from 'lucide-react';
+
+const BUCKET = 'documents';
+
+// Speicherpfad eines Dokuments (neue Datensätze: file_path, ältere ggf. storage_path)
+const getDocPath = (doc) => doc?.file_path || doc?.storage_path || null;
 
 const Documents = () => {
     const { user } = useAuth();
@@ -17,15 +27,29 @@ const Documents = () => {
     const [selectedTenant, setSelectedTenant] = useState(null);
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
+    const [thumbUrls, setThumbUrls] = useState({}); // file_path -> signierte Vorschau-URL
+    const [feedback, setFeedback] = useState(null); // { type: 'error' | 'warning' | 'success', messages: [] }
     const fileInputRef = useRef(null);
+    // Schutz gegen veraltete Antworten bei schnellem Objektwechsel
+    const docsRequestRef = useRef(0);
+    const tenantsRequestRef = useRef(0);
+
+    const showFeedback = useCallback(
+        (type, messages) => setFeedback({ type, messages: Array.isArray(messages) ? messages : [messages] }),
+        []
+    );
 
     // ── FETCH PROPERTIES ─────────────────────────────────────────────
     useEffect(() => {
         const fetchProperties = async () => {
-            const { data } = await supabase
+            const { data, error } = await supabase
                 .from('properties')
                 .select('id, street, house_number, city')
                 .order('street');
+            if (error) {
+                console.error('Error fetching properties:', error);
+                showFeedback('error', `Immobilien konnten nicht geladen werden: ${translateError(error)}`);
+            }
             setProperties(data || []);
             if (data && data.length > 0) {
                 setSelectedProperty(data[0]);
@@ -33,48 +57,85 @@ const Documents = () => {
             setLoading(false);
         };
         fetchProperties();
-    }, []);
+    }, [showFeedback]);
 
     // ── FETCH DOCUMENTS FOR SELECTED PROPERTY ────────────────────────
-    useEffect(() => {
-        if (!selectedProperty) return;
-        fetchDocuments();
-        fetchTenants();
-    }, [selectedProperty]);
-
-    const fetchDocuments = async () => {
-        if (!selectedProperty) return;
+    const fetchDocuments = useCallback(async (propertyId) => {
+        if (!propertyId) return;
+        const requestId = ++docsRequestRef.current;
 
         // General documents: property_id set, unit_id is null, tenant_id is null
-        const { data: genDocs } = await supabase
+        const genPromise = supabase
             .from('documents')
             .select('*')
-            .eq('property_id', selectedProperty.id)
+            .eq('property_id', propertyId)
             .is('unit_id', null)
             .is('tenant_id', null)
             .order('created_at', { ascending: false });
 
-        setGeneralDocs(genDocs || []);
-
         // Personal documents: property_id set, tenant_id set
-        const { data: persDocs } = await supabase
+        const persPromise = supabase
             .from('documents')
             .select('*, tenant:tenants(first_name, last_name)')
-            .eq('property_id', selectedProperty.id)
+            .eq('property_id', propertyId)
             .not('tenant_id', 'is', null)
             .order('created_at', { ascending: false });
 
-        setPersonalDocs(persDocs || []);
-    };
+        const [genRes, persRes] = await Promise.all([genPromise, persPromise]);
+        if (requestId !== docsRequestRef.current) return; // inzwischen anderes Objekt gewählt
 
-    const fetchTenants = async () => {
-        if (!selectedProperty) return;
+        const loadError = genRes.error || persRes.error;
+        if (loadError) {
+            console.error('Error fetching documents:', loadError);
+            showFeedback('error', `Dokumente konnten nicht geladen werden: ${translateError(loadError)}`);
+        }
+
+        const genDocs = genRes.data || [];
+        const persDocs = persRes.data || [];
+        setGeneralDocs(genDocs);
+        setPersonalDocs(persDocs);
+
+        // Vorschaubilder einmal gebündelt signieren (statt je Zeile und Ansicht)
+        const imagePaths = [...genDocs, ...persDocs]
+            .filter(d => isImageName(d.file_name) && getDocPath(d))
+            .map(getDocPath);
+        if (imagePaths.length === 0) {
+            setThumbUrls({});
+            return;
+        }
+        const { data: signed, error: signError } = await supabase.storage
+            .from(BUCKET)
+            .createSignedUrls(imagePaths, 3600);
+        if (requestId !== docsRequestRef.current) return;
+        if (signError) {
+            console.error('Error signing thumbnails:', signError);
+            setThumbUrls({});
+            return;
+        }
+        const map = {};
+        (signed || []).forEach(s => {
+            if (s?.path && s.signedUrl && !s.error) map[s.path] = s.signedUrl;
+        });
+        setThumbUrls(map);
+    }, [showFeedback]);
+
+    const fetchTenants = useCallback(async (propertyId) => {
+        if (!propertyId) return;
+        const requestId = ++tenantsRequestRef.current;
 
         // First get units for this property
-        const { data: units } = await supabase
+        const { data: units, error: unitError } = await supabase
             .from('units')
             .select('id, unit_name')
-            .eq('property_id', selectedProperty.id);
+            .eq('property_id', propertyId);
+
+        if (requestId !== tenantsRequestRef.current) return;
+        if (unitError) {
+            console.error('Error fetching units:', unitError);
+            showFeedback('error', `Mieter konnten nicht geladen werden: ${translateError(unitError)}`);
+            setTenants([]);
+            return;
+        }
 
         if (!units || units.length === 0) {
             setTenants([]);
@@ -86,11 +147,19 @@ const Documents = () => {
         units.forEach(u => { unitMap[u.id] = u.unit_name; });
 
         // Get active leases for those units
-        const { data: leases } = await supabase
+        const { data: leases, error: leaseError } = await supabase
             .from('leases')
             .select('tenant_id, unit_id, tenant:tenants(id, first_name, last_name)')
             .in('unit_id', unitIds)
             .in('status', ['active', 'Active', 'aktiv']);
+
+        if (requestId !== tenantsRequestRef.current) return;
+        if (leaseError) {
+            console.error('Error fetching leases:', leaseError);
+            showFeedback('error', `Mieter konnten nicht geladen werden: ${translateError(leaseError)}`);
+            setTenants([]);
+            return;
+        }
 
         if (leases && leases.length > 0) {
             const uniqueTenants = [];
@@ -109,52 +178,94 @@ const Documents = () => {
         } else {
             setTenants([]);
         }
-    };
+    }, [showFeedback]);
+
+    const selectedPropertyId = selectedProperty?.id;
+    useEffect(() => {
+        if (!selectedPropertyId) return;
+        fetchDocuments(selectedPropertyId);
+        fetchTenants(selectedPropertyId);
+    }, [selectedPropertyId, fetchDocuments, fetchTenants]);
 
     // ── UPLOAD ───────────────────────────────────────────────────────
     const handleUpload = async (files) => {
         if (!files || files.length === 0 || !selectedProperty || uploading) return;
+        const propertyId = selectedProperty.id;
+        const isGeneral = activeTab === 'general';
+        const tenant = isGeneral ? null : selectedTenant;
+
+        if (!isGeneral && !tenant?.id) {
+            showFeedback('error', 'Bitte wählen Sie zuerst einen Mieter aus.');
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            return;
+        }
+
         setUploading(true);
+        setFeedback(null);
+        const errors = [];
+        let uploadedCount = 0;
 
         try {
             for (const file of Array.from(files)) {
-                if (file.size > 10 * 1024 * 1024) {
-                    alert(`${file.name} ist zu groß (max 10MB)`);
+                const validationError = validateUploadFile(file, FILE_RULES.documents);
+                if (validationError) {
+                    errors.push(validationError);
                     continue;
                 }
 
-                const timestamp = Date.now();
-                const filePath = `${selectedProperty.id}/${activeTab === 'general' ? 'general' : `tenant/${selectedTenant?.id}`}/${timestamp}_${file.name}`;
+                // Schlüssel ohne Originalnamen (Umlaute/Sonderzeichen führen sonst zu "Invalid key")
+                const folder = isGeneral ? 'general' : `tenant/${tenant.id}`;
+                const filePath = `${propertyId}/${folder}/${buildStorageObjectName(file)}`;
+                const { body, contentType } = prepareUploadBody(file);
 
                 const { error: uploadError } = await supabase.storage
-                    .from('documents')
-                    .upload(filePath, file);
+                    .from(BUCKET)
+                    .upload(filePath, body, { contentType });
 
                 if (uploadError) {
                     console.error('Upload error:', uploadError);
+                    errors.push(`„${file.name}“ konnte nicht hochgeladen werden: ${translateError(uploadError)}`);
                     continue;
                 }
 
                 const docData = {
                     user_id: user.id,
-                    property_id: selectedProperty.id,
+                    property_id: propertyId,
                     file_name: file.name,
                     file_path: filePath,
-                    mime_type: file.type,
-                    category: activeTab === 'general' ? 'general' : 'personal',
+                    mime_type: contentType,
+                    category: isGeneral ? 'general' : 'personal',
                 };
 
-                if (activeTab === 'personal' && selectedTenant) {
-                    docData.tenant_id = selectedTenant.id;
-                    docData.unit_id = selectedTenant.unit_id;
+                if (!isGeneral) {
+                    docData.tenant_id = tenant.id;
+                    docData.unit_id = tenant.unit_id;
                 }
 
-                await supabase.from('documents').insert(docData);
+                const { error: insertError } = await supabase.from('documents').insert(docData);
+                if (insertError) {
+                    console.error('Insert error:', insertError);
+                    // Datei wieder entfernen, damit sie nicht verwaist im Speicher liegt
+                    const { error: cleanupError } = await supabase.storage.from(BUCKET).remove([filePath]);
+                    if (cleanupError) console.error('Cleanup error:', cleanupError);
+                    errors.push(`„${file.name}“ konnte nicht gespeichert werden: ${translateError(insertError)}`);
+                    continue;
+                }
+                uploadedCount += 1;
             }
 
-            fetchDocuments();
+            if (errors.length > 0) {
+                showFeedback('error', uploadedCount > 0
+                    ? [`${uploadedCount} Datei(en) hochgeladen, aber:`, ...errors]
+                    : errors);
+            } else if (uploadedCount > 0) {
+                showFeedback('success', uploadedCount === 1 ? 'Dokument hochgeladen.' : `${uploadedCount} Dokumente hochgeladen.`);
+            }
+
+            fetchDocuments(propertyId);
         } catch (err) {
             console.error('Error uploading:', err);
+            showFeedback('error', `Fehler beim Hochladen: ${translateError(err)}`);
         } finally {
             setUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -162,24 +273,79 @@ const Documents = () => {
     };
 
     // ── DELETE ────────────────────────────────────────────────────────
+    // Erst die Datei im Speicher löschen, dann den Datensatz. Bleibt die Datei liegen
+    // (z. B. fehlende Löschberechtigung), wird das angezeigt statt still übergangen.
     const handleDelete = async (doc) => {
         if (!window.confirm(`"${doc.file_name}" wirklich löschen?`)) return;
+        setFeedback(null);
 
         try {
-            await supabase.storage.from('documents').remove([doc.file_path]);
-            await supabase.from('documents').delete().eq('id', doc.id);
-            fetchDocuments();
+            const path = getDocPath(doc);
+            let fileStillStored = false;
+
+            if (path) {
+                const { data: removed, error: removeError } = await supabase.storage.from(BUCKET).remove([path]);
+                if (removeError) {
+                    console.error('Storage delete error:', removeError);
+                    showFeedback('error', `Die Datei konnte nicht gelöscht werden: ${translateError(removeError)}`);
+                    return;
+                }
+                if (!removed || removed.length === 0) {
+                    // Nichts gelöscht: existiert die Datei noch (dann fehlt die Berechtigung)?
+                    const { data: probe, error: probeError } = await supabase.storage
+                        .from(BUCKET)
+                        .createSignedUrl(path, 60);
+                    fileStillStored = !probeError && !!probe?.signedUrl;
+                }
+            }
+
+            if (fileStillStored && !window.confirm(
+                'Die Datei konnte nicht aus dem Speicher gelöscht werden (keine Löschberechtigung).\n\n' +
+                'Soll der Eintrag trotzdem aus der Liste entfernt werden? Die Datei bleibt dann im Speicher erhalten.'
+            )) {
+                return;
+            }
+
+            const { data: deletedRows, error: dbError } = await supabase
+                .from('documents')
+                .delete()
+                .eq('id', doc.id)
+                .select('id');
+            if (dbError) throw dbError;
+            if (!deletedRows || deletedRows.length === 0) {
+                showFeedback('error', 'Der Eintrag konnte nicht gelöscht werden (keine Berechtigung).');
+                fetchDocuments(selectedPropertyId);
+                return;
+            }
+
+            if (fileStillStored) {
+                showFeedback('warning', 'Der Eintrag wurde entfernt. Die Datei selbst liegt weiterhin im Speicher, weil die Löschberechtigung fehlt.');
+            }
+            fetchDocuments(selectedPropertyId);
         } catch (err) {
             console.error('Delete error:', err);
+            showFeedback('error', `Fehler beim Löschen: ${translateError(err)}`);
         }
     };
 
     // ── DOWNLOAD ─────────────────────────────────────────────────────
     const handleDownload = async (doc) => {
-        const { data } = await supabase.storage
-            .from('documents')
-            .createSignedUrl(doc.file_path, 3600);
-        if (data?.signedUrl) window.open(data.signedUrl, '_blank');
+        const path = getDocPath(doc);
+        if (!path) {
+            showFeedback('error', 'Zu diesem Dokument ist keine Datei hinterlegt.');
+            return;
+        }
+        const err = await openSignedUrlInNewTab(async () => {
+            const { data, error } = await supabase.storage
+                .from(BUCKET)
+                .createSignedUrl(path, 3600);
+            if (error) throw error;
+            return data?.signedUrl;
+        });
+        if (err) {
+            console.error('Download error:', err);
+            showFeedback('error', `Download nicht möglich: ${translateError(err)}`);
+        }
     };
 
     const getPropertyLabel = (p) => `${p.street} ${p.house_number || ''}, ${p.city}`;
@@ -236,6 +402,13 @@ const Documents = () => {
                     value={selectedProperty?.id || ''}
                     onChange={(e) => {
                         const prop = properties.find(p => p.id === e.target.value);
+                        // Listen sofort leeren, damit nie Dokumente des vorherigen Objekts
+                        // unter dem neuen stehen
+                        setGeneralDocs([]);
+                        setPersonalDocs([]);
+                        setTenants([]);
+                        setThumbUrls({});
+                        setFeedback(null);
                         setSelectedProperty(prop);
                         setSelectedTenant(null);
                     }}
@@ -250,6 +423,36 @@ const Documents = () => {
                     ))}
                 </select>
             </div>
+
+            {/* Rückmeldungen (Fehler beim Laden, Hochladen, Löschen) */}
+            {feedback && feedback.messages.length > 0 && (
+                <div
+                    role={feedback.type === 'error' ? 'alert' : 'status'}
+                    style={{
+                        display: 'flex', alignItems: 'flex-start', gap: '10px',
+                        padding: '12px 16px', marginBottom: '16px',
+                        borderRadius: 'var(--radius-md)',
+                        border: `1px solid ${feedback.type === 'error' ? '#FECACA' : feedback.type === 'warning' ? '#FDE68A' : '#BBF7D0'}`,
+                        backgroundColor: 'var(--surface-color)',
+                        color: feedback.type === 'error' ? '#B91C1C' : feedback.type === 'warning' ? '#92400E' : '#15803D',
+                        fontSize: '0.85rem'
+                    }}
+                >
+                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <div style={{ flex: 1 }}>
+                        {feedback.messages.map((m, i) => (
+                            <div key={i}>{m}</div>
+                        ))}
+                    </div>
+                    <button
+                        onClick={() => setFeedback(null)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
+                        title="Schließen"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
 
             {/* Tabs */}
             <div style={{
@@ -351,15 +554,21 @@ const Documents = () => {
                                 }
                             </div>
                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                PDF, Bilder bis 10MB
+                                {FILE_RULES.documents.label} bis 10 MB
                             </div>
+                            {activeTab === 'general' && (
+                                <div style={{ fontSize: '0.75rem', color: '#92400E', marginTop: '4px' }}>
+                                    Hinweis: Allgemeine Dokumente sind für alle Mieter dieser Immobilie im Mieterportal sichtbar.
+                                    Interne Unterlagen (z. B. Kaufvertrag, Versicherungen) bitte nicht hier ablegen.
+                                </div>
+                            )}
                         </div>
                     </div>
                     <div>
                         <input
                             type="file"
                             ref={fileInputRef}
-                            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+                            accept={acceptAttribute(FILE_RULES.documents)}
                             multiple
                             style={{ display: 'none' }}
                             onChange={(e) => handleUpload(e.target.files)}
@@ -396,57 +605,23 @@ const Documents = () => {
                 onDownload={handleDownload}
                 getFileIcon={getFileIcon}
                 formatDate={formatDate}
+                thumbUrls={thumbUrls}
             />
         </div>
     );
 };
 
 // ── DOCUMENT THUMBNAIL COMPONENT ─────────────────────────────────────────
-const DocumentThumbnail = ({ doc, getFileIcon }) => {
-    const [imgUrl, setImgUrl] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const ext = doc.file_name?.split('.').pop().toLowerCase();
-    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
-
-    useEffect(() => {
-        if (!isImage) return;
-        let active = true;
-        const getSignedUrl = async () => {
-            setLoading(true);
-            try {
-                const { data } = await supabase.storage
-                    .from('documents')
-                    .createSignedUrl(doc.file_path, 3600);
-                if (active && data?.signedUrl) {
-                    setImgUrl(data.signedUrl);
-                }
-            } catch (err) {
-                console.error(err);
-            } finally {
-                if (active) setLoading(false);
-            }
-        };
-        getSignedUrl();
-        return () => { active = false; };
-    }, [doc.file_path, isImage]);
-
-    if (isImage) {
-        if (loading) {
-            return (
-                <div style={{ width: '36px', height: '36px', borderRadius: '4px', backgroundColor: 'rgba(255,255,255,0.03)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border-color)' }}>
-                    <Loader size={12} className="animate-spin" style={{ color: 'var(--text-secondary)' }} />
-                </div>
-            );
-        }
-        if (imgUrl) {
-            return (
-                <img 
-                    src={imgUrl} 
-                    alt={doc.file_name} 
-                    style={{ width: '36px', height: '36px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--border-color)' }} 
-                />
-            );
-        }
+// Die signierte Vorschau-URL kommt gebündelt aus der Liste (thumbUrls).
+const DocumentThumbnail = ({ doc, getFileIcon, url }) => {
+    if (isImageName(doc.file_name) && url) {
+        return (
+            <img
+                src={url}
+                alt={doc.file_name}
+                style={{ width: '36px', height: '36px', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--border-color)' }}
+            />
+        );
     }
 
     return (
@@ -457,7 +632,7 @@ const DocumentThumbnail = ({ doc, getFileIcon }) => {
 };
 
 // ── DOCUMENT LIST COMPONENT ──────────────────────────────────────────
-const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, formatDate }) => {
+const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, formatDate, thumbUrls = {} }) => {
     if (docs.length === 0) {
         return (
             <div style={{
@@ -499,7 +674,7 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                         onMouseLeave={(e) => e.currentTarget.style.backgroundColor = ''}
                     >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flex: 1, minWidth: 0 }}>
-                            <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} />
+                            <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} url={thumbUrls[getDocPath(doc)]} />
                             <div style={{ minWidth: 0 }}>
                                 <div style={{
                                     fontSize: '0.9rem', fontWeight: 500,
@@ -564,7 +739,7 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                     }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '12px' }}>
                             <div style={{ flexShrink: 0 }}>
-                                <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} />
+                                <DocumentThumbnail doc={doc} getFileIcon={getFileIcon} url={thumbUrls[getDocPath(doc)]} />
                             </div>
                             <div style={{ minWidth: 0, flex: 1 }}>
                                 <div style={{ fontWeight: 600, fontSize: '0.95rem', wordBreak: 'break-all' }}>{doc.file_name}</div>

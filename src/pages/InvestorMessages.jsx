@@ -3,9 +3,14 @@ import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
+import { translateError } from '../lib/errorTranslator';
 import Messenger from '../components/Messenger';
 import { MessageSquare, Users, Circle, Search } from 'lucide-react';
 import { useViewMode } from '../context/ViewModeContext';
+
+// Wie viele der jüngsten eigenen Nachrichten für "letzte Nachricht"/"ungelesen" in
+// EINER Abfrage geladen werden. Nur für Gespräche ohne Treffer wird einzeln nachgefragt.
+const RECENT_MESSAGES_LIMIT = 1000;
 
 const InvestorMessages = () => {
     const { user } = useAuth();
@@ -15,6 +20,7 @@ const InvestorMessages = () => {
     const [conversations, setConversations] = useState([]);
     const [selectedConvo, setSelectedConvo] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [listError, setListError] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [preSelectDone, setPreSelectDone] = useState(false);
 
@@ -24,76 +30,109 @@ const InvestorMessages = () => {
         clearByType('ticket_comment');
     }, [clearByType]);
 
-    // ── BUILD CONVERSATION LIST ─────────────────────────────────────
-    useEffect(() => {
-        const fetchConversations = async () => {
-            if (!user) return;
-            setLoading(true);
+    const userId = user?.id;
 
+    // ── BUILD CONVERSATION LIST ─────────────────────────────────────
+    // Lade-Zustand nur beim ersten Laden; spätere Aktualisierungen (Realtime) laufen
+    // im Hintergrund, damit die Liste nicht flackert.
+    useEffect(() => {
+        if (!userId) return;
+        let cancelled = false;
+        let refreshTimer = null;
+
+        const fetchConversations = async () => {
             try {
                 // Get all tenant roles with tenant info
-                const { data: tenantRoles } = await supabase
+                const { data: tenantRoles, error: rolesError } = await supabase
                     .from('user_roles')
                     .select('user_id, tenant_id, unit_id, property_id')
                     .eq('role', 'tenant');
 
+                if (rolesError) throw rolesError;
+
                 if (!tenantRoles || tenantRoles.length === 0) {
-                    setConversations([]);
-                    setLoading(false);
+                    if (!cancelled) {
+                        setConversations([]);
+                        setListError(null);
+                    }
                     return;
                 }
 
                 // Fetch tenant names
                 const tenantIds = tenantRoles.map(r => r.tenant_id).filter(Boolean);
-                const { data: tenantData } = await supabase
-                    .from('tenants')
-                    .select('id, first_name, last_name')
-                    .in('id', tenantIds);
-
-                // Fetch units
                 const unitIds = tenantRoles.map(r => r.unit_id).filter(Boolean);
-                let unitData = [];
-                if (unitIds.length > 0) {
-                    const { data } = await supabase
-                        .from('units')
-                        .select('id, unit_name, property:properties(street, house_number)')
-                        .in('id', unitIds);
-                    unitData = data || [];
-                }
 
-                // Get unread counts
-                const { data: unreadMessages } = await supabase
+                const [tenantRes, unitRes, recentRes] = await Promise.all([
+                    tenantIds.length > 0
+                        ? supabase.from('tenants').select('id, first_name, last_name').in('id', tenantIds)
+                        : Promise.resolve({ data: [], error: null }),
+                    unitIds.length > 0
+                        ? supabase.from('units').select('id, unit_name, property:properties(street, house_number)').in('id', unitIds)
+                        : Promise.resolve({ data: [], error: null }),
+                    // Jüngste Nachrichten (gesendet und empfangen) in einer Abfrage
+                    supabase
+                        .from('messages')
+                        .select('text, created_at, sender_id, receiver_id, read')
+                        .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+                        .order('created_at', { ascending: false })
+                        .limit(RECENT_MESSAGES_LIMIT)
+                ]);
+
+                if (tenantRes.error) throw tenantRes.error;
+                if (unitRes.error) throw unitRes.error;
+                if (recentRes.error) throw recentRes.error;
+
+                const tenantData = tenantRes.data || [];
+                const unitData = unitRes.data || [];
+                const recent = recentRes.data || [];
+
+                const lastByPartner = {};
+                recent.forEach(m => {
+                    const partner = m.sender_id === userId ? m.receiver_id : m.sender_id;
+                    if (!lastByPartner[partner]) lastByPartner[partner] = m;
+                });
+
+                // Get unread counts (eigene Abfrage, damit kein ungelesener Eintrag fehlt)
+                const { data: unreadMessages, error: unreadError } = await supabase
                     .from('messages')
                     .select('sender_id')
-                    .eq('receiver_id', user.id)
+                    .eq('receiver_id', userId)
                     .eq('read', false);
+                if (unreadError) throw unreadError;
 
                 const unreadMap = {};
                 (unreadMessages || []).forEach(m => {
                     unreadMap[m.sender_id] = (unreadMap[m.sender_id] || 0) + 1;
                 });
 
-                // Get last message for each conversation
-                const convos = await Promise.all(tenantRoles.map(async (role) => {
-                    const tenant = (tenantData || []).find(t => t.id === role.tenant_id);
-                    const unit = unitData.find(u => u.id === role.unit_id);
-
+                // Nur Gespräche ohne Treffer unter den jüngsten Nachrichten einzeln nachladen
+                const missing = recent.length < RECENT_MESSAGES_LIMIT
+                    ? []
+                    : tenantRoles.filter(r => !lastByPartner[r.user_id]);
+                await Promise.all(missing.map(async (role) => {
                     const { data: lastMsg } = await supabase
                         .from('messages')
-                        .select('text, created_at, sender_id, is_system')
-                        .or(`and(sender_id.eq.${user.id},receiver_id.eq.${role.user_id}),and(sender_id.eq.${role.user_id},receiver_id.eq.${user.id})`)
+                        .select('text, created_at, sender_id, receiver_id')
+                        .or(`and(sender_id.eq.${userId},receiver_id.eq.${role.user_id}),and(sender_id.eq.${role.user_id},receiver_id.eq.${userId})`)
                         .order('created_at', { ascending: false })
                         .limit(1);
+                    if (lastMsg?.[0]) lastByPartner[role.user_id] = lastMsg[0];
+                }));
+
+                const convos = tenantRoles.map((role) => {
+                    const tenant = tenantData.find(t => t.id === role.tenant_id);
+                    const unit = unitData.find(u => u.id === role.unit_id);
+                    const lastMsg = lastByPartner[role.user_id];
 
                     return {
                         userId: role.user_id,
                         name: tenant ? `${tenant.last_name}, ${tenant.first_name}` : 'Unbekannt',
                         unit: unit ? `${unit.property?.street || ''} ${unit.property?.house_number || ''} / ${unit.unit_name}` : '',
-                        lastMessage: lastMsg?.[0]?.text || null,
-                        lastMessageTime: lastMsg?.[0]?.created_at || null,
+                        lastMessage: lastMsg?.text || null,
+                        lastMessageTime: lastMsg?.created_at || null,
                         unread: unreadMap[role.user_id] || 0
                     };
-                }));
+                });
 
                 // Sort: unread first, then by last message time
                 convos.sort((a, b) => {
@@ -104,37 +143,59 @@ const InvestorMessages = () => {
                     return new Date(b.lastMessageTime) - new Date(a.lastMessageTime);
                 });
 
-                setConversations(convos);
+                if (!cancelled) {
+                    setConversations(convos);
+                    setListError(null);
+                }
             } catch (err) {
                 console.error('Error:', err);
+                if (!cancelled) setListError(`Gespräche konnten nicht geladen werden: ${translateError(err)}`);
             } finally {
-                setLoading(false);
+                if (!cancelled) setLoading(false);
             }
         };
 
         fetchConversations();
 
-        // Refresh on new messages
+        // Bei neuen bzw. gelesenen Nachrichten still (gebündelt) aktualisieren
+        const scheduleRefresh = () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(fetchConversations, 400);
+        };
+
         const channel = supabase
             .channel('investor-msg-list')
             .on('postgres_changes', {
                 event: 'INSERT',
                 schema: 'public',
                 table: 'messages'
-            }, () => {
-                fetchConversations();
-            })
+            }, scheduleRefresh)
+            .on('postgres_changes', {
+                event: 'UPDATE',
+                schema: 'public',
+                table: 'messages'
+            }, scheduleRefresh)
             .subscribe();
 
-        return () => supabase.removeChannel(channel);
-    }, [user]);
+        return () => {
+            cancelled = true;
+            if (refreshTimer) clearTimeout(refreshTimer);
+            supabase.removeChannel(channel);
+        };
+    }, [userId]);
+
+    // Gespräch öffnen: Zähler sofort zurücksetzen (Messenger markiert als gelesen)
+    const openConversation = (convo) => {
+        setSelectedConvo(convo);
+        setConversations(prev => prev.map(c => (c.userId === convo.userId ? { ...c, unread: 0 } : c)));
+    };
 
     // Auto-select conversation from navigation state
     useEffect(() => {
         if (!preSelectDone && !loading && conversations.length > 0 && location.state?.preSelectUserId) {
             const match = conversations.find(c => c.userId === location.state.preSelectUserId);
             if (match) {
-                setSelectedConvo(match);
+                openConversation(match);
             }
             setPreSelectDone(true);
         }
@@ -145,11 +206,12 @@ const InvestorMessages = () => {
         c.unit.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
+    // Kalendertage vergleichen (nicht 24-Stunden-Differenz): gestern 23 Uhr = "Gestern"
     const formatTime = (d) => {
         if (!d) return '';
         const date = new Date(d);
-        const now = new Date();
-        const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+        const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+        const diffDays = Math.round((startOfDay(new Date()) - startOfDay(date)) / (1000 * 60 * 60 * 24));
         if (diffDays === 0) return date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
         if (diffDays === 1) return 'Gestern';
         return date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
@@ -207,6 +269,14 @@ const InvestorMessages = () => {
 
                     {/* List */}
                     <div style={{ flex: 1, overflowY: 'auto' }}>
+                        {listError && (
+                            <div role="alert" style={{
+                                margin: '10px 16px', padding: '8px 12px', borderRadius: '8px',
+                                border: '1px solid #FECACA', color: '#B91C1C', fontSize: '0.8rem'
+                            }}>
+                                {listError}
+                            </div>
+                        )}
                         {loading ? (
                             <div style={{ padding: '30px 16px', textAlign: 'center', color: 'var(--text-secondary)' }}>
                                 Laden...
@@ -220,7 +290,7 @@ const InvestorMessages = () => {
                             filteredConvos.map(convo => (
                                 <div
                                     key={convo.userId}
-                                    onClick={() => setSelectedConvo(convo)}
+                                    onClick={() => openConversation(convo)}
                                     style={{
                                         padding: '14px 16px',
                                         cursor: 'pointer',
@@ -295,7 +365,10 @@ const InvestorMessages = () => {
                 {/* ── RIGHT: MESSENGER ── */}
                 <div style={{ display: (!isMobile || selectedConvo) ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
                     {selectedConvo ? (
+                        // key: beim Mieterwechsel neu aufbauen, damit Entwurf und Anhang
+                        // nicht an den falschen Mieter gehen
                         <Messenger
+                            key={selectedConvo.userId}
                             conversationUserId={selectedConvo.userId}
                             conversationUserName={selectedConvo.name}
                             onBack={isMobile ? () => setSelectedConvo(null) : undefined}

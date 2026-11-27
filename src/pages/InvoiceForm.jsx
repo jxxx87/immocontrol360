@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
     ArrowLeft,
@@ -9,7 +9,10 @@ import {
     Check,
     Search,
     UserPlus,
-    Loader2
+    Loader2,
+    Lock,
+    AlertTriangle,
+    Eye
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -20,7 +23,67 @@ import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
 import Modal from '../components/ui/Modal';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
-import { printInvoice, downloadInvoicePdf } from '../lib/invoiceDocument';
+import {
+    printInvoice,
+    downloadInvoicePdf,
+    fetchNextInvoiceNumber,
+    insertInvoiceWithNumber,
+    issueInvoice,
+    getInvoiceMissingFields,
+    getInvoiceStatus,
+    isInvoiceEditable,
+    isInvoiceSmallBusiness,
+    isSmallBusinessPortfolio,
+    hasSmallBusinessColumn,
+    toLocalDateString,
+    parseLocalDate,
+    computeTaxBreakdown,
+    INVOICE_STATUS,
+    INVOICE_STATUS_LABELS,
+    VAT_RATE_OPTIONS,
+    LEGACY_VAT_RATE,
+    SMALL_BUSINESS_NOTE
+} from '../lib/invoiceDocument';
+
+// Helpers
+const toNum = (v) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+    const s = String(v ?? '').trim();
+    // Deutsches Format ("1.000,50") oder Zahl als Text ("155.76")
+    const n = s.includes(',') ? parseFloat(s.replace(/\./g, '').replace(',', '.')) : parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+};
+const r2 = (num) => Math.round((toNum(num) + Number.EPSILON) * 100) / 100;
+const r4 = (num) => Math.round((toNum(num) + Number.EPSILON) * 10000) / 10000;
+const fmt = (num) => new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num || 0);
+const fmtEur = (num) => fmt(num) + ' €';
+const fmtRate = (rate) => `${Number(rate).toLocaleString('de-DE')} %`;
+
+// Betrag einer Position aus dem zuletzt eingegebenen Wert (Preis/Nacht, Netto oder Brutto) neu berechnen.
+// Der Preis/Nacht wird ungerundet (4 Stellen) geführt, damit Netto beim erneuten Öffnen nicht um Cent abweicht.
+const recalcItem = (item, nightsForItem, rate) => {
+    const it = { ...item };
+    const n = nightsForItem > 0 ? nightsForItem : 1;
+    const r = toNum(rate);
+    const basis = it.basis || 'net';
+    if (basis === 'gross') {
+        it.grossTotal = r2(it.grossTotal);
+        it.netTotal = r2(it.grossTotal / (1 + r / 100));
+        it.vat = r2(it.grossTotal - it.netTotal);
+        it.pricePerNight = r4(it.netTotal / n);
+    } else if (basis === 'ppn') {
+        it.pricePerNight = r4(it.pricePerNight);
+        it.netTotal = r2(n * it.pricePerNight);
+        it.vat = r2(it.netTotal * r / 100);
+        it.grossTotal = r2(it.netTotal + it.vat);
+    } else {
+        it.netTotal = r2(it.netTotal);
+        it.vat = r2(it.netTotal * r / 100);
+        it.grossTotal = r2(it.netTotal + it.vat);
+        it.pricePerNight = r4(it.netTotal / n);
+    }
+    return it;
+};
 
 const InvoiceForm = () => {
     const { id } = useParams();
@@ -29,13 +92,18 @@ const InvoiceForm = () => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const hasPortfolioSelection = !!selectedPortfolioID && selectedPortfolioID !== 'all';
 
     // State
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [reloadKey, setReloadKey] = useState(0);
     const [saving, setSaving] = useState(false);
     const [pdfGenerating, setPdfGenerating] = useState(false);
+    const [issuing, setIssuing] = useState(false);
     const [successModal, setSuccessModal] = useState(false);
     const [savedInvoice, setSavedInvoice] = useState(null);
+    const [loadedInvoice, setLoadedInvoice] = useState(null);
 
     // Form Data
     const [portfolios, setPortfolios] = useState([]);
@@ -55,42 +123,48 @@ const InvoiceForm = () => {
     const [recipientZip, setRecipientZip] = useState('');
     const [recipientCity, setRecipientCity] = useState('');
 
-    const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
+    // Lokales Datum (toISOString wäre UTC -> zwischen 0 und 2 Uhr der Vortag)
+    const [invoiceDate, setInvoiceDate] = useState(() => toLocalDateString());
     const [invoiceNumber, setInvoiceNumber] = useState('');
+    const [numberError, setNumberError] = useState(null);
     const [selectedUnitId, setSelectedUnitId] = useState('');
     const [moveIn, setMoveIn] = useState('');
     const [moveOut, setMoveOut] = useState('');
     const [persons, setPersons] = useState(1);
     const [positions, setPositions] = useState([]);
+    const [smallBusiness, setSmallBusiness] = useState(false);
+    const [savingPortfolioFlag, setSavingPortfolioFlag] = useState(false);
+
+    // Hat der Nutzer Anreise/Abreise/Personen/Einheit aktiv geändert? (Im Bearbeiten-Modus wird sonst nichts neu berechnet.)
+    const stayTouchedRef = useRef(false);
+    // Hat der Nutzer die Bezeichnung der Position 1 selbst geändert? (Dann nicht mehr automatisch überschreiben.)
+    const manualDescRef = useRef(false);
 
     // Contact Picker State
     const [contactPickerOpen, setContactPickerOpen] = useState(false);
     const [contactSearch, setContactSearch] = useState('');
 
-    // Helpers
-    const r2 = (num) => Math.round((num + Number.EPSILON) * 100) / 100;
-    const fmt = (num) => new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num || 0);
-    const fmtEur = (num) => fmt(num) + ' €';
+    const invoiceStatus = isEdit ? getInvoiceStatus(loadedInvoice) : INVOICE_STATUS.DRAFT;
+    const readOnly = isEdit && !!loadedInvoice && !isInvoiceEditable(loadedInvoice);
 
     // Derived
-    // Units might have 'Ferienwohnung' in type or usage_type. We check both to be safe or just 'type'.
-    // In previous versions it was 'type'.
     const vacationUnits = useMemo(() => {
         let filtered = allUnits.filter(u => u.is_vacation_rental === true);
 
-        if (selectedPortfolioID && selectedPortfolioID !== 'all') {
+        if (hasPortfolioSelection) {
             const portfolioProps = properties.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id);
             filtered = filtered.filter(u => portfolioProps.includes(u.property_id));
         }
         return filtered;
-    }, [allUnits, properties, selectedPortfolioID]);
+    }, [allUnits, properties, selectedPortfolioID, hasPortfolioSelection]);
     const selectedUnit = useMemo(() => allUnits.find(u => u.id === selectedUnitId), [allUnits, selectedUnitId]);
+    const senderPortfolio = useMemo(() => portfolios.find(p => p.id === senderPortfolioId) || null, [portfolios, senderPortfolioId]);
 
     const nights = useMemo(() => {
-        if (!moveIn || !moveOut) return 0;
-        const start = new Date(moveIn);
-        const end = new Date(moveOut);
-        const diff = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+        const start = parseLocalDate(moveIn);
+        const end = parseLocalDate(moveOut);
+        if (!start || !end) return 0;
+        const diff = Math.round((Date.UTC(end.getFullYear(), end.getMonth(), end.getDate()) - Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / 86400000);
         return diff > 0 ? diff : 0;
     }, [moveIn, moveOut]);
 
@@ -98,23 +172,30 @@ const InvoiceForm = () => {
         if (!selectedUnit) return '';
         const prop = properties.find(p => p.id === selectedUnit.property_id);
         if (!prop) return '';
-        return `${prop.street} ${prop.house_number || ''}, ${prop.zip} ${prop.city}`;
+        return `${prop.street} ${prop.house_number || ''}, ${prop.zip || ''} ${prop.city || ''}`.replace(/\s+/g, ' ').trim();
     }, [selectedUnit, properties]);
+
+    const effectiveRate = (p) => (smallBusiness ? 0 : (p.vatRate === null || p.vatRate === undefined ? 0 : toNum(p.vatRate)));
+    const nightsFor = (p) => (p.isFirst ? (nights || 1) : 1);
 
     // ===== DATA FETCHING =====
     useEffect(() => {
         if (user) fetchData();
-    }, [user, isEdit, editId]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [user, isEdit, editId, reloadKey]);
 
     const fetchData = async () => {
         try {
             setLoading(true);
+            setLoadError(null);
             const [portRes, propRes, unitRes, contactRes] = await Promise.all([
                 supabase.from('portfolios').select('*'),
                 supabase.from('properties').select('*'),
                 supabase.from('units').select('*'),
                 supabase.from('contacts').select('*').order('name')
             ]);
+            const firstError = portRes.error || propRes.error || unitRes.error || contactRes.error;
+            if (firstError) throw firstError;
 
             const ports = portRes.data || [];
             const props = propRes.data || [];
@@ -125,64 +206,76 @@ const InvoiceForm = () => {
             setAllUnits(units);
             setContacts(contactRes.data || []);
 
-            // Set default sender from current selected portfolio if one is selected
-            if (selectedPortfolioID && selectedPortfolioID !== 'all') {
-                const portfolio = ports.find(p => p.id === selectedPortfolioID);
-                if (portfolio && !isEdit) {
-                    setSenderPortfolioId(portfolio.id);
-                    setSenderName(portfolio.company_name || portfolio.name || '');
-                    setSenderStreet(portfolio.street ? `${portfolio.street} ${portfolio.house_number || ''}`.trim() : '');
-                    setSenderZip(portfolio.zip || '');
-                    setSenderCity(portfolio.city || '');
-                }
-            }
-
             if (isEdit && editId) {
-                const { data: inv, error } = await supabase.from('invoices').select('*').eq('id', editId).single();
-                if (inv) {
-                    setSenderName(inv.sender_name || '');
-                    setSenderStreet(inv.sender_street || '');
-                    setSenderZip(inv.sender_zip || '');
-                    setSenderCity(inv.sender_city || '');
-                    setRecipientName(inv.recipient_name || '');
-                    setRecipientStreet(inv.recipient_street || '');
-                    setRecipientZip(inv.recipient_zip || '');
-                    setRecipientCity(inv.recipient_city || '');
-                    setRecipientContactId(inv.contact_id || null);
-                    setInvoiceDate(inv.invoice_date || '');
-                    setInvoiceNumber(inv.invoice_number || '');
-                    setSelectedUnitId(inv.unit_id || '');
-                    setMoveIn(inv.move_in || '');
-                    setMoveOut(inv.move_out || '');
-                    setPersons(inv.persons || 1);
-                    setSenderPortfolioId(inv.portfolio_id || '');
-
-                    if (inv.positions && Array.isArray(inv.positions)) {
-                        setPositions(inv.positions);
-                    }
+                const { data: inv, error } = await supabase.from('invoices').select('*').eq('id', editId).maybeSingle();
+                if (error) throw error;
+                if (!inv) {
+                    setLoadError('Die Rechnung wurde nicht gefunden oder Sie haben keinen Zugriff darauf.');
+                    return;
                 }
+                setLoadedInvoice(inv);
+                setSenderName(inv.sender_name || '');
+                setSenderStreet(inv.sender_street || '');
+                setSenderZip(inv.sender_zip || '');
+                setSenderCity(inv.sender_city || '');
+                setRecipientName(inv.recipient_name || '');
+                setRecipientStreet(inv.recipient_street || '');
+                setRecipientZip(inv.recipient_zip || '');
+                setRecipientCity(inv.recipient_city || '');
+                setRecipientContactId(inv.contact_id || null);
+                setInvoiceDate(inv.invoice_date || '');
+                setInvoiceNumber(inv.invoice_number || '');
+                setSelectedUnitId(inv.unit_id || '');
+                setMoveIn(inv.move_in || '');
+                setMoveOut(inv.move_out || '');
+                setPersons(inv.persons || 1);
+                setSenderPortfolioId(inv.portfolio_id || '');
+
+                const sb = isInvoiceSmallBusiness(inv);
+                setSmallBusiness(sb);
+                // Gespeicherte Beträge unverändert übernehmen (keine Neuberechnung beim Öffnen)
+                const loadedPositions = Array.isArray(inv.positions) ? inv.positions : [];
+                setPositions(loadedPositions.map((p, idx) => ({
+                    ...p,
+                    pos: p.pos ?? idx + 1,
+                    isFirst: idx === 0 ? (p.isFirst ?? true) : !!p.isFirst,
+                    vatRate: sb ? 0 : (p.vatRate ?? LEGACY_VAT_RATE),
+                    basis: p.basis || ((idx === 0 || p.isFirst) && toNum(p.pricePerNight) > 0 ? 'ppn' : 'net')
+                })));
+                stayTouchedRef.current = false;
+                manualDescRef.current = true; // gespeicherter Text bleibt, bis Aufenthaltsdaten aktiv geändert werden
             } else {
-                // If a portfolio is already selected, generate number and potentially select first unit
-                if (selectedPortfolioID && selectedPortfolioID !== 'all') {
-                    await generateInvoiceNumber(selectedPortfolioID);
+                // Absender aus dem aktuell gewählten Portfolio vorbelegen
+                if (hasPortfolioSelection) {
+                    const portfolio = ports.find(p => p.id === selectedPortfolioID);
+                    if (portfolio) {
+                        setSenderPortfolioId(portfolio.id);
+                        setSenderName(portfolio.company_name || portfolio.name || '');
+                        setSenderStreet(portfolio.street ? `${portfolio.street} ${portfolio.house_number || ''}`.trim() : '');
+                        setSenderZip(portfolio.zip || '');
+                        setSenderCity(portfolio.city || '');
+                    }
 
                     const portProps = props.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id);
                     const firstUnit = units.find(u => u.is_vacation_rental === true && portProps.includes(u.property_id));
-                    if (firstUnit && !selectedUnitId) {
+                    if (firstUnit) {
                         setSelectedUnitId(firstUnit.id);
                     }
                 }
             }
         } catch (err) {
             console.error('InvoiceForm load error:', err);
+            setLoadError('Die Daten konnten nicht geladen werden: ' + (err?.message || 'Unbekannter Fehler') + '. Bitte versuchen Sie es erneut.');
         } finally {
             setLoading(false);
         }
     };
 
-    // ===== AUTO-FILL SENDER FROM UNIT =====
+    // ===== AUTO-FILL SENDER FROM UNIT (nur Neuanlage, nur bei Wechsel der Einheit) =====
+    const lastAutofillUnitRef = useRef(null);
     useEffect(() => {
         if (!selectedUnitId || isEdit || loading) return;
+        if (lastAutofillUnitRef.current === selectedUnitId) return; // manuelle Absender-Änderungen nicht überschreiben
 
         const unit = allUnits.find(u => u.id === selectedUnitId);
         if (!unit) return;
@@ -192,14 +285,12 @@ const InvoiceForm = () => {
 
         const portfolio = portfolios.find(p => p.id === property.portfolio_id);
         if (portfolio) {
+            lastAutofillUnitRef.current = selectedUnitId;
             setSenderPortfolioId(portfolio.id);
             setSenderName(portfolio.company_name || portfolio.name || '');
             setSenderStreet(portfolio.street ? `${portfolio.street} ${portfolio.house_number || ''}`.trim() : '');
             setSenderZip(portfolio.zip || '');
             setSenderCity(portfolio.city || '');
-
-            // Regenerate invoice number for this specific portfolio
-            generateInvoiceNumber(portfolio.id);
         }
     }, [selectedUnitId, allUnits, properties, portfolios, isEdit, loading]);
 
@@ -210,40 +301,38 @@ const InvoiceForm = () => {
         }
     }, [vacationUnits, selectedUnitId, isEdit]);
 
-    // ===== INVOICE NUMBER GENERATION =====
-    const generateInvoiceNumber = async (portfolioId) => {
-        try {
-            const year = new Date().getFullYear();
-            const yearStr = String(year);
-
-            let query = supabase
-                .from('invoices')
-                .select('invoice_number')
-                .like('invoice_number', `${yearStr}-%`)
-                .order('invoice_number', { ascending: false })
-                .limit(1);
-
-            if (portfolioId && portfolioId !== 'all') {
-                query = query.eq('portfolio_id', portfolioId);
-            }
-
-            const { data } = await query;
-
-            let nextNum = 1;
-            if (data && data.length > 0) {
-                const lastNum = data[0].invoice_number;
-                const parts = lastNum.split('-');
-                if (parts.length >= 2) {
-                    nextNum = parseInt(parts[1], 10) + 1;
-                }
-            }
-
-            setInvoiceNumber(`${yearStr}-${String(nextNum).padStart(3, '0')}`);
-        } catch (err) {
-            console.error('Error generating invoice number:', err);
-            setInvoiceNumber(`${new Date().getFullYear()}-001`);
+    // ===== INVOICE NUMBER (Vorschau; die endgültige Nummer wird erst beim Speichern vergeben) =====
+    const invoiceYear = (invoiceDate || '').slice(0, 4);
+    useEffect(() => {
+        if (isEdit || loading) return;
+        if (!senderPortfolioId) {
+            setInvoiceNumber('');
+            setNumberError(null);
+            return;
         }
+        let cancelled = false;
+        fetchNextInvoiceNumber(senderPortfolioId, invoiceDate)
+            .then(n => { if (!cancelled) { setInvoiceNumber(n); setNumberError(null); } })
+            .catch(err => {
+                console.error('Error generating invoice number:', err);
+                if (!cancelled) { setInvoiceNumber(''); setNumberError('Nummer konnte nicht ermittelt werden – sie wird beim Speichern vergeben.'); }
+            });
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [senderPortfolioId, invoiceYear, isEdit, loading]);
+
+    // ===== KLEINUNTERNEHMER (Voreinstellung aus dem Portfolio, nur Neuanlage) =====
+    const applySmallBusiness = (checked) => {
+        setSmallBusiness(checked);
+        setPositions(prev => prev.map(p => recalcItem(p, p.isFirst ? (nights || 1) : 1, checked ? 0 : (p.vatRate ?? 0))));
     };
+
+    useEffect(() => {
+        if (isEdit || loading) return;
+        const preset = isSmallBusinessPortfolio(senderPortfolio);
+        if (preset !== smallBusiness) applySmallBusiness(preset);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [senderPortfolio, isEdit, loading]);
 
     // ===== POSITION 1 AUTO-SETUP =====
     useEffect(() => {
@@ -255,90 +344,86 @@ const InvoiceForm = () => {
                 netTotal: 0,
                 vat: 0,
                 grossTotal: 0,
-                isFirst: true
+                isFirst: true,
+                vatRate: LEGACY_VAT_RATE, // Beherbergung (bisheriger Standardsatz), änderbar
+                basis: 'ppn'
             }]);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isEdit, loading]);
 
     const buildFirstDescription = () => {
-        const unitLabel = selectedUnit ? (selectedUnit.unit_name || 'Ferienwohnung') : 'Ferienwohnung';
+        const unitLabel = selectedUnit?.unit_name ? `Ferienwohnung ${selectedUnit.unit_name}` : 'Ferienwohnung';
         const addr = unitAddress ? ` (${unitAddress})` : '';
         const lines = [];
 
         if (nights > 0) {
-            lines.push(`${nights} Übernachtung${nights > 1 ? 'en' : ''} in Ferienwohnung ${unitLabel}${addr}`);
+            lines.push(`${nights} Übernachtung${nights > 1 ? 'en' : ''} in ${unitLabel}${addr}`);
         } else {
-            lines.push(`Übernachtungen in Ferienwohnung ${unitLabel}${addr}`);
+            lines.push(`Übernachtungen in ${unitLabel}${addr}`);
         }
 
         if (persons > 0) lines.push(`${persons} Person${persons > 1 ? 'en' : ''}`);
         return lines.join('\n');
     };
 
+    // Bezeichnung der Position 1: bei Neuanlage automatisch; im Bearbeiten-Modus nur nach aktiver Änderung
+    // von Anreise/Abreise/Personen/Einheit – und nie, wenn der Text von Hand angepasst wurde.
     useEffect(() => {
+        if (loading || readOnly) return;
+        if (isEdit && !stayTouchedRef.current) return;
+        if (manualDescRef.current && !stayTouchedRef.current) return;
         if (positions.length > 0 && positions[0].isFirst) {
             const desc = buildFirstDescription();
-            const updated = [...positions];
-            if (updated[0].description !== desc) {
-                updated[0] = { ...updated[0], description: desc };
-                setPositions(updated);
+            if (positions[0].description !== desc) {
+                manualDescRef.current = false;
+                setPositions(prev => {
+                    if (!prev.length) return prev;
+                    const updated = [...prev];
+                    updated[0] = { ...updated[0], description: desc };
+                    return updated;
+                });
             }
         }
-    }, [nights, unitAddress, persons, selectedUnitId, positions.length]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [nights, unitAddress, persons, selectedUnitId, positions.length, loading]);
+
+    // Nächte geändert (nur nach aktiver Änderung): Position 1 aus dem zuletzt eingegebenen Wert neu rechnen
+    useEffect(() => {
+        if (loading || readOnly || !stayTouchedRef.current) return;
+        setPositions(prev => {
+            if (!prev.length || !prev[0].isFirst) return prev;
+            const updated = [...prev];
+            updated[0] = recalcItem(updated[0], nights || 1, smallBusiness ? 0 : (updated[0].vatRate ?? 0));
+            return updated;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [nights]);
+
+    const touchStay = () => { stayTouchedRef.current = true; };
 
     // ===== CALCULATIONS =====
     const updatePosition = (idx, field, value) => {
         const updated = [...positions];
-        const item = { ...updated[idx] };
-        const n = item.isFirst ? (nights || 1) : 1;
+        let item = { ...updated[idx] };
 
-        // Handle German format from CurrencyInput (1.000,00 -> 1000.00)
-        let numVal = 0;
-        if (typeof value === 'string') {
-            numVal = parseFloat(value.replace(/\./g, '').replace(',', '.')) || 0;
-        } else {
-            numVal = parseFloat(value) || 0;
-        }
-
-        if (field === 'pricePerNight') {
-            item.pricePerNight = numVal;
-            item.netTotal = r2(n * numVal);
-            item.vat = r2(item.netTotal * 0.07);
-            item.grossTotal = r2(item.netTotal + item.vat);
-        } else if (field === 'netTotal') {
-            item.netTotal = numVal;
-            item.pricePerNight = r2(numVal / n);
-            item.vat = r2(item.netTotal * 0.07);
-            item.grossTotal = r2(item.netTotal + item.vat);
-        } else if (field === 'grossTotal') {
-            item.grossTotal = numVal;
-            item.netTotal = r2(numVal / 1.07);
-            item.vat = r2(item.grossTotal - item.netTotal);
-            item.pricePerNight = r2(item.netTotal / n);
-        } else if (field === 'description') {
+        if (field === 'description') {
             item.description = value;
+            if (idx === 0) { manualDescRef.current = true; stayTouchedRef.current = false; }
+        } else if (field === 'vatRate') {
+            item.vatRate = value === '' || value === null ? null : Number(value);
+            item = recalcItem(item, nightsFor(item), effectiveRate(item));
+        } else {
+            const numVal = toNum(value);
+            if (field === 'pricePerNight') { item.pricePerNight = numVal; item.basis = 'ppn'; }
+            else if (field === 'netTotal') { item.netTotal = numVal; item.basis = 'net'; }
+            else if (field === 'grossTotal') { item.grossTotal = numVal; item.basis = 'gross'; }
+            item = recalcItem(item, nightsFor(item), effectiveRate(item));
         }
 
         updated[idx] = item;
         setPositions(updated);
     };
-
-    useEffect(() => {
-        if (positions.length > 0 && positions[0].isFirst && nights > 0) {
-            const item = { ...positions[0] };
-            if (item.pricePerNight > 0) {
-                const newNet = r2(nights * item.pricePerNight);
-                if (item.netTotal !== newNet) {
-                    item.netTotal = newNet;
-                    item.vat = r2(item.netTotal * 0.07);
-                    item.grossTotal = r2(item.netTotal + item.vat);
-                    const updated = [...positions];
-                    updated[0] = item;
-                    setPositions(updated);
-                }
-            }
-        }
-    }, [nights]);
 
     const addPosition = () => {
         setPositions([...positions, {
@@ -348,7 +433,9 @@ const InvoiceForm = () => {
             netTotal: 0,
             vat: 0,
             grossTotal: 0,
-            isFirst: false
+            isFirst: false,
+            vatRate: null, // Steuersatz muss bewusst gewählt werden (bei § 19 UStG gilt ohnehin 0 %)
+            basis: 'net'
         }]);
     };
 
@@ -358,9 +445,58 @@ const InvoiceForm = () => {
         setPositions(updated);
     };
 
-    const totalNet = useMemo(() => r2(positions.reduce((s, p) => s + (p.netTotal || 0), 0)), [positions]);
-    const totalVat = useMemo(() => r2(positions.reduce((s, p) => s + (p.vat || 0), 0)), [positions]);
-    const totalGross = useMemo(() => r2(positions.reduce((s, p) => s + (p.grossTotal || 0), 0)), [positions]);
+    const totalNet = useMemo(() => r2(positions.reduce((s, p) => s + toNum(p.netTotal), 0)), [positions]);
+    const totalVat = useMemo(() => r2(positions.reduce((s, p) => s + toNum(p.vat), 0)), [positions]);
+    const totalGross = useMemo(() => r2(positions.reduce((s, p) => s + toNum(p.grossTotal), 0)), [positions]);
+    const taxBreakdown = useMemo(
+        () => computeTaxBreakdown(positions.map(p => ({ ...p, vatRate: smallBusiness ? 0 : (p.vatRate ?? 0) })), smallBusiness),
+        [positions, smallBusiness]
+    );
+    const hasZeroRateWithoutExemption = !smallBusiness && positions.some(p => p.vatRate === 0 && (toNum(p.netTotal) !== 0 || p.description));
+
+    // Positionen so, wie sie gespeichert/gedruckt werden (Steuersatz und § 19 eingefroren)
+    const buildPositionsForSave = () => positions.map((p, i) => {
+        const { smallBusiness: _sb, ...rest } = p;
+        return {
+            ...rest,
+            pos: i + 1,
+            vatRate: smallBusiness ? 0 : p.vatRate,
+            ...(smallBusiness ? { smallBusiness: true } : {})
+        };
+    });
+
+    // Aktueller Formularstand als Rechnungsobjekt (Vorschau, Pflichtangaben-Prüfung)
+    const buildInvoiceFromState = () => ({
+        ...(loadedInvoice || {}),
+        portfolio_id: senderPortfolioId || null,
+        unit_id: selectedUnitId || null,
+        contact_id: recipientContactId || null,
+        invoice_number: invoiceNumber,
+        invoice_date: invoiceDate,
+        sender_name: senderName,
+        sender_street: senderStreet,
+        sender_zip: senderZip,
+        sender_city: senderCity,
+        recipient_name: recipientName,
+        recipient_street: recipientStreet,
+        recipient_zip: recipientZip,
+        recipient_city: recipientCity,
+        move_in: moveIn || null,
+        move_out: moveOut || null,
+        persons: persons || 1,
+        positions: buildPositionsForSave(),
+        net_amount: totalNet,
+        vat_amount: smallBusiness ? 0 : totalVat,
+        gross_amount: totalGross,
+        status: isEdit ? invoiceStatus : INVOICE_STATUS.DRAFT
+    });
+
+    const missingFields = useMemo(() => {
+        if (loading || readOnly) return [];
+        return getInvoiceMissingFields(buildInvoiceFromState(), senderPortfolio)
+            .filter(f => isEdit || f !== 'Rechnungsnummer'); // bei Neuanlage wird die Nummer beim Speichern vergeben
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loading, readOnly, senderPortfolio, senderName, senderStreet, senderZip, senderCity, recipientName, recipientStreet, recipientZip, recipientCity, invoiceNumber, invoiceDate, moveIn, moveOut, isEdit]);
 
     // ===== CONTACTS =====
     const filteredContacts = useMemo(() => {
@@ -384,574 +520,166 @@ const InvoiceForm = () => {
     };
 
     const saveAsContact = async () => {
-        if (!recipientName.trim()) return alert('Bitte Name eingeben.');
+        const name = recipientName.trim();
+        if (!name) return alert('Bitte Name eingeben.');
         try {
-            const payload = {
-                user_id: user.id,
-                name: recipientName,
-                contact_type: 'guest',
+            const fields = {
+                name,
                 street: recipientStreet,
                 zip: recipientZip,
                 city: recipientCity
             };
 
-            const { data: existingByName } = await supabase
+            // Nur eigene Gast-Kontakte zählen als Dublette (Mieter/Handwerker gleichen Namens bleiben unberührt)
+            const { data: existingByName, error: findError } = await supabase
                 .from('contacts')
                 .select('id, name')
-                .eq('name', recipientName.trim())
+                .eq('user_id', user.id)
+                .eq('contact_type', 'guest')
+                .eq('name', name)
                 .limit(1);
+            if (findError) throw findError;
 
-            let targetId = recipientContactId;
-            let isNew = !recipientContactId;
+            const picked = contacts.find(c => c.id === recipientContactId);
+            let targetId = (picked && picked.user_id === user.id && picked.contact_type === 'guest') ? picked.id : null;
 
-            if (existingByName && existingByName.length > 0) {
+            if (existingByName && existingByName.length > 0 && existingByName[0].id !== targetId) {
+                if (!window.confirm(`Ein Gast-Kontakt mit dem Namen "${name}" existiert bereits. Möchten Sie diesen mit der eingegebenen Adresse aktualisieren?`)) return;
                 targetId = existingByName[0].id;
-                isNew = false;
-                if (!recipientContactId || recipientContactId !== targetId) {
-                    if (!confirm(`Ein Kontakt mit dem Namen "${recipientName}" existiert bereits. Möchten Sie diesen aktualisieren?`)) return;
-                }
             }
 
-            if (!isNew && targetId) {
-                const { error } = await supabase.from('contacts').update(payload).eq('id', targetId);
+            if (targetId) {
+                // Kontakt-Typ und Besitzer werden beim Aktualisieren nicht verändert
+                const { data, error } = await supabase.from('contacts').update(fields).eq('id', targetId).select('id');
                 if (error) throw error;
+                if (!data || data.length === 0) throw new Error('Der Kontakt konnte nicht aktualisiert werden (keine Berechtigung).');
                 setRecipientContactId(targetId);
                 alert('Kontakt aktualisiert!');
             } else {
-                const { data, error } = await supabase.from('contacts').insert([payload]).select().single();
+                const { data, error } = await supabase
+                    .from('contacts')
+                    .insert([{ ...fields, user_id: user.id, contact_type: 'guest' }])
+                    .select()
+                    .single();
                 if (error) throw error;
                 if (data) setRecipientContactId(data.id);
-                alert('Kontakt neu angelegt!');
+                alert(picked ? 'Neuer Gast-Kontakt angelegt (der ausgewählte Kontakt bleibt unverändert).' : 'Kontakt neu angelegt!');
             }
-            const { data: refreshed } = await supabase.from('contacts').select('*').order('name');
-            setContacts(refreshed || []);
+            const { data: refreshed, error: refreshError } = await supabase.from('contacts').select('*').order('name');
+            if (!refreshError) setContacts(refreshed || []);
         } catch (err) {
             console.error('Error saving contact:', err);
             alert('Fehler: ' + (err.message || err));
         }
     };
 
-    const generateInvoiceHTML = (invoiceData) => {
-        // Construct Sender Data from invoice (which might have portfolio info injected) or fallback
-        // Ideally, we should receive the portfolio object, but we might only have IDs.
-        // Let's try to find the portfolio from state if possible.
-        let portfolio = null;
-        if (invoiceData.portfolio_id) {
-            portfolio = portfolios.find(p => p.id === invoiceData.portfolio_id);
-        } else if (senderPortfolioId) {
-            portfolio = portfolios.find(p => p.id === senderPortfolioId);
+    // ===== KLEINUNTERNEHMER ALS PORTFOLIO-STANDARD =====
+    const canSavePortfolioFlag = !readOnly
+        && hasSmallBusinessColumn(senderPortfolio)
+        && senderPortfolio?.user_id === user?.id
+        && isSmallBusinessPortfolio(senderPortfolio) !== smallBusiness;
+
+    const savePortfolioFlag = async () => {
+        if (!senderPortfolio) return;
+        setSavingPortfolioFlag(true);
+        try {
+            const { data, error } = await supabase
+                .from('portfolios')
+                .update({ is_small_business: smallBusiness })
+                .eq('id', senderPortfolio.id)
+                .select('id');
+            if (error) throw error;
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, das Portfolio zu ändern.');
+            setPortfolios(prev => prev.map(p => (p.id === senderPortfolio.id ? { ...p, is_small_business: smallBusiness } : p)));
+        } catch (err) {
+            alert('Fehler: ' + (err.message || err));
+        } finally {
+            setSavingPortfolioFlag(false);
         }
-
-        const sender = {
-            name: invoiceData.sender_name || portfolio?.company_name || portfolio?.name || "ImmoControl pro 360",
-            street: invoiceData.sender_street || portfolio?.street ? `${portfolio?.street} ${portfolio?.house_number || ''}` : "Musterstraße 1",
-            city: invoiceData.sender_city || portfolio?.zip ? `${portfolio?.zip} ${portfolio?.city}` : "12345 Musterstadt",
-            email: portfolio?.email || "info@immocontrol.de",
-            phone: portfolio?.phone || "01234 / 567890",
-            bank: portfolio?.bank_name || "Musterbank",
-            iban: portfolio?.iban || "DE12 3456 7890 1234 5678 90",
-            bic: portfolio?.bic || "MUSDEFF"
-        };
-
-        const senderLine = `${sender.name} • ${sender.street} • ${sender.city}`;
-
-        const inv = invoiceData || {};
-
-        const posRows = (inv.positions || []).map(p => `
-            <tr>
-                <td style="text-align:center;padding:6px 0;vertical-align:top;">${p.pos}</td>
-                <td style="text-align:left;padding:6px 10px;word-wrap:break-word;vertical-align:top;">${(p.description || '').replace(/\n/g, '<br>')}</td>
-                <td style="text-align:right;padding:6px 0;white-space:nowrap;vertical-align:top;">${p.isFirst ? fmt(p.pricePerNight) + ' €' : ''}</td>
-                <td style="text-align:right;padding:6px 0;white-space:nowrap;vertical-align:top;">${fmt(p.netTotal)} €</td>
-                <td style="text-align:right;padding:6px 0;vertical-align:top;">7%</td>
-                <td style="text-align:right;padding:6px 0;font-weight:bold;white-space:nowrap;vertical-align:top;">${fmt(p.grossTotal)} €</td>
-            </tr>
-        `).join('');
-
-        const fmtDate = (d) => d ? new Date(d).toLocaleDateString('de-DE') : '–';
-
-        return `<!DOCTYPE html>
-        <html lang="de">
-        <head>
-            <meta charset="UTF-8">
-            <title>Rechnung ${inv.invoice_number}</title>
-            <style>
-                @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
-                
-                @page { 
-                    size: A4; 
-                    margin: 0; 
-                }
-                
-                body { 
-                    margin: 0; 
-                    padding: 0; 
-                    font-family: 'Open Sans', Arial, sans-serif; 
-                    font-size: 10pt; 
-                    color: #000; 
-                    background: #fff;
-                    -webkit-print-color-adjust: exact; 
-                }
-                
-                * { box-sizing: border-box; }
-                
-                .page-container {
-                    width: 210mm;
-                    height: 296mm; 
-                    position: relative;
-                    margin: 0 auto;
-                    background: white;
-                    overflow: hidden;
-                }
-
-                /* DIN 5008 Form B Marks */
-                .mark { position: absolute; left: 0; width: 5mm; height: 1px; background: #000; }
-                .mark.fold-1 { top: 105mm; } 
-                .mark.fold-2 { top: 210mm; } 
-                .mark.center { top: 148.5mm; width: 10mm; } 
-                
-                /* Address Zone: 45mm from top */
-                .address-zone {
-                    position: absolute;
-                    top: 45mm;
-                    left: 20mm;
-                    width: 85mm;
-                    height: 45mm;
-                }
-                
-                .sender-line {
-                    font-size: 7pt;
-                    text-decoration: underline;
-                    margin-bottom: 2mm;
-                    color: #555;
-                }
-                
-                .recipient {
-                    font-size: 11pt;
-                    line-height: 1.4;
-                }
-
-                /* Info Block */
-                .info-block {
-                    position: absolute;
-                    top: 45mm; 
-                    left: 125mm;
-                    right: 20mm;
-                    font-size: 10pt;
-                }
-                
-                .info-row {
-                    display: flex;
-                    justify-content: space-between;
-                    margin-bottom: 3px;
-                }
-                .info-row span:first-child { color: #555; }
-                .info-row span:last-child { font-weight: 600; }
-
-                /* Content Area */
-                .content {
-                    position: absolute;
-                    top: 98mm; 
-                    left: 25mm; 
-                    right: 20mm;
-                }
-                
-                .doc-title {
-                    font-size: 18pt;
-                    font-weight: 700;
-                    margin-bottom: 8mm;
-                }
-                
-                .intro-text {
-                    margin-bottom: 8mm;
-                    line-height: 1.4;
-                }
-                
-                /* Table Styles */
-                table { width: 100%; border-collapse: collapse; margin-bottom: 8mm; }
-                thead th { border-bottom: 2px solid #000; text-align: left; padding: 8px 0; font-weight: 700; }
-                tbody tr { border-bottom: 1px solid #ddd; }
-                tbody td { padding: 8px 0; }
-
-                /* Totals */
-                .totals {
-                    display: flex;
-                    justify-content: flex-end;
-                    margin-bottom: 20mm;
-                }
-                .totals-box { width: 80mm; }
-                .t-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
-                .t-row.final { 
-                    border-top: 2px solid #000; 
-                    padding-top: 4px; 
-                    margin-top: 4px; 
-                    font-weight: 700; 
-                    font-size: 11pt; 
-                }
-
-                /* Footer */
-                .footer {
-                    position: absolute;
-                    bottom: 15mm;
-                    left: 25mm;
-                    right: 20mm;
-                    border-top: 1px solid #ccc;
-                    padding-top: 3mm;
-                    font-size: 7.5pt;
-                    display: grid;
-                    grid-template-columns: repeat(3, 1fr);
-                    gap: 10px;
-                    color: #444;
-                }
-                .f-col h4 { margin: 0 0 2px 0; color: #000; font-size: 8pt; }
-                .f-col p { margin: 0; line-height: 1.25; }
-
-                @media print {
-                    body, .page-container { margin: 0; box-shadow: none; }
-                }
-            </style>
-        </head>
-        <body>
-            <div class="page-container">
-                <!-- Folding Marks -->
-                <div class="mark fold-1"></div>
-                <div class="mark center"></div>
-                <div class="mark fold-2"></div>
-
-                <!-- Address -->
-                <div class="address-zone">
-                    <div class="sender-line">${senderLine}</div>
-                    <div class="recipient">
-                        ${inv.recipient_name}<br>
-                        ${inv.recipient_street}<br>
-                        ${inv.recipient_zip} ${inv.recipient_city}
-                    </div>
-                </div>
-
-                <!-- Info Block -->
-                <div class="info-block">
-                    <div class="info-row"><span>Rechnungs-Nr.</span><span>${inv.invoice_number}</span></div>
-                    <div class="info-row"><span>Datum</span><span>${fmtDate(inv.invoice_date)}</span></div>
-                    <div class="info-row"><span>Leistungszeitraum</span><span>${inv.move_in ? fmtDate(inv.move_in) : '-'}</span></div>
-                    <div class="info-row"><span>bis</span><span>${inv.move_out ? fmtDate(inv.move_out) : '-'}</span></div>
-                    <br>
-                    <div class="info-row"><span>Anzahl Gäste</span><span>${inv.persons}</span></div>
-                </div>
-
-                <!-- Main Content -->
-                <div class="content">
-                    <div class="doc-title">Rechnung</div>
-                    <div class="intro-text">
-                        Sehr geehrte Damen und Herren,<br><br>
-                        vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen folgende Leistungen:
-                    </div>
-
-                    <table>
-                        <thead>
-                            <tr>
-                                <th style="width: 8%; text-align: center;">Pos.</th>
-                                <th style="width: 42%;">Bezeichnung</th>
-                                <th style="width: 15%; text-align: right;">Einzelpreis</th>
-                                <th style="width: 15%; text-align: right;">Netto</th>
-                                <th style="width: 5%; text-align: right;">MwSt</th>
-                                <th style="width: 15%; text-align: right;">Brutto</th>
-                            </tr>
-                        </thead>
-                        <tbody>${posRows}</tbody>
-                    </table>
-
-                    <div class="totals">
-                        <div class="totals-box">
-                            <div class="t-row"><span>Summe Netto</span><span>${fmt(inv.net_amount)} €</span></div>
-                            <div class="t-row"><span>zzgl. 7% MwSt</span><span>${fmt(inv.vat_amount)} €</span></div>
-                            <div class="t-row final"><span>Gesamtbetrag</span><span>${fmt(inv.gross_amount)} €</span></div>
-                        </div>
-                    </div>
-
-                    <div class="intro-text">
-                        Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.<br>
-                    </div>
-                </div>
-
-                <!-- Footer -->
-                <div class="footer">
-                    <div class="f-col">
-                        <h4>Anschrift</h4>
-                        <p>${sender.name}<br>${sender.street}<br>${sender.city}</p>
-                    </div>
-                    <div class="f-col">
-                        <h4>Kontakt</h4>
-                        <p>Tel: ${sender.phone}<br>Email: ${sender.email}</p>
-                    </div>
-                    <div class="f-col">
-                        <h4>Bankverbindung</h4>
-                        <p>${sender.bank}<br>IBAN: ${sender.iban}<br>BIC: ${sender.bic}</p>
-                    </div>
-                </div>
-            </div>
-        </body>
-        </html>`;
     };
 
+    // ===== PRINT / PDF =====
     const handlePrint = (data) => {
-        // Vorlagenbasierte Ausgabe über das gemeinsame Rechnungs-Modul (Schreibvorlage fewo_invoice/_credit_note).
-        printInvoice({ ...data, portfolio_id: data.portfolio_id || senderPortfolioId }, { user, portfolios });
+        if (!data) return;
+        // Vorlagenbasierte Ausgabe über das gemeinsame Rechnungs-Modul; das Fenster öffnet synchron im Klick.
+        printInvoice({ ...data, portfolio_id: data.portfolio_id || senderPortfolioId }, { user, portfolios })
+            .catch(err => {
+                console.error(err);
+                alert('Druck-Fehler: ' + (err.message || err));
+            });
     };
 
-    // ===== PDF (Client-Side Vector Drawing) =====
     const handlePDF = async (data) => {
-        // Vorlagenbasierte Ausgabe über das gemeinsame Rechnungs-Modul (ersetzt das alte manuelle jsPDF-Layout).
+        if (!data) return;
         setPdfGenerating(true);
         try {
             await downloadInvoicePdf({ ...data, portfolio_id: data.portfolio_id || senderPortfolioId }, { user, portfolios });
         } catch (error) {
             console.error(error);
-            alert('PDF Fehler: ' + error.message);
-        } finally {
-            setPdfGenerating(false);
-        }
-        return;
-        // --- Alt (deaktiviert, unreachable): manuelles jsPDF-Vektor-Layout ---
-        // eslint-disable-next-line no-unreachable
-        try {
-            // Lazy load jsPDF to avoid large bundle size
-            if (!window.jspdf) {
-                await new Promise((resolve) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
-                    script.onload = resolve;
-                    document.head.appendChild(script);
-                });
-            }
-
-            const { jsPDF } = window.jspdf;
-            const doc = new jsPDF({
-                orientation: 'portrait',
-                unit: 'mm',
-                format: 'a4'
-            });
-
-            // --- DATA PREPARATION ---
-            // Construct Sender Data
-            let portfolio = null;
-            if (data.portfolio_id) {
-                portfolio = portfolios.find(p => p.id === data.portfolio_id);
-            } else if (senderPortfolioId) {
-                portfolio = portfolios.find(p => p.id === senderPortfolioId);
-            }
-
-            const sender = {
-                name: data.sender_name || portfolio?.company_name || portfolio?.name || "ImmoControl pro 360",
-                street: data.sender_street || portfolio?.street ? (portfolio?.street + (portfolio?.house_number ? ' ' + portfolio.house_number : '')) : "Musterstraße 1",
-                city: data.sender_city || portfolio?.zip ? `${portfolio?.zip} ${portfolio?.city}` : "12345 Musterstadt",
-                email: portfolio?.email || "info@immocontrol.de",
-                phone: portfolio?.phone || "01234 / 567890",
-                bank: portfolio?.bank_name || "Musterbank",
-                iban: portfolio?.iban || "DE12 3456 7890 1234 5678 90",
-                bic: portfolio?.bic || "MUSDEFF"
-            };
-
-            const inv = data || {};
-            const recipientName = inv.recipient_name || (inv.tenant?.name || 'Unbekannt');
-            const recipientAddress = inv.recipient_street ? `${inv.recipient_street}\n${inv.recipient_zip} ${inv.recipient_city}` : (inv.tenant?.address || '');
-
-            const invoiceDate = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : new Date().toLocaleDateString('de-DE');
-            const invoiceNum = inv.invoice_number || 'ENTWURF';
-            // Use move_in / move_out as service period for invoice form
-            const servicePeriod = inv.move_in && inv.move_out
-                ? `${new Date(inv.move_in).toLocaleDateString('de-DE')} - ${new Date(inv.move_out).toLocaleDateString('de-DE')}`
-                : (inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('de-DE') : '');
-
-            // --- FONTS ---
-            doc.setFont("helvetica"); // Standard font
-
-            // --- LAYOUT CONSTANTS (DIN 5008 Form B) ---
-            const leftMargin = 25;
-            const rightMargin = 20;
-            // const contentWidth = 210 - leftMargin - rightMargin;
-            let y = 0;
-
-            // 1. Sender Line (Small) - 45mm from top
-            y = 45;
-            doc.setFontSize(8);
-            doc.setTextColor(100);
-            doc.text(`${sender.name} • ${sender.street} • ${sender.city}`, leftMargin, y);
-
-            // 2. Recipient Address - 50mm from top 
-            y = 55;
-            doc.setFontSize(11);
-            doc.setTextColor(0);
-            doc.text(recipientName, leftMargin, y);
-            y += 6;
-            if (recipientAddress) {
-                const addrLines = doc.splitTextToSize(recipientAddress.replace(/<br>/g, '\n'), 85);
-                doc.text(addrLines, leftMargin, y);
-            }
-
-            // 3. Info Block (Date, Number) - Right side
-            const infoX = 125;
-            let infoY = 50;
-            doc.setFontSize(10);
-
-            const addInfoRow = (label, value) => {
-                doc.text(label, infoX, infoY);
-                doc.text(value, infoX + 60, infoY, { align: 'right' });
-                infoY += 5;
-            };
-
-            addInfoRow("Rechnungsnummer:", invoiceNum);
-            addInfoRow("Rechnungsdatum:", invoiceDate);
-            addInfoRow("Leistungszeitraum:", servicePeriod);
-            addInfoRow("Anzahl Gäste:", `${inv.persons || 1}`);
-            if (inv.customer_id) addInfoRow("Kundennummer:", inv.customer_id);
-
-            // 4. Headline - 98.4mm from top (Subject line)
-            y = 105;
-            doc.setFontSize(14);
-            doc.setFont("helvetica", "bold");
-            doc.text(`Rechnung Nr. ${invoiceNum}`, leftMargin, y);
-
-            // Intro Text
-            y += 10;
-            doc.setFontSize(11);
-            doc.setFont("helvetica", "normal");
-            doc.text("Sehr geehrte Damen und Herren,", leftMargin, y);
-            y += 6;
-            doc.text("vielen Dank für Ihren Aufenthalt. Wir berechnen Ihnen folgende Leistungen:", leftMargin, y);
-            y += 15;
-
-            // 5. Item Table
-            // Header
-            const col1 = leftMargin; // Pos
-            const col2 = leftMargin + 12; // Description
-            const col3 = 140; // Price per Night (Einzelpreis)
-            const col4 = 160; // Net Total
-            const col5 = 175; // VAT
-            const col6 = 190; // Gross Total
-
-            // Draw Header Line
-            doc.setDrawColor(0);
-            doc.setLineWidth(0.2);
-            doc.line(leftMargin, y, 210 - rightMargin, y); // Top line
-            y += 5;
-
-            doc.setFontSize(10);
-            doc.setFont("helvetica", "bold");
-            doc.text("Pos.", col1, y);
-            doc.text("Bezeichnung", col2, y);
-            doc.text("Einzel", col3, y, { align: 'right' });
-            doc.text("Netto", col4, y, { align: 'right' });
-            doc.text("MwSt", col5, y, { align: 'right' });
-            doc.text("Brutto", col6, y, { align: 'right' });
-
-            y += 2;
-            doc.line(leftMargin, y, 210 - rightMargin, y); // Bottom line
-            y += 6;
-
-            // Items
-            doc.setFont("helvetica", "normal");
-
-            (inv.positions || []).forEach((item) => {
-                // Determine description text
-                const descText = item.description || '';
-                const descLines = doc.splitTextToSize(descText, 85);
-                const lineHeight = descLines.length * 5;
-
-                // Check page break
-                if (y + lineHeight > 240) {
-                    doc.addPage();
-                    y = 30;
-                    // Reprint header? Usually yes, but simple version for now
-                }
-
-                doc.text(`${item.pos}`, col1, y);
-                doc.text(descLines, col2, y);
-                doc.text(item.isFirst ? fmt(item.pricePerNight) + ' €' : '', col3, y, { align: 'right' });
-                doc.text(fmt(item.netTotal) + " €", col4, y, { align: 'right' });
-                doc.text("7%", col5, y, { align: 'right' });
-                doc.text(fmt(item.grossTotal) + " €", col6, y, { align: 'right' });
-
-                y += Math.max(6, lineHeight + 2);
-            });
-
-            // 6. Totals
-            y += 5;
-
-            // Totals Box
-            const totalsX = 140; // Start X for totals labels
-            const totalsValX = 190; // End X for values
-
-            // Net
-            doc.text("Summe Netto:", totalsX, y);
-            doc.text(fmt(inv.net_amount || totalNet) + " €", totalsValX, y, { align: 'right' });
-            y += 5;
-
-            // VAT
-            doc.text("zzgl. 7% MwSt:", totalsX, y);
-            doc.text(fmt(inv.vat_amount || totalVat) + " €", totalsValX, y, { align: 'right' });
-            y += 2;
-
-            // Double Line / Bold Total
-            doc.line(totalsX, y, 210 - rightMargin, y);
-            y += 6;
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(11);
-            doc.text("Gesamtbetrag:", totalsX, y);
-            doc.text(fmt(inv.gross_amount || totalGross) + " €", totalsValX, y, { align: 'right' });
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(10);
-
-            // 7. Footer Instructions
-            y += 20;
-            if (y > 250) { doc.addPage(); y = 30; }
-
-            doc.text("Bitte überweisen Sie den Gesamtbetrag sofort und ohne Abzug auf das unten genannte Konto.", leftMargin, y);
-
-            // 8. Bottom Footer (Bank Details) - Fixed at bottom
-            const footerY = 275;
-            doc.setFontSize(8);
-            doc.setTextColor(50);
-
-            // Column 1: Address
-            doc.text("Anschrift", 25, footerY);
-            doc.text(`${sender.name}`, 25, footerY + 4);
-            doc.text(`${sender.street}`, 25, footerY + 8);
-            doc.text(`${sender.city}`, 25, footerY + 12);
-
-            // Column 2: Contact
-            doc.text("Kontakt", 85, footerY);
-            doc.text(`Tel: ${sender.phone}`, 85, footerY + 4);
-            doc.text(`Email: ${sender.email}`, 85, footerY + 8);
-
-            // Column 3: Bank
-            doc.text("Bankverbindung", 145, footerY);
-            doc.text(`${sender.bank}`, 145, footerY + 4);
-            doc.text(`IBAN: ${sender.iban}`, 145, footerY + 8);
-            doc.text(`BIC: ${sender.bic}`, 145, footerY + 12);
-
-            // Save
-            doc.save(`${invoiceNum}.pdf`);
-
-        } catch (error) {
-            console.error(error);
-            alert('PDF Fehler: ' + error.message);
+            alert('PDF-Fehler: ' + (error.message || error));
         } finally {
             setPdfGenerating(false);
         }
     };
 
+    // Entwurfsvorschau des aktuellen (auch ungespeicherten) Formularstands – mit Vermerk „ENTWURF"
+    const handlePreview = () => handlePrint({ ...buildInvoiceFromState(), status: INVOICE_STATUS.DRAFT });
+
+    // ===== AUSSTELLEN =====
+    const handleIssue = async () => {
+        if (!savedInvoice) return;
+        const missing = getInvoiceMissingFields(savedInvoice, portfolios.find(p => p.id === savedInvoice.portfolio_id));
+        const msg = (missing.length
+            ? `Achtung, es fehlen Angaben:\n- ${missing.join('\n- ')}\n\nFehlende Angaben werden im Dokument rot markiert.\n\n`
+            : '')
+            + 'Mit dem Ausstellen wird die Rechnung festgeschrieben. Danach kann sie nicht mehr bearbeitet werden; Korrekturen sind nur noch über eine Gutschrift möglich. Jetzt ausstellen?';
+        if (!window.confirm(msg)) return;
+        setIssuing(true);
+        try {
+            const updated = await issueInvoice(savedInvoice.id);
+            setSavedInvoice(updated);
+        } catch (err) {
+            alert('Fehler: ' + (err.message || err));
+        } finally {
+            setIssuing(false);
+        }
+    };
+
+    // ===== VALIDATION =====
+    const validate = () => {
+        const errors = [];
+        if (!senderPortfolioId) errors.push('Bitte eine Ferienwohnung wählen (sie bestimmt Portfolio und Rechnungssteller).');
+        if (!senderName.trim()) errors.push('Absender fehlt.');
+        if (!recipientName.trim()) errors.push('Empfänger fehlt.');
+        if (!invoiceDate || !parseLocalDate(invoiceDate)) errors.push('Rechnungsdatum fehlt.');
+        if (!moveIn || !moveOut) errors.push('Bitte Anreise und Abreise angeben (Leistungszeitraum ist Pflichtangabe).');
+        else if (nights <= 0) errors.push('Die Abreise muss nach der Anreise liegen.');
+        if (positions.length === 0) errors.push('Mindestens eine Position ist erforderlich.');
+        positions.forEach((p, i) => {
+            if (!String(p.description || '').trim()) errors.push(`Position ${i + 1}: Bezeichnung fehlt.`);
+            if (!smallBusiness && (p.vatRate === null || p.vatRate === undefined || p.vatRate === '')) errors.push(`Position ${i + 1}: Bitte einen Steuersatz wählen.`);
+        });
+        if (totalGross <= 0) errors.push('Der Rechnungsbetrag muss größer als 0 € sein.');
+        return errors;
+    };
+
     // ===== SAVE =====
     const handleSave = async () => {
-        if (!senderName.trim()) return alert('Absender fehlt.');
-        if (!recipientName.trim()) return alert('Empfänger fehlt.');
+        if (readOnly) return;
+        const errors = validate();
+        if (errors.length) {
+            alert('Bitte prüfen Sie folgende Angaben:\n- ' + errors.join('\n- '));
+            return;
+        }
         setSaving(true);
         try {
+            const savePositions = buildPositionsForSave();
+            const rates = [...new Set(savePositions.map(p => Number(p.vatRate)))];
             const payload = {
-                user_id: user.id,
-                portfolio_id: senderPortfolioId || null,
+                portfolio_id: senderPortfolioId,
+                property_id: selectedUnit?.property_id || null,
                 contact_id: recipientContactId || null,
                 unit_id: selectedUnitId || null,
-                invoice_number: invoiceNumber,
                 invoice_date: invoiceDate,
                 sender_name: senderName,
                 sender_street: senderStreet,
@@ -963,32 +691,70 @@ const InvoiceForm = () => {
                 recipient_city: recipientCity,
                 move_in: moveIn || null,
                 move_out: moveOut || null,
+                nights: nights || null,
                 persons: persons || 1,
-                positions: positions,
+                positions: savePositions,
+                vat_rate: rates.length === 1 ? rates[0] : null,
                 net_amount: totalNet,
-                vat_amount: totalVat,
-                gross_amount: totalGross,
-                status: 'draft'
+                vat_amount: smallBusiness ? 0 : totalVat,
+                gross_amount: totalGross
             };
 
             let result;
             if (isEdit) {
-                const { data, error } = await supabase.from('invoices').update(payload).eq('id', editId).select().single();
+                // Status, Nummer und Besitzer bleiben unverändert; nur Entwürfe dürfen geändert werden
+                const { data, error } = await supabase
+                    .from('invoices')
+                    .update(payload)
+                    .eq('id', editId)
+                    .eq('status', INVOICE_STATUS.DRAFT)
+                    .select();
                 if (error) throw error;
-                result = data;
+                if (!data || data.length === 0) {
+                    throw new Error('Die Rechnung ist nicht mehr im Entwurf (bereits ausgestellt) oder Sie haben keine Berechtigung. Änderungen wurden nicht gespeichert.');
+                }
+                result = data[0];
+                setLoadedInvoice(result);
             } else {
-                const { data, error } = await supabase.from('invoices').insert([payload]).select().single();
-                if (error) throw error;
-                result = data;
+                // Besitzer ist der Portfolio-Eigentümer (auch wenn ein freigegebenes Teammitglied die Rechnung anlegt)
+                result = await insertInvoiceWithNumber({
+                    ...payload,
+                    user_id: senderPortfolio?.user_id || user.id,
+                    status: INVOICE_STATUS.DRAFT
+                });
+                setInvoiceNumber(result.invoice_number || '');
             }
             setSavedInvoice(result);
             setSuccessModal(true);
         } catch (err) {
-            alert('Fehler: ' + (err.message || 'Schema nicht aktuell. Bitte Datenbank-Migration prüfen.'));
+            alert('Fehler: ' + (err.message || 'Die Rechnung konnte nicht gespeichert werden.'));
         } finally { setSaving(false); }
     };
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>;
+
+    if (loadError) {
+        return (
+            <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: 'var(--spacing-lg)' }}>
+                    <button onClick={() => navigate('/invoices')} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
+                        <ArrowLeft size={20} />
+                    </button>
+                    <h1 style={{ fontSize: '1.875rem', fontWeight: 700 }}>{isEdit ? 'Rechnung' : 'Rechnung erstellen'}</h1>
+                </div>
+                <Card>
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', color: 'var(--danger-color, #dc2626)', marginBottom: '1rem' }}>
+                        <AlertTriangle size={20} style={{ flexShrink: 0 }} />
+                        <div>{loadError}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                        <Button variant="secondary" onClick={() => navigate('/invoices')}>Zur Rechnungsliste</Button>
+                        <Button onClick={() => setReloadKey(k => k + 1)}>Erneut laden</Button>
+                    </div>
+                </Card>
+            </div>
+        );
+    }
 
     // Premium Styles
     const selectStyle = {
@@ -1018,6 +784,20 @@ const InvoiceForm = () => {
         marginBottom: '1rem'
     };
 
+    const noticeStyle = (tone) => ({
+        display: 'flex', gap: '10px', alignItems: 'flex-start',
+        padding: '12px 14px', borderRadius: 'var(--radius-md)', fontSize: '0.875rem',
+        marginBottom: 'var(--spacing-lg)',
+        background: tone === 'warn' ? 'rgba(245,158,11,0.08)' : 'rgba(14,165,233,0.06)',
+        border: `1px solid ${tone === 'warn' ? 'rgba(245,158,11,0.3)' : 'rgba(14,165,233,0.25)'}`,
+        color: tone === 'warn' ? '#92400e' : 'var(--text-primary)'
+    });
+
+    const savedStatus = savedInvoice ? getInvoiceStatus(savedInvoice) : null;
+    const headerSubtitle = isEdit
+        ? `Rechnungs-Nr. ${invoiceNumber || '–'} · ${INVOICE_STATUS_LABELS[invoiceStatus] || invoiceStatus}`
+        : 'Neue Rechnung – die fortlaufende Nummer wird beim Speichern vergeben';
+
     return (
         <div style={{ position: 'relative' }}>
             {saving && <LoadingOverlay message="Rechnung wird gespeichert..." />}
@@ -1030,225 +810,345 @@ const InvoiceForm = () => {
                 </button>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>
-                        {isEdit ? 'Rechnung bearbeiten' : 'Rechnung erstellen'}
+                        {!isEdit ? 'Rechnung erstellen' : (readOnly ? (invoiceStatus === INVOICE_STATUS.CREDIT_NOTE ? 'Gutschrift ansehen' : 'Rechnung ansehen') : 'Rechnung bearbeiten')}
                     </h1>
-                    <p style={{ color: 'var(--text-secondary)' }}>
-                        {isEdit ? `Rechnungs - Nr.${invoiceNumber} ` : 'Neue Rechnung mit automatischer Nummernvergabe'}
-                    </p>
+                    <p style={{ color: 'var(--text-secondary)' }}>{headerSubtitle}</p>
                 </div>
             </div>
 
-            {/* Main Layout */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-lg)', marginBottom: 'var(--spacing-lg)' }}>
-                {/* LEFT: Sender */}
-                <Card>
-                    <div style={sectionTitle}>Rechnungssteller</div>
-                    <Input label="Name" value={senderName} onChange={e => setSenderName(e.target.value)} placeholder="Max Mustermann" />
-                    <Input label="Straße & Nr." value={senderStreet} onChange={e => setSenderStreet(e.target.value)} placeholder="Musterstraße 1" />
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 'var(--spacing-md)' }}>
-                        <Input label="PLZ" value={senderZip} onChange={e => setSenderZip(e.target.value)} placeholder="12345" />
-                        <Input label="Ort" value={senderCity} onChange={e => setSenderCity(e.target.value)} placeholder="Musterstadt" />
-                    </div>
-                </Card>
-
-                {/* RIGHT: Date / Number / Unit */}
-                <Card>
-                    <div style={sectionTitle}>Rechnungsdetails</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                        <Input label="Rechnungsdatum" type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} />
-                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                            <label style={labelStyle}>Rechnungsnummer</label>
-                            <input
-                                type="text"
-                                value={invoiceNumber}
-                                readOnly
-                                style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', color: '#6b7280' }}
-                            />
+            {readOnly && (
+                <div style={noticeStyle('info')}>
+                    <Lock size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                            {invoiceStatus === INVOICE_STATUS.CREDIT_NOTE ? 'Gutschrift – festgeschrieben' : `Diese Rechnung ist ${invoiceStatus === INVOICE_STATUS.CREDITED ? 'storniert' : 'ausgestellt'} und festgeschrieben.`}
                         </div>
-                    </div>
-                    <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                        <label style={labelStyle}>Ferienwohnung</label>
-                        <select style={selectStyle} value={selectedUnitId} onChange={e => setSelectedUnitId(e.target.value)}>
-                            <option value="">– Bitte wählen –</option>
-                            {vacationUnits.map(u => {
-                                const prop = properties.find(p => p.id === u.property_id);
-                                const addr = prop ? `${prop.street} ${prop.house_number || ''}, ${prop.zip} ${prop.city} ` : '';
-                                return <option key={u.id} value={u.id}>{u.unit_name} – {addr}</option>;
-                            })}
-                        </select>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--spacing-md)' }}>
-                        <Input label="Einzug" type="date" value={moveIn} onChange={e => setMoveIn(e.target.value)} />
-                        <Input label="Auszug" type="date" value={moveOut} onChange={e => setMoveOut(e.target.value)} />
-                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                            <label style={labelStyle}>Nächte</label>
-                            <input type="text" value={nights} readOnly style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', textAlign: 'center', fontWeight: 600 }} />
+                        <div>
+                            Ausgestellte Belege können nicht mehr geändert werden.
+                            {invoiceStatus === INVOICE_STATUS.ISSUED && ' Korrekturen erfolgen über „Gutschrift / Storno erstellen" in der Rechnungsliste; danach kann eine neue Rechnung erstellt werden.'}
                         </div>
-                    </div>
-                    <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                        <label style={labelStyle}>Anzahl Personen</label>
-                        <select style={selectStyle} value={persons} onChange={e => setPersons(parseInt(e.target.value))}>
-                            {Array.from({ length: 12 }, (_, i) => i + 1).map(n => (
-                                <option key={n} value={n}>{n}</option>
-                            ))}
-                        </select>
-                    </div>
-                </Card>
-            </div>
-
-            {/* Recipient */}
-            <Card style={{ marginBottom: 'var(--spacing-lg)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                    <div style={sectionTitle}>Rechnungsempfänger</div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                        <Button variant="secondary" size="sm" icon={Search} onClick={() => setContactPickerOpen(true)}>Aus Kontakten</Button>
-                        <Button variant="secondary" size="sm" icon={UserPlus} onClick={saveAsContact}>Als Kontakt speichern</Button>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                            <Button variant="secondary" size="sm" icon={Printer} onClick={() => handlePrint(loadedInvoice)}>Drucken</Button>
+                            <Button variant="secondary" size="sm" icon={Download} onClick={() => handlePDF(loadedInvoice)}>PDF</Button>
+                        </div>
                     </div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-lg)' }}>
+            )}
+
+            {!readOnly && missingFields.length > 0 && (
+                <div style={noticeStyle('warn')}>
+                    <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: 2 }} />
                     <div>
-                        <Input label="Name / Firma" value={recipientName} onChange={e => setRecipientName(e.target.value)} placeholder="Name des Empfängers" />
-                        <Input label="Straße & Nr." value={recipientStreet} onChange={e => setRecipientStreet(e.target.value)} placeholder="Straße" />
+                        <div style={{ fontWeight: 600, marginBottom: 4 }}>Für eine ordnungsgemäße Rechnung (§ 14 UStG) fehlen noch Angaben:</div>
+                        <ul style={{ margin: '0 0 0 1.1rem', padding: 0 }}>
+                            {missingFields.map(f => <li key={f}>{f}</li>)}
+                        </ul>
+                        <div style={{ marginTop: 4, fontSize: '0.8rem' }}>Fehlende Angaben werden im Dokument rot markiert. Daten des Portfolios (Steuernummer, Bankverbindung) pflegen Sie in den Portfolio-Einstellungen.</div>
                     </div>
-                    <div>
+                </div>
+            )}
+
+            <fieldset disabled={readOnly} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+                {/* Main Layout */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-lg)', marginBottom: 'var(--spacing-lg)' }}>
+                    {/* LEFT: Sender */}
+                    <Card>
+                        <div style={sectionTitle}>Rechnungssteller</div>
+                        <Input label="Name" value={senderName} onChange={e => setSenderName(e.target.value)} placeholder="Name oder Firma" />
+                        <Input label="Straße & Nr." value={senderStreet} onChange={e => setSenderStreet(e.target.value)} placeholder="Straße und Hausnummer" />
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 'var(--spacing-md)' }}>
-                            <Input label="PLZ" value={recipientZip} onChange={e => setRecipientZip(e.target.value)} placeholder="PLZ" />
-                            <Input label="Ort" value={recipientCity} onChange={e => setRecipientCity(e.target.value)} placeholder="Ort" />
+                            <Input label="PLZ" value={senderZip} onChange={e => setSenderZip(e.target.value)} placeholder="PLZ" />
+                            <Input label="Ort" value={senderCity} onChange={e => setSenderCity(e.target.value)} placeholder="Ort" />
+                        </div>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.875rem', cursor: readOnly ? 'default' : 'pointer', marginTop: '4px' }}>
+                            <input
+                                type="checkbox"
+                                checked={smallBusiness}
+                                onChange={e => applySmallBusiness(e.target.checked)}
+                                style={{ marginTop: 3 }}
+                            />
+                            <span>
+                                Kleinunternehmer nach § 19 UStG (keine Umsatzsteuer ausweisen)
+                                {smallBusiness && <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Hinweis im Dokument: „{SMALL_BUSINESS_NOTE}"</span>}
+                            </span>
+                        </label>
+                        {canSavePortfolioFlag && (
+                            <button
+                                type="button"
+                                onClick={savePortfolioFlag}
+                                disabled={savingPortfolioFlag}
+                                style={{ marginTop: '6px', background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--primary-color)', fontSize: '0.8rem', textDecoration: 'underline' }}
+                            >
+                                {savingPortfolioFlag ? 'Wird gespeichert…' : 'Als Standard für dieses Portfolio speichern'}
+                            </button>
+                        )}
+                    </Card>
+
+                    {/* RIGHT: Date / Number / Unit */}
+                    <Card>
+                        <div style={sectionTitle}>Rechnungsdetails</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
+                            <Input label="Rechnungsdatum" type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} />
+                            <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                                <label style={labelStyle}>{isEdit ? 'Rechnungsnummer' : 'Rechnungsnummer (vorläufig)'}</label>
+                                <input
+                                    type="text"
+                                    value={invoiceNumber}
+                                    readOnly
+                                    placeholder={isEdit ? '' : 'wird beim Speichern vergeben'}
+                                    style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', color: '#6b7280' }}
+                                />
+                                {numberError && !isEdit && <div style={{ fontSize: '0.75rem', color: '#b45309', marginTop: 4 }}>{numberError}</div>}
+                            </div>
+                        </div>
+                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                            <label style={labelStyle}>Ferienwohnung</label>
+                            <select style={selectStyle} value={selectedUnitId} onChange={e => { touchStay(); setSelectedUnitId(e.target.value); }}>
+                                <option value="">– Bitte wählen –</option>
+                                {vacationUnits.map(u => {
+                                    const prop = properties.find(p => p.id === u.property_id);
+                                    const addr = prop ? `${prop.street} ${prop.house_number || ''}, ${prop.zip || ''} ${prop.city || ''} ` : '';
+                                    return <option key={u.id} value={u.id}>{u.unit_name} – {addr}</option>;
+                                })}
+                                {isEdit && selectedUnitId && !vacationUnits.find(u => u.id === selectedUnitId) && selectedUnit && (
+                                    <option value={selectedUnitId}>{selectedUnit.unit_name}</option>
+                                )}
+                            </select>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--spacing-md)' }}>
+                            <Input label="Anreise" type="date" value={moveIn} onChange={e => { touchStay(); setMoveIn(e.target.value); }} />
+                            <Input label="Abreise" type="date" value={moveOut} onChange={e => { touchStay(); setMoveOut(e.target.value); }} />
+                            <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                                <label style={labelStyle}>Nächte</label>
+                                <input type="text" value={nights} readOnly style={{ ...selectStyle, backgroundColor: 'var(--background-color)', cursor: 'not-allowed', textAlign: 'center', fontWeight: 600 }} />
+                            </div>
+                        </div>
+                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                            <label style={labelStyle}>Anzahl Personen</label>
+                            <select style={selectStyle} value={persons} onChange={e => { touchStay(); setPersons(parseInt(e.target.value, 10)); }}>
+                                {Array.from({ length: 12 }, (_, i) => i + 1).map(n => (
+                                    <option key={n} value={n}>{n}</option>
+                                ))}
+                            </select>
+                        </div>
+                    </Card>
+                </div>
+
+                {/* Recipient */}
+                <Card style={{ marginBottom: 'var(--spacing-lg)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                        <div style={sectionTitle}>Rechnungsempfänger</div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <Button variant="secondary" size="sm" icon={Search} onClick={() => setContactPickerOpen(true)}>Aus Kontakten</Button>
+                            <Button variant="secondary" size="sm" icon={UserPlus} onClick={saveAsContact}>Als Kontakt speichern</Button>
                         </div>
                     </div>
-                </div>
-            </Card>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-lg)' }}>
+                        <div>
+                            <Input label="Name / Firma" value={recipientName} onChange={e => setRecipientName(e.target.value)} placeholder="Name des Empfängers" />
+                            <Input label="Straße & Nr." value={recipientStreet} onChange={e => setRecipientStreet(e.target.value)} placeholder="Straße" />
+                        </div>
+                        <div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 'var(--spacing-md)' }}>
+                                <Input label="PLZ" value={recipientZip} onChange={e => setRecipientZip(e.target.value)} placeholder="PLZ" />
+                                <Input label="Ort" value={recipientCity} onChange={e => setRecipientCity(e.target.value)} placeholder="Ort" />
+                            </div>
+                        </div>
+                    </div>
+                </Card>
 
-            {/* Positions */}
-            <Card style={{ marginBottom: 'var(--spacing-lg)' }}>
-                <div style={sectionTitle}>Positionen</div>
-                <div style={{ overflowX: 'auto' }}>
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead>
-                            <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
-                                <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '50px' }}>Pos.</th>
-                                <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Bezeichnung</th>
-                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Preis/Nacht (€)</th>
-                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Netto (€)</th>
-                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '90px' }}>MwSt 7%</th>
-                                <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Brutto (€)</th>
-                                <th style={{ width: '40px' }}></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {positions.map((p, idx) => (
-                                <tr key={idx} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
-                                    <td style={{ padding: '10px 8px', textAlign: 'center', fontWeight: 600 }}>{p.pos}</td>
-                                    <td style={{ padding: '10px 8px', position: 'relative' }}>
-                                        <textarea
-                                            value={p.description}
-                                            onChange={e => updatePosition(idx, 'description', e.target.value)}
-                                            readOnly={p.isFirst}
-                                            rows={2}
-                                            onFocus={e => {
-                                                e.target.rows = 5;
-                                                e.target.style.position = 'absolute';
-                                                e.target.style.zIndex = '20';
-                                                e.target.style.width = 'calc(100% + 300px)';
-                                                e.target.style.boxShadow = '0 4px 24px rgba(0,0,0,0.18)';
-                                                e.target.style.borderColor = 'var(--primary-color)';
-                                            }}
-                                            onBlur={e => {
-                                                e.target.rows = 2;
-                                                e.target.style.position = 'static';
-                                                e.target.style.zIndex = 'auto';
-                                                e.target.style.width = '100%';
-                                                e.target.style.boxShadow = 'none';
-                                                e.target.style.borderColor = 'var(--border-color)';
-                                            }}
-                                            style={{
-                                                width: '100%', padding: '8px 10px', borderRadius: '8px',
-                                                border: '1px solid var(--border-color)', resize: 'vertical',
-                                                fontSize: '0.9rem', fontFamily: 'inherit', outline: 'none',
-                                                backgroundColor: p.isFirst ? '#f9fafb' : 'var(--surface-color)',
-                                                transition: 'all 0.2s ease',
-                                                left: 0, top: 0
-                                            }}
-                                        />
-                                    </td>
-                                    <td style={{ padding: '10px 8px' }}>
-                                        {p.isFirst ? (
+                {/* Positions */}
+                <Card style={{ marginBottom: 'var(--spacing-lg)' }}>
+                    <div style={sectionTitle}>Positionen</div>
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <thead>
+                                <tr style={{ borderBottom: '2px solid var(--border-color)' }}>
+                                    <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '50px' }}>Pos.</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Bezeichnung</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Preis/Nacht (€)</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Netto (€)</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '110px' }}>USt-Satz</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '90px' }}>USt (€)</th>
+                                    <th style={{ padding: '10px 8px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', width: '120px' }}>Brutto (€)</th>
+                                    <th style={{ width: '40px' }}></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {positions.map((p, idx) => (
+                                    <tr key={idx} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
+                                        <td style={{ padding: '10px 8px', textAlign: 'center', fontWeight: 600 }}>{p.pos}</td>
+                                        <td style={{ padding: '10px 8px', position: 'relative' }}>
+                                            <textarea
+                                                value={p.description}
+                                                onChange={e => updatePosition(idx, 'description', e.target.value)}
+                                                rows={2}
+                                                onFocus={e => {
+                                                    e.target.rows = 5;
+                                                    e.target.style.position = 'absolute';
+                                                    e.target.style.zIndex = '20';
+                                                    e.target.style.width = 'calc(100% + 300px)';
+                                                    e.target.style.boxShadow = '0 4px 24px rgba(0,0,0,0.18)';
+                                                    e.target.style.borderColor = 'var(--primary-color)';
+                                                }}
+                                                onBlur={e => {
+                                                    e.target.rows = 2;
+                                                    e.target.style.position = 'static';
+                                                    e.target.style.zIndex = 'auto';
+                                                    e.target.style.width = '100%';
+                                                    e.target.style.boxShadow = 'none';
+                                                    e.target.style.borderColor = 'var(--border-color)';
+                                                }}
+                                                style={{
+                                                    width: '100%', padding: '8px 10px', borderRadius: '8px',
+                                                    border: '1px solid var(--border-color)', resize: 'vertical',
+                                                    fontSize: '0.9rem', fontFamily: 'inherit', outline: 'none',
+                                                    backgroundColor: 'var(--surface-color)',
+                                                    transition: 'all 0.2s ease',
+                                                    left: 0, top: 0
+                                                }}
+                                            />
+                                        </td>
+                                        <td style={{ padding: '10px 8px' }}>
+                                            {p.isFirst ? (
+                                                <CurrencyInput
+                                                    allowDecimals
+                                                    value={p.pricePerNight}
+                                                    onChange={e => updatePosition(idx, 'pricePerNight', e.target.value)}
+                                                    style={{ ...selectStyle, textAlign: 'right' }}
+                                                />
+                                            ) : (
+                                                <div style={{ color: 'var(--text-disabled)', textAlign: 'right', fontSize: '0.8rem' }}>–</div>
+                                            )}
+                                        </td>
+                                        <td style={{ padding: '10px 8px' }}>
                                             <CurrencyInput
                                                 allowDecimals
-                                                value={p.pricePerNight}
-                                                onChange={e => updatePosition(idx, 'pricePerNight', e.target.value)}
+                                                value={p.netTotal}
+                                                onChange={e => updatePosition(idx, 'netTotal', e.target.value)}
                                                 style={{ ...selectStyle, textAlign: 'right' }}
                                             />
-                                        ) : (
-                                            <div style={{ color: 'var(--text-disabled)', textAlign: 'right', fontSize: '0.8rem' }}>–</div>
-                                        )}
+                                        </td>
+                                        <td style={{ padding: '10px 8px' }}>
+                                            <select
+                                                value={smallBusiness ? '0' : (p.vatRate === null || p.vatRate === undefined ? '' : String(p.vatRate))}
+                                                onChange={e => updatePosition(idx, 'vatRate', e.target.value)}
+                                                disabled={smallBusiness}
+                                                style={{ ...selectStyle, padding: '8px', textAlign: 'right', borderColor: (!smallBusiness && (p.vatRate === null || p.vatRate === undefined)) ? '#f59e0b' : 'var(--border-color)' }}
+                                            >
+                                                <option value="">– wählen –</option>
+                                                {VAT_RATE_OPTIONS.map(rate => <option key={rate} value={String(rate)}>{fmtRate(rate)}</option>)}
+                                            </select>
+                                        </td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                            {smallBusiness ? '–' : `${fmt(p.vat)} €`}
+                                        </td>
+                                        <td style={{ padding: '10px 8px' }}>
+                                            <CurrencyInput
+                                                allowDecimals
+                                                value={p.grossTotal}
+                                                onChange={e => updatePosition(idx, 'grossTotal', e.target.value)}
+                                                style={{ ...selectStyle, textAlign: 'right', fontWeight: 600 }}
+                                            />
+                                        </td>
+                                        <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                                            {!p.isFirst && (
+                                                <button onClick={() => removePosition(idx)} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer' }}>
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                            <tfoot>
+                                <tr style={{ borderTop: '2px solid var(--border-color)' }}>
+                                    <td colSpan={3} style={{ padding: '10px 8px' }}>
+                                        <Button variant="secondary" size="sm" icon={Plus} onClick={addPosition}>Position hinzufügen</Button>
                                     </td>
-                                    <td style={{ padding: '10px 8px' }}>
-                                        <CurrencyInput
-                                            allowDecimals
-                                            value={p.netTotal}
-                                            onChange={e => updatePosition(idx, 'netTotal', e.target.value)}
-                                            style={{ ...selectStyle, textAlign: 'right' }}
-                                        />
-                                    </td>
-                                    <td style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                        {fmt(p.vat)} €
-                                    </td>
-                                    <td style={{ padding: '10px 8px' }}>
-                                        <CurrencyInput
-                                            allowDecimals
-                                            value={p.grossTotal}
-                                            onChange={e => updatePosition(idx, 'grossTotal', e.target.value)}
-                                            style={{ ...selectStyle, textAlign: 'right', fontWeight: 600 }}
-                                        />
-                                    </td>
-                                    <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                        {!p.isFirst && (
-                                            <button onClick={() => removePosition(idx)} style={{ color: 'var(--danger-color)', background: 'none', border: 'none', cursor: 'pointer' }}>
-                                                <Trash2 size={16} />
-                                            </button>
-                                        )}
-                                    </td>
+                                    <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: 600 }}>{fmtEur(totalNet)}</td>
+                                    <td></td>
+                                    <td style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{smallBusiness ? '–' : fmtEur(totalVat)}</td>
+                                    <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: 700, fontSize: '1.05rem' }}>{fmtEur(totalGross)}</td>
+                                    <td></td>
                                 </tr>
-                            ))}
-                        </tbody>
-                        <tfoot>
-                            <tr style={{ borderTop: '2px solid var(--border-color)' }}>
-                                <td colSpan={3} style={{ padding: '10px 8px' }}>
-                                    <Button variant="secondary" size="sm" icon={Plus} onClick={addPosition}>Position hinzufügen</Button>
-                                </td>
-                                <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: 600 }}>{fmtEur(totalNet)}</td>
-                                <td style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{fmtEur(totalVat)}</td>
-                                <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: 700, fontSize: '1.05rem' }}>{fmtEur(totalGross)}</td>
-                                <td></td>
-                            </tr>
-                        </tfoot>
-                    </table>
-                </div>
-            </Card>
+                            </tfoot>
+                        </table>
+                    </div>
+                    {hasZeroRateWithoutExemption && (
+                        <div style={{ ...noticeStyle('warn'), marginTop: 'var(--spacing-md)', marginBottom: 0 }}>
+                            <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                            <div>Positionen mit 0 % USt: Bitte den Grund der Steuerbefreiung in der Bezeichnung angeben (Pflichtangabe nach § 14 Abs. 4 Nr. 8 UStG).</div>
+                        </div>
+                    )}
+                </Card>
+            </fieldset>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--spacing-xl)' }}>
                 <Card style={{ minWidth: '320px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Summe Netto</span><span>{fmtEur(totalNet)}</span></div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>MwSt 7%</span><span>{fmtEur(totalVat)}</span></div>
+                        {smallBusiness ? (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{SMALL_BUSINESS_NOTE}</div>
+                        ) : (
+                            <>
+                                {taxBreakdown.length > 1 && taxBreakdown.map(g => (
+                                    <div key={`net-${g.rate}`} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                                        <span>Netto zu {fmtRate(g.rate)}</span><span>{fmtEur(g.net)}</span>
+                                    </div>
+                                ))}
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Summe Netto</span><span>{fmtEur(totalNet)}</span></div>
+                                {taxBreakdown.filter(g => g.rate > 0).map(g => (
+                                    <div key={`vat-${g.rate}`} style={{ display: 'flex', justifyContent: 'space-between' }}><span>USt {fmtRate(g.rate)}</span><span>{fmtEur(g.vat)}</span></div>
+                                ))}
+                            </>
+                        )}
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.2rem', fontWeight: 700, borderTop: '2px solid var(--primary-color)', paddingTop: '0.5rem', marginTop: '0.25rem' }}>
-                            <span>Gesamtsumme Brutto</span><span>{fmtEur(totalGross)}</span>
+                            <span>{smallBusiness ? 'Gesamtbetrag' : 'Gesamtsumme Brutto'}</span><span>{fmtEur(totalGross)}</span>
                         </div>
-                        <Button icon={Check} onClick={handleSave} style={{ marginTop: '1rem', width: '100%', padding: '12px' }}>RECHNUNG SPEICHERN</Button>
+                        {!readOnly && (
+                            <>
+                                <Button icon={Check} onClick={handleSave} disabled={saving} style={{ marginTop: '1rem', width: '100%', padding: '12px' }}>
+                                    {isEdit ? 'ENTWURF SPEICHERN' : 'RECHNUNG SPEICHERN'}
+                                </Button>
+                                <Button variant="secondary" icon={Eye} onClick={handlePreview} style={{ width: '100%' }}>Vorschau (Entwurf)</Button>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    Die Rechnung wird als Entwurf gespeichert und kann bis zum Ausstellen geändert werden.
+                                </div>
+                            </>
+                        )}
                     </div>
                 </Card>
             </div>
 
             {/* Modals */}
-            <Modal isOpen={successModal} onClose={() => navigate('/invoices')} title="Erfolg">
+            <Modal isOpen={successModal} onClose={() => navigate('/invoices')} title="Gespeichert">
                 <div style={{ textAlign: 'center', padding: '1rem' }}>
-                    <p style={{ marginBottom: '1.5rem' }}>Die Rechnung wurde erfolgreich gespeichert.</p>
-                    <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
-                        <Button variant="secondary" icon={Printer} onClick={() => handlePrint(savedInvoice)}>Drucken</Button>
-                        <Button variant="secondary" icon={Download} onClick={() => handlePDF(savedInvoice)}>PDF</Button>
-                        <Button onClick={() => navigate('/invoices')}>Schließen</Button>
-                    </div>
+                    {savedStatus === INVOICE_STATUS.DRAFT ? (
+                        <>
+                            <p style={{ marginBottom: '0.75rem' }}>
+                                Die Rechnung <strong>{savedInvoice?.invoice_number}</strong> wurde als <strong>Entwurf</strong> gespeichert.
+                            </p>
+                            <p style={{ marginBottom: '1.5rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                Mit „Ausstellen" wird sie festgeschrieben und kann danach gedruckt und versendet werden. Änderungen sind dann nur noch per Gutschrift möglich.
+                            </p>
+                            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                                <Button variant="secondary" icon={Eye} onClick={() => handlePrint(savedInvoice)}>Vorschau</Button>
+                                <Button icon={issuing ? Loader2 : Lock} onClick={handleIssue} disabled={issuing}>Ausstellen</Button>
+                                <Button variant="secondary" onClick={() => navigate('/invoices')}>Schließen</Button>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <p style={{ marginBottom: '1.5rem' }}>
+                                Die Rechnung <strong>{savedInvoice?.invoice_number}</strong> ist ausgestellt.
+                            </p>
+                            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                                <Button variant="secondary" icon={Printer} onClick={() => handlePrint(savedInvoice)}>Drucken</Button>
+                                <Button variant="secondary" icon={Download} onClick={() => handlePDF(savedInvoice)}>PDF</Button>
+                                <Button onClick={() => navigate('/invoices')}>Schließen</Button>
+                            </div>
+                        </>
+                    )}
                 </div>
             </Modal>
 

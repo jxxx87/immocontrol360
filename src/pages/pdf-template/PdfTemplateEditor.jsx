@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
     ArrowLeft, Save, Undo2, Redo2, FileText, Lock,
-    ZoomIn, ZoomOut, Loader2, Image, Monitor, Smartphone,
+    ZoomIn, ZoomOut, Loader2, Image,
     Move, Trash2, RotateCcw, AlignLeft, AlignCenter, AlignRight
 } from 'lucide-react';
 import Card from '../../components/ui/Card';
@@ -11,19 +11,30 @@ import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useViewMode } from '../../context/ViewModeContext';
+import { REPORT_CONFIGS } from '../../lib/reportConfigs';
+import { generateClientPdf, sanitizeLogoUrl, normalizeHexColor } from '../../lib/pdfGenerator';
 import {
-    A4_W, A4_H, HEADER_H, FOOTER_H, MM_TO_PX,
-    MARGIN_OPTIONS, DEFAULT_MARGIN, SNAP_GRID,
-    REPORT_TITLE_MAP, ZOOM_LEVELS,
-    EL_TYPES, MAX_FREETEXT, MAX_LINES, MAX_LOGOS,
-    getPresetElements, elementDefaults,
-    getPageDims, DEFAULT_ORIENTATION_BY_REPORT, convertElements,
+    HEADER_H, FOOTER_H, MM_TO_PX,
+    MARGIN_OPTIONS, DEFAULT_MARGIN, SNAP_GRID, DEFAULT_ACCENT, PDF_FONT_STACK,
+    ZOOM_LEVELS, EL_TYPES, MAX_FREETEXT, MAX_LINES,
+    getPresetElements, elementDefaults, getPageDims, getSizeLimits,
+    clampElementToPage, fitElementsToOrientation, hasElementCollision, getTemplateOrientation,
 } from './constants';
 
 // ─── Helpers ────────────────────────────────────────────────────────
 const snap = (v) => Math.round(v / SNAP_GRID) * SNAP_GRID;
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const round1 = (v) => Math.round(v * 10) / 10;
 const uid = () => `el_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+const parseInputNumber = (raw) => {
+    if (raw === '' || raw === null || raw === undefined) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+};
+const pointerXY = (e) => {
+    const t = e.touches?.[0];
+    return t ? { x: t.clientX, y: t.clientY } : { x: e.clientX, y: e.clientY };
+};
 
 const labelForType = (type) => {
     const map = {
@@ -34,28 +45,108 @@ const labelForType = (type) => {
     return map[type] || type;
 };
 
+// Kollision eines Elements mit anderen sichtbaren Elementen derselben Zone (Logos ausgenommen)
+const collides = (el, allElements) => {
+    for (const other of allElements) {
+        if (other.id === el.id || !other.visible) continue;
+        if (other.zone !== el.zone) continue;
+        if (el.type === EL_TYPES.LOGO || other.type === EL_TYPES.LOGO) continue;
+        const ax1 = el.x, ay1 = el.y, ax2 = el.x + el.w, ay2 = el.y + (el.h || 0.5);
+        const bx1 = other.x, by1 = other.y, bx2 = other.x + other.w, by2 = other.y + (other.h || 0.5);
+        if (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1) return true;
+    }
+    return false;
+};
+
+// Ein Verlaufsschritt umfasst Elemente, Seitenrand und Orientierung
+const snapshotOf = (elements, margin, orientation) => JSON.stringify({ elements, margin, orientation });
+
+// ─── Logo-Upload ────────────────────────────────────────────────────
+const LOGO_MAX_BYTES = 2 * 1024 * 1024;
+const LOGO_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg' };
+const LOGO_PUBLIC_PATH = '/storage/v1/object/public/pdf-assets/';
+
+// Prüft die Datei-Signatur (PNG/JPEG), nicht nur Endung bzw. MIME-Angabe des Browsers
+const hasImageSignature = async (file, ext) => {
+    try {
+        const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+        if (ext === 'png') return head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+        if (ext === 'jpg') return head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+        return false;
+    } catch {
+        return false;
+    }
+};
+
+// Pfad im Bucket pdf-assets zu einer öffentlichen Logo-URL (nur eigener Storage)
+const logoStoragePath = (url) => {
+    const safe = sanitizeLogoUrl(url);
+    if (!safe) return null;
+    const { pathname } = new URL(safe);
+    if (!pathname.startsWith(LOGO_PUBLIC_PATH)) return null;
+    try {
+        return decodeURIComponent(pathname.slice(LOGO_PUBLIC_PATH.length));
+    } catch {
+        return null;
+    }
+};
+
+// ─── Test-PDF (Beispieldaten, klar als Muster erkennbar) ────────────
+const TEST_COLUMNS = ['adresse', 'einheiten', 'kaufpreis', 'marktpreis', 'miete_monat'];
+const TEST_ROWS = [
+    { adresse: 'Musterstraße 1, 12345 Musterstadt', einheiten: 4, kaufpreis: 250000, marktpreis: 265000, miete_monat: 1450 },
+    { adresse: 'Beispielweg 5, 54321 Beispielort', einheiten: 2, kaufpreis: 180000, marktpreis: 182000, miete_monat: 980 },
+    { adresse: 'Testgasse 10, 99999 Testheim', einheiten: 6, kaufpreis: 320000, marktpreis: 335000, miete_monat: 2100 },
+];
+
+const NO_ROW_SAVED = 'Die Vorlage wurde nicht gespeichert – keine Berechtigung oder die Vorlage existiert nicht mehr. Bitte die Seite neu laden.';
+const describeSaveError = (err) => {
+    const msg = err?.message || String(err || 'Unbekannter Fehler');
+    if (err?.code === '42501' || /row-level security/i.test(msg)) {
+        return 'Keine Berechtigung, die PDF-Vorlage dieses Portfolios zu speichern.';
+    }
+    return msg;
+};
+
 // ─── Main Component ─────────────────────────────────────────────────
+// Der Editor wird bei Nutzer- oder Portfoliowechsel neu eingehängt. So kann
+// kein Zustand (Vorlagen-ID, Logo, Subtitel, Verlauf) in ein anderes
+// Portfolio „mitwandern" und beim Speichern eine fremde Vorlage überschreiben.
 const PdfTemplateEditor = () => {
+    const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    return (
+        <PdfTemplateEditorInner
+            key={`${user?.id || '-'}:${selectedPortfolioID || '-'}`}
+            portfolioId={selectedPortfolioID || ''}
+        />
+    );
+};
+
+function PdfTemplateEditorInner({ portfolioId }) {
     const navigate = useNavigate();
     const location = useLocation();
     const { user } = useAuth();
-    const { selectedPortfolioID, portfolios } = usePortfolio();
+    const userId = user?.id || null;
+    const { portfolios } = usePortfolio();
     const { isMobile } = useViewMode();
-    const [searchParams] = useSearchParams();
 
     // Where to go back to (from ExportDropdown or Settings)
     const backPath = location.state?.from || '/settings';
 
     // State
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(() => Boolean(userId && portfolioId));
+    const [loadError, setLoadError] = useState(null);
+    const [reloadToken, setReloadToken] = useState(0);
     const [saving, setSaving] = useState(false);
+    const [saveNotice, setSaveNotice] = useState(null);
     const [dirty, setDirty] = useState(false);
     const [templateId, setTemplateId] = useState(null);
 
     // Template data
     const [margin, setMargin] = useState(DEFAULT_MARGIN);
     const [elements, setElements] = useState([]);
-    const [accentColor, setAccentColor] = useState('#0ea5e9');
+    const [accentColor, setAccentColor] = useState(DEFAULT_ACCENT);
     const [subtitlesByReport, setSubtitlesByReport] = useState({});
     const [logoUrl, setLogoUrl] = useState(null);
 
@@ -69,396 +160,443 @@ const PdfTemplateEditor = () => {
     const [zoom, setZoom] = useState(isMobile ? 0.6 : 1);
     const [rightTab, setRightTab] = useState('elements'); // 'elements' | 'properties'
     const [uploadingLogo, setUploadingLogo] = useState(false);
+    const [todayStr] = useState(() => new Date().toLocaleDateString('de-DE'));
 
-    // History (Undo/Redo)
-    const [history, setHistory] = useState([]);
-    const [historyIdx, setHistoryIdx] = useState(-1);
-    const skipHistoryRef = useRef(false);
+    // History (Undo/Redo) – Stapel im Ref, Position als State für die Buttons
+    const historyRef = useRef({ stack: [], idx: -1 });
+    const [historyPos, setHistoryPos] = useState({ idx: -1, len: 0 });
+
+    // Immer aktuelle Werte für Event-Handler (keine Seiteneffekte in setState-Updatern)
+    const elementsRef = useRef([]);
+    const marginRef = useRef(DEFAULT_MARGIN);
+    const orientationRef = useRef('portrait');
+    const changeCountRef = useRef(0);
+    const savingRef = useRef(false);
+    const handleSaveRef = useRef(null);
+    const savedLogoUrlRef = useRef(null);
+    const uploadedLogoPathsRef = useRef([]);
+    const dragRef = useRef(null);
+    const collisionTimerRef = useRef(null);
+    const noticeTimerRef = useRef(null);
 
     // Drag state
     const [dragging, setDragging] = useState(null);
     const previewRef = useRef(null);
 
-    const selectedPortfolio = portfolios.find(p => p.id === selectedPortfolioID);
+    const selectedPortfolio = portfolios.find(p => p.id === portfolioId);
 
     const pageDims = getPageDims(currentOrientation);
     const pageW = pageDims.w;
     const pageH = pageDims.h;
 
-    // ─── History Management ────────────────────────
-    const pushHistory = useCallback((els) => {
-        if (skipHistoryRef.current) { skipHistoryRef.current = false; return; }
-        setHistory(prev => {
-            const next = [...prev.slice(0, historyIdx + 1), JSON.stringify(els)];
-            if (next.length > 50) next.shift();
-            return next;
-        });
-        setHistoryIdx(prev => Math.min(prev + 1, 49));
-    }, [historyIdx]);
-
-    const undo = useCallback(() => {
-        if (historyIdx <= 0) return;
-        const newIdx = historyIdx - 1;
-        skipHistoryRef.current = true;
-        setElements(JSON.parse(history[newIdx]));
-        setHistoryIdx(newIdx);
+    // ─── Dirty-Tracking ────────────────────────
+    const markDirty = useCallback(() => {
+        changeCountRef.current += 1;
         setDirty(true);
-    }, [history, historyIdx]);
-
-    const redo = useCallback(() => {
-        if (historyIdx >= history.length - 1) return;
-        const newIdx = historyIdx + 1;
-        skipHistoryRef.current = true;
-        setElements(JSON.parse(history[newIdx]));
-        setHistoryIdx(newIdx);
-        setDirty(true);
-    }, [history, historyIdx]);
-
-    // ─── Update elements with history ────────────
-    const updateElements = useCallback((newEls) => {
-        setElements(newEls);
-        pushHistory(newEls);
-        setDirty(true);
-    }, [pushHistory]);
-
-    // ─── Collision Detection ─────────────────────
-    const checkCollision = useCallback((el, allElements) => {
-        for (const other of allElements) {
-            if (other.id === el.id || !other.visible) continue;
-            if (other.zone !== el.zone) continue;
-            if (el.type === EL_TYPES.LOGO || other.type === EL_TYPES.LOGO) continue;
-            const ax1 = el.x, ay1 = el.y, ax2 = el.x + el.w, ay2 = el.y + (el.h || 0.5);
-            const bx1 = other.x, by1 = other.y, bx2 = other.x + other.w, by2 = other.y + (other.h || 0.5);
-            if (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1) return true;
-        }
-        return false;
+        setSaveNotice(null);
     }, []);
 
-    // ─── Zone boundaries (orientation-aware) ────
-    const getZoneBounds = useCallback((zone) => {
-        if (zone === 'header') return { minY: 0, maxY: HEADER_H };
-        if (zone === 'footer') return { minY: pageH - FOOTER_H, maxY: pageH };
-        return { minY: 0, maxY: pageH };
-    }, [pageH]);
+    // ─── Layout-State + Refs gemeinsam setzen ──
+    const applyLayout = useCallback(({ elements: els, margin: mrg, orientation: ori }) => {
+        if (els !== undefined) { elementsRef.current = els; setElements(els); }
+        if (mrg !== undefined) { marginRef.current = mrg; setMargin(mrg); }
+        if (ori !== undefined) { orientationRef.current = ori; setCurrentOrientation(ori); }
+    }, []);
 
-    // ─── Clamp element within bounds ───────────
-    const clampElement = useCallback((el) => {
-        const bounds = getZoneBounds(el.zone);
-        const x = clamp(el.x, margin, pageW - margin - el.w);
-        const y = clamp(el.y, bounds.minY, bounds.maxY - (el.h || 0.5));
-        return { ...el, x: snap(x), y: snap(y) };
-    }, [margin, pageW, getZoneBounds]);
+    // ─── History Management ────────────────────────
+    const pushHistory = useCallback(() => {
+        const snapshot = snapshotOf(elementsRef.current, marginRef.current, orientationRef.current);
+        const h = historyRef.current;
+        if (h.idx >= 0 && h.stack[h.idx] === snapshot) return; // keine echte Änderung
+        const stack = [...h.stack.slice(0, h.idx + 1), snapshot];
+        while (stack.length > 50) stack.shift();
+        historyRef.current = { stack, idx: stack.length - 1 };
+        setHistoryPos({ idx: stack.length - 1, len: stack.length });
+    }, []);
+
+    const resetHistory = useCallback(() => {
+        historyRef.current = { stack: [snapshotOf(elementsRef.current, marginRef.current, orientationRef.current)], idx: 0 };
+        setHistoryPos({ idx: 0, len: 1 });
+    }, []);
+
+    const restoreHistory = useCallback((idx) => {
+        const h = historyRef.current;
+        if (idx < 0 || idx >= h.stack.length || idx === h.idx) return;
+        historyRef.current = { ...h, idx };
+        setHistoryPos({ idx, len: h.stack.length });
+        const snapshot = JSON.parse(h.stack[idx]);
+        applyLayout({
+            elements: Array.isArray(snapshot.elements) ? snapshot.elements : [],
+            margin: Number(snapshot.margin) > 0 ? Number(snapshot.margin) : DEFAULT_MARGIN,
+            orientation: snapshot.orientation === 'landscape' ? 'landscape' : 'portrait',
+        });
+        markDirty();
+    }, [applyLayout, markDirty]);
+
+    const undo = useCallback(() => restoreHistory(historyRef.current.idx - 1), [restoreHistory]);
+    const redo = useCallback(() => restoreHistory(historyRef.current.idx + 1), [restoreHistory]);
+
+    // Änderung übernehmen: State + Verlaufsschritt + ungespeichert
+    const commitLayout = useCallback((changes) => {
+        applyLayout(changes);
+        pushHistory();
+        markDirty();
+    }, [applyLayout, pushHistory, markDirty]);
+
+    const flashCollisionWarning = useCallback((hasCollision) => {
+        setCollisionWarning(hasCollision);
+        clearTimeout(collisionTimerRef.current);
+        if (hasCollision) collisionTimerRef.current = setTimeout(() => setCollisionWarning(false), 4000);
+    }, []);
+
+    useEffect(() => () => {
+        clearTimeout(collisionTimerRef.current);
+        clearTimeout(noticeTimerRef.current);
+    }, []);
+
+    const layoutOptions = useCallback(() => ({ orientation: orientationRef.current, margin: marginRef.current }), []);
 
     // ─── Move element ──────────────────────────
     const moveElement = useCallback((id, dx, dy) => {
-        setElements(prev => {
-            const idx = prev.findIndex(e => e.id === id);
-            if (idx < 0) return prev;
-            const el = { ...prev[idx] };
-            const newEl = clampElement({ ...el, x: el.x + dx, y: el.y + dy });
-            const test = prev.map((e, i) => i === idx ? newEl : e);
-            if (checkCollision(newEl, test)) return prev; // blocked
-            pushHistory(test);
-            setDirty(true);
-            return test;
-        });
-    }, [clampElement, checkCollision, pushHistory]);
+        const prev = elementsRef.current;
+        const idx = prev.findIndex(e => e.id === id);
+        if (idx < 0) return;
+        const el = prev[idx];
+        const newEl = clampElementToPage({ ...el, x: round1(el.x + dx), y: round1(el.y + dy) }, layoutOptions());
+        if (newEl.x === el.x && newEl.y === el.y) return; // am Rand – keine Bewegung, kein Verlaufsschritt
+        const next = prev.map((e, i) => i === idx ? newEl : e);
+        if (collides(newEl, next)) return; // blocked
+        commitLayout({ elements: next });
+    }, [commitLayout, layoutOptions]);
 
     // ─── Update single element property ────────
     const updateElement = useCallback((id, updates) => {
-        setElements(prev => {
-            const idx = prev.findIndex(e => e.id === id);
-            if (idx < 0) return prev;
-            let newEl = { ...prev[idx], ...updates };
-            // If logo aspect locked
-            if (newEl.type === EL_TYPES.LOGO && updates.w !== undefined && newEl.aspectRatio) {
-                newEl.h = Math.round(newEl.w / newEl.aspectRatio * 10) / 10;
-            }
-            newEl = clampElement(newEl);
-            const test = prev.map((e, i) => i === idx ? newEl : e);
-            if (updates.x !== undefined || updates.y !== undefined || updates.w !== undefined) {
-                if (checkCollision(newEl, test)) return prev;
-            }
-            pushHistory(test);
-            setDirty(true);
-            return test;
-        });
-    }, [clampElement, checkCollision, pushHistory]);
+        const prev = elementsRef.current;
+        const idx = prev.findIndex(e => e.id === id);
+        if (idx < 0) return;
+        let newEl = { ...prev[idx], ...updates };
+        // If logo aspect locked
+        if (newEl.type === EL_TYPES.LOGO && updates.w !== undefined && newEl.aspectRatio) {
+            newEl.h = Math.round(newEl.w / newEl.aspectRatio * 10) / 10;
+        }
+        newEl = clampElementToPage(newEl, layoutOptions());
+        const next = prev.map((e, i) => i === idx ? newEl : e);
+        if (updates.x !== undefined || updates.y !== undefined || updates.w !== undefined || updates.h !== undefined) {
+            if (collides(newEl, next)) return;
+        }
+        commitLayout({ elements: next });
+    }, [commitLayout, layoutOptions]);
 
     // ─── Add element (orientation-aware) ────────
     const addElement = useCallback((type) => {
-        const def = elementDefaults(type, margin, currentOrientation);
-        const el = { ...def, id: uid(), zone: activeZone };
-        const clamped = clampElement(el);
-        setElements(prev => {
-            if (type === EL_TYPES.FREETEXT && prev.filter(e => e.type === EL_TYPES.FREETEXT).length >= MAX_FREETEXT) return prev;
-            if (type === EL_TYPES.LINE && prev.filter(e => e.type === EL_TYPES.LINE).length >= MAX_LINES) return prev;
-            const newEls = [...prev, clamped];
-            pushHistory(newEls);
-            setDirty(true);
-            return newEls;
-        });
-        setSelectedId(clamped.id);
+        const prev = elementsRef.current;
+        if (type === EL_TYPES.FREETEXT && prev.filter(e => e.type === EL_TYPES.FREETEXT).length >= MAX_FREETEXT) return;
+        if (type === EL_TYPES.LINE && prev.filter(e => e.type === EL_TYPES.LINE).length >= MAX_LINES) return;
+        const def = elementDefaults(type, marginRef.current, orientationRef.current);
+        const el = clampElementToPage({ ...def, id: uid(), zone: activeZone }, layoutOptions());
+        commitLayout({ elements: [...prev, el] });
+        setSelectedId(el.id);
         setRightTab('properties');
-    }, [margin, activeZone, currentOrientation, clampElement, pushHistory]);
+    }, [activeZone, commitLayout, layoutOptions]);
 
     // ─── Remove element ────────────────────────
     const removeElement = useCallback((id) => {
-        setElements(prev => {
-            const newEls = prev.filter(e => e.id !== id);
-            pushHistory(newEls);
-            setDirty(true);
-            return newEls;
-        });
-        if (selectedId === id) setSelectedId(null);
-    }, [selectedId, pushHistory]);
+        const prev = elementsRef.current;
+        if (!prev.some(e => e.id === id)) return;
+        commitLayout({ elements: prev.filter(e => e.id !== id) });
+        setSelectedId(cur => (cur === id ? null : cur));
+    }, [commitLayout]);
 
-    // ─── Apply Preset (orientation-aware) ───────
-    const applyPreset = useCallback((presetKey) => {
-        const newEls = getPresetElements(presetKey, currentOrientation);
-        setMargin(15);
-        setElements(newEls);
-        pushHistory(newEls);
-        setDirty(true);
+    // ─── Reset to standard layout ──────────────
+    const resetToStandard = useCallback(() => {
+        if (!window.confirm('Layout auf den Standard zurücksetzen? Alle Elemente und der Seitenrand werden ersetzt (mit „Rückgängig" wiederherstellbar).')) return;
+        commitLayout({ elements: getPresetElements('standard', orientationRef.current), margin: DEFAULT_MARGIN });
         setSelectedId(null);
-    }, [currentOrientation, pushHistory]);
+    }, [commitLayout]);
 
     // ─── Switch Orientation (global) ──────────────
     const switchOrientation = useCallback((newOri) => {
-        const oldOri = currentOrientation;
+        const oldOri = orientationRef.current;
         if (oldOri === newOri) return;
-
-        // Proportional conversion
-        let newEls = convertElements(elements, oldOri, newOri);
-        const newPage = getPageDims(newOri);
-        newEls = newEls.map(el => {
-            const bounds = el.zone === 'footer'
-                ? { minY: newPage.h - FOOTER_H, maxY: newPage.h }
-                : { minY: 0, maxY: HEADER_H };
-            return {
-                ...el,
-                x: snap(clamp(el.x, margin, newPage.w - margin - el.w)),
-                y: snap(clamp(el.y, bounds.minY, bounds.maxY - (el.h || 0.5))),
-            };
-        });
-
-        // Check collisions and warn
-        let hasCollision = false;
-        for (const el of newEls) {
-            for (const other of newEls) {
-                if (other.id === el.id || !other.visible || other.zone !== el.zone) continue;
-                if (el.type === EL_TYPES.LOGO || other.type === EL_TYPES.LOGO) continue;
-                if (el.x < other.x + other.w && el.x + el.w > other.x && el.y < other.y + (other.h || 0.5) && el.y + (el.h || 0.5) > other.y) {
-                    hasCollision = true; break;
-                }
-            }
-            if (hasCollision) break;
-        }
-        setCollisionWarning(hasCollision);
-        if (hasCollision) setTimeout(() => setCollisionWarning(false), 4000);
-
-        setCurrentOrientation(newOri);
-        setElements(newEls);
-        pushHistory(newEls);
-        setDirty(true);
+        // Proportionale Umrechnung + Begrenzung (dieselbe Logik nutzt der PDF-Generator)
+        const newEls = fitElementsToOrientation(elementsRef.current, { from: oldOri, to: newOri, margin: marginRef.current });
+        flashCollisionWarning(hasElementCollision(newEls));
+        commitLayout({ elements: newEls, orientation: newOri });
         setSelectedId(null);
-    }, [currentOrientation, elements, margin, pushHistory]);
+    }, [commitLayout, flashCollisionWarning]);
+
+    // ─── Change margin (Elemente neu begrenzen, per Undo umkehrbar) ──
+    const changeMargin = useCallback((value) => {
+        const newMargin = Number(value);
+        if (!MARGIN_OPTIONS.includes(newMargin) || newMargin === marginRef.current) return;
+        const newEls = elementsRef.current.map(el => clampElementToPage(el, { orientation: orientationRef.current, margin: newMargin }));
+        flashCollisionWarning(hasElementCollision(newEls));
+        commitLayout({ elements: newEls, margin: newMargin });
+    }, [commitLayout, flashCollisionWarning]);
 
     // ─── Load Template ─────────────────────────
     useEffect(() => {
-        if (!user || !selectedPortfolioID) { setLoading(false); return; }
+        if (!userId || !portfolioId) return undefined;
+        let cancelled = false;
         const load = async () => {
-            try {
-                const { data } = await supabase
-                    .from('pdf_templates')
-                    .select('*')
-                    .eq('portfolio_id', selectedPortfolioID)
-                    .single();
+            const { data, error } = await supabase
+                .from('pdf_templates')
+                .select('*')
+                .eq('portfolio_id', portfolioId)
+                .maybeSingle();
+            if (cancelled) return;
+            if (error) throw error;
 
-                if (data) {
-                    setTemplateId(data.id);
-                    setMargin(data.margin_mm || DEFAULT_MARGIN);
-                    setAccentColor(data.accent_color || '#0ea5e9');
-                    setSubtitlesByReport(data.subtitles_by_report_type || {});
-                    setLogoUrl(data.logo_url || null);
-                    // Load global orientation
-                    const ori = data.orientation_by_report_type || {};
-                    // Use the first stored orientation as global, or default to portrait
-                    const globalOri = Object.values(ori)[0] || 'portrait';
-                    setCurrentOrientation(globalOri);
-                    // Load global elements
-                    const initEls = data.elements || [];
-                    setElements(initEls);
-                    pushHistory(initEls);
-                } else {
-                    applyPreset('standard');
-                }
-            } catch {
-                applyPreset('standard');
-            } finally {
-                setLoading(false);
+            if (data) {
+                const safeLogo = sanitizeLogoUrl(data.logo_url);
+                const subs = data.subtitles_by_report_type;
+                setTemplateId(data.id);
+                setAccentColor(normalizeHexColor(data.accent_color) || DEFAULT_ACCENT);
+                setSubtitlesByReport(subs && typeof subs === 'object' && !Array.isArray(subs) ? subs : {});
+                setLogoUrl(safeLogo);
+                savedLogoUrlRef.current = safeLogo;
+                applyLayout({
+                    elements: Array.isArray(data.elements) ? data.elements : [],
+                    margin: Number(data.margin_mm) > 0 ? Number(data.margin_mm) : DEFAULT_MARGIN,
+                    // Use the stored (global) orientation, or default to portrait
+                    orientation: getTemplateOrientation(data.orientation_by_report_type),
+                });
+            } else {
+                // Noch keine Vorlage: Standard-Layout anzeigen (zählt nicht als Änderung)
+                setTemplateId(null);
+                applyLayout({ elements: getPresetElements('standard', 'portrait'), margin: DEFAULT_MARGIN, orientation: 'portrait' });
             }
+            resetHistory();
+            changeCountRef.current = 0;
+            setDirty(false);
+            setLoadError(null);
+            setLoading(false);
         };
-        load();
-    }, [user, selectedPortfolioID]);
+        load().catch(err => {
+            if (cancelled) return;
+            // Nicht stillschweigend auf den Standard ausweichen – sonst würde beim
+            // Speichern eine bestehende Vorlage überschrieben.
+            setLoadError(err?.message || 'Unbekannter Fehler');
+            setLoading(false);
+        });
+        return () => { cancelled = true; };
+    }, [userId, portfolioId, reloadToken, applyLayout, resetHistory]);
+
+    const retryLoad = () => {
+        setLoadError(null);
+        setLoading(true);
+        setReloadToken(t => t + 1);
+    };
 
     // ─── Save Template ─────────────────────────
+    const cleanupReplacedLogos = (currentUrl) => {
+        const keepPath = logoStoragePath(currentUrl);
+        const candidates = [...uploadedLogoPathsRef.current, logoStoragePath(savedLogoUrlRef.current)];
+        const toRemove = [...new Set(candidates)]
+            .filter(p => p && p !== keepPath && p.startsWith(`logos/${portfolioId}/`));
+        uploadedLogoPathsRef.current = [];
+        savedLogoUrlRef.current = currentUrl;
+        if (toRemove.length === 0) return;
+        // Best effort: nicht mehr verwendete Logos aus dem öffentlichen Bucket entfernen
+        supabase.storage.from('pdf-assets').remove(toRemove)
+            .then(({ error }) => { if (error) console.warn('Altes Logo konnte nicht gelöscht werden:', error.message); })
+            .catch(err => console.warn('Altes Logo konnte nicht gelöscht werden:', err));
+    };
+
+    const updateTemplateRow = async (payload, id) => {
+        let query = supabase.from('pdf_templates').update(payload).eq('portfolio_id', portfolioId);
+        if (id) query = query.eq('id', id);
+        const { data, error } = await query.select('id').maybeSingle();
+        if (error) throw error;
+        return data?.id || null;
+    };
+
     const handleSave = async () => {
-        if (!user || !selectedPortfolioID) return;
+        if (!userId || !portfolioId || loading || loadError || savingRef.current) return;
+        savingRef.current = true;
         setSaving(true);
+        const changeAtStart = changeCountRef.current;
         try {
-            // Build a consistent orientation map for all report types (global orientation)
+            // Eine globale Orientierung für alle Report-Typen (Liste aus den Report-Konfigurationen)
+            const orientation = orientationRef.current;
             const orientationMap = {};
-            ['immobilien', 'einheiten', 'mietverhaeltnisse', 'bankaufstellung', 'offene_mieten', 'buchhaltung', 'kpi', 'deals', 'deal_kalkulation', 'finanzierungen', 'sanierung', 'sanierung_rechner', 'mahnwesen'].forEach(rt => {
-                orientationMap[rt] = currentOrientation;
-            });
+            Object.keys(REPORT_CONFIGS).forEach(rt => { orientationMap[rt] = orientation; });
+            orientationMap.global = orientation;
+            const safeLogo = sanitizeLogoUrl(logoUrl);
             const payload = {
-                portfolio_id: selectedPortfolioID,
-                user_id: user.id,
-                margin_mm: margin,
+                margin_mm: marginRef.current,
                 header_height_mm: HEADER_H,
                 footer_height_mm: FOOTER_H,
-                accent_color: accentColor,
-                elements,
+                accent_color: normalizeHexColor(accentColor) || DEFAULT_ACCENT,
+                elements: elementsRef.current,
                 orientation_by_report_type: orientationMap,
-                elements_by_report_orientation: {},
                 subtitles_by_report_type: subtitlesByReport,
-                logo_url: logoUrl,
+                logo_url: safeLogo,
                 updated_at: new Date().toISOString(),
-                updated_by: user.id,
+                updated_by: userId,
             };
+
+            let savedId = null;
             if (templateId) {
-                await supabase.from('pdf_templates').update(payload).eq('id', templateId);
+                // user_id bleibt beim Aktualisieren unverändert (kein Besitzwechsel)
+                savedId = await updateTemplateRow(payload, templateId);
             } else {
-                const { data } = await supabase.from('pdf_templates').insert(payload).select().single();
-                if (data) setTemplateId(data.id);
+                // Neue Vorlage gehört dem Eigentümer des Portfolios
+                const ownerId = selectedPortfolio?.user_id || userId;
+                const { data, error } = await supabase
+                    .from('pdf_templates')
+                    .insert({ ...payload, portfolio_id: portfolioId, user_id: ownerId })
+                    .select('id')
+                    .single();
+                if (error?.code === '23505') {
+                    // Inzwischen existiert eine Vorlage für dieses Portfolio → diese aktualisieren
+                    savedId = await updateTemplateRow(payload, null);
+                } else if (error) {
+                    throw error;
+                } else {
+                    savedId = data?.id || null;
+                }
             }
-            setDirty(false);
+            if (!savedId) throw new Error(NO_ROW_SAVED);
+
+            setTemplateId(savedId);
+            cleanupReplacedLogos(safeLogo);
+            // Nur als gespeichert markieren, wenn währenddessen nichts geändert wurde
+            if (changeCountRef.current === changeAtStart) {
+                setDirty(false);
+                setSaveNotice('Gespeichert');
+                clearTimeout(noticeTimerRef.current);
+                noticeTimerRef.current = setTimeout(() => setSaveNotice(null), 3000);
+            }
         } catch (err) {
-            alert('Fehler beim Speichern: ' + err.message);
+            alert('Fehler beim Speichern: ' + describeSaveError(err));
         } finally {
+            savingRef.current = false;
             setSaving(false);
         }
     };
 
+    // Strg+S ruft immer die aktuelle Speicherfunktion auf (kein veralteter Closure-Stand)
+    useEffect(() => { handleSaveRef.current = handleSave; });
+
     // ─── Logo Upload ───────────────────────────
     const handleLogoUpload = async (file) => {
-        if (!file || !selectedPortfolioID) return;
+        if (!file || !portfolioId) return;
+        const ext = LOGO_TYPES[file.type];
+        if (!ext) {
+            alert('Bitte ein Logo im Format PNG oder JPG hochladen.');
+            return;
+        }
+        if (file.size > LOGO_MAX_BYTES) {
+            alert('Das Logo ist zu groß (maximal 2 MB).');
+            return;
+        }
         setUploadingLogo(true);
         try {
-            const ext = file.name.split('.').pop();
-            const path = `logos/${selectedPortfolioID}/logo_${Date.now()}.${ext}`;
-            const { error: upErr } = await supabase.storage.from('pdf-assets').upload(path, file, { upsert: true });
+            if (!(await hasImageSignature(file, ext))) {
+                throw new Error('Die Datei ist kein gültiges PNG- bzw. JPG-Bild.');
+            }
+            const path = `logos/${portfolioId}/logo_${Date.now()}.${ext}`;
+            const { error: upErr } = await supabase.storage
+                .from('pdf-assets')
+                .upload(path, file, { contentType: file.type, upsert: false });
             if (upErr) throw upErr;
             const { data: urlData } = supabase.storage.from('pdf-assets').getPublicUrl(path);
-            setLogoUrl(urlData.publicUrl);
-            setDirty(true);
+            const safeUrl = sanitizeLogoUrl(urlData?.publicUrl);
+            if (!safeUrl) throw new Error('Ungültige Logo-Adresse.');
+            uploadedLogoPathsRef.current = [...uploadedLogoPathsRef.current, path];
+            setLogoUrl(safeUrl);
+            markDirty();
         } catch (err) {
-            alert('Logo-Upload fehlgeschlagen: ' + err.message);
+            alert('Logo-Upload fehlgeschlagen: ' + (err?.message || err));
         } finally {
             setUploadingLogo(false);
         }
     };
 
     // ─── Test PDF ──────────────────────────────
+    // Nutzt denselben (abgesicherten) Generator wie der echte Export, damit
+    // die Vorschau exakt dem späteren Druck entspricht.
     const handleTestPdf = () => {
-        // MVP: Open a new tab with a styled HTML preview
-        const w = window.open('', '_blank');
-        if (!w) return;
-        const headerEls = elements.filter(e => e.zone === 'header' && e.visible);
-        const footerEls = elements.filter(e => e.zone === 'footer' && e.visible);
-        const portfolioName = selectedPortfolio?.name || 'Mein Portfolio';
-        const title = 'Immobilienübersicht';
-        const subtitle = subtitlesByReport['global'] || '';
-        const today = new Date().toLocaleDateString('de-DE');
+        generateClientPdf({
+            reportType: 'immobilien',
+            data: TEST_ROWS,
+            selectedColumns: TEST_COLUMNS,
+            orientation: orientationRef.current,
+            showSums: false,
+            portfolioName: selectedPortfolio?.name || 'Mein Portfolio',
+            template: {
+                accentColor,
+                logoUrl,
+                subtitle: subtitlesByReport['global'] || '',
+                elements: elementsRef.current,
+                margin: marginRef.current,
+                headerHeight: HEADER_H,
+                footerHeight: FOOTER_H,
+                orientationByReport: { global: orientationRef.current },
+            },
+            autoPrint: false,
+        });
+    };
 
-        const renderEl = (el) => {
-            const left = el.x * MM_TO_PX;
-            const top = el.y * MM_TO_PX;
-            const width = el.w * MM_TO_PX;
-            const height = (el.h || 5) * MM_TO_PX;
-            const style = `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;font-family:Inter,sans-serif;`;
-
-            switch (el.type) {
-                case 'title': return `<div style="${style}font-size:${el.fontSize}pt;font-weight:${el.fontWeight};color:${el.color};text-align:${el.align}">${title}</div>`;
-                case 'subtitle': return `<div style="${style}font-size:${el.fontSize}pt;color:${el.color};text-align:${el.align}">${subtitle}</div>`;
-                case 'portfolio_name': return `<div style="${style}font-size:${el.fontSize}pt;color:${el.color}">${portfolioName}</div>`;
-                case 'date': return `<div style="${style}font-size:${el.fontSize}pt;color:${el.color}">Stichtag: ${today}</div>`;
-                case 'page_number': return `<div style="${style}font-size:${el.fontSize}pt;color:${el.color};text-align:${el.align}">Seite 1 von 1</div>`;
-                case 'line': return `<div style="${style}border-top:1px solid ${el.color}"></div>`;
-                case 'logo': return logoUrl ? `<img src="${logoUrl}" style="${style}object-fit:contain" />` : `<div style="${style}background:#f3f4f6;display:flex;align-items:center;justify-content:center;border-radius:4px;font-size:10px;color:#999">Logo</div>`;
-                case 'freetext': return `<div style="${style}font-size:${el.fontSize}pt;color:${el.color};text-align:${el.align}">${el.text || ''}</div>`;
-                default: return '';
-            }
-        };
-
-        const sizeStr = currentOrientation === 'landscape' ? 'A4 landscape' : 'A4';
-        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Test PDF – ${title}</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-<style>@page{size:${sizeStr};margin:0}body{margin:0;font-family:Inter,sans-serif}
-.page{width:${pageW}mm;height:${pageH}mm;position:relative;margin:0 auto;background:#fff;box-shadow:0 2px 20px rgba(0,0,0,.1)}
-.content{position:absolute;left:${margin * MM_TO_PX}px;right:${margin * MM_TO_PX}px;top:${HEADER_H * MM_TO_PX}px;bottom:${FOOTER_H * MM_TO_PX}px;padding-top:10px}
-table{width:100%;border-collapse:collapse;font-size:9pt}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f8f9fa;font-weight:600}
-</style></head><body><div class="page">
-${headerEls.map(renderEl).join('')}
-<div class="content">
-<table><thead><tr><th>Nr.</th><th>Bezeichnung</th><th>Adresse</th><th>Wert</th></tr></thead>
-<tbody><tr><td>1</td><td>Musterstraße 1</td><td>12345 Musterstadt</td><td>250.000 €</td></tr>
-<tr><td>2</td><td>Beispielweg 5</td><td>54321 Beispielort</td><td>180.000 €</td></tr>
-<tr><td>3</td><td>Testgasse 10</td><td>99999 Testheim</td><td>320.000 €</td></tr></tbody></table>
-</div>
-${footerEls.map(renderEl).join('')}
-</div></body></html>`;
-        w.document.write(html);
-        w.document.close();
+    // ─── Back (mit Rückfrage bei ungespeicherten Änderungen) ──
+    const handleBack = () => {
+        if (dirty && !window.confirm('Es gibt ungespeicherte Änderungen an der PDF-Vorlage. Trotzdem verlassen?')) return;
+        navigate(backPath);
     };
 
     // ─── Drag Handling ─────────────────────────
     const handlePointerDown = useCallback((e, elId) => {
         e.preventDefault();
         e.stopPropagation();
-        const el = elements.find(el => el.id === elId);
+        const el = elementsRef.current.find(x => x.id === elId);
         if (!el || el.zone !== activeZone) return;
         setSelectedId(elId);
         setRightTab('properties');
         const rect = previewRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const scale = zoom * MM_TO_PX;
+        const p = pointerXY(e);
+        dragRef.current = { moved: false };
         setDragging({
             id: elId,
-            startX: (e.clientX || e.touches?.[0]?.clientX) - rect.left,
-            startY: (e.clientY || e.touches?.[0]?.clientY) - rect.top,
+            startX: p.x - rect.left,
+            startY: p.y - rect.top,
             origX: el.x,
             origY: el.y,
         });
-    }, [elements, activeZone, zoom]);
+    }, [activeZone]);
 
     useEffect(() => {
-        if (!dragging) return;
+        if (!dragging) return undefined;
         const scale = zoom * MM_TO_PX;
         const onMove = (e) => {
             const rect = previewRef.current?.getBoundingClientRect();
             if (!rect) return;
-            const cx = (e.clientX || e.touches?.[0]?.clientX) - rect.left;
-            const cy = (e.clientY || e.touches?.[0]?.clientY) - rect.top;
-            const dxMm = (cx - dragging.startX) / scale;
-            const dyMm = (cy - dragging.startY) / scale;
+            const p = pointerXY(e);
+            const dxMm = (p.x - rect.left - dragging.startX) / scale;
+            const dyMm = (p.y - rect.top - dragging.startY) / scale;
+            // Raster nur beim Ziehen mit der Maus
             const newX = snap(dragging.origX + dxMm);
             const newY = snap(dragging.origY + dyMm);
 
-            setElements(prev => {
-                const idx = prev.findIndex(e => e.id === dragging.id);
-                if (idx < 0) return prev;
-                const el = prev[idx];
-                const clamped = clampElement({ ...el, x: newX, y: newY });
-                const test = prev.map((e, i) => i === idx ? clamped : e);
-                if (checkCollision(clamped, test)) return prev;
-                return test;
-            });
+            const prev = elementsRef.current;
+            const idx = prev.findIndex(x => x.id === dragging.id);
+            if (idx < 0) return;
+            const el = prev[idx];
+            const clamped = clampElementToPage({ ...el, x: newX, y: newY }, { orientation: orientationRef.current, margin: marginRef.current });
+            if (clamped.x === el.x && clamped.y === el.y) return;
+            const next = prev.map((x, i) => i === idx ? clamped : x);
+            if (collides(clamped, next)) return;
+            applyLayout({ elements: next });
+            if (dragRef.current) dragRef.current.moved = true;
         };
         const onUp = () => {
-            setElements(prev => { pushHistory(prev); return prev; });
-            setDirty(true);
+            // Verlaufsschritt/„ungespeichert" nur bei tatsächlicher Bewegung
+            if (dragRef.current?.moved) {
+                pushHistory();
+                markDirty();
+            }
+            dragRef.current = null;
             setDragging(null);
         };
         window.addEventListener('pointermove', onMove);
@@ -471,7 +609,7 @@ ${footerEls.map(renderEl).join('')}
             window.removeEventListener('touchmove', onMove);
             window.removeEventListener('touchend', onUp);
         };
-    }, [dragging, zoom, clampElement, checkCollision, pushHistory]);
+    }, [dragging, zoom, applyLayout, pushHistory, markDirty]);
 
     // ─── Unsaved changes warning ───────────────
     useEffect(() => {
@@ -482,20 +620,22 @@ ${footerEls.map(renderEl).join('')}
 
     // ─── Keyboard shortcuts ────────────────────
     useEffect(() => {
+        const isEditable = (node) => !!node && (node.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName));
         const handler = (e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
-            if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); handleSave(); }
-            if (selectedId && !e.ctrlKey) {
+            const key = (e.key || '').toLowerCase();
+            const mod = e.ctrlKey || e.metaKey;
+            if (mod && key === 's') { e.preventDefault(); handleSaveRef.current?.(); return; }
+            // In Eingabefeldern gelten die normalen Tasten (Cursor, Text-Undo, Löschen)
+            if (isEditable(e.target) || isEditable(document.activeElement)) return;
+            if (mod && key === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+            if (mod && key === 'y') { e.preventDefault(); redo(); return; }
+            if (selectedId && !mod && !e.altKey) {
                 const step = e.shiftKey ? 5 : 1;
                 if (e.key === 'ArrowLeft') { e.preventDefault(); moveElement(selectedId, -step, 0); }
                 if (e.key === 'ArrowRight') { e.preventDefault(); moveElement(selectedId, step, 0); }
                 if (e.key === 'ArrowUp') { e.preventDefault(); moveElement(selectedId, 0, -step); }
                 if (e.key === 'ArrowDown') { e.preventDefault(); moveElement(selectedId, 0, step); }
-                if (e.key === 'Delete' || e.key === 'Backspace') {
-                    if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-                        e.preventDefault(); removeElement(selectedId);
-                    }
-                }
+                if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeElement(selectedId); }
             }
         };
         window.addEventListener('keydown', handler);
@@ -503,12 +643,12 @@ ${footerEls.map(renderEl).join('')}
     }, [selectedId, undo, redo, moveElement, removeElement]);
 
     const selectedEl = elements.find(e => e.id === selectedId);
-    const headerEls = elements.filter(e => e.zone === 'header');
-    const footerEls = elements.filter(e => e.zone === 'footer');
     const currentTitle = 'Reporttitel';
     const currentSubtitle = subtitlesByReport['global'] || '';
     const portfolioName = selectedPortfolio?.name || 'Portfolio';
     const orientationLabel = currentOrientation === 'landscape' ? 'Querformat' : 'Hochformat';
+    const canUndo = historyPos.idx > 0;
+    const canRedo = historyPos.idx < historyPos.len - 1;
 
     // ─── Count helpers ─────────────────────────
     const freetextCount = elements.filter(e => e.type === EL_TYPES.FREETEXT).length;
@@ -520,11 +660,26 @@ ${footerEls.map(renderEl).join('')}
         </div>
     );
 
-    if (!selectedPortfolioID) return (
+    if (!portfolioId) return (
         <div style={{ padding: '40px', textAlign: 'center' }}>
             <FileText size={48} style={{ color: 'var(--text-secondary)', marginBottom: '16px' }} />
             <h2 style={{ marginBottom: '8px' }}>Kein Portfolio ausgewählt</h2>
             <p style={{ color: 'var(--text-secondary)' }}>Bitte wähle ein Portfolio aus, um die PDF-Vorlage zu bearbeiten.</p>
+        </div>
+    );
+
+    if (loadError) return (
+        <div style={{ padding: '40px', textAlign: 'center' }}>
+            <FileText size={48} style={{ color: '#dc2626', marginBottom: '16px' }} />
+            <h2 style={{ marginBottom: '8px' }}>PDF-Vorlage konnte nicht geladen werden</h2>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>
+                {loadError}<br />
+                Um eine bestehende Vorlage nicht versehentlich zu überschreiben, ist das Bearbeiten erst nach erfolgreichem Laden möglich.
+            </p>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                <Button variant="secondary" icon={ArrowLeft} onClick={() => navigate(backPath)}>Zurück</Button>
+                <Button icon={RotateCcw} onClick={retryLoad}>Erneut laden</Button>
+            </div>
         </div>
     );
 
@@ -553,13 +708,14 @@ ${footerEls.map(renderEl).join('')}
             overflow: 'hidden',
         };
 
+        // Gleiche Schrift und Zeilenhöhe wie im Druck (lib/pdfGenerator.js)
         const textStyle = {
-            fontFamily: 'Inter, sans-serif',
+            fontFamily: PDF_FONT_STACK,
             fontSize: `${(el.fontSize || 10) * zoom}pt`,
             fontWeight: el.fontWeight || 'normal',
             color: el.color || '#333',
             textAlign: el.align || 'left',
-            lineHeight: 1.3,
+            lineHeight: 1.2,
             width: '100%',
         };
 
@@ -580,7 +736,7 @@ ${footerEls.map(renderEl).join('')}
                 content = <div style={textStyle}>{portfolioName}</div>;
                 break;
             case EL_TYPES.DATE:
-                content = <div style={textStyle}>Stichtag: {new Date().toLocaleDateString('de-DE')}</div>;
+                content = <div style={textStyle}>Stichtag: {todayStr}</div>;
                 break;
             case EL_TYPES.PAGE_NUMBER:
                 content = <div style={textStyle}>Seite 1 von 1</div>;
@@ -602,13 +758,6 @@ ${footerEls.map(renderEl).join('')}
                 onClick={(e) => { e.stopPropagation(); setSelectedId(el.id); setRightTab('properties'); }}
             >
                 {content}
-                {/* Resize handle for non-line scalable elements */}
-                {isSelected && inActiveZone && el.type !== EL_TYPES.LINE && (
-                    <div style={{
-                        position: 'absolute', right: -4, bottom: -4, width: 8, height: 8,
-                        background: accentColor, borderRadius: '50%', cursor: 'se-resize',
-                    }} />
-                )}
             </div>
         );
     };
@@ -657,6 +806,8 @@ ${footerEls.map(renderEl).join('')}
             background: 'var(--surface-color)', color: 'var(--text-primary)', fontSize: '0.82rem',
             width: '60px',
         };
+        // Grenzen für Breite/Höhe an einer Stelle (constants.getSizeLimits)
+        const limits = getSizeLimits(selectedEl, { orientation: currentOrientation, margin });
 
         return (
             <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -674,28 +825,34 @@ ${footerEls.map(renderEl).join('')}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '4px', marginBottom: '4px' }}>Position</div>
                 <div style={inputRow}>
                     <span style={labelSt}>X (mm)</span>
-                    <input type="number" step={SNAP_GRID} value={selectedEl.x} onChange={e => updateElement(selectedEl.id, { x: snap(Number(e.target.value)) })} style={inputSt} />
+                    <input type="number" step={1} value={selectedEl.x}
+                        onChange={e => { const v = parseInputNumber(e.target.value); if (v !== null) updateElement(selectedEl.id, { x: v }); }}
+                        style={inputSt} />
                     <span style={labelSt}>Y (mm)</span>
-                    <input type="number" step={SNAP_GRID} value={selectedEl.y} onChange={e => updateElement(selectedEl.id, { y: snap(Number(e.target.value)) })} style={inputSt} />
+                    <input type="number" step={1} value={selectedEl.y}
+                        onChange={e => { const v = parseInputNumber(e.target.value); if (v !== null) updateElement(selectedEl.id, { y: v }); }}
+                        style={inputSt} />
                 </div>
 
                 {/* Size */}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '4px', marginBottom: '4px' }}>Größe</div>
                 <div style={inputRow}>
                     <span style={labelSt}>B (mm)</span>
-                    <input type="number" step={SNAP_GRID}
+                    <input type="number" step={1}
                         value={selectedEl.w}
-                        min={selectedEl.type === EL_TYPES.LOGO ? 20 : 10}
-                        max={selectedEl.type === EL_TYPES.LOGO ? 60 : pageW - 2 * margin}
-                        onChange={e => updateElement(selectedEl.id, { w: clamp(Number(e.target.value), 10, pageW - 2 * margin) })}
+                        min={limits.minW}
+                        max={limits.maxW}
+                        onChange={e => { const v = parseInputNumber(e.target.value); if (v !== null) updateElement(selectedEl.id, { w: clamp(v, limits.minW, limits.maxW) }); }}
                         style={inputSt}
                     />
                     {selectedEl.type !== EL_TYPES.LINE && (
                         <>
                             <span style={labelSt}>H (mm)</span>
                             <input type="number" step={1} value={Math.round((selectedEl.h || 5) * 10) / 10}
+                                min={limits.minH}
+                                max={limits.maxH}
                                 disabled={selectedEl.type === EL_TYPES.LOGO}
-                                onChange={e => updateElement(selectedEl.id, { h: Number(e.target.value) })}
+                                onChange={e => { const v = parseInputNumber(e.target.value); if (v !== null) updateElement(selectedEl.id, { h: clamp(v, limits.minH, limits.maxH) }); }}
                                 style={{ ...inputSt, opacity: selectedEl.type === EL_TYPES.LOGO ? 0.5 : 1 }}
                             />
                         </>
@@ -729,7 +886,7 @@ ${footerEls.map(renderEl).join('')}
                     </button>
                     <button
                         type="button"
-                        onClick={() => updateElement(selectedEl.id, { zIndex: (selectedEl.zIndex || 1) + 1 })}
+                        onClick={() => updateElement(selectedEl.id, { zIndex: Math.min(999, (selectedEl.zIndex || 1) + 1) })}
                         style={{
                             padding: '3px 8px',
                             borderRadius: '4px',
@@ -753,7 +910,8 @@ ${footerEls.map(renderEl).join('')}
                         <div style={inputRow}>
                             <span style={labelSt}>Größe</span>
                             <input type="number" step={1} min={6} max={28} value={selectedEl.fontSize || 10}
-                                onChange={e => updateElement(selectedEl.id, { fontSize: Number(e.target.value) })} style={{ ...inputSt, width: '50px' }} />
+                                onChange={e => { const v = parseInputNumber(e.target.value); if (v !== null) updateElement(selectedEl.id, { fontSize: clamp(v, 6, 28) }); }}
+                                style={{ ...inputSt, width: '50px' }} />
                             <span style={labelSt}>pt</span>
                         </div>
                         <div style={inputRow}>
@@ -773,8 +931,8 @@ ${footerEls.map(renderEl).join('')}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '8px', marginBottom: '4px' }}>Farbe</div>
                 <div style={inputRow}>
                     <span style={labelSt}>{selectedEl.type === EL_TYPES.LINE ? 'Linie' : 'Text'}</span>
-                    <input type="color" value={selectedEl.color || '#333333'}
-                        onChange={e => updateElement(selectedEl.id, { color: e.target.value })}
+                    <input type="color" value={normalizeHexColor(selectedEl.color) || '#333333'}
+                        onChange={e => updateElement(selectedEl.id, { color: normalizeHexColor(e.target.value) || '#333333' })}
                         style={{ width: '36px', height: '28px', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: 'pointer', padding: '2px' }}
                     />
                 </div>
@@ -787,7 +945,7 @@ ${footerEls.map(renderEl).join('')}
                             value={selectedEl.text || ''}
                             onChange={e => updateElement(selectedEl.id, { text: e.target.value })}
                             rows={3}
-                            style={{ ...inputSt, width: '100%', resize: 'vertical', fontFamily: 'Inter, sans-serif', fontSize: '0.82rem' }}
+                            style={{ ...inputSt, width: '100%', resize: 'vertical', fontFamily: PDF_FONT_STACK, fontSize: '0.82rem' }}
                         />
                     </>
                 )}
@@ -800,7 +958,7 @@ ${footerEls.map(renderEl).join('')}
                         </div>
                         <input
                             value={subtitlesByReport['global'] || ''}
-                            onChange={e => { setSubtitlesByReport(prev => ({ ...prev, global: e.target.value })); setDirty(true); }}
+                            onChange={e => { const v = e.target.value; setSubtitlesByReport(prev => ({ ...prev, global: v })); markDirty(); }}
                             placeholder="Subtitel eingeben…"
                             style={{ ...inputSt, width: '100%' }}
                         />
@@ -882,7 +1040,7 @@ ${footerEls.map(renderEl).join('')}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '6px' }}>Standard-Elemente</div>
                 {renderStandardRow(EL_TYPES.LOGO, 'Logo')}
                 {renderStandardRow(EL_TYPES.TITLE, 'Reporttitel (auto)')}
-                {renderStandardRow(EL_TYPES.SUBTITLE, 'Subtitel (pro Typ)')}
+                {renderStandardRow(EL_TYPES.SUBTITLE, 'Subtitel')}
                 {renderStandardRow(EL_TYPES.PORTFOLIO_NAME, 'Portfolio-Name')}
                 {renderStandardRow(EL_TYPES.DATE, 'Datum')}
                 {renderStandardRow(EL_TYPES.PAGE_NUMBER, 'Seitenzahl')}
@@ -908,21 +1066,23 @@ ${footerEls.map(renderEl).join('')}
                 {/* Logo Upload */}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '16px', marginBottom: '6px' }}>Logo hochladen</div>
                 <label style={{ padding: '8px 12px', borderRadius: '6px', border: '1px dashed var(--border-color)', background: 'var(--surface-color)', cursor: 'pointer', fontSize: '0.78rem', color: 'var(--text-primary)', textAlign: 'center', display: 'block' }}>
-                    {uploadingLogo ? <Loader2 size={14} className="animate-spin" /> : <><Image size={14} style={{ marginRight: '4px', verticalAlign: 'middle' }} />PNG / JPG / SVG</>}
-                    <input type="file" accept=".png,.jpg,.jpeg,.svg" hidden onChange={e => e.target.files?.[0] && handleLogoUpload(e.target.files[0])} />
+                    {uploadingLogo ? <Loader2 size={14} className="animate-spin" /> : <><Image size={14} style={{ marginRight: '4px', verticalAlign: 'middle' }} />PNG / JPG (max. 2 MB)</>}
+                    <input type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" hidden
+                        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleLogoUpload(f); }} />
                 </label>
                 {logoUrl && <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px' }}>✓ Logo hochgeladen</div>}
 
                 {/* Accent Color */}
                 <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginTop: '16px', marginBottom: '6px' }}>Akzentfarbe</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input type="color" value={accentColor} onChange={e => { setAccentColor(e.target.value); setDirty(true); }}
+                    <input type="color" value={accentColor}
+                        onChange={e => { setAccentColor(normalizeHexColor(e.target.value) || DEFAULT_ACCENT); markDirty(); }}
                         style={{ width: '36px', height: '28px', border: '1px solid var(--border-color)', borderRadius: '4px', cursor: 'pointer', padding: '2px' }} />
                     <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{accentColor}</span>
                 </div>
 
                 {/* Reset */}
-                <button onClick={() => applyPreset('standard')}
+                <button onClick={resetToStandard}
                     style={{ marginTop: '20px', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', cursor: 'pointer', fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'center' }}>
                     <RotateCcw size={13} /> Auf Standard zurücksetzen
                 </button>
@@ -934,7 +1094,7 @@ ${footerEls.map(renderEl).join('')}
     return (
         <div>
             {/* Back */}
-            <button onClick={() => navigate(backPath)}
+            <button onClick={handleBack}
                 style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '16px', padding: 0 }}>
                 <ArrowLeft size={16} /> Zurück
             </button>
@@ -946,6 +1106,7 @@ ${footerEls.map(renderEl).join('')}
                 </h1>
                 <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(14,165,233,0.08)', color: '#0ea5e9', fontWeight: 500 }}>{orientationLabel}</span>
                 {dirty && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(239,68,68,0.1)', color: '#dc2626', fontWeight: 500 }}>Ungespeichert</span>}
+                {!dirty && saveNotice && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(34,197,94,0.12)', color: '#15803d', fontWeight: 500 }}>✓ {saveNotice}</span>}
                 {collisionWarning && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(245,158,11,0.12)', color: '#d97706', fontWeight: 500 }}>⚠ Layout kollidiert – bitte Elemente anpassen</span>}
             </div>
 
@@ -957,7 +1118,7 @@ ${footerEls.map(renderEl).join('')}
                     <button style={toggleBtnStyle(currentOrientation === 'landscape')} onClick={() => switchOrientation('landscape')} title="Querformat">⬕ Quer</button>
                 </div>
 
-                <select value={margin} onChange={e => { setMargin(Number(e.target.value)); setDirty(true); }} style={selectStyle}>
+                <select value={margin} onChange={e => changeMargin(e.target.value)} style={selectStyle}>
                     {MARGIN_OPTIONS.map(m => <option key={m} value={m}>Rand {m}mm</option>)}
                 </select>
 
@@ -968,8 +1129,8 @@ ${footerEls.map(renderEl).join('')}
 
                 <div style={{ flex: 1 }} />
 
-                <button style={{ ...iconBtnStyle, opacity: historyIdx <= 0 ? 0.3 : 1 }} onClick={undo} disabled={historyIdx <= 0} title="Rückgängig"><Undo2 size={15} /></button>
-                <button style={{ ...iconBtnStyle, opacity: historyIdx >= history.length - 1 ? 0.3 : 1 }} onClick={redo} disabled={historyIdx >= history.length - 1} title="Wiederholen"><Redo2 size={15} /></button>
+                <button style={{ ...iconBtnStyle, opacity: canUndo ? 1 : 0.3 }} onClick={undo} disabled={!canUndo} title="Rückgängig (Strg+Z)"><Undo2 size={15} /></button>
+                <button style={{ ...iconBtnStyle, opacity: canRedo ? 1 : 0.3 }} onClick={redo} disabled={!canRedo} title="Wiederholen (Strg+Umschalt+Z)"><Redo2 size={15} /></button>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
                     <button style={iconBtnStyle} onClick={() => setZoom(z => ZOOM_LEVELS[Math.max(0, ZOOM_LEVELS.indexOf(z) - 1)] || z)} title="Verkleinern"><ZoomOut size={14} /></button>
@@ -1026,7 +1187,7 @@ ${footerEls.map(renderEl).join('')}
                             gap: '8px', pointerEvents: 'none',
                         }}>
                             <Lock size={20 * zoom} color="#ccc" />
-                            <span style={{ fontSize: `${9 * zoom}pt`, color: '#bbb', fontFamily: 'Inter' }}>Inhalt wird automatisch gefüllt</span>
+                            <span style={{ fontSize: `${9 * zoom}pt`, color: '#bbb', fontFamily: PDF_FONT_STACK }}>Inhalt wird automatisch gefüllt</span>
                         </div>
 
                         {/* Footer zone */}
@@ -1069,6 +1230,6 @@ ${footerEls.map(renderEl).join('')}
             </div>
         </div>
     );
-};
+}
 
 export default PdfTemplateEditor;

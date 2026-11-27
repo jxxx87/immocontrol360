@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
@@ -6,12 +6,22 @@ import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Mail, CheckCircle2, AlertTriangle, Loader2, Trash2 } from 'lucide-react';
 
+// Das SMTP-Passwort wird nie in den Browser zurückgeladen: Es kann nur gesetzt
+// bzw. geändert werden. Leeres Passwortfeld = gespeichertes Passwort bleibt.
+const EMAIL_PATTERN = /[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/;
+
+const extractSenderAddress = (sender) => {
+    const value = (sender || '').trim();
+    const angle = value.match(/<([^<>]+)>\s*$/);
+    return (angle ? angle[1] : value).trim();
+};
+
 export const EmailSettings = () => {
     const { user } = useAuth();
     const [loading, setLoading] = useState(false);
+    const [loadError, setLoadError] = useState('');
     const [saving, setSaving] = useState(false);
     const [testing, setTesting] = useState(false);
-    const [testEmail, setTestEmail] = useState('');
     const [isTestModalOpen, setIsTestModalOpen] = useState(false);
     const [statusMessage, setStatusMessage] = useState(null);
     const [isConfiguredInDb, setIsConfiguredInDb] = useState(false);
@@ -25,18 +35,15 @@ export const EmailSettings = () => {
         smtp_sender: ''
     });
 
-    useEffect(() => {
-        if (user) {
-            fetchSettings();
-        }
-    }, [user]);
-
-    const fetchSettings = async () => {
+    const fetchSettings = useCallback(async () => {
+        if (!user) return;
         try {
             setLoading(true);
+            setLoadError('');
+            // Bewusst ohne smtp_pass
             const { data, error } = await supabase
                 .from('user_smtp_settings')
-                .select('*')
+                .select('smtp_host, smtp_port, smtp_user, smtp_sender')
                 .eq('user_id', user.id)
                 .maybeSingle();
 
@@ -46,7 +53,7 @@ export const EmailSettings = () => {
                     smtp_host: data.smtp_host || '',
                     smtp_port: String(data.smtp_port || '587'),
                     smtp_user: data.smtp_user || '',
-                    smtp_pass: data.smtp_pass || '',
+                    smtp_pass: '',
                     smtp_sender: data.smtp_sender || ''
                 });
                 setIsConfiguredInDb(!!data.smtp_host && !!data.smtp_user);
@@ -57,36 +64,72 @@ export const EmailSettings = () => {
             }
         } catch (err) {
             console.error('Failed to load SMTP settings:', err);
+            setLoadError('Die E-Mail-Einstellungen konnten nicht geladen werden. Speichern ist gesperrt, damit keine bestehende Einrichtung überschrieben wird. Bitte laden Sie die Seite neu.');
         } finally {
             setLoading(false);
         }
+    }, [user]);
+
+    useEffect(() => {
+        fetchSettings();
+    }, [fetchSettings]);
+
+    const validateForm = ({ requirePassword }) => {
+        if (!form.smtp_host.trim() || !form.smtp_port || !form.smtp_user.trim() || !form.smtp_sender.trim()) {
+            return 'Bitte füllen Sie alle Pflichtfelder aus.';
+        }
+        if (requirePassword && !form.smtp_pass) {
+            return 'Bitte geben Sie das Passwort des Postfachs ein.';
+        }
+        const port = Number(form.smtp_port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            return 'Bitte einen gültigen SMTP-Port angeben (ganze Zahl von 1 bis 65535, üblich: 465 oder 587).';
+        }
+        if (!EMAIL_PATTERN.test(extractSenderAddress(form.smtp_sender))) {
+            return 'Bitte beim Absender eine gültige E-Mail-Adresse angeben, z. B. „Max Mustermann <info@ihredomain.de>".';
+        }
+        return null;
     };
 
     const handleSave = async () => {
-        if (!form.smtp_host || !form.smtp_port || !form.smtp_user || !form.smtp_pass || !form.smtp_sender) {
-            alert('Bitte füllen Sie alle Pflichtfelder aus.');
+        if (loadError) {
+            alert(loadError);
+            return;
+        }
+        const validationError = validateForm({ requirePassword: !isConfiguredInDb });
+        if (validationError) {
+            alert(validationError);
             return;
         }
 
         try {
             setSaving(true);
             const payload = {
-                user_id: user.id,
-                smtp_host: form.smtp_host,
-                smtp_port: parseInt(form.smtp_port),
-                smtp_user: form.smtp_user,
-                smtp_pass: form.smtp_pass,
-                smtp_sender: form.smtp_sender,
+                smtp_host: form.smtp_host.trim(),
+                smtp_port: Number(form.smtp_port),
+                smtp_user: form.smtp_user.trim(),
+                smtp_sender: form.smtp_sender.trim(),
                 updated_at: new Date().toISOString()
             };
+            // Passwort nur mitschicken, wenn es neu eingegeben wurde
+            if (form.smtp_pass) payload.smtp_pass = form.smtp_pass;
 
-            const { error } = await supabase
-                .from('user_smtp_settings')
-                .upsert(payload, { onConflict: 'user_id' });
+            let error;
+            if (isConfiguredInDb) {
+                ({ error } = await supabase
+                    .from('user_smtp_settings')
+                    .update(payload)
+                    .eq('user_id', user.id));
+            } else {
+                ({ error } = await supabase
+                    .from('user_smtp_settings')
+                    .upsert({ ...payload, user_id: user.id }, { onConflict: 'user_id' }));
+            }
 
             if (error) throw error;
             setIsConfiguredInDb(true);
-            setDbSender(form.smtp_sender || form.smtp_user);
+            setDbSender(payload.smtp_sender || payload.smtp_user);
+            setForm(prev => ({ ...prev, smtp_pass: '' }));
             window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail Server-Einstellungen erfolgreich gespeichert.');
         } catch (err) {
@@ -129,27 +172,41 @@ export const EmailSettings = () => {
         }
     };
 
+    // Testmail geht immer an die eigene Konto-Adresse
+    const testRecipient = user?.email || '';
+
     const handleTestConnection = async () => {
-        if (!testEmail) {
-            alert('Bitte geben Sie eine Test-E-Mail-Adresse ein.');
+        const validationError = validateForm({ requirePassword: !isConfiguredInDb });
+        if (validationError) {
+            setStatusMessage({ type: 'error', text: validationError });
             return;
         }
+        if (!testRecipient) {
+            setStatusMessage({ type: 'error', text: 'Für Ihr Konto ist keine E-Mail-Adresse hinterlegt.' });
+            return;
+        }
+
+        const usesStoredPassword = !form.smtp_pass;
 
         try {
             setTesting(true);
             setStatusMessage({ type: 'info', text: 'Verbindung wird getestet und Testmail gesendet...' });
 
+            const settings = {
+                smtp_host: form.smtp_host.trim(),
+                smtp_port: String(Number(form.smtp_port)),
+                smtp_user: form.smtp_user.trim(),
+                smtp_sender: form.smtp_sender.trim()
+            };
+            if (!usesStoredPassword) settings.smtp_pass = form.smtp_pass;
+
             const { data, error } = await supabase.functions.invoke('send-letting-email', {
                 body: {
                     action: 'test_connection',
-                    settings: {
-                        smtp_host: form.smtp_host,
-                        smtp_port: form.smtp_port,
-                        smtp_user: form.smtp_user,
-                        smtp_pass: form.smtp_pass,
-                        smtp_sender: form.smtp_sender
-                    },
-                    test_email: testEmail
+                    settings,
+                    // Ohne neu eingegebenes Passwort soll der Server das gespeicherte verwenden
+                    use_stored_password: usesStoredPassword,
+                    test_email: testRecipient
                 }
             });
 
@@ -158,18 +215,20 @@ export const EmailSettings = () => {
             if (data?.success) {
                 setStatusMessage({
                     type: 'success',
-                    text: 'Erfolgreich! Die Verbindung zum Mailserver konnte hergestellt werden und die Test-E-Mail wurde gesendet.'
+                    text: `Erfolgreich! Die Verbindung zum Mailserver konnte hergestellt werden und die Test-E-Mail wurde an ${testRecipient} gesendet.`
                 });
             } else {
                 setStatusMessage({
                     type: 'error',
                     text: 'Verbindung fehlgeschlagen: ' + (data?.error || 'Unbekannter Fehler')
+                        + (usesStoredPassword ? ' – Tipp: Geben Sie das Passwort im Formular erneut ein und testen Sie noch einmal.' : '')
                 });
             }
         } catch (err) {
             setStatusMessage({
                 type: 'error',
                 text: 'Verbindungstest fehlgeschlagen: ' + err.message
+                    + (usesStoredPassword ? ' – Tipp: Geben Sie das Passwort im Formular erneut ein und testen Sie noch einmal.' : '')
             });
         } finally {
             setTesting(false);
@@ -186,8 +245,6 @@ export const EmailSettings = () => {
         );
     }
 
-    const hasConfigured = form.smtp_host && form.smtp_user;
-
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
             <Card title="E-Mail-Einrichtung (SMTP)">
@@ -196,7 +253,21 @@ export const EmailSettings = () => {
                         Richten Sie hier Ihren eigenen E-Mail-Server (SMTP) ein. Nach der Einrichtung werden alle automatischen Benachrichtigungen, Bewerbungsbestätigungen, Terminbestätigungen und Mieter-Einladungen direkt von Ihrer E-Mail-Adresse aus versendet.
                     </p>
 
-                    {isConfiguredInDb ? (
+                    {loadError ? (
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '12px',
+                            padding: '12px 16px',
+                            backgroundColor: '#FEF2F2',
+                            border: '1px solid #FECACA',
+                            borderRadius: '8px',
+                            color: '#991B1B'
+                        }}>
+                            <AlertTriangle size={20} />
+                            <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>{loadError}</span>
+                        </div>
+                    ) : isConfiguredInDb ? (
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -243,6 +314,9 @@ export const EmailSettings = () => {
                             onChange={e => setForm({ ...form, smtp_port: e.target.value })}
                             placeholder="587"
                             type="number"
+                            min="1"
+                            max="65535"
+                            step="1"
                         />
                     </div>
 
@@ -253,13 +327,16 @@ export const EmailSettings = () => {
                             onChange={e => setForm({ ...form, smtp_user: e.target.value })}
                             placeholder="info@ihredomain.de"
                         />
-                        <Input
-                            label="Passwort *"
-                            value={form.smtp_pass}
-                            onChange={e => setForm({ ...form, smtp_pass: e.target.value })}
-                            type="password"
-                            placeholder="••••••••"
-                        />
+                        <div>
+                            <Input
+                                label={isConfiguredInDb ? 'Passwort (nur zum Ändern ausfüllen)' : 'Passwort *'}
+                                value={form.smtp_pass}
+                                onChange={e => setForm({ ...form, smtp_pass: e.target.value })}
+                                type="password"
+                                autoComplete="new-password"
+                                placeholder={isConfiguredInDb ? 'Gespeichert – leer lassen, um es beizubehalten' : '••••••••'}
+                            />
+                        </div>
                     </div>
 
                     <Input
@@ -278,6 +355,7 @@ export const EmailSettings = () => {
                                     setIsTestModalOpen(true);
                                 }}
                                 icon={Mail}
+                                disabled={!!loadError}
                             >
                                 Verbindung testen
                             </Button>
@@ -294,7 +372,7 @@ export const EmailSettings = () => {
                         </div>
                         <Button
                             onClick={handleSave}
-                            disabled={saving}
+                            disabled={saving || !!loadError}
                         >
                             {saving ? 'Speichert...' : 'Einstellungen speichern'}
                         </Button>
@@ -327,18 +405,10 @@ export const EmailSettings = () => {
                     }}>
                         <h3 style={{ fontSize: '1.25rem', fontWeight: 600, margin: '0 0 12px 0' }}>E-Mail-Verbindung testen</h3>
                         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                            Geben Sie eine E-Mail-Adresse ein, an die eine Test-Nachricht geschickt werden soll.
+                            Mit den Angaben aus dem Formular wird eine Test-Nachricht an Ihre Konto-Adresse
+                            <strong> {testRecipient || '–'}</strong> gesendet.
+                            {!form.smtp_pass && isConfiguredInDb && ' Ohne neu eingegebenes Passwort wird das gespeicherte Passwort verwendet.'}
                         </p>
-
-                        <div style={{ marginBottom: '16px' }}>
-                            <Input
-                                label="Empfänger E-Mailadresse"
-                                type="email"
-                                value={testEmail}
-                                onChange={e => setTestEmail(e.target.value)}
-                                placeholder="ihre-testmail@domain.de"
-                            />
-                        </div>
 
                         {statusMessage && (
                             <div style={{

@@ -1,63 +1,120 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { translateError } from '../lib/errorTranslator';
+import {
+    FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
+    prepareUploadBody, extractStoragePath, isImageName
+} from '../lib/storageFiles';
 import { Send, Paperclip, Image, X, Bot, Clock, ChevronLeft } from 'lucide-react';
 
+const ATTACHMENT_BUCKET = 'chat-attachments';
+// Anzahl Nachrichten je Ladevorgang (PostgREST liefert ohnehin höchstens 1000 Zeilen)
+const PAGE_SIZE = 200;
+
 const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, onBack }) => {
-    const { user } = useAuth();
+    const { user, userRole } = useAuth();
     const [messages, setMessages] = useState([]);
     const [newMessage, setNewMessage] = useState('');
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [hasMore, setHasMore] = useState(false);
+    const [loadingOlder, setLoadingOlder] = useState(false);
     const [sending, setSending] = useState(false);
+    const [sendError, setSendError] = useState(null);
     const [attachmentFile, setAttachmentFile] = useState(null);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
+    const skipNextAutoScroll = useRef(false);
 
-    // ── FETCH MESSAGES ──────────────────────────────────────────────
-    const fetchMessages = async () => {
-        if (!user || !conversationUserId) return;
-        setLoading(true);
+    const userId = user?.id;
 
+    // Abfrage aller Nachrichten dieses Gesprächs (optional nur eines Tickets)
+    const buildConversationQuery = useCallback(() => {
         let query = supabase
             .from('messages')
             .select('*')
             .or(
-                `and(sender_id.eq.${user.id},receiver_id.eq.${conversationUserId}),and(sender_id.eq.${conversationUserId},receiver_id.eq.${user.id})`
-            )
-            .order('created_at', { ascending: true });
-
+                `and(sender_id.eq.${userId},receiver_id.eq.${conversationUserId}),and(sender_id.eq.${conversationUserId},receiver_id.eq.${userId})`
+            );
         if (ticketId) {
             query = query.eq('ticket_id', ticketId);
         }
+        return query;
+    }, [userId, conversationUserId, ticketId]);
 
-        const { data, error } = await query;
-
-        if (error) {
-            console.error('Error fetching messages:', error);
-        } else {
-            setMessages(data || []);
-        }
-        setLoading(false);
-
-        // Mark unread messages as read
-        await supabase
+    // Ungelesene Nachrichten des Gesprächspartners als gelesen markieren
+    const markConversationRead = useCallback(async () => {
+        let query = supabase
             .from('messages')
             .update({ read: true })
-            .eq('receiver_id', user.id)
+            .eq('receiver_id', userId)
             .eq('sender_id', conversationUserId)
             .eq('read', false);
-    };
+        if (ticketId) {
+            query = query.eq('ticket_id', ticketId);
+        }
+        const { error } = await query;
+        if (error) console.error('Error marking messages as read:', error);
+    }, [userId, conversationUserId, ticketId]);
 
+    // ── FETCH MESSAGES ──────────────────────────────────────────────
+    // Neueste Nachrichten zuerst laden (sonst fehlen bei langen Verläufen die neuesten),
+    // für die Anzeige umdrehen. Ältere Nachrichten per "Ältere Nachrichten laden".
     useEffect(() => {
-        fetchMessages();
-    }, [user, conversationUserId, ticketId]);
+        if (!userId || !conversationUserId) return;
+        let cancelled = false;
+
+        const load = async () => {
+            const { data, error } = await buildConversationQuery()
+                .order('created_at', { ascending: false })
+                .limit(PAGE_SIZE);
+
+            if (cancelled) return; // Antwort einer inzwischen gewechselten Konversation
+
+            if (error) {
+                console.error('Error fetching messages:', error);
+                setLoadError(`Nachrichten konnten nicht geladen werden: ${translateError(error)}`);
+            } else {
+                setLoadError(null);
+                setMessages((data || []).slice().reverse());
+                setHasMore((data || []).length === PAGE_SIZE);
+            }
+            setLoading(false);
+
+            if (!error) await markConversationRead();
+        };
+        load();
+
+        return () => { cancelled = true; };
+    }, [userId, conversationUserId, buildConversationQuery, markConversationRead]);
+
+    const loadOlderMessages = async () => {
+        if (loadingOlder || messages.length === 0) return;
+        setLoadingOlder(true);
+        const oldest = messages[0].created_at;
+        const { data, error } = await buildConversationQuery()
+            .lt('created_at', oldest)
+            .order('created_at', { ascending: false })
+            .limit(PAGE_SIZE);
+        if (error) {
+            console.error('Error fetching older messages:', error);
+            setLoadError(`Ältere Nachrichten konnten nicht geladen werden: ${translateError(error)}`);
+        } else {
+            const older = (data || []).slice().reverse();
+            skipNextAutoScroll.current = true;
+            setMessages(prev => [...older.filter(o => !prev.some(p => p.id === o.id)), ...prev]);
+            setHasMore((data || []).length === PAGE_SIZE);
+        }
+        setLoadingOlder(false);
+    };
 
     // ── REALTIME SUBSCRIPTION ───────────────────────────────────────
     useEffect(() => {
-        if (!user || !conversationUserId) return;
+        if (!userId || !conversationUserId) return;
 
         const channel = supabase
-            .channel(`messages-${user.id}-${conversationUserId}`)
+            .channel(`messages-${userId}-${conversationUserId}-${ticketId || 'direct'}`)
             .on('postgres_changes', {
                 event: 'INSERT',
                 schema: 'public',
@@ -65,23 +122,27 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
             }, (payload) => {
                 const msg = payload.new;
                 // Only add if it's part of our conversation
-                if (
-                    (msg.sender_id === user.id && msg.receiver_id === conversationUserId) ||
-                    (msg.sender_id === conversationUserId && msg.receiver_id === user.id)
-                ) {
-                    setMessages(prev => {
-                        // Avoid duplicates
-                        if (prev.find(m => m.id === msg.id)) return prev;
-                        return [...prev, msg];
-                    });
+                const inConversation =
+                    (msg.sender_id === userId && msg.receiver_id === conversationUserId) ||
+                    (msg.sender_id === conversationUserId && msg.receiver_id === userId);
+                // Im Ticket-Chat nur Nachrichten genau dieses Tickets
+                if (!inConversation || (ticketId && msg.ticket_id !== ticketId)) return;
 
-                    // Auto-mark as read if we're the receiver
-                    if (msg.receiver_id === user.id) {
-                        supabase
-                            .from('messages')
-                            .update({ read: true })
-                            .eq('id', msg.id);
-                    }
+                setMessages(prev => {
+                    // Avoid duplicates
+                    if (prev.find(m => m.id === msg.id)) return prev;
+                    return [...prev, msg];
+                });
+
+                // Auto-mark as read if we're the receiver
+                if (msg.receiver_id === userId && !msg.read) {
+                    supabase
+                        .from('messages')
+                        .update({ read: true })
+                        .eq('id', msg.id)
+                        .then(({ error }) => {
+                            if (error) console.error('Error marking message as read:', error);
+                        });
                 }
             })
             .subscribe();
@@ -89,7 +150,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
         return () => {
             supabase.removeChannel(channel);
         };
-    }, [user, conversationUserId]);
+    }, [userId, conversationUserId, ticketId]);
 
     // ── AUTO-SCROLL ─────────────────────────────────────────────────
     const isInitialLoad = useRef(true);
@@ -99,6 +160,11 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
 
     useEffect(() => {
         if (messages.length === 0) return;
+        if (skipNextAutoScroll.current) {
+            // Ältere Nachrichten wurden oben angefügt – Position beibehalten
+            skipNextAutoScroll.current = false;
+            return;
+        }
         if (isInitialLoad.current) {
             // Multiple scroll attempts to catch async image loads
             scrollToBottom('instant');
@@ -111,37 +177,73 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
         }
     }, [messages, loading, scrollToBottom]);
 
+    // System-Hinweise stammen immer vom Vermieter/Verwalter (Statuswechsel im Ticket-Board).
+    // Eine als "System" markierte Nachricht eines Mieters wird deshalb normal angezeigt.
+    const isTrustedSystemMessage = (msg) => {
+        if (!msg.is_system) return false;
+        return userRole === 'tenant' ? msg.sender_id !== userId : msg.sender_id === userId;
+    };
+
+    // ── ATTACHMENT SELECTION ────────────────────────────────────────
+    const handleAttachmentSelected = (file) => {
+        if (!file) return;
+        const validationError = validateUploadFile(file, FILE_RULES.chat);
+        if (validationError) {
+            setSendError(validationError);
+            setAttachmentFile(null);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            return;
+        }
+        setSendError(null);
+        setAttachmentFile(file);
+    };
+
+    const clearAttachment = () => {
+        setAttachmentFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
     // ── SEND MESSAGE ────────────────────────────────────────────────
+    // Eingabe und Anhang werden erst nach erfolgreichem Speichern geleert; bei einem
+    // Fehler bleiben sie erhalten und der Nutzer sieht eine Meldung.
     const handleSend = async () => {
-        if ((!newMessage.trim() && !attachmentFile) || sending) return;
-        setSending(true);
-
         const messageText = newMessage.trim();
-        setNewMessage('');
+        if ((!messageText && !attachmentFile) || sending) return;
+        setSending(true);
+        setSendError(null);
 
-        let attachmentUrl = null;
+        let attachmentPath = null;
 
         // Upload attachment if present
         if (attachmentFile) {
-            const timestamp = Date.now();
-            const filePath = `${user.id}/${timestamp}_${attachmentFile.name}`;
-            const { data: uploadData, error: uploadError } = await supabase.storage
-                .from('chat-attachments')
-                .upload(filePath, attachmentFile);
+            const validationError = validateUploadFile(attachmentFile, FILE_RULES.chat);
+            if (validationError) {
+                setSendError(validationError);
+                setSending(false);
+                return;
+            }
+            // Pfad: <eigene user-id>/<zufalls-id>.<endung> (Originalname führt bei Umlauten zu "Invalid key")
+            const filePath = `${userId}/${buildStorageObjectName(attachmentFile)}`;
+            const { body, contentType } = prepareUploadBody(attachmentFile);
+            const { error: uploadError } = await supabase.storage
+                .from(ATTACHMENT_BUCKET)
+                .upload(filePath, body, { contentType });
 
             if (uploadError) {
                 console.error('Upload error:', uploadError);
-            } else {
-                // Store the file path, not public URL (bucket is private)
-                attachmentUrl = filePath;
+                setSendError(`Der Anhang konnte nicht hochgeladen werden: ${translateError(uploadError)}`);
+                setSending(false);
+                return;
             }
+            // Store the file path, not public URL (bucket is private)
+            attachmentPath = filePath;
         }
 
         const messagePayload = {
-            sender_id: user.id,
+            sender_id: userId,
             receiver_id: conversationUserId,
             text: messageText || null,
-            attachment_url: attachmentUrl,
+            attachment_url: attachmentPath,
             ticket_id: ticketId || null,
             is_system: false
         };
@@ -154,7 +256,17 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
 
         if (error) {
             console.error('Error sending message:', error);
-        } else if (insertedMsg) {
+            if (attachmentPath) {
+                // Hochgeladenen Anhang wieder entfernen, er gehört zu keiner Nachricht
+                const { error: cleanupError } = await supabase.storage.from(ATTACHMENT_BUCKET).remove([attachmentPath]);
+                if (cleanupError) console.error('Cleanup error:', cleanupError);
+            }
+            setSendError(`Die Nachricht konnte nicht gesendet werden: ${translateError(error)}`);
+            setSending(false);
+            return;
+        }
+
+        if (insertedMsg) {
             // Optimistic: add message to local state immediately
             setMessages(prev => {
                 if (prev.find(m => m.id === insertedMsg.id)) return prev;
@@ -162,7 +274,9 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
             });
         }
 
-        setAttachmentFile(null);
+        // Nur leeren, wenn während des Sendens nichts Neues getippt wurde
+        setNewMessage(current => (current.trim() === messageText ? '' : current));
+        clearAttachment();
         setSending(false);
     };
 
@@ -254,6 +368,31 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                 flex: 1, overflowY: 'auto', padding: '16px 20px',
                 display: 'flex', flexDirection: 'column', gap: '4px'
             }}>
+                {loadError && (
+                    <div role="alert" style={{
+                        textAlign: 'center', padding: '8px 12px', margin: '4px 0 8px',
+                        borderRadius: '8px', border: '1px solid #FECACA',
+                        color: '#B91C1C', fontSize: '0.8rem', backgroundColor: 'var(--surface-color)'
+                    }}>
+                        {loadError}
+                    </div>
+                )}
+                {!loading && hasMore && (
+                    <div style={{ display: 'flex', justifyContent: 'center', margin: '4px 0 8px' }}>
+                        <button
+                            onClick={loadOlderMessages}
+                            disabled={loadingOlder}
+                            style={{
+                                padding: '4px 14px', borderRadius: '12px',
+                                border: '1px solid var(--border-color)',
+                                backgroundColor: 'var(--surface-color)',
+                                color: 'var(--text-secondary)', fontSize: '0.75rem', cursor: 'pointer'
+                            }}
+                        >
+                            {loadingOlder ? 'Lädt...' : 'Ältere Nachrichten laden'}
+                        </button>
+                    </div>
+                )}
                 {loading ? (
                     <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
                         Nachrichten werden geladen...
@@ -288,8 +427,8 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                                 </div>
                             </div>
                             {msgs.map((msg) => {
-                                const isMine = msg.sender_id === user.id;
-                                const isSystem = msg.is_system;
+                                const isMine = msg.sender_id === userId;
+                                const isSystem = isTrustedSystemMessage(msg);
 
                                 if (isSystem) {
                                     return (
@@ -354,6 +493,27 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                 <div ref={messagesEndRef} />
             </div>
 
+            {/* ── SEND ERROR ── */}
+            {sendError && (
+                <div role="alert" style={{
+                    padding: '8px 20px',
+                    borderTop: '1px solid #FECACA',
+                    backgroundColor: 'var(--surface-color)',
+                    display: 'flex', alignItems: 'center', gap: '10px',
+                    color: '#B91C1C', fontSize: '0.8rem',
+                    flexShrink: 0
+                }}>
+                    <span style={{ flex: 1 }}>{sendError}</span>
+                    <button
+                        onClick={() => setSendError(null)}
+                        style={{ color: 'inherit', cursor: 'pointer', background: 'none', border: 'none' }}
+                        title="Schließen"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+            )}
+
             {/* ── ATTACHMENT PREVIEW ── */}
             {attachmentFile && (
                 <div style={{
@@ -368,7 +528,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                         {attachmentFile.name}
                     </span>
                     <button
-                        onClick={() => setAttachmentFile(null)}
+                        onClick={clearAttachment}
                         style={{ color: 'var(--text-secondary)', cursor: 'pointer' }}
                     >
                         <X size={16} />
@@ -390,8 +550,9 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                 <input
                     type="file"
                     ref={fileInputRef}
+                    accept={acceptAttribute(FILE_RULES.chat)}
                     style={{ display: 'none' }}
-                    onChange={(e) => setAttachmentFile(e.target.files[0])}
+                    onChange={(e) => handleAttachmentSelected(e.target.files?.[0])}
                 />
                 <button
                     onClick={() => fileInputRef.current?.click()}
@@ -459,37 +620,34 @@ const MessageCircleIcon = () => (
 );
 
 // Component to display attachment with signed URL from private bucket
+// Nur Pfade des eigenen Buckets werden signiert und angezeigt; fremde Adressen
+// (attachment_url ist frei setzbar) werden nicht als Bild/Link gerendert.
 const SignedAttachment = ({ path, isMine, hasText, onLoad }) => {
     const [url, setUrl] = useState(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
+        let cancelled = false;
         const fetchUrl = async () => {
-            // Legacy full URLs: extract file path for signed URL
-            let filePath = path;
-            if (path.startsWith('http')) {
-                const marker = '/object/public/chat-attachments/';
-                const idx = path.indexOf(marker);
-                if (idx !== -1) {
-                    filePath = path.substring(idx + marker.length);
-                } else {
-                    // Try using the URL directly as fallback
-                    setUrl(path);
-                    setLoading(false);
-                    return;
-                }
+            const filePath = extractStoragePath(path, ATTACHMENT_BUCKET);
+            if (!filePath) {
+                if (!cancelled) setLoading(false);
+                return;
             }
 
             const { data, error } = await supabase.storage
-                .from('chat-attachments')
+                .from(ATTACHMENT_BUCKET)
                 .createSignedUrl(filePath, 3600); // 1 hour
 
+            if (cancelled) return;
+            if (error) console.error('Error signing attachment:', error);
             if (data?.signedUrl) {
                 setUrl(data.signedUrl);
             }
             setLoading(false);
         };
         fetchUrl();
+        return () => { cancelled = true; };
     }, [path]);
 
     if (loading) {
@@ -514,7 +672,7 @@ const SignedAttachment = ({ path, isMine, hasText, onLoad }) => {
         );
     }
 
-    const isImage = path.match(/\.(jpg|jpeg|png|gif|webp)$/i);
+    const isImage = isImageName(extractStoragePath(path, ATTACHMENT_BUCKET) || '');
 
     return (
         <div style={{ marginBottom: hasText ? '8px' : 0 }}>
@@ -526,7 +684,7 @@ const SignedAttachment = ({ path, isMine, hasText, onLoad }) => {
                         maxWidth: '100%', maxHeight: '200px',
                         borderRadius: '8px', cursor: 'pointer'
                     }}
-                    onClick={() => window.open(url, '_blank')}
+                    onClick={() => window.open(url, '_blank', 'noopener')}
                     onLoad={() => onLoad?.('instant')}
                 />
             ) : (

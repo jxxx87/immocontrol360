@@ -1,25 +1,53 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Bell, X, Shield } from 'lucide-react';
 import { useNotifications } from '../../context/NotificationContext';
+import { useAuth } from '../../context/AuthContext';
+
+// "Später erinnern" blendet den Hinweis nur für diese Zeit aus (pro Benutzerkonto)
+const REMIND_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+const STORAGE_PREFIX = 'immo_push_prompt_';
+const STATE_ALLOWED = 'allowed';
+
+const readPromptState = (key) => {
+    try {
+        return localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+};
+
+const writePromptState = (key, value) => {
+    try {
+        localStorage.setItem(key, value);
+    } catch {
+        // localStorage nicht verfügbar
+    }
+};
 
 /**
  * PushPermissionPrompt
- * 
+ *
  * Beautiful onboarding dialog that asks users to enable push notifications.
- * Appears once after login/app start if permission hasn't been granted yet.
+ * Appears after login/app start if permission hasn't been granted yet;
+ * "Später erinnern" fragt nach 7 Tagen erneut.
  * Works in both browser and Capacitor (native app) environments.
  */
 const PushPermissionPrompt = () => {
     const { permissionGranted, requestPermission } = useNotifications();
+    const { user } = useAuth();
     const [visible, setVisible] = useState(false);
     const [animating, setAnimating] = useState(false);
+    const hideTimerRef = useRef(null);
+    const storageKey = `${STORAGE_PREFIX}${user?.id || 'anonymous'}`;
 
     useEffect(() => {
-        // Don't show if already granted or already dismissed
+        // Don't show if already granted or recently dismissed
         if (permissionGranted) return;
 
-        const alreadyDismissed = localStorage.getItem('immo_push_prompt_dismissed');
-        if (alreadyDismissed) return;
+        const state = readPromptState(storageKey);
+        if (state === STATE_ALLOWED) return;
+        const dismissedAt = state ? Date.parse(state) : NaN;
+        if (!Number.isNaN(dismissedAt) && Date.now() - dismissedAt < REMIND_AFTER_MS) return;
 
         // In native app: permission is handled by Android native dialog (MainActivity.java)
         const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
@@ -39,32 +67,42 @@ const PushPermissionPrompt = () => {
         }, 2000);
 
         return () => clearTimeout(timer);
-    }, [permissionGranted]);
+    }, [permissionGranted, storageKey]);
+
+    // Ausblende-Timer beim Unmount aufräumen
+    useEffect(() => () => clearTimeout(hideTimerRef.current), []);
+
+    const dismiss = () => {
+        setAnimating(false);
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = setTimeout(() => setVisible(false), 300);
+    };
 
     const handleAllow = async () => {
-        const granted = await requestPermission();
+        let granted = false;
+        try {
+            granted = await requestPermission();
+        } catch (err) {
+            console.warn('Push permission request failed:', err);
+        }
         if (granted && 'Notification' in window && Notification.permission === 'granted') {
             try {
                 new Notification('ImmoControl Pro 360', {
                     body: 'Push-Benachrichtigungen wurden aktiviert! 🎉',
                     icon: '/logo.svg',
                 });
-            } catch (e) {
-                // Native app doesn't support this constructor
+            } catch {
+                // Native app / Android Chrome doesn't support this constructor
             }
         }
-        localStorage.setItem('immo_push_prompt_dismissed', 'true');
+        // Erteilt: nicht mehr fragen; sonst wie "Später erinnern" behandeln
+        writePromptState(storageKey, granted ? STATE_ALLOWED : new Date().toISOString());
         dismiss();
     };
 
     const handleDismiss = () => {
-        localStorage.setItem('immo_push_prompt_dismissed', 'true');
+        writePromptState(storageKey, new Date().toISOString());
         dismiss();
-    };
-
-    const dismiss = () => {
-        setAnimating(false);
-        setTimeout(() => setVisible(false), 300);
     };
 
     if (!visible) return null;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
     CreditCard,
     Receipt,
@@ -31,6 +31,21 @@ const STATUS_MAP = {
     past_due: { label: 'Zahlung ausstehend', color: '#dc2626', bg: '#fef2f2', icon: AlertTriangle },
     canceled: { label: 'Gekündigt', color: '#6b7280', bg: '#f3f4f6', icon: XCircle },
     incomplete: { label: 'Unvollständig', color: '#f59e0b', bg: '#fef3c7', icon: AlertTriangle },
+    incomplete_expired: { label: 'Abgebrochen', color: '#6b7280', bg: '#f3f4f6', icon: XCircle },
+    unpaid: { label: 'Unbezahlt', color: '#dc2626', bg: '#fef2f2', icon: AlertTriangle },
+    paused: { label: 'Pausiert', color: '#6b7280', bg: '#f3f4f6', icon: Clock },
+};
+
+// Status, bei denen das Abo noch läuft (kein neuer Checkout nötig)
+const RUNNING_STATUSES = ['active', 'trialing', 'past_due', 'unpaid', 'paused'];
+
+/** Liest die JSON-Antwort einer Edge Function auch bei Nicht-2xx-Status. */
+const readFunctionError = async (error) => {
+    try {
+        return (await error?.context?.json()) || null;
+    } catch {
+        return null;
+    }
 };
 
 /* ─── Component ─────────────────────────────────────────── */
@@ -62,6 +77,7 @@ const Billing = () => {
 
         try {
             const origin = window.location.origin;
+            // user_id nur noch für ältere Function-Versionen; die neue Function nutzt das Anmelde-Token.
             const { data, error } = await supabase.functions.invoke('create-portal-session', {
                 body: {
                     user_id: session.user.id,
@@ -69,15 +85,19 @@ const Billing = () => {
                 },
             });
 
-            if (error) throw error;
+            const payload = error ? await readFunctionError(error) : data;
 
-            if (data?.error === 'no_customer') {
-                alert(data.message);
+            if (payload?.error === 'no_customer' || payload?.error === 'not_authenticated') {
+                alert(payload.message);
                 return;
             }
 
+            if (error) throw error;
+
             if (data?.url) {
                 window.location.href = data.url;
+            } else {
+                throw new Error('Keine Portal-URL erhalten');
             }
         } catch (err) {
             console.error('Portal error:', err);
@@ -273,6 +293,13 @@ const Billing = () => {
     const hasSub = !!subscription;
     const isTrial = subscription?.status === 'trialing';
     const hasCustomer = !!subscription?.stripe_customer_id;
+    const isTrialExpired = isTrial && (!subscription?.trial_ends_at || new Date(subscription.trial_ends_at) <= new Date());
+    const isRunning = RUNNING_STATUSES.includes(status);
+    const isEnded = status === 'canceled' || status === 'incomplete_expired';
+    const cancelAtPeriodEnd = !!subscription?.cancel_at_period_end;
+    const periodLabel = isEnded ? 'Laufzeitende' : cancelAtPeriodEnd ? 'Läuft aus am' : 'Nächste Abrechnung';
+    // Abo-Zeile ohne Stripe-Kunde und ohne Testphase (z. B. gekündigt/unvollständig)
+    const showOtherState = hasSub && !hasCustomer && !isTrial;
 
     // Trial: Verbleibende Tage
     const trialDaysLeft = subscription?.trial_ends_at
@@ -345,10 +372,17 @@ const Billing = () => {
                         {/* Status */}
                         <div style={styles.row}>
                             <span style={styles.label}>Status</span>
-                            <span style={styles.badge('#0ea5e9', '#e0f2fe')}>
-                                <Clock size={14} />
-                                Testphase aktiv
-                            </span>
+                            {isTrialExpired ? (
+                                <span style={styles.badge('#dc2626', '#fef2f2')}>
+                                    <AlertTriangle size={14} />
+                                    Testphase abgelaufen
+                                </span>
+                            ) : (
+                                <span style={styles.badge('#0ea5e9', '#e0f2fe')}>
+                                    <Clock size={14} />
+                                    Testphase aktiv
+                                </span>
+                            )}
                         </div>
 
                         {/* Verbleibende Tage */}
@@ -365,7 +399,7 @@ const Billing = () => {
 
                         {/* Enddatum */}
                         <div style={styles.rowLast}>
-                            <span style={styles.label}>Testphase endet am</span>
+                            <span style={styles.label}>{isTrialExpired ? 'Testphase endete am' : 'Testphase endet am'}</span>
                             <span style={styles.value}>{trialEndDate || '—'}</span>
                         </div>
 
@@ -386,10 +420,45 @@ const Billing = () => {
                         {/* Hint */}
                         <div style={styles.hint}>
                             <Sparkles size={14} color="#0ea5e9" />
-                            Nach Ablauf der Testphase benötigst du ein Abo, um die App weiter zu nutzen.
+                            {isTrialExpired
+                                ? 'Deine Testphase ist abgelaufen. Schließe ein Abo ab, um die App weiter zu nutzen.'
+                                : 'Nach Ablauf der Testphase benötigst du ein Abo, um die App weiter zu nutzen.'}
                         </div>
                     </div>
                 </>
+            )}
+
+            {/* ── 1b. Abo-Eintrag ohne Stripe-Kunde und ohne Testphase (z. B. gekündigt) ── */}
+            {showOtherState && (
+                <div style={styles.card}>
+                    <div style={styles.cardTitle}>
+                        <Crown size={18} color="#0ea5e9" />
+                        Dein Abo
+                    </div>
+                    <div style={styles.rowLast}>
+                        <span style={styles.label}>Status</span>
+                        {statusInfo ? (
+                            <span style={styles.badge(statusInfo.color, statusInfo.bg)}>
+                                {React.createElement(statusInfo.icon, { size: 14 })}
+                                {statusInfo.label}
+                            </span>
+                        ) : (
+                            <span style={styles.value}>{status || '—'}</span>
+                        )}
+                    </div>
+                    <div style={styles.actions}>
+                        <button
+                            style={styles.btnCheckout}
+                            onClick={openCheckout}
+                            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
+                        >
+                            <Crown size={18} />
+                            Jetzt Abo abschließen
+                            <ArrowRight size={16} />
+                        </button>
+                    </div>
+                </div>
             )}
 
             {/* ── 2. Bezahltes Abo (mit stripe_customer_id) ── */}
@@ -428,14 +497,26 @@ const Billing = () => {
                             )}
                         </div>
 
-                        {/* Next billing */}
+                        {/* Next billing / Laufzeitende */}
                         <div style={styles.rowLast}>
-                            <span style={styles.label}>Nächste Abrechnung</span>
+                            <span style={styles.label}>{periodLabel}</span>
                             <span style={styles.value}>{nextBillingDate || 'Siehe Stripe-Portal'}</span>
                         </div>
 
                         {/* Actions */}
                         <div style={styles.actions}>
+                            {!isRunning && (
+                                <button
+                                    style={styles.btnCheckout}
+                                    onClick={openCheckout}
+                                    onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
+                                >
+                                    <Crown size={18} />
+                                    Neues Abo abschließen
+                                    <ArrowRight size={16} />
+                                </button>
+                            )}
                             <button
                                 style={styles.btnPrimary}
                                 onClick={() => openPortal()}
@@ -480,7 +561,7 @@ const Billing = () => {
                                 { icon: Receipt, text: 'Rechnungen & Belege' },
                                 { icon: Crown, text: 'Plan wechseln (Up-/Downgrade)' },
                                 { icon: XCircle, text: 'Abo kündigen' },
-                            ].map(({ icon: Icon, text }, i) => (
+                            ].map(({ icon, text }, i) => (
                                 <div key={i} style={{
                                     display: 'flex',
                                     alignItems: 'center',
@@ -492,7 +573,7 @@ const Billing = () => {
                                     fontWeight: 500,
                                     color: 'var(--text-secondary)',
                                 }}>
-                                    <Icon size={16} color="#0ea5e9" />
+                                    {React.createElement(icon, { size: 16, color: '#0ea5e9' })}
                                     {text}
                                 </div>
                             ))}

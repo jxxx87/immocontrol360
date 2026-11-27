@@ -23,6 +23,12 @@ const TenantStamdaten = () => {
     // Lease details
     const [leaseData, setLeaseData] = useState(null);
 
+    // Anschrift des Mietobjekts – nur als Vorschlag (Platzhalter), wird nicht ungefragt gespeichert
+    const [propertyAddress, setPropertyAddress] = useState({ street: '', house_number: '', postal_code: '', city: '' });
+
+    const tenantId = roleData?.tenant_id;
+    const roleUnitId = roleData?.unit_id;
+
     // Password Form
     const [passwordForm, setPasswordForm] = useState({
         password: '',
@@ -33,45 +39,63 @@ const TenantStamdaten = () => {
     // Toast/Message state
     const [message, setMessage] = useState({ type: '', text: '' });
 
+    // Nur bei wechselndem Mieter neu laden – nicht bei jedem Auth-Ereignis (sonst gehen Eingaben verloren)
     useEffect(() => {
         const fetchAllData = async () => {
-            if (!roleData?.tenant_id) {
+            if (!tenantId) {
                 setLoading(false);
                 return;
             }
 
             try {
-                // Fetch tenant and lease data in parallel
+                // Nur die benötigten Spalten (keine Objekt-Finanzdaten des Vermieters)
                 const [tenantRes, leaseRes] = await Promise.all([
-                    supabase.from('tenants').select('*').eq('id', roleData.tenant_id).maybeSingle(),
-                    supabase.from('leases').select('*, unit:units(*, property:properties(*))').eq('tenant_id', roleData.tenant_id).eq('status', 'active').maybeSingle()
+                    supabase
+                        .from('tenants')
+                        .select('id, first_name, last_name, phone, email, street, house_number, postal_code, city')
+                        .eq('id', tenantId)
+                        .maybeSingle(),
+                    supabase
+                        .from('leases')
+                        .select('id, unit_id, start_date, end_date, cold_rent, service_charge, heating_cost, other_costs, payment_due_day, status, unit:units(unit_name, property:properties(street, house_number, zip, city))')
+                        .eq('tenant_id', tenantId)
+                        .eq('status', 'active')
+                        .order('start_date', { ascending: false })
+                        .limit(10)
                 ]);
 
+                // Mieterdaten unabhängig von einem Fehler beim Vertrag anzeigen
                 if (tenantRes.error) throw tenantRes.error;
-                if (leaseRes.error) throw leaseRes.error;
-
                 const tenant = tenantRes.data;
-                const lease = leaseRes.data;
 
-                if (lease) {
-                    setLeaseData(lease);
+                if (leaseRes.error) {
+                    console.error('Error fetching lease details:', leaseRes.error);
+                    setMessage({ type: 'error', text: 'Die Angaben zum Mietverhältnis konnten nicht geladen werden.' });
                 }
 
-                if (tenant) {
-                    const propStreet = lease?.unit?.property?.street || '';
-                    const propHouseNumber = lease?.unit?.property?.house_number || '';
-                    const propZip = lease?.unit?.property?.zip_code || lease?.unit?.property?.zip || '';
-                    const propCity = lease?.unit?.property?.city || '';
+                // Mehrere aktive Verträge (z. B. Wohnung + Stellplatz): Vertrag der zugeordneten Einheit, sonst den neuesten
+                const leases = leaseRes.error ? [] : (leaseRes.data || []);
+                const lease = leases.find(l => roleUnitId && l.unit_id === roleUnitId) || leases[0] || null;
+                setLeaseData(lease);
 
+                const prop = lease?.unit?.property;
+                setPropertyAddress({
+                    street: prop?.street || '',
+                    house_number: prop?.house_number || '',
+                    postal_code: prop?.zip || '',
+                    city: prop?.city || ''
+                });
+
+                if (tenant) {
                     setTenantData({
                         first_name: tenant.first_name || '',
                         last_name: tenant.last_name || '',
                         phone: tenant.phone || '',
                         email: tenant.email || '',
-                        street: tenant.street || propStreet,
-                        house_number: tenant.house_number || propHouseNumber,
-                        postal_code: tenant.postal_code || propZip,
-                        city: tenant.city || propCity
+                        street: tenant.street || '',
+                        house_number: tenant.house_number || '',
+                        postal_code: tenant.postal_code || '',
+                        city: tenant.city || ''
                     });
                 }
             } catch (err) {
@@ -83,30 +107,43 @@ const TenantStamdaten = () => {
         };
 
         fetchAllData();
-    }, [roleData]);
+    }, [tenantId, roleUnitId]);
+
+    const hasOwnAddress = !!(tenantData.street || tenantData.house_number || tenantData.postal_code || tenantData.city);
 
     const handleSaveStammdaten = async (e) => {
         e.preventDefault();
-        if (!roleData?.tenant_id) return;
+        if (!tenantId) return;
 
         setSaving(true);
         setMessage({ type: '', text: '' });
 
+        const clean = (v) => {
+            const t = (v || '').trim();
+            return t === '' ? null : t;
+        };
+
         try {
-            const { error } = await supabase
+            // Nur die Kontaktfelder dieses Formulars (die Datenbank lässt Mietern auch nur diese zu)
+            const { data: updatedRows, error } = await supabase
                 .from('tenants')
                 .update({
-                    first_name: tenantData.first_name,
-                    last_name: tenantData.last_name,
-                    phone: tenantData.phone,
-                    street: tenantData.street,
-                    house_number: tenantData.house_number,
-                    postal_code: tenantData.postal_code,
-                    city: tenantData.city
+                    first_name: (tenantData.first_name || '').trim(),
+                    last_name: (tenantData.last_name || '').trim(),
+                    phone: clean(tenantData.phone),
+                    street: clean(tenantData.street),
+                    house_number: clean(tenantData.house_number),
+                    postal_code: clean(tenantData.postal_code),
+                    city: clean(tenantData.city)
                 })
-                .eq('id', roleData.tenant_id);
+                .eq('id', tenantId)
+                .select('id');
 
             if (error) throw error;
+            if (!updatedRows || updatedRows.length !== 1) {
+                setMessage({ type: 'error', text: 'Die Änderungen konnten nicht gespeichert werden (keine Berechtigung oder Datensatz nicht gefunden). Bitte wenden Sie sich an Ihren Vermieter.' });
+                return;
+            }
             setMessage({ type: 'success', text: 'Stammdaten erfolgreich gespeichert.' });
         } catch (err) {
             console.error('Error updating tenant:', err);
@@ -120,8 +157,8 @@ const TenantStamdaten = () => {
         e.preventDefault();
         setPasswordStatus({ type: '', message: '' });
 
-        if (passwordForm.password.length < 6) {
-            setPasswordStatus({ type: 'error', message: 'Das Passwort muss mindestens 6 Zeichen lang sein.' });
+        if (passwordForm.password.length < 10) {
+            setPasswordStatus({ type: 'error', message: 'Das Passwort muss mindestens 10 Zeichen lang sein.' });
             return;
         }
 
@@ -275,12 +312,26 @@ const TenantStamdaten = () => {
 
                             <div style={{ borderTop: '1px solid var(--border-color)', margin: '8px 0', padding: '16px 0 0 0' }}>
                                 <h3 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>Anschrift (Meldeadresse)</h3>
+                                {!hasOwnAddress && propertyAddress.street && (
+                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: 1.4 }}>
+                                        Noch keine eigene Anschrift hinterlegt. Grau vorgeschlagen ist die Anschrift Ihres Mietobjekts –
+                                        sie wird nur gespeichert, wenn Sie sie eintragen.{' '}
+                                        <button
+                                            type="button"
+                                            onClick={() => setTenantData({ ...tenantData, ...propertyAddress })}
+                                            style={{ background: 'none', border: 'none', padding: 0, color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, textDecoration: 'underline' }}
+                                        >
+                                            Anschrift des Mietobjekts übernehmen
+                                        </button>
+                                    </div>
+                                )}
                                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px', marginBottom: '12px' }}>
                                     <div>
                                         <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Straße</label>
                                         <input
                                             type="text"
                                             value={tenantData.street}
+                                            placeholder={propertyAddress.street}
                                             onChange={e => setTenantData({ ...tenantData, street: e.target.value })}
                                             style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
                                         />
@@ -290,6 +341,7 @@ const TenantStamdaten = () => {
                                         <input
                                             type="text"
                                             value={tenantData.house_number}
+                                            placeholder={propertyAddress.house_number}
                                             onChange={e => setTenantData({ ...tenantData, house_number: e.target.value })}
                                             style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
                                         />
@@ -301,6 +353,7 @@ const TenantStamdaten = () => {
                                         <input
                                             type="text"
                                             value={tenantData.postal_code}
+                                            placeholder={propertyAddress.postal_code}
                                             onChange={e => setTenantData({ ...tenantData, postal_code: e.target.value })}
                                             style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
                                         />
@@ -310,6 +363,7 @@ const TenantStamdaten = () => {
                                         <input
                                             type="text"
                                             value={tenantData.city}
+                                            placeholder={propertyAddress.city}
                                             onChange={e => setTenantData({ ...tenantData, city: e.target.value })}
                                             style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
                                         />
@@ -474,7 +528,7 @@ const TenantStamdaten = () => {
                                     <Key size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
                                     <input
                                         type="password"
-                                        placeholder="Mindestens 6 Zeichen"
+                                        placeholder="Mindestens 10 Zeichen"
                                         value={passwordForm.password}
                                         onChange={e => setPasswordForm({ ...passwordForm, password: e.target.value })}
                                         style={{ width: '100%', padding: '10px 12px 10px 36px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
@@ -548,7 +602,7 @@ const TenantStamdaten = () => {
                             <ShieldCheck size={16} color="var(--primary-color)" /> Sicherheitshinweise
                         </h3>
                         <ul style={{ paddingLeft: '20px', margin: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            <li>Verwenden Sie ein sicheres Passwort mit mindestens 6 Zeichen (idealerweise bestehend aus Groß-/Kleinschreibung, Zahlen und Sonderzeichen).</li>
+                            <li>Verwenden Sie ein sicheres Passwort mit mindestens 10 Zeichen (idealerweise bestehend aus Groß-/Kleinschreibung, Zahlen und Sonderzeichen).</li>
                             <li>Geben Sie Ihre Zugangsdaten niemals an Dritte weiter.</li>
                             <li>Ihr Passwort wird verschlüsselt in unserem sicheren Datenzentrum gespeichert und ist für niemanden (auch nicht für Ihren Vermieter) einsehbar.</li>
                             <li>Nachdem Sie das Passwort eingerichtet haben, können Sie sich jederzeit regulär über die Anmeldeseite einloggen.</li>

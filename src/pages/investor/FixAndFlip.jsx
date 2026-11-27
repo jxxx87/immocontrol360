@@ -1,22 +1,16 @@
 import React from 'react';
 import { Hammer } from 'lucide-react';
+import RoadmapPlaceholder from './RoadmapPlaceholder';
 
 const FixAndFlip = () => (
-    <div>
-        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '8px' }}>Fix & Flip</h1>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '24px' }}>
-            Immobilien-Flipping-Projekte planen und verfolgen.
-        </p>
-        <div style={{
-            backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-lg)',
-            border: '1px solid var(--border-color)', padding: '60px 40px', textAlign: 'center'
-        }}>
-            <Hammer size={48} color="var(--border-color)" />
-            <p style={{ color: 'var(--text-secondary)', marginTop: '12px' }}>
-                Dieses Modul wird in Kürze verfügbar sein.
-            </p>
-        </div>
-    </div>
+    <RoadmapPlaceholder
+        title="Fix & Flip"
+        subtitle="Immobilien-Flipping-Projekte planen und verfolgen."
+        icon={Hammer}
+        hint="Fix & Flip-Deals lassen sich bereits im Investor-Portal unter „Deals“ anlegen und berechnen."
+        linkTo="/investor-portal?tab=deals"
+        linkLabel="Zu den Deals"
+    />
 );
 
 export default FixAndFlip;

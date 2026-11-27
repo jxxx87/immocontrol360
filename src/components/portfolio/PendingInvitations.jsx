@@ -1,25 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import Card from '../ui/Card';
 import Button from '../ui/Button';
-import Badge from '../ui/Badge';
-import { Mail, Check, X, BellDot } from 'lucide-react';
+import { Mail, Check, X, BellDot, AlertTriangle } from 'lucide-react';
 
 export const PendingInvitations = () => {
     const { user } = useAuth();
     const { refreshPortfolios } = usePortfolio();
     const [invitations, setInvitations] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [busyId, setBusyId] = useState(null);
+    const [feedback, setFeedback] = useState(null); // { type: 'error' | 'success', text }
 
-    useEffect(() => {
-        if (user) {
-            fetchInvitations();
-        }
-    }, [user]);
-
-    const fetchInvitations = async () => {
+    const fetchInvitations = useCallback(async () => {
         setLoading(true);
         try {
             const { data, error } = await supabase.rpc('get_pending_invitations');
@@ -28,45 +23,83 @@ export const PendingInvitations = () => {
             setInvitations(data || []);
         } catch (error) {
             console.error("Error fetching invitations:", error);
+            setFeedback({ type: 'error', text: 'Offene Einladungen konnten nicht geladen werden.' });
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        if (user) {
+            fetchInvitations();
+        }
+    }, [user, fetchInvitations]);
 
     const handleAccept = async (shareId) => {
+        setFeedback(null);
+        setBusyId(shareId);
         try {
             const { data, error } = await supabase.rpc('accept_portfolio_share', { share_id: shareId });
-            
+
             if (error) throw error;
-            
+
             if (data) {
-                alert('Einladung erfolgreich angenommen!');
-                fetchInvitations();
-                refreshPortfolios();
+                setFeedback({ type: 'success', text: 'Einladung angenommen. Das Portfolio steht jetzt in der Portfolio-Auswahl oben zur Verfügung.' });
+                if (refreshPortfolios) refreshPortfolios();
+            } else {
+                setFeedback({ type: 'error', text: 'Die Einladung konnte nicht angenommen werden. Sie wurde möglicherweise inzwischen zurückgezogen oder Ihre E-Mail-Adresse ist noch nicht bestätigt.' });
             }
         } catch (error) {
             console.error("Error accepting invitation:", error);
-            alert("Fehler beim Annehmen der Einladung.");
+            setFeedback({ type: 'error', text: 'Fehler beim Annehmen der Einladung: ' + (error?.message || 'Unbekannter Fehler') });
+        } finally {
+            setBusyId(null);
+            fetchInvitations();
         }
     };
 
     const handleDecline = async (shareId) => {
         if (!window.confirm('Einladung wirklich ablehnen?')) return;
+        setFeedback(null);
+        setBusyId(shareId);
         try {
             const { error } = await supabase.rpc('decline_portfolio_share', { share_id: shareId });
-            
+
             if (error) throw error;
-            
-            fetchInvitations();
+            setFeedback({ type: 'success', text: 'Einladung abgelehnt.' });
         } catch (error) {
             console.error("Error declining invitation:", error);
+            setFeedback({ type: 'error', text: 'Die Einladung konnte nicht abgelehnt werden: ' + (error?.message || 'Unbekannter Fehler') });
+        } finally {
+            setBusyId(null);
+            fetchInvitations();
         }
     };
 
-    if (loading || invitations.length === 0) return null;
+    const feedbackBox = feedback && (
+        <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', marginBottom: '12px',
+            borderRadius: '8px', fontSize: '0.85rem',
+            backgroundColor: feedback.type === 'error' ? '#FEF2F2' : '#F0FDF4',
+            color: feedback.type === 'error' ? '#991B1B' : '#166534',
+            border: `1px solid ${feedback.type === 'error' ? '#FECACA' : '#BBF7D0'}`
+        }}>
+            {feedback.type === 'error' ? <AlertTriangle size={16} /> : <Check size={16} />}
+            <span style={{ flex: 1 }}>{feedback.text}</span>
+            <button type="button" onClick={() => setFeedback(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}>
+                <X size={14} />
+            </button>
+        </div>
+    );
+
+    if (loading && invitations.length === 0) return null;
+    if (invitations.length === 0) {
+        return feedback ? <div style={{ marginBottom: 'var(--spacing-xl)' }}>{feedbackBox}</div> : null;
+    }
 
     return (
         <div style={{ marginBottom: 'var(--spacing-xl)' }}>
+            {feedbackBox}
             <Card style={{ backgroundColor: '#F0F9FF', border: '1px solid #BAE6FD' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
                     <div style={{ backgroundColor: '#DBEAFE', color: 'var(--primary-color)', padding: '8px', borderRadius: '8px' }}>
@@ -88,6 +121,8 @@ export const PendingInvitations = () => {
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
+                            flexWrap: 'wrap',
+                            gap: '12px',
                             padding: '16px',
                             backgroundColor: 'white',
                             borderRadius: 'var(--radius-md)',
@@ -110,17 +145,19 @@ export const PendingInvitations = () => {
                                 </div>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <Button 
-                                    variant="primary" 
-                                    icon={Check} 
+                                <Button
+                                    variant="primary"
+                                    icon={Check}
+                                    disabled={busyId === invitation.id}
                                     onClick={() => handleAccept(invitation.id)}
                                 >
                                     Annehmen
                                 </Button>
-                                <Button 
-                                    variant="ghost" 
-                                    icon={X} 
+                                <Button
+                                    variant="ghost"
+                                    icon={X}
                                     style={{ color: 'var(--danger-color)' }}
+                                    disabled={busyId === invitation.id}
                                     onClick={() => handleDecline(invitation.id)}
                                 >
                                     Ablehnen

@@ -1,3 +1,7 @@
+-- Komplett-Check 2026-11-27 (M1-03): Der hier frueher fest eingetragene service_role-Schluessel wurde
+-- durch einen Platzhalter ersetzt. Die Migration ist bereits verbucht und wird NICHT erneut ausgefuehrt.
+-- Live rufen die Trigger heute notify_push() auf; den Schluessel liest man kuenftig aus dem Supabase-
+-- Tresor (Vault), nie aus einer Datei im Repo. Den alten Schluessel muss der Nutzer rotieren (Phase 0).
 -- Update trigger functions to use supabase_functions.http_request (Database Webhooks)
 
 -- Messages trigger
@@ -7,7 +11,7 @@ BEGIN
     IF NEW.receiver_id IS NOT NULL AND NEW.sender_id IS DISTINCT FROM NEW.receiver_id THEN
         PERFORM net.http_post(
             url := 'https://agsmqvvwfufenaiekuox.supabase.co/functions/v1/send-push-notification',
-            headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnc21xdnZ3ZnVmZW5haWVrdW94Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDcxNzE1MSwiZXhwIjoyMDg2MjkzMTUxfQ.TNsRHhA6AivTuuJNvBaSjHsH4TYZuQJf06Q5xRc9MxY"}'::jsonb,
+            headers := '{"Content-Type":"application/json","Authorization":"Bearer <SERVICE_ROLE_KEY – im Supabase-Tresor, nicht im Repo>"}'::jsonb,
             body := jsonb_build_object('type','INSERT','table','messages','record',to_jsonb(NEW))::text
         );
     END IF;
@@ -24,7 +28,7 @@ RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
     PERFORM net.http_post(
         url := 'https://agsmqvvwfufenaiekuox.supabase.co/functions/v1/send-push-notification',
-        headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnc21xdnZ3ZnVmZW5haWVrdW94Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDcxNzE1MSwiZXhwIjoyMDg2MjkzMTUxfQ.TNsRHhA6AivTuuJNvBaSjHsH4TYZuQJf06Q5xRc9MxY"}'::jsonb,
+        headers := '{"Content-Type":"application/json","Authorization":"Bearer <SERVICE_ROLE_KEY – im Supabase-Tresor, nicht im Repo>"}'::jsonb,
         body := jsonb_build_object('type','INSERT','table','tickets','record',to_jsonb(NEW))::text
     );
     RETURN NEW;
@@ -40,7 +44,7 @@ RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
     PERFORM net.http_post(
         url := 'https://agsmqvvwfufenaiekuox.supabase.co/functions/v1/send-push-notification',
-        headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnc21xdnZ3ZnVmZW5haWVrdW94Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDcxNzE1MSwiZXhwIjoyMDg2MjkzMTUxfQ.TNsRHhA6AivTuuJNvBaSjHsH4TYZuQJf06Q5xRc9MxY"}'::jsonb,
+        headers := '{"Content-Type":"application/json","Authorization":"Bearer <SERVICE_ROLE_KEY – im Supabase-Tresor, nicht im Repo>"}'::jsonb,
         body := jsonb_build_object('type','INSERT','table','announcements','record',to_jsonb(NEW))::text
     );
     RETURN NEW;
@@ -56,7 +60,7 @@ RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
     PERFORM net.http_post(
         url := 'https://agsmqvvwfufenaiekuox.supabase.co/functions/v1/send-push-notification',
-        headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnc21xdnZ3ZnVmZW5haWVrdW94Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDcxNzE1MSwiZXhwIjoyMDg2MjkzMTUxfQ.TNsRHhA6AivTuuJNvBaSjHsH4TYZuQJf06Q5xRc9MxY"}'::jsonb,
+        headers := '{"Content-Type":"application/json","Authorization":"Bearer <SERVICE_ROLE_KEY – im Supabase-Tresor, nicht im Repo>"}'::jsonb,
         body := jsonb_build_object('type','INSERT','table','documents','record',to_jsonb(NEW))::text
     );
     RETURN NEW;
@@ -73,7 +77,7 @@ BEGIN
     IF NEW.role = 'tenant' THEN
         PERFORM net.http_post(
             url := 'https://agsmqvvwfufenaiekuox.supabase.co/functions/v1/send-push-notification',
-            headers := '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnc21xdnZ3ZnVmZW5haWVrdW94Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDcxNzE1MSwiZXhwIjoyMDg2MjkzMTUxfQ.TNsRHhA6AivTuuJNvBaSjHsH4TYZuQJf06Q5xRc9MxY"}'::jsonb,
+            headers := '{"Content-Type":"application/json","Authorization":"Bearer <SERVICE_ROLE_KEY – im Supabase-Tresor, nicht im Repo>"}'::jsonb,
             body := jsonb_build_object('type','INSERT','table','user_roles','record',to_jsonb(NEW))::text
         );
     END IF;

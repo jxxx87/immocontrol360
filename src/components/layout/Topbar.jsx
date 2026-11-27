@@ -9,9 +9,9 @@ import { useViewMode } from '../../context/ViewModeContext';
 import { useSubscription } from '../../context/SubscriptionContext';
 
 const Topbar = ({ onboardingLocked }) => {
-    const { user, signOut, isInvestor, isTenant, roleData } = useAuth();
+    const { user, signOut, isTenant, roleData } = useAuth();
     const { portfolios, selectedPortfolioID, setSelectedPortfolioID } = usePortfolio();
-    const { subscription, subscriptionLoading = true, isTrialActive, isSubscriptionActive, setShowPaywall, setPaywallReason } = useSubscription() || {};
+    const { subscription, isTrialActive, isSubscriptionActive, setShowPaywall, setPaywallReason } = useSubscription() || {};
 
     const navigate = useNavigate();
     const { isMobile } = useViewMode();
@@ -24,30 +24,34 @@ const Topbar = ({ onboardingLocked }) => {
 
     const [emailStatus, setEmailStatus] = React.useState({ connected: false });
     const [cloudStatus, setCloudStatus] = React.useState({ connected: false, connections: [] });
-    const [activePopup, setActivePopup] = React.useState(null); // 'email' | 'cloud' | null
+    const [activePopup, setActivePopup] = React.useState(null); // 'email' | 'cloud' | 'profile' | null
 
     const emailRef = React.useRef(null);
     const cloudRef = React.useRef(null);
+    const profileRef = React.useRef(null);
 
     const fetchConnectionStatuses = React.useCallback(async () => {
         if (!user) return;
         try {
-            // Fetch SMTP settings
-            const { data: smtpData } = await supabase
+            // Nur Anzeige-Spalten laden – Passwort und Tokens gehören nicht in den Browser
+            const { data: smtpData, error: smtpError } = await supabase
                 .from('user_smtp_settings')
-                .select('*')
+                .select('smtp_host, smtp_user, smtp_sender')
                 .eq('user_id', user.id)
                 .maybeSingle();
-            
+            if (smtpError) console.error('Error fetching SMTP status in Topbar:', smtpError);
+
             setEmailStatus({
                 connected: !!smtpData?.smtp_host && !!smtpData?.smtp_user,
                 email: smtpData?.smtp_sender || smtpData?.smtp_user || ''
             });
 
-            // Fetch Cloud connections
-            const { data: cloudData } = await supabase
+            // Fetch Cloud connections (ohne access_token/refresh_token)
+            const { data: cloudData, error: cloudError } = await supabase
                 .from('cloud_connections')
-                .select('*');
+                .select('id, provider, account_email')
+                .eq('user_id', user.id);
+            if (cloudError) console.error('Error fetching cloud status in Topbar:', cloudError);
 
             setCloudStatus({
                 connected: (cloudData || []).length > 0,
@@ -74,10 +78,8 @@ const Topbar = ({ onboardingLocked }) => {
 
     React.useEffect(() => {
         const handleClickOutside = (e) => {
-            if (
-                (emailRef.current && !emailRef.current.contains(e.target)) &&
-                (cloudRef.current && !cloudRef.current.contains(e.target))
-            ) {
+            const inside = [emailRef, cloudRef, profileRef].some(ref => ref.current && ref.current.contains(e.target));
+            if (!inside) {
                 setActivePopup(null);
             }
         };
@@ -126,9 +128,39 @@ const Topbar = ({ onboardingLocked }) => {
     }, [isTenant, roleData]);
 
     const handleLogout = async () => {
+        setActivePopup(null);
         await signOut();
         navigate('/login');
     };
+
+    // Portfolio-Auswahl (Desktop und mobil)
+    const renderPortfolioSelect = (compact = false) => (
+        <select
+            value={selectedPortfolioID}
+            onChange={(e) => setSelectedPortfolioID(e.target.value)}
+            aria-label="Portfolio auswählen"
+            style={{
+                padding: compact ? '4px 6px' : 'var(--spacing-sm) var(--spacing-md)',
+                borderRadius: 'var(--radius-md)',
+                border: 'none', // Removed border
+                backgroundColor: 'rgba(255,255,255,0.6)', // Glassy
+                backdropFilter: 'blur(4px)',
+                boxShadow: 'var(--shadow-sm)',
+                color: 'var(--text-primary)',
+                cursor: 'pointer',
+                outline: 'none',
+                minWidth: compact ? 0 : '200px',
+                maxWidth: compact ? '120px' : undefined,
+                fontSize: compact ? '0.75rem' : '0.9rem',
+                fontFamily: 'inherit'
+            }}
+        >
+            <option value="">Alle Portfolios</option>
+            {portfolios.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+        </select>
+    );
 
 
 
@@ -153,31 +185,10 @@ const Topbar = ({ onboardingLocked }) => {
                 <>
                     {/* Left: Portfolio Filter (Investor only) OR Tenant Label */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', ...(onboardingLocked ? { pointerEvents: 'none', opacity: 0.5 } : {}) }}>
-                        {isInvestor ? (
+                        {/* Gleiche Rollenquelle wie Sidebar/BottomNav: alles außer 'tenant' ist Investor-Oberfläche */}
+                        {!isTenant ? (
                             <>
-                                <select
-                                    value={selectedPortfolioID}
-                                    onChange={(e) => setSelectedPortfolioID(e.target.value)}
-                                    style={{
-                                        padding: 'var(--spacing-sm) var(--spacing-md)',
-                                        borderRadius: 'var(--radius-md)',
-                                        border: 'none', // Removed border
-                                        backgroundColor: 'rgba(255,255,255,0.6)', // Glassy
-                                        backdropFilter: 'blur(4px)',
-                                        boxShadow: 'var(--shadow-sm)',
-                                        color: 'var(--text-primary)',
-                                        cursor: 'pointer',
-                                        outline: 'none',
-                                        minWidth: '200px',
-                                        fontSize: '0.9rem',
-                                        fontFamily: 'inherit'
-                                    }}
-                                >
-                                    <option value="">Alle Portfolios</option>
-                                    {portfolios.map(p => (
-                                        <option key={p.id} value={p.id}>{p.name}</option>
-                                    ))}
-                                </select>
+                                {renderPortfolioSelect()}
                                 <button
                                     onClick={() => navigate('/settings', { state: { activeTab: 'portfolios' } })}
                                     title="Portfolio verwalten"
@@ -468,47 +479,89 @@ const Topbar = ({ onboardingLocked }) => {
                             <NotificationBell />
                         </div>
 
-                        {/* User Profile */}
-                        <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            cursor: 'pointer',
-                            padding: '4px 8px',
-                            borderRadius: '30px', // More rounded
-                            backgroundColor: 'rgba(255,255,255,0.5)', // Glassy
-                            backdropFilter: 'blur(4px)',
-                            transition: 'background 0.2s',
-                            boxShadow: 'var(--shadow-sm)'
-                        }}
-                            onClick={handleLogout}
-                            title="Klicken zum Abmelden"
-                        >
+                        {/* User Profile: Menü statt Abmelden per Klick (kein versehentliches Abmelden) */}
+                        <div ref={profileRef} style={{ position: 'relative' }}>
                             <div style={{
-                                width: '32px',
-                                height: '32px',
-                                borderRadius: '50%',
-                                backgroundColor: isTenant ? '#DCFCE7' : 'var(--primary-color)',
                                 display: 'flex',
                                 alignItems: 'center',
-                                justifyContent: 'center',
-                                color: isTenant ? '#16A34A' : 'white',
-                                marginRight: 'var(--spacing-sm)'
-                            }}>
-                                <User size={18} />
+                                cursor: 'pointer',
+                                padding: '4px 8px',
+                                borderRadius: '30px', // More rounded
+                                backgroundColor: 'rgba(255,255,255,0.5)', // Glassy
+                                backdropFilter: 'blur(4px)',
+                                transition: 'background 0.2s',
+                                boxShadow: 'var(--shadow-sm)'
+                            }}
+                                onClick={() => setActivePopup(activePopup === 'profile' ? null : 'profile')}
+                                title="Konto-Menü"
+                            >
+                                <div style={{
+                                    width: '32px',
+                                    height: '32px',
+                                    borderRadius: '50%',
+                                    backgroundColor: isTenant ? '#DCFCE7' : 'var(--primary-color)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    color: isTenant ? '#16A34A' : 'white',
+                                    marginRight: 'var(--spacing-sm)'
+                                }}>
+                                    <User size={18} />
+                                </div>
+                                <div style={{ marginRight: 'var(--spacing-sm)' }}>
+                                    <div style={{ fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>{user?.email || 'User'}</div>
+                                </div>
+                                <LogOut size={16} color="var(--text-secondary)" />
                             </div>
-                            <div style={{ marginRight: 'var(--spacing-sm)' }}>
-                                <div style={{ fontSize: 'var(--font-size-sm)', fontWeight: 600 }}>{user?.email || 'User'}</div>
-                            </div>
-                            <LogOut size={16} color="var(--text-secondary)" />
+
+                            {activePopup === 'profile' && (
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '48px',
+                                    right: 0,
+                                    width: '220px',
+                                    backgroundColor: 'var(--surface-color, white)',
+                                    borderRadius: '12px',
+                                    border: '1px solid var(--border-color)',
+                                    boxShadow: '0 10px 30px rgba(0,0,0,0.1)',
+                                    padding: '8px',
+                                    zIndex: 100,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '4px'
+                                }}>
+                                    {!isTenant && (
+                                        <button
+                                            onClick={() => { setActivePopup(null); navigate('/settings', { state: { activeTab: 'profile' } }); }}
+                                            style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 10px', border: 'none', background: 'transparent', borderRadius: '6px', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-primary)', textAlign: 'left' }}
+                                        >
+                                            <User size={16} /> Profil & Einstellungen
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={handleLogout}
+                                        style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 10px', border: 'none', background: 'transparent', borderRadius: '6px', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--danger-color, #DC2626)', textAlign: 'left' }}
+                                    >
+                                        <LogOut size={16} /> Abmelden
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </>
             )}
 
             {isMobile && (
-                <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between', padding: '0 var(--spacing-sm)' }}>
-                    <div style={{ width: '32px' }}></div> {/* Spacer to center logo */}
-                    <img src="/logo.svg" alt="ImmoControl Pro 360" style={{ maxHeight: '40px' }} />
+                <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between', padding: '0 var(--spacing-sm)', gap: '6px' }}>
+                    {/* Portfolio-Auswahl auch auf dem Handy (sonst Spacer für zentriertes Logo) */}
+                    {!isTenant && portfolios.length > 0 ? (
+                        <div style={onboardingLocked ? { pointerEvents: 'none', opacity: 0.5 } : {}}>
+                            {renderPortfolioSelect(true)}
+                        </div>
+                    ) : (
+                        <div style={{ width: '32px' }}></div>
+                    )}
+                    <img src="/logo.svg" alt="ImmoControl Pro 360" style={{ maxHeight: '40px', minWidth: 0, maxWidth: '38%', objectFit: 'contain' }} />
                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                         {/* Mobile Upgrade Badge */}
                         <div style={onboardingLocked ? { pointerEvents: 'none', opacity: 0.5 } : {}}>
@@ -543,7 +596,10 @@ const Topbar = ({ onboardingLocked }) => {
                             <NotificationBell />
                         </div>
                         <button
-                            onClick={handleLogout}
+                            onClick={() => {
+                                if (window.confirm('Wirklich abmelden? Nicht gespeicherte Eingaben gehen verloren.')) handleLogout();
+                            }}
+                            title="Abmelden"
                             style={{
                                 display: 'flex',
                                 alignItems: 'center',

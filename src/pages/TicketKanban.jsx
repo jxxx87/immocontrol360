@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { translateError } from '../lib/errorTranslator';
+import { extractStoragePath } from '../lib/storageFiles';
 import {
     DndContext,
     closestCorners,
@@ -31,11 +33,16 @@ const TicketKanban = () => {
     const [tickets, setTickets] = useState([]);
     const [tenants, setTenants] = useState({});
     const [units, setUnits] = useState({});
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(true); // nur beim ersten Laden
+    const [boardError, setBoardError] = useState(null);
+    const [boardNotice, setBoardNotice] = useState(null);
     const [activeTicket, setActiveTicket] = useState(null);
     const [overId, setOverId] = useState(null);
-    const [selectedTicket, setSelectedTicket] = useState(null); // For detail modal
-    const [imageUrls, setImageUrls] = useState({}); // cache signed URLs
+    // Nur die ID merken und das Ticket aus der aktuellen Liste ableiten (sonst zeigt das
+    // Detailfenster nach Statuswechsel/Realtime den alten Stand)
+    const [selectedTicketId, setSelectedTicketId] = useState(null);
+    const imageUrlsRef = useRef({}); // cache signed URLs
+    const selectedTicket = selectedTicketId ? tickets.find(t => t.id === selectedTicketId) || null : null;
 
     const columns = [
         { id: 'received', label: 'Eingegangen', color: '#F59E0B', bg: 'var(--col-bg-received, #FFFBEB)', icon: Clock },
@@ -70,85 +77,129 @@ const TicketKanban = () => {
     );
 
     // ── FETCH DATA ──────────────────────────────────────────────────
-    const fetchData = async () => {
-        setLoading(true);
+    // Lade-Zustand nur beim ersten Laden; Realtime-Aktualisierungen laufen im
+    // Hintergrund, damit Board und offenes Detailfenster (samt Kommentar) erhalten bleiben.
+    const fetchData = useCallback(async () => {
         try {
-            const [ticketRes, unitRes] = await Promise.all([
-                supabase.from('tickets').select('*').order('created_at', { ascending: false }),
-                supabase.from('units').select('*, property:properties(*)')
-            ]);
+            const ticketRes = await supabase
+                .from('tickets')
+                .select('*')
+                .order('created_at', { ascending: false });
+            if (ticketRes.error) throw ticketRes.error;
+            const ticketRows = ticketRes.data || [];
 
-            setTickets(ticketRes.data || []);
-
+            // Nur die Einheiten der vorhandenen Tickets (mit Adresse) laden
+            const unitIds = [...new Set(ticketRows.map(t => t.unit_id).filter(Boolean))];
             const unitMap = {};
-            (unitRes.data || []).forEach(u => { unitMap[u.id] = u; });
-            setUnits(unitMap);
+            if (unitIds.length > 0) {
+                const unitRes = await supabase
+                    .from('units')
+                    .select('id, unit_name, property:properties(street, house_number, city)')
+                    .in('id', unitIds);
+                if (unitRes.error) throw unitRes.error;
+                (unitRes.data || []).forEach(u => { unitMap[u.id] = u; });
+            }
 
             // Fetch tenant names
-            const tenantUserIds = [...new Set((ticketRes.data || []).map(t => t.tenant_user_id).filter(Boolean))];
+            const tMap = {};
+            const tenantUserIds = [...new Set(ticketRows.map(t => t.tenant_user_id).filter(Boolean))];
             if (tenantUserIds.length > 0) {
-                const { data: roleData } = await supabase
+                const { data: roleData, error: roleError } = await supabase
                     .from('user_roles')
                     .select('user_id, tenant_id')
                     .in('user_id', tenantUserIds);
+                if (roleError) console.error('Error loading tenant roles:', roleError);
 
                 const tenantIds = (roleData || []).map(r => r.tenant_id).filter(Boolean);
                 if (tenantIds.length > 0) {
-                    const { data: tenantData } = await supabase
+                    const { data: tenantData, error: tenantError } = await supabase
                         .from('tenants')
                         .select('id, first_name, last_name')
                         .in('id', tenantIds);
+                    if (tenantError) console.error('Error loading tenants:', tenantError);
 
-                    const tMap = {};
                     (roleData || []).forEach(r => {
                         const tenant = (tenantData || []).find(t => t.id === r.tenant_id);
                         if (tenant) tMap[r.user_id] = `${tenant.last_name}, ${tenant.first_name}`;
                     });
-                    setTenants(tMap);
                 }
             }
+
+            setTickets(ticketRows);
+            setUnits(unitMap);
+            setTenants(tMap);
+            setBoardError(null);
         } catch (err) {
             console.error('Error:', err);
+            setBoardError(`Tickets konnten nicht geladen werden: ${translateError(err)}`);
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
 
-    useEffect(() => { fetchData(); }, []);
+    useEffect(() => { fetchData(); }, [fetchData]);
 
     // ── REALTIME ────────────────────────────────────────────────────
     useEffect(() => {
+        let refreshTimer = null;
         const channel = supabase
             .channel('kanban-tickets')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-                fetchData();
+                // Mehrere Ereignisse kurz hintereinander zu einem Abruf bündeln
+                if (refreshTimer) clearTimeout(refreshTimer);
+                refreshTimer = setTimeout(fetchData, 300);
             })
             .subscribe();
-        return () => supabase.removeChannel(channel);
-    }, []);
+        return () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            supabase.removeChannel(channel);
+        };
+    }, [fetchData]);
 
     // ── GET SIGNED URL FOR IMAGES ───────────────────────────────────
-    const getSignedUrl = async (path) => {
-        if (imageUrls[path]) return imageUrls[path];
+    const getSignedUrl = useCallback(async (path) => {
+        if (imageUrlsRef.current[path]) return imageUrlsRef.current[path];
 
-        // Extract file path from legacy full public URLs
-        let filePath = path;
-        if (path.startsWith('http')) {
-            const marker = '/object/public/tickets/';
-            const idx = path.indexOf(marker);
-            if (idx !== -1) {
-                filePath = path.substring(idx + marker.length);
-            } else {
-                // Can't parse, skip
-                return null;
-            }
-        }
+        // Legacy-URLs des Buckets -> Pfad; fremde Adressen werden nicht angezeigt
+        const filePath = extractStoragePath(path, 'tickets');
+        if (!filePath) return null;
 
-        const { data } = await supabase.storage.from('tickets').createSignedUrl(filePath, 3600);
+        const { data, error } = await supabase.storage.from('tickets').createSignedUrl(filePath, 3600);
+        if (error) console.error('Error signing ticket image:', error);
         if (data?.signedUrl) {
-            setImageUrls(prev => ({ ...prev, [path]: data.signedUrl }));
+            imageUrlsRef.current = { ...imageUrlsRef.current, [path]: data.signedUrl };
             return data.signedUrl;
         }
+        return null;
+    }, []);
+
+    // ── DELETE TICKET ───────────────────────────────────────────────
+    // Gibt null bei Erfolg zurück, sonst eine Fehlermeldung für das Detailfenster.
+    const handleDeleteTicket = async (ticket) => {
+        const { data: deleted, error } = await supabase
+            .from('tickets')
+            .delete()
+            .eq('id', ticket.id)
+            .select('id');
+        if (error) {
+            console.error('Error deleting ticket:', error);
+            return `Das Ticket konnte nicht gelöscht werden: ${translateError(error)}`;
+        }
+        if (!deleted || deleted.length === 0) {
+            return 'Das Ticket konnte nicht gelöscht werden (keine Berechtigung).';
+        }
+
+        // Fotos des Tickets aus dem Speicher entfernen (nur Pfade des Buckets)
+        const paths = (ticket.images || [])
+            .map(p => extractStoragePath(p, 'tickets'))
+            .filter(Boolean);
+        if (paths.length > 0) {
+            const { error: removeError } = await supabase.storage.from('tickets').remove(paths);
+            if (removeError) console.error('Error removing ticket images:', removeError);
+        }
+
+        setTickets(prev => prev.filter(t => t.id !== ticket.id));
+        setSelectedTicketId(null);
         return null;
     };
 
@@ -207,29 +258,33 @@ const TicketKanban = () => {
         }
 
         // Send auto-notification to tenant
+        // Supabase wirft keine Fehler, sondern gibt sie zurück – daher { error } prüfen
         try {
             const statusLabel = statusLabels[newStatus];
-            await supabase.from('messages').insert({
+            const { error: notifyError } = await supabase.from('messages').insert({
                 sender_id: user.id,
                 receiver_id: ticket.tenant_user_id,
                 text: `📋 Ihr Ticket "${ticket.title}" wurde auf "${statusLabel}" aktualisiert.`,
                 ticket_id: ticket.id,
                 is_system: true
             });
+            if (notifyError) throw notifyError;
         } catch (err) {
             console.error('Error sending notification:', err);
+            setBoardNotice(`Status von „${ticket.title}“ gespeichert, aber der Mieter konnte nicht benachrichtigt werden: ${translateError(err)}`);
         }
     };
 
     const handleDragCancel = () => setActiveTicket(null);
 
+    // Kalendertage vergleichen (nicht 24-Stunden-Differenz)
     const formatDate = (d) => {
         const date = new Date(d);
-        const now = new Date();
-        const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+        const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+        const diffDays = Math.round((startOfDay(new Date()) - startOfDay(date)) / (1000 * 60 * 60 * 24));
         if (diffDays === 0) return 'Heute';
         if (diffDays === 1) return 'Gestern';
-        if (diffDays < 7) return `Vor ${diffDays} Tagen`;
+        if (diffDays > 1 && diffDays < 7) return `Vor ${diffDays} Tagen`;
         return date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
     };
 
@@ -249,6 +304,27 @@ const TicketKanban = () => {
                     Verwalten Sie Mieter-Tickets per Drag & Drop. Statuswechsel benachrichtigt den Mieter automatisch.
                 </p>
             </div>
+
+            {[boardError, boardNotice].filter(Boolean).map((msg, i) => (
+                <div key={i} role="alert" style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '10px',
+                    padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)',
+                    border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+                    color: '#B91C1C', fontSize: '0.85rem'
+                }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <span style={{ flex: 1 }}>{msg}</span>
+                    {msg === boardNotice && (
+                        <button
+                            onClick={() => setBoardNotice(null)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0 }}
+                            title="Schließen"
+                        >
+                            <X size={16} />
+                        </button>
+                    )}
+                </div>
+            ))}
 
             <DndContext
                 sensors={sensors}
@@ -277,7 +353,7 @@ const TicketKanban = () => {
                                 formatDate={formatDate}
                                 priorityColors={priorityColors}
                                 priorityLabels={priorityLabels}
-                                onTicketClick={setSelectedTicket}
+                                onTicketClick={(t) => setSelectedTicketId(t.id)}
                             />
                         );
                     })}
@@ -301,6 +377,7 @@ const TicketKanban = () => {
             {/* ── DETAIL MODAL ────────────────────────────────────────── */}
             {selectedTicket && (
                 <TicketDetailModal
+                    key={selectedTicket.id}
                     ticket={selectedTicket}
                     tenantName={tenants[selectedTicket.tenant_user_id]}
                     unit={units[selectedTicket.unit_id]}
@@ -309,12 +386,8 @@ const TicketKanban = () => {
                     priorityColors={priorityColors}
                     getSignedUrl={getSignedUrl}
                     user={user}
-                    onDelete={async (ticketId) => {
-                        await supabase.from('tickets').delete().eq('id', ticketId);
-                        setTickets(prev => prev.filter(t => t.id !== ticketId));
-                        setSelectedTicket(null);
-                    }}
-                    onClose={() => setSelectedTicket(null)}
+                    onDelete={() => handleDeleteTicket(selectedTicket)}
+                    onClose={() => setSelectedTicketId(null)}
                     isMobile={isMobile}
                 />
             )}
@@ -511,46 +584,67 @@ const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, prio
 
 // ── TICKET DETAIL MODAL ─────────────────────────────────────────────
 const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLabels, priorityColors, getSignedUrl, user, onDelete, onClose, isMobile }) => {
-    const [signedUrls, setSignedUrls] = useState([]);
-    const [loadingImages, setLoadingImages] = useState(false);
+    const [signedUrls, setSignedUrls] = useState(null); // null = lädt noch
     const [comments, setComments] = useState([]);
     const [loadingComments, setLoadingComments] = useState(true);
+    const [commentsError, setCommentsError] = useState(null);
     const [newComment, setNewComment] = useState('');
     const [sendingComment, setSendingComment] = useState(false);
+    const [commentError, setCommentError] = useState(null);
     const [confirmDelete, setConfirmDelete] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState(null);
     const verlaufEndRef = useRef(null);
+
+    // Stabiler Schlüssel, damit Realtime-Aktualisierungen (neues Array-Objekt) nicht
+    // jedes Mal alle Bilder neu signieren
+    const imagesKey = (ticket.images || []).join('|');
+    const loadingImages = signedUrls === null && imagesKey !== '';
 
     // Load signed URLs for images
     useEffect(() => {
-        if (!ticket.images || ticket.images.length === 0) return;
-        setLoadingImages(true);
+        if (!imagesKey) return;
+        let cancelled = false;
         const loadUrls = async () => {
             const urls = await Promise.all(
-                ticket.images.map(async (path) => {
+                imagesKey.split('|').map(async (path) => {
                     const url = await getSignedUrl(path);
                     return { path, url };
                 })
             );
-            setSignedUrls(urls.filter(u => u.url));
-            setLoadingImages(false);
+            if (!cancelled) setSignedUrls(urls.filter(u => u.url));
         };
         loadUrls();
-    }, [ticket.images]);
+        return () => { cancelled = true; };
+    }, [imagesKey, getSignedUrl]);
 
     // Load comments (messages with ticket_id)
-    const fetchComments = async () => {
-        setLoadingComments(true);
-        const { data, error } = await supabase
-            .from('messages')
-            .select('*')
-            .eq('ticket_id', ticket.id)
-            .order('created_at', { ascending: true });
+    useEffect(() => {
+        let cancelled = false;
+        const loadComments = async () => {
+            const { data, error } = await supabase
+                .from('messages')
+                .select('*')
+                .eq('ticket_id', ticket.id)
+                .order('created_at', { ascending: true });
 
-        if (!error) setComments(data || []);
-        setLoadingComments(false);
-    };
-
-    useEffect(() => { fetchComments(); }, [ticket.id]);
+            if (cancelled) return;
+            if (error) {
+                console.error('Error loading comments:', error);
+                setCommentsError(`Verlauf konnte nicht geladen werden: ${translateError(error)}`);
+            } else {
+                setCommentsError(null);
+                setComments(prev => {
+                    const loaded = data || [];
+                    const extra = prev.filter(p => !loaded.some(l => l.id === p.id));
+                    return [...loaded, ...extra];
+                });
+            }
+            setLoadingComments(false);
+        };
+        loadComments();
+        return () => { cancelled = true; };
+    }, [ticket.id]);
 
     // Realtime subscription for new comments
     useEffect(() => {
@@ -585,17 +679,22 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
 
     // Auto-scroll to latest comment
     useEffect(() => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
             verlaufEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }, 100);
+        return () => clearTimeout(timer);
     }, [comments, loadingComments]);
 
     // Send investor comment
+    // Verwalter-Kommentare sind normale Nachrichten (is_system: false); System-Hinweise
+    // bleiben den automatischen Statusmeldungen vorbehalten.
     const handleSendComment = async () => {
-        if (!newComment.trim() || sendingComment) return;
+        const text = newComment.trim();
+        if (!text || sendingComment) return;
         setSendingComment(true);
+        setCommentError(null);
 
-        const commentText = `💬 Kommentar zu Ticket "${ticket.title}":\n${newComment.trim()}`;
+        const commentText = `💬 Kommentar zu Ticket "${ticket.title}":\n${text}`;
 
         const { data: inserted, error } = await supabase
             .from('messages')
@@ -604,16 +703,35 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                 receiver_id: ticket.tenant_user_id,
                 text: commentText,
                 ticket_id: ticket.id,
-                is_system: true
+                is_system: false
             })
             .select()
             .single();
 
-        if (!error && inserted) {
-            setComments(prev => [...prev, inserted]);
+        if (error) {
+            console.error('Error sending comment:', error);
+            setCommentError(`Der Kommentar konnte nicht gesendet werden: ${translateError(error)}`);
+            setSendingComment(false);
+            return;
         }
-        setNewComment('');
+
+        if (inserted) {
+            // Realtime kann die Nachricht schon angefügt haben – Duplikate vermeiden
+            setComments(prev => (prev.some(c => c.id === inserted.id) ? prev : [...prev, inserted]));
+        }
+        setNewComment(current => (current.trim() === text ? '' : current));
         setSendingComment(false);
+    };
+
+    const handleConfirmDelete = async () => {
+        if (deleting) return;
+        setDeleting(true);
+        setDeleteError(null);
+        const errorMessage = await onDelete();
+        if (errorMessage) {
+            setDeleteError(errorMessage);
+            setDeleting(false);
+        }
     };
 
     const formatDateTime = (d) => {
@@ -748,10 +866,15 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Bilder werden geladen...</div>
                             ) : (
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '10px' }}>
-                                    {signedUrls.map((item, idx) => (
+                                    {(signedUrls || []).length < (ticket.images || []).length && (
+                                        <div style={{ gridColumn: '1 / -1', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                            {(ticket.images || []).length - (signedUrls || []).length} Foto(s) nicht verfügbar.
+                                        </div>
+                                    )}
+                                    {(signedUrls || []).map((item, idx) => (
                                         <div
                                             key={idx}
-                                            onClick={() => window.open(item.url, '_blank')}
+                                            onClick={() => window.open(item.url, '_blank', 'noopener')}
                                             style={{
                                                 borderRadius: 'var(--radius-md)', overflow: 'hidden', cursor: 'pointer',
                                                 border: '1px solid var(--border-color)', aspectRatio: '4/3', position: 'relative'
@@ -805,14 +928,25 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                                 </div>
                             </div>
 
+                            {commentsError && (
+                                <div role="alert" style={{ color: '#B91C1C', fontSize: '0.8rem', marginBottom: '8px' }}>
+                                    {commentsError}
+                                </div>
+                            )}
                             {loadingComments ? (
                                 <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.82rem', padding: '10px' }}>
                                     Laden...
                                 </div>
                             ) : (
                                 comments.map((msg) => {
-                                    const isSystem = msg.is_system;
-                                    const isInvestor = msg.sender_id === user.id;
+                                    // Rolle über den Mieter des Tickets bestimmen (nicht über den eigenen
+                                    // Nutzer): alles, was nicht vom Mieter kommt, stammt von der Verwaltung.
+                                    const isFromTenant = msg.sender_id === ticket.tenant_user_id;
+                                    const text = msg.text || '';
+                                    // Ältere Verwalter-Kommentare wurden als System-Nachricht gespeichert
+                                    const isLegacyComment = !!msg.is_system && text.startsWith('💬');
+                                    const isSystem = !!msg.is_system && !isFromTenant && !isLegacyComment;
+                                    const isInvestor = !isFromTenant;
 
                                     let bgColor, borderColor, dotColor, textColor;
                                     if (isSystem) {
@@ -839,12 +973,12 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                                                         fontSize: '0.82rem', color: textColor, lineHeight: 1.4,
                                                         whiteSpace: 'pre-wrap', wordBreak: 'break-word'
                                                     }}>
-                                                        {isSystem ? msg.text : (
+                                                        {isSystem ? text : (
                                                             <>
                                                                 <span style={{ fontWeight: 600, fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
                                                                     {isInvestor ? '🔧 Verwalter' : '👤 Mieter'}:
                                                                 </span>{' '}
-                                                                {msg.text}
+                                                                {text || (msg.attachment_url ? '📎 Anhang (im Chat ansehen)' : '')}
                                                             </>
                                                         )}
                                                     </div>
@@ -895,9 +1029,14 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                                     <p style={{ fontSize: '0.85rem', color: '#991B1B', marginBottom: '12px', fontWeight: 500 }}>
                                         Ticket endgültig löschen? Das kann nicht rückgängig gemacht werden.
                                     </p>
+                                    {deleteError && (
+                                        <p role="alert" style={{ fontSize: '0.8rem', color: '#B91C1C', marginBottom: '12px' }}>
+                                            {deleteError}
+                                        </p>
+                                    )}
                                     <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
                                         <button
-                                            onClick={() => setConfirmDelete(false)}
+                                            onClick={() => { setConfirmDelete(false); setDeleteError(null); }}
                                             style={{
                                                 padding: '8px 20px', borderRadius: '6px',
                                                 backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)',
@@ -907,14 +1046,15 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                                             Abbrechen
                                         </button>
                                         <button
-                                            onClick={() => onDelete(ticket.id)}
+                                            onClick={handleConfirmDelete}
+                                            disabled={deleting}
                                             style={{
                                                 padding: '8px 20px', borderRadius: '6px',
                                                 backgroundColor: '#DC2626', color: 'white', border: 'none',
                                                 fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer'
                                             }}
                                         >
-                                            Ja, löschen
+                                            {deleting ? 'Löscht...' : 'Ja, löschen'}
                                         </button>
                                     </div>
                                 </div>
@@ -924,6 +1064,16 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                 </div>
 
                 {/* ── Fixed Comment Input Footer ── */}
+                {commentError && (
+                    <div role="alert" style={{
+                        padding: isMobile ? '8px 20px' : '8px 28px',
+                        borderTop: '1px solid #FECACA',
+                        backgroundColor: 'var(--surface-color)',
+                        color: '#B91C1C', fontSize: '0.8rem', flexShrink: 0
+                    }}>
+                        {commentError}
+                    </div>
+                )}
                 <div style={{
                     display: 'flex', gap: '8px',
                     padding: isMobile ? '12px 20px' : '12px 28px',

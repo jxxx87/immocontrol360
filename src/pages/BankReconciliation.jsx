@@ -1,965 +1,901 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import LoadingOverlay from '../components/ui/LoadingOverlay';
-import { 
-    Plus, Loader2, ArrowUpRight, ArrowDownLeft, Check, X, ShieldAlert,
-    AlertCircle, Sparkles, Building2, User, CreditCard, RefreshCw, Key,
-    Trash2, HelpCircle, Save, Settings, Layers, ListFilter
+import {
+    Loader2, Check, X, AlertCircle, Sparkles, Building2, CreditCard, RefreshCw,
+    Trash2, HelpCircle, Save, Settings, FlaskConical, RotateCcw, TriangleAlert, Info
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DEMO-MODUS
+// Es gibt noch KEINEN echten Bankimport (weder CSV/CAMT.053/MT940 noch eine
+// FinAPI-Anbindung über eine Edge Function). Die Seite läuft deshalb nur als
+// lokale Vorschau: Beispiel-Umsätze, Zuordnungen und gelernte Regeln existieren
+// ausschließlich im Browser. Es werden KEINE Bankkonten, Umsätze, Regeln,
+// Mietzahlungen oder Ausgaben angelegt oder geändert.
+// Gelesen werden nur Stammdaten (Objekte, Einheiten, Mietverträge, Kostenarten),
+// vorhandene Buchungen im Zeitfenster der Demo (Duplikat-Hinweise) und der
+// Altbestand der früheren Testversion (bank_connections / bank_transactions /
+// bank_matching_rules). Einzige Schreibaktionen: Löschen dieses Altbestands bzw.
+// einzelner alter Regeln – auf ausdrücklichen Wunsch des Nutzers.
+// Ein echter Import braucht später: stabile transaction_id + Upsert, Buchung per
+// RPC in einer Transaktion (Status 'pending' sperren, Buchungs-ID am Umsatz).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DUPLICATE_WINDOW_DAYS = 10;          // "bereits erfasst": gleicher Vertrag/Kostenart, gleicher Betrag
+const POSSIBLE_RENT_DUPLICATE_DAYS = 5;    // nur Hinweis: gleicher Betrag ohne Mieterbezug
+const POSSIBLE_EXPENSE_DUPLICATE_DAYS = 3; // nur Hinweis: gleicher Betrag ohne Kostenart-/Empfängerbezug
+const DEMO_MAX_AGE_DAYS = 5;               // ältester Demo-Umsatz liegt so viele Tage zurück
+const AMOUNT_EPSILON = 0.005;
+const RENT_AMOUNT_TOLERANCE = 1;           // Abweichung zur Soll-Miete, die noch als "Betrag passt" gilt
+
+// Beispiel-Umsätze der Demo. Bewusst neutrale Musternamen und ungültige Platzhalter-IBANs
+// (Prüfziffer 00), damit sie nie mit echten Konten, Banken oder Mietern verwechselt werden.
+const DEMO_TRANSACTIONS = [
+    { daysAgo: 0, amount: 600.00, purpose: 'Miete EG Musterstraße 1 - Max Mustermann', counterpart_name: 'Max Mustermann', counterpart_iban: 'DE00 0000 0000 0000 0000 01' },
+    { daysAgo: 1, amount: -128.50, purpose: 'Rechn. 0001 - Abschlag Wasser Musterstraße 1', counterpart_name: 'Stadtwerke Musterstadt (Demo)', counterpart_iban: 'DE00 0000 0000 0000 0000 02' },
+    { daysAgo: 2, amount: 850.00, purpose: 'MIETE MUSTERFRAU 1. OG RECHTS', counterpart_name: 'Erika Musterfrau', counterpart_iban: 'DE00 0000 0000 0000 0000 03' },
+    { daysAgo: 3, amount: -340.00, purpose: 'Gebaeudeversicherung Police DEMO-0001', counterpart_name: 'Muster Versicherung (Demo)', counterpart_iban: 'DE00 0000 0000 0000 0000 04' },
+    { daysAgo: DEMO_MAX_AGE_DAYS, amount: 450.00, purpose: 'Miete - WE 101 Beispiel', counterpart_name: 'Hans Beispiel', counterpart_iban: 'DE00 0000 0000 0000 0000 05' }
+];
+
+// Schlagwort-Heuristik für Ausgaben (erste passende Zeile gewinnt)
+const EXPENSE_HEURISTICS = [
+    { test: (s, p) => s.includes('stadtwerke') || p.includes('wasser') || p.includes('abwasser'), categoryKeys: ['wasser', 'betriebskosten'], score: 80, reason: 'Absender weist auf Stadtwerke/Wasser hin' },
+    { test: (s, p) => s.includes('energie') || s.includes('strom') || p.includes('strom') || s.includes('e.on'), categoryKeys: ['strom', 'energie'], score: 80, reason: 'Absender weist auf Energieversorger hin' },
+    { test: (s, p) => s.includes('schornsteinfeger') || p.includes('schornstein') || p.includes('kehrer'), categoryKeys: ['schornstein', 'wartung'], score: 90, reason: 'Schlagwort im Absender / Verwendungszweck' },
+    { test: (s, p) => s.includes('versicherung') || p.includes('gebäudeversicherung') || p.includes('gebaeudeversicherung'), categoryKeys: ['versicherung'], score: 85, reason: 'Schlagwort Versicherung' },
+    { test: (s, p) => s.includes('müll') || p.includes('abfall') || p.includes('entsorgung'), categoryKeys: ['müll', 'abfall'], score: 80, reason: 'Entsorgungsschlagwort gefunden' }
+];
+
+// Gelernte Regeln: IBAN exakt > Zahlungspartner > Schlüsselwort (Schlüsselwort nie als sicherer Treffer)
+const RULE_STRENGTH = { iban: 3, name: 2, keyword: 1 };
+const RULE_CONFIDENCE = { 3: 100, 2: 90, 1: 60 };
+const RULE_REASON = {
+    3: 'Gelernt aus Ihren Zuordnungen: gleiche IBAN',
+    2: 'Gelernt aus Ihren Zuordnungen: gleicher Zahlungspartner',
+    1: 'Nur Schlüsselwort im Verwendungszweck – bitte genau prüfen'
+};
+
+const EMPTY_INCOME_FORM = { payment_date: '', period_month: '', property_id: '', lease_id: '', amount: '', note: '' };
+const EMPTY_EXPENSE_FORM = {
+    booking_date: '', payee: '', category_id: '', category_custom: '', scope: 'general',
+    property_id: '', unit_id: '', amount: '', is_allocatable: true, note: ''
+};
+
+// ── Hilfsfunktionen ─────────────────────────────────────────────────────────
+const pad2 = (n) => String(n).padStart(2, '0');
+const toDateStr = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+const parseDateStr = (str) => {
+    const [y, m, d] = String(str || '').slice(0, 10).split('-').map(Number);
+    if (!y || !m || !d) return null;
+    return Date.UTC(y, m - 1, d);
+};
+const addDays = (dateStr, days) => {
+    const t = parseDateStr(dateStr);
+    if (t === null) return dateStr;
+    const d = new Date(t + days * DAY_MS);
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+};
+const daysBetween = (a, b) => {
+    const ta = parseDateStr(a);
+    const tb = parseDateStr(b);
+    if (ta === null || tb === null) return Infinity;
+    return Math.abs(ta - tb) / DAY_MS;
+};
+const formatDate = (str) => {
+    const t = parseDateStr(str);
+    if (t === null) return '–';
+    const d = new Date(t);
+    return `${pad2(d.getUTCDate())}.${pad2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}`;
+};
+const formatMonth = (monthStr) => {
+    const [y, m] = String(monthStr || '').split('-');
+    return y && m ? `${m}/${y}` : '–';
+};
+const formatCurrency = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(val) || 0);
+const toNumber = (v) => {
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    return Number.isFinite(n) ? n : NaN;
+};
+const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
+
+const normalizeIban = (iban) => String(iban || '').replace(/\s+/g, '').toUpperCase();
+const normalizeText = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Ganzes Wort bzw. ganze Wortfolge (Unicode-fähig): "Ott" trifft nicht "Otto", "May" nicht "Mayr"
+const containsWord = (haystack, needle) => {
+    const n = normalizeText(needle);
+    if (n.length < 2 || !haystack) return false;
+    const re = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(n)}(?=$|[^\\p{L}\\p{N}])`, 'u');
+    return re.test(normalizeText(haystack));
+};
+
+const leaseMonthlyTotal = (lease) =>
+    ['cold_rent', 'service_charge', 'heating_cost', 'other_costs'].reduce((sum, key) => sum + (Number(lease?.[key]) || 0), 0);
+const leaseCoversDate = (lease, dateStr) =>
+    !!lease?.start_date && lease.start_date <= dateStr && (!lease.end_date || lease.end_date >= dateStr);
+const isLeaseEnded = (lease, todayStr) => lease.status !== 'active' || (!!lease.end_date && lease.end_date < todayStr);
+const tenantLabel = (tenant) => [tenant?.last_name, tenant?.first_name].filter(Boolean).join(', ') || 'Unbekannter Mieter';
+const propertyLabel = (p) => (p ? `${p.street || ''} ${p.house_number || ''}`.trim() : '');
+const leaseLabel = (lease) => {
+    const unit = lease?.unit?.unit_name || 'Einheit';
+    const prop = propertyLabel(lease?.unit?.property);
+    return `${tenantLabel(lease?.tenant)} – ${unit}${prop ? ` (${prop})` : ''}`;
+};
+
+const allocatedAmount = (tx) => round2((tx.allocations || []).reduce((sum, a) => sum + (Number(a.amount) || 0), 0));
+const remainingAmount = (tx) => round2(Math.abs(Number(tx.amount)) - allocatedAmount(tx));
+
+const isMissingTableError = (error) => !!error && ['42P01', 'PGRST205'].includes(error.code);
+
+// Lädt alle Zeilen seitenweise (.range), damit die PostgREST-Grenze (Standard 1000 Zeilen) nichts abschneidet
+const fetchAllPages = async (table, columns, applyQuery = (q) => q, pageSize = 1000) => {
+    const rows = [];
+    let total = null;
+    for (let page = 0; page < 200; page++) {
+        const from = rows.length;
+        const query = applyQuery(supabase.from(table).select(columns, page === 0 ? { count: 'exact' } : undefined))
+            .order('id', { ascending: true });
+        const { data, error, count } = await query.range(from, from + pageSize - 1);
+        if (error) return { data: rows, error };
+        const chunk = data || [];
+        if (page === 0 && typeof count === 'number') total = count;
+        rows.push(...chunk);
+        if (chunk.length === 0) break;
+        if (total !== null ? rows.length >= total : chunk.length < pageSize) break;
+    }
+    return { data: rows, error: null };
+};
+
+const buildDemoTransactions = () => {
+    const today = toDateStr(new Date());
+    return DEMO_TRANSACTIONS.map((t, i) => {
+        const date = addDays(today, -t.daysAgo);
+        return {
+            id: `demo-tx-${i + 1}`,
+            booking_date: date,
+            value_date: date,
+            amount: t.amount,
+            purpose: t.purpose,
+            counterpart_name: t.counterpart_name,
+            counterpart_iban: t.counterpart_iban,
+            status: 'pending',
+            allocations: []
+        };
+    });
+};
+
+// ── Abgleich ────────────────────────────────────────────────────────────────
+
+// Stärke, mit der eine Regel auf einen Umsatz passt (0 = gar nicht).
+// - Typ und Vorzeichen müssen zusammenpassen: Mieteingang nur bei Gutschrift, Ausgabe nur bei Abbuchung
+//   (sonst würde z. B. eine Kautionsrückzahlung an den Mieter als Mietzahlung vorgeschlagen).
+// - Haben Regel und Umsatz eine IBAN, muss sie übereinstimmen; Name/Schlüsselwort zählen dann nicht.
+const ruleMatchStrength = (rule, tx) => {
+    const isCredit = Number(tx.amount) > 0;
+    if (rule.target_type === 'income' ? !isCredit : rule.target_type === 'expense' ? isCredit : true) return 0;
+    const ruleIban = normalizeIban(rule.counterpart_iban);
+    const txIban = normalizeIban(tx.counterpart_iban);
+    if (ruleIban && txIban) return ruleIban === txIban ? RULE_STRENGTH.iban : 0;
+    if (rule.counterpart_name && containsWord(tx.counterpart_name, rule.counterpart_name)) return RULE_STRENGTH.name;
+    if (rule.purpose_keyword && containsWord(tx.purpose, rule.purpose_keyword)) return RULE_STRENGTH.keyword;
+    return 0;
+};
+
+// Beste Regel: höchste Stärke gewinnt; bei gleicher Stärke die zuerst gelistete (in der Demo gelernte
+// Korrekturen stehen vor älteren gespeicherten Regeln). Regeln mit nicht (mehr) vorhandenem Ziel zählen nicht.
+const findRule = (tx, rules, isValidRule) => {
+    let best = null;
+    let bestStrength = 0;
+    for (const rule of rules) {
+        const strength = ruleMatchStrength(rule, tx);
+        if (strength > bestStrength && isValidRule(rule)) {
+            best = rule;
+            bestStrength = strength;
+        }
+    }
+    return best ? { rule: best, strength: bestStrength } : null;
+};
+
+// Mietvertrag per Heuristik. Ohne Nachnamen-Treffer (ganzes Wort) gibt es keinen Vorschlag – ein passender
+// Betrag allein ist kein Beleg. Passen mehrere Verträge gleich gut, wird nichts vorgeschlagen.
+const suggestLease = (tx, leases) => {
+    const sender = tx.counterpart_name || '';
+    const purpose = tx.purpose || '';
+    let best = [];
+    let bestScore = 0;
+    let bestParts = [];
+    leases.forEach(lease => {
+        if (!(lease.status === 'active' || leaseCoversDate(lease, tx.booking_date))) return;
+        const lastName = lease.tenant?.last_name;
+        if (!lastName || !(containsWord(sender, lastName) || containsWord(purpose, lastName))) return;
+        let score = 50;
+        const parts = ['Nachname'];
+        const firstName = lease.tenant?.first_name;
+        if (firstName && (containsWord(sender, firstName) || containsWord(purpose, firstName))) { score += 20; parts.push('Vorname'); }
+        if (Math.abs(leaseMonthlyTotal(lease) - Number(tx.amount)) < RENT_AMOUNT_TOLERANCE) { score += 30; parts.push('Betrag = Soll-Miete'); }
+        const street = lease.unit?.property?.street;
+        if (street && normalizeText(street).length > 3 && containsWord(purpose, street)) { score += 15; parts.push('Straße'); }
+        if (score > bestScore) {
+            bestScore = score;
+            best = [lease];
+            bestParts = parts;
+        } else if (score === bestScore) {
+            best.push(lease);
+        }
+    });
+    if (best.length === 0) return null;
+    if (best.length > 1) return { ambiguous: true, count: best.length };
+    return { lease: best[0], score: bestScore, reason: `Übereinstimmung: ${bestParts.join(', ')}` };
+};
+
+// Objekt über die Straße im Verwendungszweck erkennen – nur eindeutige Treffer zählen
+const detectProperty = (purpose, properties) => {
+    const candidates = properties.filter(p => normalizeText(p.street).length > 3 && containsWord(purpose, p.street));
+    if (candidates.length <= 1) return candidates[0] || null;
+    const withNumber = candidates.filter(p => p.house_number && containsWord(purpose, `${p.street} ${p.house_number}`));
+    return withNumber.length === 1 ? withNumber[0] : null;
+};
+
+const suggestExpense = (tx, categories, properties) => {
+    const sender = normalizeText(tx.counterpart_name);
+    const purpose = normalizeText(tx.purpose);
+    const heuristic = EXPENSE_HEURISTICS.find(h => h.test(sender, purpose));
+    if (!heuristic) return null;
+    const category = categories.find(c => heuristic.categoryKeys.some(k => normalizeText(c.name).includes(k)));
+    if (!category) return null;
+    const property = detectProperty(tx.purpose, properties);
+    return {
+        category,
+        property,
+        score: Math.min(heuristic.score + (property ? 10 : 0), 95),
+        reason: heuristic.reason + (property ? ` • Immobilie ${propertyLabel(property)} erkannt` : '')
+    };
+};
+
+const sameAmount = (a, b) => Math.abs(Math.abs(Number(a)) - Math.abs(Number(b))) < 0.01;
+
+// Vorschlag für einen offenen Umsatz. ctx enthält die (portfolio-gefilterten) Stammdaten.
+const recommendFor = (tx, ctx) => {
+    const amount = Number(tx.amount);
+    const none = (reason) => ({ type: null, targetId: null, confidence: 0, label: 'Kein eindeutiger Treffer', reason });
+
+    if (amount > 0) {
+        let suggestion = null;
+        let noneReason = 'Keine passende Regel und kein Mietername (ganzes Wort) gefunden.';
+        const hit = findRule(tx, ctx.rules, ctx.isValidRule);
+        if (hit) {
+            const lease = ctx.leaseById.get(hit.rule.target_id);
+            suggestion = {
+                type: 'income', targetId: lease.id, propertyId: lease.unit?.property_id || null, unitId: lease.unit_id || null,
+                confidence: RULE_CONFIDENCE[hit.strength], label: `Miete: ${leaseLabel(lease)}`, reason: RULE_REASON[hit.strength], rule: hit.rule
+            };
+        } else {
+            const h = suggestLease(tx, ctx.leases);
+            if (h?.ambiguous) {
+                noneReason = `${h.count} Mietverträge passen gleich gut (z. B. gleicher Nachname) – bitte manuell zuordnen.`;
+            } else if (h) {
+                suggestion = {
+                    type: 'income', targetId: h.lease.id, propertyId: h.lease.unit?.property_id || null, unitId: h.lease.unit_id || null,
+                    confidence: Math.min(h.score, 95), label: `Miete: ${leaseLabel(h.lease)}`, reason: h.reason
+                };
+            }
+        }
+
+        if (suggestion) {
+            const booked = ctx.rentPayments.find(p =>
+                p.lease_id === suggestion.targetId && !ctx.linkedKeys.has(`rent:${p.id}`) &&
+                sameAmount(p.amount, amount) && daysBetween(p.payment_date, tx.booking_date) <= DUPLICATE_WINDOW_DAYS);
+            if (booked) {
+                const lease = ctx.leaseById.get(booked.lease_id);
+                return {
+                    ...suggestion, confidence: 100, alreadyBooked: true, linkedKey: `rent:${booked.id}`,
+                    label: `Erfasste Miete: ${tenantLabel(lease?.tenant)}`,
+                    reason: `Eine Zahlung über ${formatCurrency(booked.amount)} für ${leaseLabel(lease)} wurde bereits am ${formatDate(booked.payment_date)} erfasst.`
+                };
+            }
+        }
+
+        // Gleicher Betrag ohne Mieterbezug: nur Hinweis, keine 1-Klick-Verknüpfung
+        const possible = ctx.rentPayments.find(p =>
+            !ctx.linkedKeys.has(`rent:${p.id}`) && p.lease_id !== suggestion?.targetId &&
+            sameAmount(p.amount, amount) && daysBetween(p.payment_date, tx.booking_date) <= POSSIBLE_RENT_DUPLICATE_DAYS);
+        const possibleDuplicate = possible
+            ? `Hinweis: Am ${formatDate(possible.payment_date)} wurde bereits eine Mietzahlung über ${formatCurrency(possible.amount)} erfasst (${ctx.leaseById.has(possible.lease_id) ? tenantLabel(ctx.leaseById.get(possible.lease_id).tenant) : 'anderer Mietvertrag'}). Bitte prüfen, ob es dieselbe Zahlung ist.`
+            : null;
+
+        return suggestion ? { ...suggestion, possibleDuplicate } : { ...none(noneReason), possibleDuplicate };
+    }
+
+    if (amount < 0) {
+        let suggestion = null;
+        const hit = findRule(tx, ctx.rules, ctx.isValidRule);
+        if (hit) {
+            const cat = ctx.categoryById.get(hit.rule.target_id);
+            const prop = hit.rule.property_id ? ctx.propertyById.get(hit.rule.property_id) : null;
+            suggestion = {
+                type: 'expense', targetId: cat.id, propertyId: prop?.id || null, unitId: prop ? (hit.rule.unit_id || null) : null,
+                confidence: RULE_CONFIDENCE[hit.strength], label: `Ausgabe: ${cat.name} (${prop ? propertyLabel(prop) : 'ohne Objekt'})`,
+                reason: RULE_REASON[hit.strength], rule: hit.rule
+            };
+        } else {
+            const h = suggestExpense(tx, ctx.categories, ctx.properties);
+            if (h) {
+                suggestion = {
+                    type: 'expense', targetId: h.category.id, propertyId: h.property?.id || null, unitId: null,
+                    confidence: h.score, label: `Betriebskosten: ${h.category.name} (${h.property ? propertyLabel(h.property) : 'ohne Objekt'})`,
+                    reason: h.reason
+                };
+            }
+        }
+
+        const sender = normalizeText(tx.counterpart_name);
+        const booked = ctx.expenses.find(e => {
+            if (ctx.linkedKeys.has(`expense:${e.id}`) || !sameAmount(e.amount, amount)) return false;
+            if (daysBetween(e.booking_date, tx.booking_date) > DUPLICATE_WINDOW_DAYS) return false;
+            // Ausgabe eines anderen Objekts ist kein Duplikat (z. B. gleich hoher Abschlag für zwei Häuser)
+            if (suggestion?.propertyId && e.property_id && e.property_id !== suggestion.propertyId) return false;
+            if (suggestion?.targetId && e.category_id === suggestion.targetId) return true;
+            const payee = normalizeText(e.payee);
+            return payee.length >= 3 && sender.length >= 3 && (sender.includes(payee) || payee.includes(sender));
+        });
+        if (booked) {
+            const cat = ctx.categoryById.get(booked.category_id);
+            return {
+                type: 'expense', targetId: booked.category_id || null, propertyId: booked.property_id || null, unitId: booked.unit_id || null,
+                confidence: 100, alreadyBooked: true, linkedKey: `expense:${booked.id}`,
+                label: `Erfasste Ausgabe (${cat?.name || booked.category_custom || 'Kategorie'})`,
+                reason: `Ausgabe über ${formatCurrency(booked.amount)} (${booked.payee || 'Unbekannt'}) am ${formatDate(booked.booking_date)} wurde bereits erfasst.`
+            };
+        }
+
+        const possible = ctx.expenses.find(e =>
+            !ctx.linkedKeys.has(`expense:${e.id}`) && sameAmount(e.amount, amount) &&
+            daysBetween(e.booking_date, tx.booking_date) <= POSSIBLE_EXPENSE_DUPLICATE_DAYS);
+        const possibleDuplicate = possible
+            ? `Hinweis: Am ${formatDate(possible.booking_date)} wurde bereits eine Ausgabe über ${formatCurrency(possible.amount)} erfasst (${possible.payee || 'Unbekannt'}). Bitte prüfen, ob es dieselbe Zahlung ist.`
+            : null;
+
+        return suggestion
+            ? { ...suggestion, possibleDuplicate }
+            : { ...none('Keine passende Regel und kein bekanntes Schlagwort gefunden.'), possibleDuplicate };
+    }
+
+    return none('Umsatz ohne Betrag');
+};
+
+// ── Vorschau-Buchungen (werden NICHT gespeichert) ───────────────────────────
+// record zeigt, wie die Buchung bei einer echten Anbindung aussähe – inkl. Leistungsmonat (period_month),
+// ohne den das Mietkonto den Monat nicht als bezahlt führen würde.
+const buildRentAllocation = ({ lease, amount, paymentDate, periodMonth, note }) => ({
+    kind: 'rent_payment',
+    amount,
+    record: { lease_id: lease.id, payment_date: paymentDate, period_month: `${periodMonth}-01`, amount, note: note || null },
+    text: `Mietzahlung ${formatCurrency(amount)} · ${leaseLabel(lease)} · Leistungsmonat ${formatMonth(periodMonth)} · Zahldatum ${formatDate(paymentDate)}`
+});
+
+const buildExpenseAllocation = ({ amount, category, customCategory, property, unit, scope, isAllocatable, bookingDate, payee, note }) => ({
+    kind: 'expense',
+    amount,
+    record: {
+        booking_date: bookingDate, payee: payee || null, category_id: category?.id || null,
+        category_custom: category ? null : customCategory, scope, property_id: property?.id || null,
+        unit_id: unit?.id || null, amount, is_allocatable: !!isAllocatable, note: note || null
+    },
+    text: `Ausgabe ${formatCurrency(amount)} · ${category?.name || customCategory} · ${property ? propertyLabel(property) : 'ohne Objekt'}${unit ? ` / ${unit.unit_name}` : ''} · ${isAllocatable ? 'umlagefähig' : 'nicht umlagefähig'}`
+});
+
+const buildLinkAllocation = ({ amount, linkedKey, description }) => ({
+    kind: 'link',
+    amount,
+    linkedKey,
+    text: `Mit vorhandener Buchung verknüpft – keine neue Buchung (${description})`
+});
+
+const ruleCriteria = (rule) => {
+    const parts = [];
+    if (rule.counterpart_iban) parts.push(`IBAN ${rule.counterpart_iban}`);
+    if (rule.counterpart_name) parts.push(`Name „${rule.counterpart_name}“`);
+    if (rule.purpose_keyword) parts.push(`Schlüsselwort „${rule.purpose_keyword}“ (nur schwacher Hinweis)`);
+    return parts.join(' · ') || 'ohne Merkmal';
+};
+
+// Kleine Aktionsknöpfe in der Umsatzliste
+const actionBtn = (variant, disabled) => {
+    const base = {
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+        padding: '4px 8px', fontSize: '0.75rem', fontWeight: 600, borderRadius: '4px',
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1
+    };
+    switch (variant) {
+        case 'success': return { ...base, flex: 1, border: 'none', backgroundColor: 'var(--success-color)', color: 'white' };
+        case 'warning': return { ...base, flex: 1, border: 'none', backgroundColor: '#d97706', color: 'white' };
+        case 'primary': return { ...base, flex: 1, border: 'none', backgroundColor: 'var(--primary-color)', color: 'white' };
+        case 'icon': return { ...base, padding: '4px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)' };
+        default: return { ...base, fontWeight: 500, border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-secondary)' };
+    }
+};
+
+const TOAST_COLORS = { info: '#38bdf8', success: '#4ade80', error: '#f87171', learned: '#38bdf8' };
+
 const BankReconciliation = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const userId = user?.id;
 
-    const [loading, setLoading] = useState(true);
+    const [todayStr] = useState(() => toDateStr(new Date()));
+    const [initialLoading, setInitialLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [actionLoading, setActionLoading] = useState(false);
-    
-    // Core data states
-    const [connections, setConnections] = useState([]);
-    const [transactions, setTransactions] = useState([]);
-    const [rules, setRules] = useState([]);
+    const [loadErrors, setLoadErrors] = useState([]); // Bezeichnungen der Daten, die nicht geladen werden konnten
+    const [legacyError, setLegacyError] = useState(false);
+
+    // Stammdaten und vorhandene Buchungen (nur gelesen)
     const [properties, setProperties] = useState([]);
+    const [units, setUnits] = useState([]);
     const [leases, setLeases] = useState([]);
     const [categories, setCategories] = useState([]);
-    const [tenants, setTenants] = useState([]);
-    const [units, setUnits] = useState([]);
     const [rentPayments, setRentPayments] = useState([]);
     const [expenses, setExpenses] = useState([]);
 
-    // UI control states
-    const [showConnectModal, setShowConnectModal] = useState(false);
-    const [connectStep, setConnectStep] = useState('bank-select'); // bank-select, login, success
-    const [selectedBank, setSelectedBank] = useState('');
-    const [loginUser, setLoginUser] = useState('sandbox_demo');
-    const [loginPin, setLoginPin] = useState('•••••');
+    // Altbestand der früheren Testversion (Mock-Daten in der Datenbank)
+    const [legacyConnections, setLegacyConnections] = useState([]);
+    const [legacyTransactions, setLegacyTransactions] = useState([]);
+    const [dbRules, setDbRules] = useState([]);
+
+    // Lokale Demo (nur im Browser)
+    const [transactions, setTransactions] = useState([]);
+    const [localRules, setLocalRules] = useState([]);
+    const localIdRef = useRef(0);
+
+    // UI
     const [activeTab, setActiveTab] = useState('transactions'); // transactions, rules
-    const [manualMapTx, setManualMapTx] = useState(null); // transaction being manually mapped
-    const [manualTargetType, setManualTargetType] = useState('income'); // income or expense
+    const [manualMapTx, setManualMapTx] = useState(null);
+    const [incomeForm, setIncomeForm] = useState(EMPTY_INCOME_FORM);
+    const [expenseForm, setExpenseForm] = useState(EMPTY_EXPENSE_FORM);
+    const [toast, setToast] = useState(null); // { title, message, tone }
+    const toastTimerRef = useRef(null);
 
-    // Prefilled Form States (matching Finance.jsx)
-    const [incomeForm, setIncomeForm] = useState({
-        payment_date: '',
-        period_month: '',
-        tenant_id: '',
-        property_id: '',
-        unit_id: '',
-        amount: '',
-        note: ''
-    });
-    const [expectedRentDisplay, setExpectedRentDisplay] = useState(null);
-
-    const [expenseForm, setExpenseForm] = useState({
-        booking_date: '',
-        payee: '',
-        category_id: '',
-        category_custom: '',
-        scope: 'general',
-        property_id: '',
-        unit_id: '',
-        amount: '',
-        is_allocatable: true,
-        note: ''
-    });
-
-    const [showRuleToast, setShowRuleToast] = useState(null); // toast message
-
-    // Notification toast helper
-    const triggerToast = (message) => {
-        setShowRuleToast(message);
-        setTimeout(() => setShowRuleToast(null), 5000);
+    const showToast = (title, message, tone = 'info') => {
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        setToast({ title, message, tone });
+        toastTimerRef.current = setTimeout(() => {
+            setToast(null);
+            toastTimerRef.current = null;
+        }, 5000);
     };
 
-    // Fetch initial databases
-    const fetchData = async () => {
-        if (!user) return;
+    useEffect(() => () => {
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    }, []);
+
+    const loadData = useCallback(async () => {
+        if (!userId) return;
+        // Zeitfenster der Demo-Umsätze ± Duplikatfenster – mehr Buchungen braucht der Abgleich nicht
+        const today = toDateStr(new Date());
+        const windowFrom = addDays(today, -(DEMO_MAX_AGE_DAYS + DUPLICATE_WINDOW_DAYS));
+        const windowTo = addDays(today, DUPLICATE_WINDOW_DAYS);
+
         try {
-            setLoading(true);
-            
-            // 1. Fetch properties
-            const { data: propsData } = await supabase
-                .from('properties')
-                .select('*')
-                .order('street');
-            setProperties(propsData || []);
+            const [propsRes, unitsRes, leasesRes, catsRes, paymentsRes, expensesRes, connRes, txRes, rulesRes] = await Promise.all([
+                fetchAllPages('properties', 'id, street, house_number, portfolio_id', q => q.order('street')),
+                fetchAllPages('units', 'id, unit_name, property_id', q => q.order('unit_name')),
+                // Alle Verträge (auch beendete) – Nachzahlungen ausgezogener Mieter müssen zuordenbar sein
+                fetchAllPages('leases', '*, unit:units(id, unit_name, property_id, property:properties(id, street, house_number, portfolio_id)), tenant:tenants(id, first_name, last_name)'),
+                fetchAllPages('expense_categories', 'id, name, is_allocatable, is_recoverable', q => q.order('name')),
+                // Ohne user_id-Filter: RLS liefert auch Buchungen von Mitnutzern geteilter Portfolios
+                fetchAllPages('rent_payments', 'id, lease_id, payment_date, period_month, amount', q => q.gte('payment_date', windowFrom).lte('payment_date', windowTo)),
+                fetchAllPages('expenses', 'id, booking_date, payee, category_id, category_custom, property_id, unit_id, amount', q => q.gte('booking_date', windowFrom).lte('booking_date', windowTo)),
+                fetchAllPages('bank_connections', 'id, bank_name, created_at', q => q.eq('user_id', userId)),
+                fetchAllPages('bank_transactions', 'id, booking_date, amount, counterpart_name, status, matched_type', q => q.eq('user_id', userId).order('booking_date', { ascending: false })),
+                fetchAllPages('bank_matching_rules', 'id, created_at, counterpart_name, counterpart_iban, purpose_keyword, target_type, target_id, property_id, unit_id', q => q.eq('user_id', userId).order('created_at', { ascending: false }))
+            ]);
 
-            // 2. Fetch active leases with units and tenants
-            const { data: leasesData } = await supabase
-                .from('leases')
-                .select('*, unit:units(*, property:properties(*)), tenant:tenants(*)')
-                .eq('status', 'active');
-            setLeases(leasesData || []);
+            const errors = [];
+            const take = (res, label, setter) => {
+                if (res.error) {
+                    errors.push(label);
+                    console.error(`Bankabgleich: ${label} konnten nicht geladen werden`, res.error);
+                }
+                setter(res.data || []);
+            };
+            take(propsRes, 'Objekte', setProperties);
+            take(unitsRes, 'Einheiten', setUnits);
+            take(leasesRes, 'Mietverträge', setLeases);
+            take(catsRes, 'Kostenarten', setCategories);
+            take(paymentsRes, 'Mietzahlungen', setRentPayments);
+            take(expensesRes, 'Ausgaben', setExpenses);
+            setLoadErrors(errors);
 
-            // 3. Fetch expense categories
-            const { data: catsData } = await supabase
-                .from('expense_categories')
-                .select('*')
-                .order('name');
-            setCategories(catsData || []);
-
-            // 4. Fetch bank connections
-            const { data: connData } = await supabase
-                .from('bank_connections')
-                .select('*')
-                .eq('user_id', user.id);
-            setConnections(connData || []);
-
-            // 5. Fetch rules
-            const { data: rulesData } = await supabase
-                .from('bank_matching_rules')
-                .select('*')
-                .eq('user_id', user.id);
-            setRules(rulesData || []);
-
-            // 6. Fetch transactions
-            const { data: txData } = await supabase
-                .from('bank_transactions')
-                .select('*')
-                .eq('user_id', user.id)
-                .order('booking_date', { ascending: false });
-            setTransactions(txData || []);
-
-            // 7. Fetch tenants
-            const { data: tenantsData } = await supabase
-                .from('tenants')
-                .select('*')
-                .order('last_name');
-            setTenants(tenantsData || []);
-
-            // 8. Fetch units
-            const { data: unitsData } = await supabase
-                .from('units')
-                .select('*')
-                .order('unit_name');
-            setUnits(unitsData || []);
-
-            // 9. Fetch rent payments
-            const { data: rentPaymentsData } = await supabase
-                .from('rent_payments')
-                .select('*')
-                .eq('user_id', user.id);
-            setRentPayments(rentPaymentsData || []);
-
-            // 10. Fetch expenses
-            const { data: expensesData } = await supabase
-                .from('expenses')
-                .select('*')
-                .eq('user_id', user.id);
-            setExpenses(expensesData || []);
-
+            const legacy = [connRes, txRes, rulesRes];
+            legacy.filter(r => r.error && !isMissingTableError(r.error)).forEach(r => console.error('Bankabgleich: Altbestand konnte nicht geladen werden', r.error));
+            setLegacyError(legacy.some(r => r.error && !isMissingTableError(r.error)));
+            setLegacyConnections(connRes.error ? [] : connRes.data);
+            setLegacyTransactions(txRes.error ? [] : txRes.data);
+            setDbRules(rulesRes.error ? [] : rulesRes.data);
         } catch (error) {
             console.error('Error loading bank reconciliation data:', error);
+            setLoadErrors(['alle Daten']);
         } finally {
-            setLoading(false);
+            setInitialLoading(false);
         }
-    };
+    }, [userId]);
 
     useEffect(() => {
-        fetchData();
-    }, [user]);
+        loadData();
+    }, [loadData]);
 
-    // Format currency helper
-    const formatCurrency = (val) => {
-        return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(val);
+    const handleRefresh = async () => {
+        setRefreshing(true);
+        try {
+            await loadData();
+        } finally {
+            setRefreshing(false);
+        }
     };
 
-    // Dynamic Form Units based on selected property
-    const formUnits = useMemo(() => {
-        const propId = manualTargetType === 'expense' ? expenseForm.property_id : incomeForm.property_id;
-        if (!propId) return [];
-        return units.filter(u => u.property_id === propId);
-    }, [units, manualTargetType, expenseForm.property_id, incomeForm.property_id]);
+    // Stammdaten auf das gewählte Portfolio eingrenzen ('' = alle Portfolios)
+    const scoped = useMemo(() => {
+        if (!selectedPortfolioID) return { properties, units, leases, rentPayments };
+        const propIds = new Set(properties.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id));
+        const scopedLeases = leases.filter(l => propIds.has(l.unit?.property_id));
+        const leaseIds = new Set(scopedLeases.map(l => l.id));
+        return {
+            properties: properties.filter(p => propIds.has(p.id)),
+            units: units.filter(u => propIds.has(u.property_id)),
+            leases: scopedLeases,
+            rentPayments: rentPayments.filter(p => leaseIds.has(p.lease_id))
+        };
+    }, [selectedPortfolioID, properties, units, leases, rentPayments]);
 
-    // Calculate match recommendations on the fly for pending transactions
-    const matchRecommendations = useMemo(() => {
-        return transactions.map(tx => {
-            if (tx.status !== 'pending') {
-                return { tx, type: tx.matched_type, targetId: tx.matched_target_id, confidence: 100, label: 'Bereits verbucht', matched: true };
+    const scopedLeaseById = useMemo(() => new Map(scoped.leases.map(l => [l.id, l])), [scoped.leases]);
+    const scopedPropertyById = useMemo(() => new Map(scoped.properties.map(p => [p.id, p])), [scoped.properties]);
+    const categoryById = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
+    const allLeaseById = useMemo(() => new Map(leases.map(l => [l.id, l])), [leases]);
+    const allPropertyById = useMemo(() => new Map(properties.map(p => [p.id, p])), [properties]);
+
+    // In der Demo gelernte Korrekturen zuerst, dann gespeicherte Regeln der früheren Version (neueste zuerst)
+    const allRules = useMemo(() => [...localRules, ...dbRules], [localRules, dbRules]);
+
+    const dataComplete = loadErrors.length === 0;
+    const actionsLocked = !dataComplete || actionLoading || refreshing;
+
+    // Vorschläge nur für offene, noch nicht (teil-)zugeordnete Umsätze
+    const recommendations = useMemo(() => {
+        const linkedKeys = new Set();
+        transactions.forEach(t => (t.allocations || []).forEach(a => { if (a.linkedKey) linkedKeys.add(a.linkedKey); }));
+        const ctx = {
+            rules: allRules,
+            leases: scoped.leases,
+            leaseById: scopedLeaseById,
+            properties: scoped.properties,
+            propertyById: scopedPropertyById,
+            categories,
+            categoryById,
+            rentPayments: scoped.rentPayments,
+            expenses,
+            linkedKeys,
+            isValidRule: (rule) => rule.target_type === 'income'
+                ? scopedLeaseById.has(rule.target_id)
+                : categoryById.has(rule.target_id) && (!rule.property_id || scopedPropertyById.has(rule.property_id))
+        };
+        const map = new Map();
+        transactions.forEach(tx => {
+            if (tx.status === 'pending' && (tx.allocations || []).length === 0) map.set(tx.id, recommendFor(tx, ctx));
+        });
+        return map;
+    }, [transactions, allRules, scoped, scopedLeaseById, scopedPropertyById, categories, categoryById, expenses]);
+
+    // ── Lokale Aktionen (Vorschau, nichts wird gespeichert) ─────────────────
+
+    const applyAllocation = (txId, allocation) => {
+        setTransactions(prev => prev.map(t => {
+            if (t.id !== txId) return t;
+            const allocations = [...(t.allocations || []), allocation];
+            const done = remainingAmount({ ...t, allocations }) <= AMOUNT_EPSILON;
+            return { ...t, allocations, status: done ? 'matched' : 'pending' };
+        }));
+    };
+
+    // Regel nur lokal merken. "Upsert": eine frühere Demo-Regel für denselben Zahlungspartner
+    // (gleiche IBAN bzw. ohne IBAN gleicher Name) wird ersetzt, damit Korrekturen gewinnen.
+    // Kein Schlüsselwort aus dem Verwendungszweck ableiten (würde fremde Umsätze treffen).
+    const learnLocalRule = (tx, { type, targetId, propertyId, unitId }) => {
+        const iban = normalizeIban(tx.counterpart_iban);
+        const name = String(tx.counterpart_name || '').trim();
+        if (!targetId || (!iban && !name)) return false;
+        localIdRef.current += 1;
+        const rule = {
+            id: `demo-rule-${localIdRef.current}`,
+            isLocal: true,
+            counterpart_name: name || null,
+            counterpart_iban: tx.counterpart_iban || null,
+            purpose_keyword: null,
+            target_type: type,
+            target_id: targetId,
+            property_id: propertyId || null,
+            unit_id: unitId || null
+        };
+        const samePartner = (r) => (iban
+            ? normalizeIban(r.counterpart_iban) === iban
+            : !normalizeIban(r.counterpart_iban) && normalizeText(r.counterpart_name) === normalizeText(name));
+        setLocalRules(prev => [rule, ...prev.filter(r => !samePartner(r))]);
+        return true;
+    };
+
+    const toastAfterAllocation = (tx, learned, rest) => {
+        const partner = tx.counterpart_name || 'Zahlungspartner';
+        const parts = [];
+        if (rest > AMOUNT_EPSILON) parts.push(`Noch offen: ${formatCurrency(rest)}.`);
+        if (learned) parts.push(`Regel für „${partner}“ gemerkt (nur in dieser Demo).`);
+        parts.push('Nichts gespeichert.');
+        showToast('Zuordnung übernommen (Vorschau)', parts.join(' '), learned ? 'learned' : 'success');
+    };
+
+    const handleStartDemo = () => {
+        setTransactions(buildDemoTransactions());
+        setActiveTab('transactions');
+        showToast('Demo gestartet', 'Beispiel-Umsätze geladen – nur in diesem Browserfenster, es wird nichts gespeichert.', 'info');
+    };
+
+    const handleEndDemo = () => {
+        const hasWork = localRules.length > 0 || transactions.some(t => t.status !== 'pending' || (t.allocations || []).length > 0);
+        if (hasWork && !window.confirm('Demo beenden? Die Beispiel-Umsätze, alle Vorschau-Zuordnungen und die in der Demo gemerkten Regeln werden verworfen.')) return;
+        setTransactions([]);
+        setLocalRules([]);
+        setManualMapTx(null);
+        showToast('Demo beendet', 'Alle Demo-Daten wurden verworfen.', 'info');
+    };
+
+    // Mit vorhandener Buchung verknüpfen (1:1 – eine Buchung kann nur mit einem Umsatz verknüpft werden)
+    const handleLinkExisting = (tx, rec) => {
+        if (actionsLocked || !rec?.linkedKey) return;
+        applyAllocation(tx.id, buildLinkAllocation({ amount: remainingAmount(tx), linkedKey: rec.linkedKey, description: rec.label }));
+        showToast('Verknüpft (Vorschau)', 'Der Umsatz würde mit der vorhandenen Buchung verknüpft – es entsteht keine zweite Buchung. Nichts gespeichert.', 'success');
+    };
+
+    // Vorschlag übernehmen (nur Vorschau)
+    const handleConfirmMatch = (tx, rec) => {
+        if (actionsLocked || !rec?.type || !rec.targetId) return;
+        const isCredit = Number(tx.amount) > 0;
+        if ((rec.type === 'income') !== isCredit) {
+            showToast('Nicht übernommen', 'Art der Zuordnung und Vorzeichen des Umsatzes passen nicht zusammen.', 'error');
+            return;
+        }
+        const amount = remainingAmount(tx);
+        let allocation;
+        if (rec.type === 'income') {
+            const lease = scopedLeaseById.get(rec.targetId);
+            if (!lease) {
+                openManualMap(tx, rec);
+                return;
             }
-
-            const purposeLower = (tx.purpose || '').toLowerCase();
-            const senderLower = (tx.counterpart_name || '').toLowerCase();
-            const txDate = new Date(tx.booking_date);
-
-            // A. Check if this is already manually booked (prevent duplicates)
-            if (tx.amount > 0) {
-                // Find matching rent payment
-                // Try to find the recommended lease first
-                let recommendedLeaseId = null;
-                const matchedRule = rules.find(rule => {
-                    if (rule.counterpart_iban && tx.counterpart_iban && rule.counterpart_iban.replace(/\s+/g, '') === tx.counterpart_iban.replace(/\s+/g, '')) return true;
-                    if (rule.counterpart_name && tx.counterpart_name && tx.counterpart_name.toLowerCase().includes(rule.counterpart_name.toLowerCase())) return true;
-                    if (rule.purpose_keyword && tx.purpose && tx.purpose.toLowerCase().includes(rule.purpose_keyword.toLowerCase())) return true;
-                    return false;
-                });
-                if (matchedRule && matchedRule.target_type === 'income') {
-                    recommendedLeaseId = matchedRule.target_id;
-                } else {
-                    let bestLease = null;
-                    let maxScore = 0;
-                    leases.forEach(lease => {
-                        let score = 0;
-                        const tenantLastName = (lease.tenant?.last_name || '').toLowerCase();
-                        if (tenantLastName && (senderLower.includes(tenantLastName) || purposeLower.includes(tenantLastName))) score += 50;
-                        if (score > maxScore) {
-                            maxScore = score;
-                            bestLease = lease;
-                        }
-                    });
-                    if (bestLease && maxScore >= 30) {
-                        recommendedLeaseId = bestLease.id;
-                    }
-                }
-
-                // Look for payment
-                let duplicatePayment = rentPayments.find(p => {
-                    const matchAmount = Math.abs(p.amount - tx.amount) < 0.01;
-                    if (!matchAmount) return false;
-                    const pDate = new Date(p.payment_date);
-                    const diffDays = Math.abs(txDate - pDate) / (1000 * 60 * 60 * 24);
-                    if (diffDays > 10) return false;
-                    if (recommendedLeaseId && p.lease_id === recommendedLeaseId) return true;
-                    return false;
-                });
-
-                if (!duplicatePayment) {
-                    // Generic check fallback with narrower window (5 days)
-                    duplicatePayment = rentPayments.find(p => {
-                        const matchAmount = Math.abs(p.amount - tx.amount) < 0.01;
-                        if (!matchAmount) return false;
-                        const pDate = new Date(p.payment_date);
-                        const diffDays = Math.abs(txDate - pDate) / (1000 * 60 * 60 * 24);
-                        return diffDays <= 5;
-                    });
-                }
-
-                if (duplicatePayment) {
-                    const lease = leases.find(l => l.id === duplicatePayment.lease_id);
-                    return {
-                        tx,
-                        type: 'income',
-                        targetId: duplicatePayment.lease_id,
-                        confidence: 100,
-                        alreadyBooked: true,
-                        label: `Erfasste Miete: ${lease?.tenant?.last_name || 'Mieter'}`,
-                        reason: `Eine Zahlung über ${formatCurrency(duplicatePayment.amount)} für ${lease?.tenant?.first_name || ''} ${lease?.tenant?.last_name || ''} wurde bereits am ${new Date(duplicatePayment.payment_date).toLocaleDateString('de-DE')} manuell gebucht.`,
-                    };
-                }
-            } else {
-                // Check outgoing expense duplicates
-                let recommendedCategoryId = null;
-                let recommendedPropertyId = null;
-                const matchedRule = rules.find(rule => {
-                    if (rule.counterpart_iban && tx.counterpart_iban && rule.counterpart_iban.replace(/\s+/g, '') === tx.counterpart_iban.replace(/\s+/g, '')) return true;
-                    if (rule.counterpart_name && tx.counterpart_name && tx.counterpart_name.toLowerCase().includes(rule.counterpart_name.toLowerCase())) return true;
-                    if (rule.purpose_keyword && tx.purpose && tx.purpose.toLowerCase().includes(rule.purpose_keyword.toLowerCase())) return true;
-                    return false;
-                });
-                if (matchedRule && matchedRule.target_type === 'expense') {
-                    recommendedCategoryId = matchedRule.target_id;
-                    recommendedPropertyId = matchedRule.property_id;
-                }
-
-                let duplicateExpense = expenses.find(e => {
-                    const matchAmount = Math.abs(e.amount - Math.abs(tx.amount)) < 0.01;
-                    if (!matchAmount) return false;
-                    const eDate = new Date(e.booking_date);
-                    const diffDays = Math.abs(txDate - eDate) / (1000 * 60 * 60 * 24);
-                    if (diffDays > 10) return false;
-                    if (recommendedCategoryId && e.category_id === recommendedCategoryId) return true;
-                    if (recommendedPropertyId && e.property_id === recommendedPropertyId) return true;
-                    const ePayeeLower = (e.payee || '').toLowerCase();
-                    if (ePayeeLower && senderLower && (senderLower.includes(ePayeeLower) || ePayeeLower.includes(senderLower))) return true;
-                    return false;
-                });
-
-                if (!duplicateExpense) {
-                    duplicateExpense = expenses.find(e => {
-                        const matchAmount = Math.abs(e.amount - Math.abs(tx.amount)) < 0.01;
-                        if (!matchAmount) return false;
-                        const eDate = new Date(e.booking_date);
-                        const diffDays = Math.abs(txDate - eDate) / (1000 * 60 * 60 * 24);
-                        return diffDays <= 3;
-                    });
-                }
-
-                if (duplicateExpense) {
-                    const cat = categories.find(c => c.id === duplicateExpense.category_id);
-                    const prop = properties.find(p => p.id === duplicateExpense.property_id);
-                    return {
-                        tx,
-                        type: 'expense',
-                        targetId: duplicateExpense.category_id || null,
-                        propertyId: duplicateExpense.property_id || null,
-                        unitId: duplicateExpense.unit_id || null,
-                        confidence: 100,
-                        alreadyBooked: true,
-                        label: `Erfasste Ausgabe (${cat?.name || 'Kategorie'})`,
-                        reason: `Ausgabe über ${formatCurrency(duplicateExpense.amount)} (${duplicateExpense.payee || 'Unbekannt'}) am ${new Date(duplicateExpense.booking_date).toLocaleDateString('de-DE')} wurde bereits verbucht.`,
-                    };
-                }
+            // Leistungsmonat = Monat der Gutschrift; abweichende Monate über "Anders zuordnen" festlegen
+            allocation = buildRentAllocation({ lease, amount, paymentDate: tx.booking_date, periodMonth: tx.booking_date.slice(0, 7), note: tx.purpose });
+        } else {
+            const category = categoryById.get(rec.targetId);
+            const property = rec.propertyId ? scopedPropertyById.get(rec.propertyId) : null;
+            // Ohne erkanntes Objekt keine Schnellbuchung: Objekt und Kostenart im Dialog bewusst wählen
+            if (!category || !property) {
+                openManualMap(tx, rec);
+                return;
             }
-
-            // 1. Check rules database (highest priority / learned intelligence)
-            const matchedRule = rules.find(rule => {
-                // Match by IBAN
-                if (rule.counterpart_iban && tx.counterpart_iban && rule.counterpart_iban.replace(/\s+/g, '') === tx.counterpart_iban.replace(/\s+/g, '')) {
-                    return true;
-                }
-                // Match by name keyword
-                if (rule.counterpart_name && tx.counterpart_name && tx.counterpart_name.toLowerCase().includes(rule.counterpart_name.toLowerCase())) {
-                    return true;
-                }
-                // Match by purpose keyword
-                if (rule.purpose_keyword && tx.purpose && tx.purpose.toLowerCase().includes(rule.purpose_keyword.toLowerCase())) {
-                    return true;
-                }
-                return false;
+            const unit = rec.unitId ? scoped.units.find(u => u.id === rec.unitId) || null : null;
+            allocation = buildExpenseAllocation({
+                amount, category, property, unit, scope: unit ? 'unit' : 'general',
+                isAllocatable: category.is_recoverable ?? true, bookingDate: tx.booking_date,
+                payee: tx.counterpart_name, note: tx.purpose
             });
-
-            if (matchedRule) {
-                if (matchedRule.target_type === 'income') {
-                    const lease = leases.find(l => l.id === matchedRule.target_id);
-                    if (lease) {
-                        return {
-                            tx,
-                            type: 'income',
-                            targetId: lease.id,
-                            propertyId: matchedRule.property_id || lease.unit?.property_id || null,
-                            unitId: matchedRule.unit_id || lease.unit_id || null,
-                            confidence: 100,
-                            label: `Miete: ${lease.tenant?.last_name || 'Mieter'} (${lease.unit?.unit_name || 'Einheit'})`,
-                            reason: 'Gelernt aus Ihren vorherigen Zuordnungen (IBAN / Name)',
-                            rule: matchedRule
-                        };
-                    }
-                } else if (matchedRule.target_type === 'expense') {
-                    const cat = categories.find(c => c.id === matchedRule.target_id);
-                    const prop = properties.find(p => p.id === matchedRule.property_id);
-                    return {
-                        tx,
-                        type: 'expense',
-                        targetId: matchedRule.target_id,
-                        propertyId: matchedRule.property_id,
-                        unitId: matchedRule.unit_id,
-                        confidence: 100,
-                        label: `Ausgabe: ${cat?.name || 'Kategorie'} (${prop ? prop.street : 'Allgemein'})`,
-                        reason: 'Gelernt aus Ihren vorherigen Zuordnungen (Name / Betreff)',
-                        rule: matchedRule
-                    };
-                }
-            }
-
-            // Heuristics matching (AI suggestions)
-
-            // Case A: Mieteingänge (positive amounts)
-            if (tx.amount > 0) {
-                let bestLease = null;
-                let maxScore = 0;
-                let reason = '';
-
-                leases.forEach(lease => {
-                    let score = 0;
-                    const tenantLastName = (lease.tenant?.last_name || '').toLowerCase();
-                    const tenantFirstName = (lease.tenant?.first_name || '').toLowerCase();
-
-                    // Check name match
-                    if (tenantLastName && (senderLower.includes(tenantLastName) || purposeLower.includes(tenantLastName))) {
-                        score += 50;
-                    }
-                    if (tenantFirstName && (senderLower.includes(tenantFirstName) || purposeLower.includes(tenantFirstName))) {
-                        score += 20;
-                    }
-
-                    // Check exact rent amount match
-                    const expectedTotal = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
-                    if (Math.abs(expectedTotal - tx.amount) < 1.0) {
-                        score += 30;
-                    }
-
-                    // Check unit name / street matching in purpose
-                    const streetName = (lease.unit?.property?.street || '').toLowerCase();
-                    if (streetName && purposeLower.includes(streetName)) {
-                        score += 15;
-                    }
-
-                    if (score > maxScore) {
-                        maxScore = score;
-                        bestLease = lease;
-                        if (score >= 80) reason = 'Name, Betrag & Mietvertrag stimmen überein';
-                        else if (score >= 50) reason = 'Mietername im Verwendungszweck oder Absender gefunden';
-                        else reason = 'Übereinstimmender Betrag & grober Namensbezug';
-                    }
-                });
-
-                if (bestLease && maxScore >= 30) {
-                    return {
-                        tx,
-                        type: 'income',
-                        targetId: bestLease.id,
-                        propertyId: bestLease.unit?.property_id || null,
-                        unitId: bestLease.unit_id || null,
-                        confidence: Math.min(maxScore, 95),
-                        label: `Miete: ${bestLease.tenant?.last_name || 'Mieter'} (${bestLease.unit?.unit_name || 'Einheit'})`,
-                        reason
-                    };
-                }
-            }
-
-            // Case B: Betriebskosten / Rechnungen (negative amounts)
-            if (tx.amount < 0) {
-                let bestCategory = null;
-                let bestProperty = null;
-                let score = 0;
-                let label = '';
-                let reason = '';
-
-                // Heuristic matches for common utility companies or recurring expenses in Germany
-                if (senderLower.includes('stadtwerke') || purposeLower.includes('wasser') || purposeLower.includes('abwasser')) {
-                    bestCategory = categories.find(c => c.name.toLowerCase().includes('wasser') || c.name.toLowerCase().includes('betriebskosten'));
-                    score = 80;
-                    label = 'Wasser / Abwasser';
-                    reason = 'Absender weist auf Stadtwerke/Wasser hin';
-                } else if (senderLower.includes('energie') || senderLower.includes('strom') || purposeLower.includes('strom') || senderLower.includes('e.on')) {
-                    bestCategory = categories.find(c => c.name.toLowerCase().includes('strom') || c.name.toLowerCase().includes('energie'));
-                    score = 80;
-                    label = 'Heizung / Allgemeinstrom';
-                    reason = 'Absender weist auf Energieversorger hin';
-                } else if (senderLower.includes('schornsteinfeger') || purposeLower.includes('schornstein') || purposeLower.includes('kehrer')) {
-                    bestCategory = categories.find(c => c.name.toLowerCase().includes('schornstein') || c.name.toLowerCase().includes('wartung'));
-                    score = 90;
-                    label = 'Schornsteinfeger';
-                    reason = 'Schlagwort im Absender / Verwendungszweck';
-                } else if (senderLower.includes('versicherung') || purposeLower.includes('gebäudeversicherung')) {
-                    bestCategory = categories.find(c => c.name.toLowerCase().includes('versicherung'));
-                    score = 85;
-                    label = 'Versicherung';
-                    reason = 'Schlagwort Gebäudeversicherung';
-                } else if (senderLower.includes('müll') || purposeLower.includes('abfall') || purposeLower.includes('entsorgung')) {
-                    bestCategory = categories.find(c => c.name.toLowerCase().includes('müll') || c.name.toLowerCase().includes('abfall'));
-                    score = 80;
-                    label = 'Müllabfuhr / Straßenreinigung';
-                    reason = 'Entsorgungsschlagwort gefunden';
-                }
-
-                // Match property by looking at street keywords in purpose
-                properties.forEach(p => {
-                    const streetKeyword = (p.street || '').split(' ')[0].toLowerCase();
-                    if (streetKeyword && streetKeyword.length > 3 && purposeLower.includes(streetKeyword)) {
-                        bestProperty = p;
-                        score += 10;
-                    }
-                });
-
-                if (bestCategory) {
-                    return {
-                        tx,
-                        type: 'expense',
-                        targetId: bestCategory.id,
-                        propertyId: bestProperty?.id || null,
-                        confidence: Math.min(score, 95),
-                        label: `Betriebskosten: ${bestCategory.name} (${bestProperty ? bestProperty.street : 'Allgemein'})`,
-                        reason: reason + (bestProperty ? ` • Immobilie ${bestProperty.street} erkannt` : '')
-                    };
-                }
-            }
-
-            return { tx, type: null, targetId: null, confidence: 0, label: 'Kein eindeutiger Treffer', reason: 'Keine passenden Regeln oder Namensübereinstimmungen gefunden' };
-        });
-    }, [transactions, rules, leases, categories, properties, rentPayments, expenses]);
-
-    // Trigger Sandbox Mock connection flow via FinAPI
-    const connectSandboxBank = async () => {
-        setActionLoading(true);
-        try {
-            // 1. Create a mock connection
-            const { data: conn, error: connErr } = await supabase
-                .from('bank_connections')
-                .insert([{
-                    user_id: user.id,
-                    bank_name: selectedBank || 'FinAPI Sandbox Bank',
-                    account_id: 'acc_' + Math.random().toString(36).substring(2, 9),
-                    account_name: 'Geschäftskonto Haupt',
-                    iban: 'DE89 3704 0044 0532 9912 00',
-                    balance: 14850.42,
-                    status: 'active'
-                }])
-                .select()
-                .single();
-
-            if (connErr) throw connErr;
-
-            // 2. Generate 5 realistic transactions to match
-            const mockTxData = [
-                {
-                    user_id: user.id,
-                    connection_id: conn.id,
-                    transaction_id: 'tx_finapi_' + Math.random().toString(36).substring(2, 9),
-                    booking_date: new Date().toISOString().split('T')[0],
-                    value_date: new Date().toISOString().split('T')[0],
-                    amount: 600.00,
-                    purpose: 'Miete EG Friedhofstraße - Max Mustermann',
-                    counterpart_name: 'Max Mustermann',
-                    counterpart_iban: 'DE24 3007 0024 1822 9310 01',
-                    status: 'pending'
-                },
-                {
-                    user_id: user.id,
-                    connection_id: conn.id,
-                    transaction_id: 'tx_finapi_' + Math.random().toString(36).substring(2, 9),
-                    booking_date: new Date(Date.now() - 86400000).toISOString().split('T')[0],
-                    value_date: new Date(Date.now() - 86400000).toISOString().split('T')[0],
-                    amount: -128.50,
-                    purpose: 'Rechn. 83921 - Abschlag Wasser Friedhofstraße 34',
-                    counterpart_name: 'Stadtwerke Zweibrücken GmbH',
-                    counterpart_iban: 'DE59 3405 0000 0012 3456 00',
-                    status: 'pending'
-                },
-                {
-                    user_id: user.id,
-                    connection_id: conn.id,
-                    transaction_id: 'tx_finapi_' + Math.random().toString(36).substring(2, 9),
-                    booking_date: new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0],
-                    value_date: new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0],
-                    amount: 850.00,
-                    purpose: 'MIETE SCHMIDT 1. OG RECHTS',
-                    counterpart_name: 'Sabine Schmidt',
-                    counterpart_iban: 'DE43 5005 0000 9382 1022 00',
-                    status: 'pending'
-                },
-                {
-                    user_id: user.id,
-                    connection_id: conn.id,
-                    transaction_id: 'tx_finapi_' + Math.random().toString(36).substring(2, 9),
-                    booking_date: new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0],
-                    value_date: new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0],
-                    amount: -340.00,
-                    purpose: 'Gebaeudeversicherung Police 3918-B',
-                    counterpart_name: 'Allianz SE',
-                    counterpart_iban: 'DE12 2003 0000 0987 6543 21',
-                    status: 'pending'
-                },
-                {
-                    user_id: user.id,
-                    connection_id: conn.id,
-                    transaction_id: 'tx_finapi_' + Math.random().toString(36).substring(2, 9),
-                    booking_date: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
-                    value_date: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
-                    amount: 450.00,
-                    purpose: 'Miete - WE 101 Mayr',
-                    counterpart_name: 'Susanne Mayr',
-                    counterpart_iban: 'DE89 6005 0000 1122 3344 55',
-                    status: 'pending'
-                }
-            ];
-
-            const { error: txErr } = await supabase
-                .from('bank_transactions')
-                .insert(mockTxData);
-
-            if (txErr) throw txErr;
-
-            triggerToast('Bankkonto erfolgreich via FinAPI verbunden! Mockdaten geladen.');
-            setConnectStep('success');
-            fetchData();
-        } catch (error) {
-            console.error('Error inserting mock connection:', error);
-            alert('Fehler beim Verbinden der Sandbox Bank: ' + error.message);
-        } finally {
-            setActionLoading(false);
         }
+        applyAllocation(tx.id, allocation);
+        const learned = learnLocalRule(tx, { type: rec.type, targetId: rec.targetId, propertyId: rec.propertyId, unitId: rec.unitId });
+        toastAfterAllocation(tx, learned, 0);
     };
 
-    // Link transaction to existing manual ledger record (without double posting)
-    const handleLinkExisting = async (txId, type, targetId) => {
-        setActionLoading(true);
-        try {
-            const { error } = await supabase
-                .from('bank_transactions')
-                .update({
-                    status: 'matched',
-                    matched_type: type,
-                    matched_target_id: targetId
-                })
-                .eq('id', txId);
-
-            if (error) throw error;
-            triggerToast('Buchung erfolgreich mit bestehendem Eintrag verknüpft (kein Duplikat erstellt).');
-            fetchData();
-        } catch (error) {
-            console.error('Error linking transaction:', error);
-            alert('Fehler beim Verknüpfen: ' + error.message);
-        } finally {
-            setActionLoading(false);
-        }
+    const handleIgnoreTransaction = (tx) => {
+        if (actionsLocked) return;
+        setTransactions(prev => prev.map(t => (t.id === tx.id ? { ...t, status: 'ignored', allocations: [] } : t)));
+        showToast('Umsatz ignoriert (Vorschau)', 'Über „Zurücksetzen“ wieder als offen markieren. Nichts gespeichert.', 'info');
     };
 
-    // Confirm matching suggestion (Create Ledger / Expense booking)
-    const handleConfirmMatch = async (recommendation) => {
-        const { tx, type, targetId, propertyId, unitId } = recommendation;
-        if (!type || !targetId) return;
-
-        setActionLoading(true);
-        try {
-            if (type === 'income') {
-                // Post rent payment
-                const { error: rentErr } = await supabase
-                    .from('rent_payments')
-                    .insert([{
-                        user_id: user.id,
-                        lease_id: targetId,
-                        payment_date: tx.booking_date,
-                        amount: Math.abs(parseFloat(tx.amount)),
-                        note: `Automatischer Bankabgleich FinAPI - ${tx.purpose}`
-                    }]);
-
-                if (rentErr) throw rentErr;
-
-            } else if (type === 'expense') {
-                // Post operational costs/expense
-                const { error: expErr } = await supabase
-                    .from('expenses')
-                    .insert([{
-                        user_id: user.id,
-                        booking_date: tx.booking_date,
-                        payee: tx.counterpart_name || 'Unbekannt',
-                        category_id: targetId,
-                        property_id: propertyId,
-                        unit_id: unitId || null,
-                        amount: Math.abs(parseFloat(tx.amount)),
-                        is_allocatable: true,
-                        note: `Automatischer Bankabgleich FinAPI - ${tx.purpose}`
-                    }]);
-
-                if (expErr) throw expErr;
-            }
-
-            // Update bank transaction status to matched
-            const { error: txUpdateErr } = await supabase
-                .from('bank_transactions')
-                .update({
-                    status: 'matched',
-                    matched_type: type,
-                    matched_target_id: targetId
-                })
-                .eq('id', tx.id);
-
-            if (txUpdateErr) throw txUpdateErr;
-
-            // Learn Rule: Save complete reference to learning rules database
-            const ruleExists = rules.some(r => 
-                (r.counterpart_iban && tx.counterpart_iban && r.counterpart_iban === tx.counterpart_iban) ||
-                (r.counterpart_name && tx.counterpart_name && r.counterpart_name === tx.counterpart_name)
-            );
-
-            if (!ruleExists) {
-                await supabase
-                    .from('bank_matching_rules')
-                    .insert([{
-                        user_id: user.id,
-                        counterpart_name: tx.counterpart_name,
-                        counterpart_iban: tx.counterpart_iban,
-                        purpose_keyword: tx.purpose ? tx.purpose.split(' ').slice(0, 2).join(' ') : null,
-                        target_type: type,
-                        target_id: targetId,
-                        property_id: propertyId || null,
-                        unit_id: unitId || null
-                    }]);
-                
-                triggerToast(`Intelligente Buchungsregel für "${tx.counterpart_name || 'Zahler'}" gelernt!`);
-            } else {
-                triggerToast('Zahlung erfolgreich verbucht.');
-            }
-
-            fetchData();
-        } catch (error) {
-            console.error('Error confirming match:', error);
-            alert('Fehler beim Buchen des Abgleichs: ' + error.message);
-        } finally {
-            setActionLoading(false);
-        }
+    const handleResetTransaction = (tx) => {
+        setTransactions(prev => prev.map(t => (t.id === tx.id ? { ...t, status: 'pending', allocations: [] } : t)));
+        showToast('Zurückgesetzt', 'Der Umsatz ist wieder offen.', 'info');
     };
 
-    // Ignore transaction
-    const handleIgnoreTransaction = async (txId) => {
-        try {
-            const { error } = await supabase
-                .from('bank_transactions')
-                .update({ status: 'ignored' })
-                .eq('id', txId);
-            if (error) throw error;
-            triggerToast('Buchung ignoriert.');
-            fetchData();
-        } catch (error) {
-            alert('Fehler: ' + error.message);
-        }
-    };
-
-    // Tenant change handler to update prefilled fields
-    const handleTenantChange = (e) => {
-        const newTenantId = e.target.value;
-        setIncomeForm(prev => {
-            const newData = { ...prev, tenant_id: newTenantId };
-
-            if (newTenantId) {
-                const today = new Date().toISOString().split('T')[0];
-                const activeLease = leases.find(l =>
-                    l.tenant_id === newTenantId &&
-                    l.status === 'active' &&
-                    l.start_date <= today &&
-                    (!l.end_date || l.end_date >= today)
-                );
-
-                if (activeLease && activeLease.unit) {
-                    newData.property_id = activeLease.unit.property_id;
-                    newData.unit_id = activeLease.unit_id;
-
-                    const totalRent = (activeLease.cold_rent || 0) + (activeLease.service_charge || 0) + (activeLease.heating_cost || 0) + (activeLease.other_costs || 0);
-                    setExpectedRentDisplay(totalRent.toFixed(2));
-                }
-            } else {
-                setExpectedRentDisplay(null);
-            }
-            return newData;
-        });
-    };
-
-    // Unit change handler to update prefilled expected rents
-    const handleUnitChange = (e) => {
-        const newUnitId = e.target.value;
-        setIncomeForm(prev => {
-            const newData = { ...prev, unit_id: newUnitId };
-
-            if (newUnitId && prev.tenant_id) {
-                const activeLease = leases.find(l =>
-                    l.tenant_id === prev.tenant_id &&
-                    l.unit_id === newUnitId &&
-                    l.status === 'active'
-                );
-
-                if (activeLease) {
-                    const totalRent = (activeLease.cold_rent || 0) + (activeLease.service_charge || 0) + (activeLease.heating_cost || 0) + (activeLease.other_costs || 0);
-                    setExpectedRentDisplay(totalRent.toFixed(2));
-                } else {
-                    setExpectedRentDisplay(null);
-                }
-            } else {
-                setExpectedRentDisplay(null);
-            }
-            return newData;
-        });
-    };
-
-    // Prep manual mapping modal fields based on heuristic recommendations
-    const openManualMap = (tx) => {
-        setManualMapTx(tx);
-        const isPositive = tx.amount > 0;
-        const targetType = isPositive ? 'income' : 'expense';
-        setManualTargetType(targetType);
-
-        // Find match recommendations
-        const recommendation = matchRecommendations.find(r => r.tx.id === tx.id);
-
-        if (isPositive) {
-            let tenantId = '';
-            let propertyId = '';
-            let unitId = '';
-            let expectedRent = null;
-
-            if (recommendation && recommendation.type === 'income' && recommendation.targetId) {
-                const lease = leases.find(l => l.id === recommendation.targetId);
-                if (lease) {
-                    tenantId = lease.tenant_id;
-                    propertyId = lease.unit?.property_id || '';
-                    unitId = lease.unit_id || '';
-                    const totalRent = (lease.cold_rent || 0) + (lease.service_charge || 0) + (lease.heating_cost || 0) + (lease.other_costs || 0);
-                    expectedRent = totalRent.toFixed(2);
-                }
-            }
-
+    // Dialog mit Vorschlag vorbelegen
+    const openManualMap = (tx, recOverride) => {
+        const rec = recOverride || recommendations.get(tx.id) || null;
+        const remaining = remainingAmount(tx);
+        if (Number(tx.amount) > 0) {
+            // Restbetrag eines teilweise zugeordneten Umsatzes: zuletzt gewählten Mietvertrag vorbelegen
+            const previousLeaseId = [...(tx.allocations || [])].reverse().find(a => a.kind === 'rent_payment')?.record?.lease_id;
+            const leaseId = rec?.type === 'income' && rec.targetId ? rec.targetId : previousLeaseId;
+            const lease = leaseId ? scopedLeaseById.get(leaseId) : null;
             setIncomeForm({
                 payment_date: tx.booking_date,
                 period_month: tx.booking_date.slice(0, 7),
-                tenant_id: tenantId,
-                property_id: propertyId,
-                unit_id: unitId,
-                amount: Math.abs(tx.amount).toString(),
+                property_id: lease?.unit?.property_id || '',
+                lease_id: lease?.id || '',
+                amount: remaining,
                 note: tx.purpose || ''
             });
-            setExpectedRentDisplay(expectedRent);
         } else {
-            let categoryId = '';
-            let propertyId = '';
-            let unitId = '';
-            let scope = 'general';
-
-            if (recommendation && recommendation.type === 'expense') {
-                categoryId = recommendation.targetId || '';
-                propertyId = recommendation.propertyId || '';
-                unitId = recommendation.unitId || '';
-                scope = unitId ? 'unit' : 'general';
-            }
-
+            const isExpenseRec = rec?.type === 'expense';
+            const cat = isExpenseRec && rec.targetId ? categoryById.get(rec.targetId) : null;
+            const propertyId = isExpenseRec && rec.propertyId && scopedPropertyById.has(rec.propertyId) ? rec.propertyId : '';
+            const unitId = propertyId && rec.unitId ? rec.unitId : '';
             setExpenseForm({
                 booking_date: tx.booking_date,
                 payee: tx.counterpart_name || '',
-                category_id: categoryId,
+                category_id: cat?.id || '',
                 category_custom: '',
-                scope: scope,
+                scope: unitId ? 'unit' : 'general',
                 property_id: propertyId,
                 unit_id: unitId,
-                amount: Math.abs(tx.amount).toString(),
-                is_allocatable: true,
+                amount: remaining,
+                is_allocatable: cat ? (cat.is_recoverable ?? true) : true,
                 note: tx.purpose || ''
             });
         }
+        setManualMapTx(tx);
     };
 
-    // Apply manual reconciliation selection and learn rule
-    const handleSaveManualMap = async () => {
-        if (!manualMapTx) return;
+    // Manuelle Zuordnung übernehmen (nur Vorschau) und Regel lokal merken
+    const handleSaveManualMap = () => {
+        if (!manualMapTx || actionsLocked) return;
+        const tx = transactions.find(t => t.id === manualMapTx.id) || manualMapTx;
+        const remaining = remainingAmount(tx);
+        const isCredit = Number(tx.amount) > 0;
+        const amount = round2(toNumber(isCredit ? incomeForm.amount : expenseForm.amount));
 
+        if (!(amount > 0)) {
+            alert('Bitte einen Betrag größer als 0 eingeben.');
+            return;
+        }
+        if (amount > remaining + AMOUNT_EPSILON) {
+            alert(`Der Betrag darf den noch offenen Betrag dieses Umsatzes (${formatCurrency(remaining)}) nicht übersteigen.`);
+            return;
+        }
+
+        let allocation;
+        let ruleTarget = null;
+        if (isCredit) {
+            const lease = scopedLeaseById.get(incomeForm.lease_id);
+            if (!lease) {
+                alert('Bitte den Mietvertrag wählen, dem die Zahlung zugeordnet werden soll.');
+                return;
+            }
+            if (!/^\d{4}-\d{2}$/.test(incomeForm.period_month || '')) {
+                alert('Bitte den Leistungsmonat angeben, für den die Zahlung gilt.');
+                return;
+            }
+            if (!incomeForm.payment_date) {
+                alert('Bitte das Zahldatum angeben.');
+                return;
+            }
+            allocation = buildRentAllocation({ lease, amount, paymentDate: incomeForm.payment_date, periodMonth: incomeForm.period_month, note: incomeForm.note });
+            ruleTarget = { type: 'income', targetId: lease.id, propertyId: lease.unit?.property_id || null, unitId: lease.unit_id || null };
+        } else {
+            const category = categoryById.get(expenseForm.category_id) || null;
+            const customCategory = (expenseForm.category_custom || '').trim();
+            if (!category && !customCategory) {
+                alert('Bitte eine Kostenart wählen oder eine eigene Kategorie eingeben.');
+                return;
+            }
+            if (!expenseForm.booking_date) {
+                alert('Bitte das Buchungsdatum angeben.');
+                return;
+            }
+            const property = scopedPropertyById.get(expenseForm.property_id) || null;
+            const unit = expenseForm.scope === 'unit' && expenseForm.unit_id ? scoped.units.find(u => u.id === expenseForm.unit_id) || null : null;
+            if (expenseForm.scope === 'unit' && (!property || !unit)) {
+                alert('Bitte Immobilie und Einheit wählen (oder Zuordnung „Allgemein“).');
+                return;
+            }
+            allocation = buildExpenseAllocation({
+                amount, category, customCategory, property, unit, scope: expenseForm.scope,
+                isAllocatable: expenseForm.is_allocatable, bookingDate: expenseForm.booking_date,
+                payee: expenseForm.payee, note: expenseForm.note
+            });
+            // Für eine Freitext-Kategorie wird keine Regel gemerkt (eine Regel braucht eine Kostenart)
+            if (category) ruleTarget = { type: 'expense', targetId: category.id, propertyId: property?.id || null, unitId: unit?.id || null };
+        }
+
+        applyAllocation(tx.id, allocation);
+        const learned = ruleTarget ? learnLocalRule(tx, ruleTarget) : false;
+        toastAfterAllocation(tx, learned, round2(remaining - amount));
+        setManualMapTx(null);
+    };
+
+    const handleDeleteRule = async (rule) => {
+        if (rule.isLocal) {
+            setLocalRules(prev => prev.filter(r => r.id !== rule.id));
+            showToast('Regel verworfen', 'Die in der Demo gemerkte Regel wurde entfernt.', 'info');
+            return;
+        }
+        if (!window.confirm('Möchten Sie diese gespeicherte Zuordnungsregel aus der früheren Testversion löschen?')) return;
         setActionLoading(true);
         try {
-            const tx = manualMapTx;
-
-            let targetId = '';
-            let propertyId = null;
-            let unitId = null;
-
-            if (manualTargetType === 'income') {
-                // Find active lease for the selected tenant and property/unit
-                const activeLease = leases.find(l =>
-                    l.tenant_id === incomeForm.tenant_id &&
-                    (!incomeForm.unit_id || l.unit_id === incomeForm.unit_id)
-                );
-
-                if (!activeLease) {
-                    alert('Kein aktives Mietverhältnis für diesen Mieter/Einheit gefunden.');
-                    setActionLoading(false);
-                    return;
-                }
-
-                targetId = activeLease.id;
-                propertyId = incomeForm.property_id || null;
-                unitId = incomeForm.unit_id || null;
-
-                // Post rent payment
-                const { error: rentErr } = await supabase
-                    .from('rent_payments')
-                    .insert([{
-                        user_id: user.id,
-                        lease_id: targetId,
-                        payment_date: incomeForm.payment_date,
-                        amount: parseFloat(incomeForm.amount),
-                        note: incomeForm.note || `Automatischer Bankabgleich - ${tx.purpose}`
-                    }]);
-
-                if (rentErr) throw rentErr;
-
-            } else if (manualTargetType === 'expense') {
-                targetId = expenseForm.category_id;
-                propertyId = expenseForm.property_id || null;
-                unitId = expenseForm.scope === 'unit' ? (expenseForm.unit_id || null) : null;
-
-                // Post expense
-                const { error: expErr } = await supabase
-                    .from('expenses')
-                    .insert([{
-                        user_id: user.id,
-                        booking_date: expenseForm.booking_date,
-                        payee: expenseForm.payee || 'Unbekannt',
-                        category_id: targetId || null,
-                        category_custom: !targetId ? expenseForm.category_custom : null,
-                        property_id: propertyId,
-                        unit_id: unitId,
-                        amount: parseFloat(expenseForm.amount),
-                        is_allocatable: expenseForm.is_allocatable,
-                        note: expenseForm.note || `Automatischer Bankabgleich - ${tx.purpose}`
-                    }]);
-
-                if (expErr) throw expErr;
-            }
-
-            // Update transaction
-            const { error: txErr } = await supabase
-                .from('bank_transactions')
-                .update({
-                    status: 'matched',
-                    matched_type: manualTargetType,
-                    matched_target_id: targetId
-                })
-                .eq('id', tx.id);
-
-            if (txErr) throw txErr;
-
-            // SAVE TO LEARNING DATABASE (RULES) - Save Haus, Einheit, Mieter/Lease reference as well
-            const { error: ruleErr } = await supabase
-                .from('bank_matching_rules')
-                .insert([{
-                    user_id: user.id,
-                    counterpart_name: tx.counterpart_name,
-                    counterpart_iban: tx.counterpart_iban,
-                    purpose_keyword: tx.purpose ? tx.purpose.split(' ').slice(0, 2).join(' ') : null,
-                    target_type: manualTargetType,
-                    target_id: targetId,
-                    property_id: propertyId,
-                    unit_id: unitId
-                }]);
-
-            if (ruleErr) throw ruleErr;
-
-            triggerToast(`Regel gelernt! Künftige Buchungen von "${tx.counterpart_name}" werden als Vorschlag bereitgestellt.`);
-            setManualMapTx(null);
-            fetchData();
+            const { error } = await supabase.from('bank_matching_rules').delete().eq('id', rule.id);
+            if (error) throw error;
+            setDbRules(prev => prev.filter(r => r.id !== rule.id));
+            showToast('Regel gelöscht', 'Die gespeicherte Regel wurde gelöscht.', 'success');
         } catch (error) {
-            console.error('Error saving manual mapping:', error);
-            alert('Fehler beim manuellen Zuweisen: ' + error.message);
+            console.error('Error deleting rule:', error);
+            alert('Fehler beim Löschen der Regel: ' + error.message);
         } finally {
             setActionLoading(false);
         }
     };
 
-    // Remove learning rule
-    const handleDeleteRule = async (ruleId) => {
-        if (!window.confirm('Möchten Sie diese Buchungsregel löschen?')) return;
+    // Altbestand der früheren Testversion entfernen. Achtung: Die Umsätze hängen per ON DELETE CASCADE am
+    // Konto – es werden ALLE Demo-Umsätze gelöscht, auch die als verbucht markierten. Daraus erzeugte
+    // Mietzahlungen/Ausgaben bleiben bestehen und müssen in den Finanzen geprüft werden.
+    const handleDeleteLegacyData = async () => {
+        if (!userId) return;
+        const msg = 'Alte Demo-Daten löschen?\n\n'
+            + `Gelöscht werden ${legacyConnections.length} Demo-Bankkonto/-konten, ${legacyTransactions.length} Demo-Umsätze `
+            + `(auch die als verbucht markierten) und ${dbRules.length} gespeicherte Zuordnungsregel(n) Ihres Kontos.\n\n`
+            + 'Mietzahlungen und Ausgaben, die damals aus Demo-Umsätzen gebucht wurden, bleiben in den Finanzen bestehen '
+            + 'und müssen dort bei Bedarf einzeln gelöscht werden. Notieren Sie sich vorher die aufgelisteten Umsätze.';
+        if (!window.confirm(msg)) return;
+        setActionLoading(true);
         try {
-            const { error } = await supabase
-                .from('bank_matching_rules')
-                .delete()
-                .eq('id', ruleId);
-            if (error) throw error;
-            triggerToast('Regel gelöscht.');
-            fetchData();
+            const { error: txErr } = await supabase.from('bank_transactions').delete().eq('user_id', userId);
+            if (txErr) throw txErr;
+            const { error: connErr } = await supabase.from('bank_connections').delete().eq('user_id', userId);
+            if (connErr) throw connErr;
+            const { error: ruleErr } = await supabase.from('bank_matching_rules').delete().eq('user_id', userId);
+            if (ruleErr) throw ruleErr;
+            showToast('Alte Demo-Daten gelöscht', 'Demo-Konten, -Umsätze und gespeicherte Regeln wurden entfernt.', 'success');
+            await loadData();
         } catch (error) {
-            alert('Fehler: ' + error.message);
+            console.error('Error deleting legacy bank demo data:', error);
+            alert('Fehler beim Löschen der alten Demo-Daten: ' + error.message);
+            await loadData();
+        } finally {
+            setActionLoading(false);
         }
     };
 
-    // Disconnect bank account
-    const handleDisconnectBank = async (connId) => {
-        if (!window.confirm('Möchten Sie diese Bankverbindung wirklich trennen? Alle zugehörigen unverbuchten Transaktionen werden gelöscht.')) return;
-        try {
-            const { error } = await supabase
-                .from('bank_connections')
-                .delete()
-                .eq('id', connId);
-            if (error) throw error;
-            triggerToast('Bankverbindung getrennt.');
-            fetchData();
-        } catch (error) {
-            alert('Fehler: ' + error.message);
-        }
-    };
+    // ── Abgeleitete Werte für die Anzeige ───────────────────────────────────
+    const demoActive = transactions.length > 0;
+    const openCount = transactions.filter(t => t.status === 'pending').length;
+    const legacyMatched = legacyTransactions.filter(t => t.status === 'matched');
+    const hasLegacyData = legacyConnections.length > 0 || legacyTransactions.length > 0 || dbRules.length > 0;
 
-    if (loading) {
+    const manualTx = manualMapTx ? (transactions.find(t => t.id === manualMapTx.id) || manualMapTx) : null;
+    const manualIsCredit = manualTx ? Number(manualTx.amount) > 0 : true;
+    const manualRemaining = manualTx ? remainingAmount(manualTx) : 0;
+
+    const expenseFormUnits = useMemo(
+        () => (expenseForm.property_id ? scoped.units.filter(u => u.property_id === expenseForm.property_id) : []),
+        [scoped.units, expenseForm.property_id]
+    );
+
+    const incomeLeaseOptions = useMemo(() => scoped.leases
+        .filter(l => !incomeForm.property_id || l.unit?.property_id === incomeForm.property_id)
+        .map(l => ({ lease: l, ended: isLeaseEnded(l, todayStr) }))
+        .sort((a, b) => (Number(a.ended) - Number(b.ended)) || leaseLabel(a.lease).localeCompare(leaseLabel(b.lease), 'de')),
+    [scoped.leases, incomeForm.property_id, todayStr]);
+
+    const selectedIncomeLease = scopedLeaseById.get(incomeForm.lease_id) || null;
+
+    const saveDisabled = actionsLocked || (manualIsCredit
+        ? !incomeForm.lease_id || !incomeForm.period_month
+        : !(expenseForm.category_id || (expenseForm.category_custom || '').trim()));
+
+    if (initialLoading) {
         return (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '100px' }}>
                 <Loader2 className="animate-spin" size={32} color="var(--primary-color)" />
@@ -967,55 +903,272 @@ const BankReconciliation = () => {
         );
     }
 
+    const renderAllocations = (tx) => (tx.allocations || []).map((a, i) => (
+        <div key={i} style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', lineHeight: 1.3, marginTop: '4px' }}>
+            {a.text}
+        </div>
+    ));
+
+    const renderStatusCell = (tx) => {
+        if (tx.status === 'matched' || tx.status === 'ignored') {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-start' }}>
+                    {tx.status === 'matched'
+                        ? <Badge variant="success">✓ Zugeordnet (Vorschau)</Badge>
+                        : <Badge>Ignoriert (Vorschau)</Badge>}
+                    {renderAllocations(tx)}
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>Nicht gespeichert – Demo</div>
+                    <button onClick={() => handleResetTransaction(tx)} style={{ ...actionBtn('default', false), marginTop: '4px' }} title="Wieder als offen markieren">
+                        <RotateCcw size={12} /> Zurücksetzen
+                    </button>
+                </div>
+            );
+        }
+
+        if ((tx.allocations || []).length > 0) {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', padding: '8px', borderRadius: '6px', backgroundColor: 'rgba(14, 165, 233, 0.05)', border: '1px dashed rgba(14, 165, 233, 0.3)' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0284c7' }}>
+                        Teilweise zugeordnet: {formatCurrency(allocatedAmount(tx))} von {formatCurrency(Math.abs(tx.amount))}
+                    </div>
+                    {renderAllocations(tx)}
+                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                        <button onClick={() => openManualMap(tx)} disabled={actionsLocked} style={actionBtn('primary', actionsLocked)}>
+                            Rest zuordnen
+                        </button>
+                        <button onClick={() => handleResetTransaction(tx)} style={actionBtn('icon', false)} title="Zurücksetzen">
+                            <RotateCcw size={12} />
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        const rec = recommendations.get(tx.id) || { confidence: 0 };
+        const ignoreButton = (
+            <button onClick={() => handleIgnoreTransaction(tx)} disabled={actionsLocked} style={actionBtn('default', actionsLocked)} title="Umsatz ignorieren (Vorschau)">
+                Ignorieren
+            </button>
+        );
+        const duplicateHint = rec.possibleDuplicate && (
+            <div style={{ display: 'flex', gap: '4px', fontSize: '0.68rem', color: '#b45309', marginTop: '4px', lineHeight: 1.25 }}>
+                <AlertCircle size={11} style={{ flexShrink: 0, marginTop: '1px' }} /> {rec.possibleDuplicate}
+            </div>
+        );
+
+        if (rec.alreadyBooked) {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', padding: '8px', borderRadius: '6px', backgroundColor: 'rgba(245, 158, 11, 0.06)', border: '1px dashed rgba(245, 158, 11, 0.3)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700, color: '#d97706' }}>
+                        <AlertCircle size={12} /> Bereits erfasst
+                    </div>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={rec.label}>
+                        {rec.label}
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.2 }}>{rec.reason}</div>
+                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                        <button onClick={() => handleLinkExisting(tx, rec)} disabled={actionsLocked} style={actionBtn('warning', actionsLocked)} title="Demo: mit vorhandenem Eintrag verknüpfen – es wird nichts gespeichert">
+                            <Check size={12} /> Verknüpfen
+                        </button>
+                        <button onClick={() => openManualMap(tx)} disabled={actionsLocked} style={actionBtn('icon', actionsLocked)} title="Neu zuordnen">
+                            <Settings size={12} />
+                        </button>
+                        {ignoreButton}
+                    </div>
+                </div>
+            );
+        }
+
+        if (rec.confidence > 0) {
+            return (
+                <div style={{
+                    display: 'flex', flexDirection: 'column', padding: '8px', borderRadius: '6px',
+                    backgroundColor: rec.rule ? 'rgba(56, 189, 248, 0.06)' : 'rgba(22, 163, 74, 0.04)',
+                    border: rec.rule ? '1px dashed rgba(56, 189, 248, 0.3)' : '1px dashed rgba(22, 163, 74, 0.25)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700, color: rec.rule ? '#0ea5e9' : 'var(--success-color)' }}>
+                        <Sparkles size={12} /> {rec.confidence}% Treffer
+                    </div>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={rec.label}>
+                        {rec.label}
+                    </div>
+                    {rec.reason && (
+                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.2 }}>{rec.reason}</div>
+                    )}
+                    {duplicateHint}
+                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                        <button onClick={() => handleConfirmMatch(tx, rec)} disabled={actionsLocked} style={actionBtn('success', actionsLocked)} title="Demo: zeigt nur, welche Buchung entstehen würde – es wird nichts gespeichert">
+                            <Check size={12} /> Bestätigen
+                        </button>
+                        <button onClick={() => openManualMap(tx)} disabled={actionsLocked} style={actionBtn('icon', actionsLocked)} title="Anders zuordnen">
+                            <Settings size={12} />
+                        </button>
+                        {ignoreButton}
+                    </div>
+                </div>
+            );
+        }
+
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <AlertCircle size={12} color="#f59e0b" /> Keine Zuweisung
+                </div>
+                {rec.reason && (
+                    <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', lineHeight: 1.2 }}>{rec.reason}</div>
+                )}
+                {duplicateHint}
+                <div style={{ display: 'flex', gap: '4px' }}>
+                    <button onClick={() => openManualMap(tx)} disabled={actionsLocked} style={actionBtn('primary', actionsLocked)}>
+                        Zuweisen
+                    </button>
+                    {ignoreButton}
+                </div>
+            </div>
+        );
+    };
+
+    const selectStyle = { width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' };
+    const labelStyle = { display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' };
+
     return (
         <div style={{ position: 'relative' }}>
-            {/* Learning Rule Toast Alert */}
-            {showRuleToast && (
-                <div style={{
+            {/* Toast */}
+            {toast && (
+                <div role="status" style={{
                     position: 'fixed', bottom: '24px', right: '24px', zIndex: 1000,
                     backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '12px',
                     padding: '16px 20px', color: '#f8fafc', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.3)',
-                    display: 'flex', alignItems: 'center', gap: '12px', width: '380px',
+                    display: 'flex', alignItems: 'center', gap: '12px', width: '380px', maxWidth: 'calc(100vw - 48px)',
                     animation: 'slideIn 0.3s ease-out'
                 }}>
-                    <Sparkles size={20} color="#38bdf8" />
+                    {toast.tone === 'error'
+                        ? <AlertCircle size={20} color={TOAST_COLORS.error} />
+                        : toast.tone === 'learned'
+                            ? <Sparkles size={20} color={TOAST_COLORS.learned} />
+                            : toast.tone === 'success'
+                                ? <Check size={20} color={TOAST_COLORS.success} />
+                                : <Info size={20} color={TOAST_COLORS.info} />}
                     <div>
-                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#38bdf8' }}>KI-Zuweisung gelernt</div>
-                        <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '2px' }}>{showRuleToast}</div>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: TOAST_COLORS[toast.tone] || TOAST_COLORS.info }}>{toast.title}</div>
+                        <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '2px' }}>{toast.message}</div>
                     </div>
-                    <button onClick={() => setShowRuleToast(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}>
+                    <button onClick={() => setToast(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }} aria-label="Hinweis schließen">
                         <X size={16} />
                     </button>
                 </div>
             )}
 
             {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
                 <div>
-                    <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: '4px' }}>Automatisierter Bankabgleich</h1>
-                    <p style={{ color: 'var(--text-secondary)' }}>Verknüpfen Sie Ihre Konten via FinAPI & verbuchen Sie Ihre Mieteingänge intelligent.</p>
+                    <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        Automatisierter Bankabgleich <Badge variant="warning">Demo</Badge>
+                    </h1>
+                    <p style={{ color: 'var(--text-secondary)' }}>Vorschau der geplanten Funktion – noch ohne Verbindung zu Ihrer Bank.</p>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
-                    <Button variant="ghost" onClick={fetchData} disabled={actionLoading}>
-                        <RefreshCw size={16} className={actionLoading ? 'animate-spin' : ''} style={{ marginRight: '6px' }} /> Aktualisieren
+                    <Button variant="ghost" onClick={handleRefresh} disabled={refreshing || actionLoading} title="Lädt Objekte, Mietverträge, Kostenarten und vorhandene Buchungen neu (keine Bankumsätze)">
+                        <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} style={{ marginRight: '6px' }} /> Daten neu laden
                     </Button>
-                    {connections.length === 0 && (
-                        <Button icon={Plus} onClick={() => { setShowConnectModal(true); setConnectStep('bank-select'); }}>
-                            Bankkonto verknüpfen (FinAPI)
+                    {!demoActive && (
+                        <Button icon={FlaskConical} onClick={handleStartDemo}>
+                            Demo starten
                         </Button>
                     )}
                 </div>
             </div>
 
+            {/* Demo-Hinweis */}
+            <div role="note" style={{
+                display: 'flex', gap: '12px', alignItems: 'flex-start', padding: '14px 16px', marginBottom: '20px',
+                borderRadius: '10px', backgroundColor: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.45)',
+                color: 'var(--text-primary)'
+            }}>
+                <TriangleAlert size={20} color="#d97706" style={{ flexShrink: 0, marginTop: '2px' }} />
+                <div style={{ fontSize: '0.85rem', lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 700, color: '#b45309', marginBottom: '4px' }}>Demo-Modus – keine Verbindung zu Ihrer Bank</div>
+                    <div>
+                        Diese Seite zeigt nur, wie der Bankabgleich künftig funktionieren soll. Einen Import echter Kontoumsätze gibt es noch nicht.
+                        Die Umsätze der Demo sind Beispieldaten und existieren nur in diesem Browserfenster.
+                    </div>
+                    <div style={{ marginTop: '4px' }}>
+                        <strong>Es wird nichts gespeichert:</strong> „Bestätigen“, „Verknüpfen“, „Zuweisen“ und „Ignorieren“ zeigen nur eine Vorschau.
+                        Es entstehen keine Mietzahlungen, Ausgaben, Bankkonten oder Regeln in Ihren Daten; beim Neuladen der Seite ist die Demo zurückgesetzt.
+                    </div>
+                </div>
+            </div>
+
+            {/* Ladefehler: Vorschläge wären unvollständig -> Zuordnen gesperrt */}
+            {!dataComplete && (
+                <div role="alert" style={{
+                    display: 'flex', gap: '10px', alignItems: 'flex-start', padding: '12px 16px', marginBottom: '20px',
+                    borderRadius: '10px', backgroundColor: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239, 68, 68, 0.35)',
+                    fontSize: '0.85rem', lineHeight: 1.5, color: 'var(--text-primary)'
+                }}>
+                    <AlertCircle size={18} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <div>
+                        <strong>Nicht alle Daten konnten geladen werden:</strong> {loadErrors.join(', ')}.
+                        Vorschläge und die Prüfung auf bereits erfasste Buchungen wären unvollständig – Zuordnen ist deshalb gesperrt.
+                        Bitte „Daten neu laden“.
+                    </div>
+                </div>
+            )}
+
+            {/* Altbestand der früheren Testversion */}
+            {hasLegacyData && (
+                <Card style={{ padding: '16px', marginBottom: '20px', border: '1px solid rgba(239, 68, 68, 0.3)', backgroundColor: 'rgba(239, 68, 68, 0.03)' }}>
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                        <Info size={18} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+                        <div style={{ fontSize: '0.84rem', lineHeight: 1.5, flex: 1, minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, marginBottom: '4px' }}>Alte Demo-Daten in Ihrem Konto</div>
+                            <div>
+                                Die frühere Testversion dieser Seite hat Beispieldaten in Ihrer Datenbank gespeichert:
+                                {' '}{legacyConnections.length} Demo-Bankkonto/-konten, {legacyTransactions.length} Demo-Umsätze
+                                und {dbRules.length} Zuordnungsregel(n). Diese Daten stammen nicht von Ihrer Bank. Die Umsätze werden nicht mehr angezeigt;
+                                gespeicherte Regeln erscheinen weiterhin unter „Lernende Regeln“ und werden nur als Vorschlag genutzt.
+                            </div>
+                            {legacyMatched.length > 0 && (
+                                <div style={{ marginTop: '8px' }}>
+                                    <div>
+                                        Aus diesen Demo-Umsätzen wurde damals eine Mietzahlung bzw. Ausgabe gebucht oder eine vorhandene Buchung verknüpft.
+                                        Bitte prüfen Sie die Einträge unter <strong>Finanzen</strong> und löschen Sie sie dort, falls sie zu keiner echten Zahlung gehören:
+                                    </div>
+                                    <ul style={{ margin: '6px 0 0', paddingLeft: '18px' }}>
+                                        {legacyMatched.map(t => (
+                                            <li key={t.id}>
+                                                {formatDate(t.booking_date)} · {formatCurrency(Math.abs(Number(t.amount)))} · {t.counterpart_name || 'Unbekannt'}
+                                                {' '}· {t.matched_type === 'income' ? 'als Mietzahlung' : t.matched_type === 'expense' ? 'als Ausgabe' : 'zugeordnet'}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            <div style={{ marginTop: '10px' }}>
+                                <Button variant="secondary" size="sm" onClick={handleDeleteLegacyData} disabled={actionLoading || refreshing}>
+                                    {actionLoading ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} style={{ marginRight: '6px' }} />}
+                                    Alte Demo-Daten löschen
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+                </Card>
+            )}
+            {legacyError && (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+                    Hinweis: Ob noch alte Demo-Daten der früheren Testversion gespeichert sind, konnte nicht geprüft werden.
+                </div>
+            )}
+
             {/* Main Layout Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: '24px', alignItems: 'start' }}>
-                
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: '24px', alignItems: 'start' }}>
+
                 {/* Left Area - Tabs & Lists */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                    
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
+
                     {/* Tabs navigation */}
-                    <div style={{ display: 'flex', gap: '12px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
-                        <button 
+                    <div style={{ display: 'flex', gap: '12px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', flexWrap: 'wrap' }}>
+                        <button
                             onClick={() => setActiveTab('transactions')}
                             style={{
                                 padding: '8px 16px', border: 'none', background: 'none', fontSize: '0.95rem', fontWeight: 600,
@@ -1024,9 +1177,9 @@ const BankReconciliation = () => {
                                 cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px'
                             }}
                         >
-                            <CreditCard size={16} /> Banktransaktionen ({transactions.filter(t => t.status === 'pending').length} offen)
+                            <CreditCard size={16} /> Demo-Umsätze ({openCount} offen)
                         </button>
-                        <button 
+                        <button
                             onClick={() => setActiveTab('rules')}
                             style={{
                                 padding: '8px 16px', border: 'none', background: 'none', fontSize: '0.95rem', fontWeight: 600,
@@ -1035,230 +1188,96 @@ const BankReconciliation = () => {
                                 cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px'
                             }}
                         >
-                            <Sparkles size={16} /> Lernende Datenbank ({rules.length} Regeln)
+                            <Sparkles size={16} /> Lernende Regeln ({allRules.length})
                         </button>
                     </div>
 
                     {/* Active Tab Contents */}
                     {activeTab === 'transactions' && (
                         <Card>
-                            {connections.length === 0 ? (
+                            {!demoActive ? (
                                 <div style={{ padding: '48px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
                                     <div style={{ width: '60px', height: '60px', borderRadius: '30px', backgroundColor: 'rgba(14, 165, 233, 0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#0ea5e9' }}>
                                         <CreditCard size={28} />
                                     </div>
                                     <div>
-                                        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>Kein Bankkonto verknüpft</h3>
-                                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', maxWidth: '420px', margin: '0 auto', lineHeight: 1.5 }}>
-                                            Verknüpfen Sie Ihr Bankkonto via FinAPI.io, um Transaktionen direkt zu laden, Mietzahlungen abzugleichen und Belege zuzuordnen.
+                                        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>Noch keine Bankanbindung verfügbar</h3>
+                                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', maxWidth: '460px', margin: '0 auto', lineHeight: 1.5 }}>
+                                            Ein Import echter Kontoumsätze ist in Vorbereitung. Mit der Demo sehen Sie anhand von Beispiel-Umsätzen,
+                                            wie Mieteingänge und Ausgaben künftig zugeordnet werden – gespeichert wird dabei nichts.
                                         </p>
                                     </div>
-                                    <Button onClick={() => { setShowConnectModal(true); setConnectStep('bank-select'); }}>
-                                        Jetzt Bankkonto verknüpfen
+                                    <Button icon={FlaskConical} onClick={handleStartDemo}>
+                                        Demo starten
                                     </Button>
                                 </div>
-                            ) : transactions.length === 0 ? (
-                                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                                    Keine Transaktionen auf diesem Konto gefunden.
-                                </div>
                             ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', backgroundColor: 'var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
-                                    
-                                    {/* Table Header */}
-                                    <div style={{ display: 'grid', gridTemplateColumns: '110px 180px 1fr 180px 180px', padding: '12px 16px', backgroundColor: 'var(--bg-secondary)', fontWeight: 600, fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                                        <div>Datum</div>
-                                        <div>Partner / IBAN</div>
-                                        <div>Verwendungszweck</div>
-                                        <div>Betrag</div>
-                                        <div>Zuweisung / Status</div>
+                                <div style={{ overflowX: 'auto' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', backgroundColor: 'var(--border-color)', borderRadius: '8px', overflow: 'hidden', minWidth: '820px' }}>
+
+                                        {/* Table Header */}
+                                        <div style={{ display: 'grid', gridTemplateColumns: '100px 180px 1fr 120px 240px', padding: '12px 16px', backgroundColor: 'var(--bg-secondary)', fontWeight: 600, fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                                            <div>Datum</div>
+                                            <div>Partner / IBAN</div>
+                                            <div>Verwendungszweck</div>
+                                            <div>Betrag</div>
+                                            <div>Zuweisung / Status</div>
+                                        </div>
+
+                                        {/* Table Body */}
+                                        {transactions.map(tx => {
+                                            const isPositive = Number(tx.amount) > 0;
+                                            return (
+                                                <div
+                                                    key={tx.id}
+                                                    style={{
+                                                        display: 'grid',
+                                                        gridTemplateColumns: '100px 180px 1fr 120px 240px',
+                                                        padding: '16px',
+                                                        backgroundColor: 'var(--surface-color)',
+                                                        alignItems: 'center',
+                                                        borderBottom: '1px solid var(--border-color)',
+                                                        opacity: tx.status !== 'pending' ? 0.8 : 1
+                                                    }}
+                                                >
+                                                    {/* Date */}
+                                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                        {formatDate(tx.booking_date)}
+                                                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#b45309', marginTop: '2px' }}>BEISPIEL</div>
+                                                    </div>
+
+                                                    {/* Partner */}
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', paddingRight: '8px' }}>
+                                                        <span style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-primary)' }}>
+                                                            {tx.counterpart_name || 'Unbekannt'}
+                                                        </span>
+                                                        <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
+                                                            {tx.counterpart_iban || '–'}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Purpose */}
+                                                    <div style={{ fontSize: '0.85rem', paddingRight: '12px', color: 'var(--text-primary)', wordBreak: 'break-word', lineHeight: 1.4 }}>
+                                                        {tx.purpose}
+                                                    </div>
+
+                                                    {/* Amount */}
+                                                    <div>
+                                                        <span style={{
+                                                            fontWeight: 700,
+                                                            fontSize: '0.95rem',
+                                                            color: isPositive ? 'var(--success-color)' : 'var(--danger-color)'
+                                                        }}>
+                                                            {isPositive ? '+' : ''}{formatCurrency(tx.amount)}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Zuweisung & Match Action */}
+                                                    <div>{renderStatusCell(tx)}</div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
-
-                                    {/* Table Body */}
-                                    {matchRecommendations.map(({ tx, type, targetId, propertyId, unitId, confidence, label, reason, rule, matched, alreadyBooked }, idx) => {
-                                        const isPositive = tx.amount > 0;
-                                        return (
-                                            <div 
-                                                key={tx.id} 
-                                                style={{ 
-                                                    display: 'grid', 
-                                                    gridTemplateColumns: '110px 180px 1fr 180px 180px', 
-                                                    padding: '16px', 
-                                                    backgroundColor: 'var(--surface-color)', 
-                                                    alignItems: 'center',
-                                                    borderBottom: '1px solid var(--border-color)',
-                                                    opacity: tx.status !== 'pending' ? 0.75 : 1
-                                                }}
-                                            >
-                                                {/* Date */}
-                                                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                                    {new Date(tx.booking_date).toLocaleDateString('de-DE')}
-                                                </div>
-
-                                                {/* Partner */}
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                                    <span style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-primary)' }}>
-                                                        {tx.counterpart_name || 'Unbekannt'}
-                                                    </span>
-                                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
-                                                        {tx.counterpart_iban || '–'}
-                                                    </span>
-                                                </div>
-
-                                                {/* Purpose */}
-                                                <div style={{ fontSize: '0.85rem', paddingRight: '12px', color: 'var(--text-primary)', wordBreak: 'break-word', lineHeight: 1.4 }}>
-                                                    {tx.purpose}
-                                                </div>
-
-                                                {/* Amount */}
-                                                <div>
-                                                    <span style={{ 
-                                                        fontWeight: 700, 
-                                                        fontSize: '0.95rem',
-                                                        color: isPositive ? 'var(--success-color)' : 'var(--danger-color)'
-                                                    }}>
-                                                        {isPositive ? '+' : ''}{formatCurrency(tx.amount)}
-                                                    </span>
-                                                </div>
-
-                                                {/* Zuweisung & Match Action */}
-                                                <div>
-                                                    {tx.status === 'matched' ? (
-                                                        <Badge variant="success">✓ Verbucht</Badge>
-                                                    ) : tx.status === 'ignored' ? (
-                                                        <Badge variant="secondary">Ignoriert</Badge>
-                                                    ) : (
-                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                                            
-                                                            {/* Check if transaction is already booked manually */}
-                                                            {alreadyBooked ? (
-                                                                <div style={{ 
-                                                                    display: 'flex', 
-                                                                    flexDirection: 'column',
-                                                                    padding: '8px', 
-                                                                    borderRadius: '6px', 
-                                                                    backgroundColor: 'rgba(245, 158, 11, 0.06)',
-                                                                    border: '1px dashed rgba(245, 158, 11, 0.3)'
-                                                                }}>
-                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700, color: '#d97706' }}>
-                                                                        <AlertCircle size={12} /> Bereits erfasst
-                                                                    </div>
-                                                                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                        {label}
-                                                                    </div>
-                                                                    {reason && (
-                                                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.2 }}>
-                                                                            {reason}
-                                                                        </div>
-                                                                    )}
-
-                                                                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
-                                                                        <button 
-                                                                            onClick={() => handleLinkExisting(tx.id, type, targetId)}
-                                                                            style={{
-                                                                                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
-                                                                                padding: '4px 6px', fontSize: '0.75rem', fontWeight: 600, border: 'none',
-                                                                                borderRadius: '4px', backgroundColor: '#d97706', color: 'white', cursor: 'pointer'
-                                                                            }}
-                                                                            title="Mit vorhandenem Eintrag verknüpfen"
-                                                                        >
-                                                                            <Check size={12} /> Verknüpfen
-                                                                        </button>
-                                                                        <button 
-                                                                            onClick={() => openManualMap(tx)}
-                                                                            style={{
-                                                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                                                padding: '4px', border: '1px solid var(--border-color)',
-                                                                                borderRadius: '4px', backgroundColor: 'var(--surface-color)', cursor: 'pointer'
-                                                                            }}
-                                                                            title="Neu verbuchen"
-                                                                        >
-                                                                            <Settings size={12} />
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            ) : confidence > 0 ? (
-                                                                <div style={{ 
-                                                                    display: 'flex', 
-                                                                    flexDirection: 'column',
-                                                                    padding: '8px', 
-                                                                    borderRadius: '6px', 
-                                                                    backgroundColor: rule ? 'rgba(56, 189, 248, 0.06)' : 'rgba(22, 163, 74, 0.04)',
-                                                                    border: rule ? '1px dashed rgba(56, 189, 248, 0.3)' : '1px dashed rgba(22, 163, 74, 0.25)'
-                                                                }}>
-                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 700, color: rule ? '#0ea5e9' : 'var(--success-color)' }}>
-                                                                        <Sparkles size={12} /> {confidence}% Match
-                                                                    </div>
-                                                                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                        {label}
-                                                                    </div>
-                                                                    {reason && (
-                                                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.2 }}>
-                                                                            {reason}
-                                                                        </div>
-                                                                    )}
-
-                                                                    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
-                                                                        <button 
-                                                                            onClick={() => handleConfirmMatch({ tx, type, targetId, propertyId, unitId })}
-                                                                            style={{
-                                                                                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
-                                                                                padding: '4px 6px', fontSize: '0.75rem', fontWeight: 600, border: 'none',
-                                                                                borderRadius: '4px', backgroundColor: 'var(--success-color)', color: 'white', cursor: 'pointer'
-                                                                            }}
-                                                                        >
-                                                                            <Check size={12} /> Bestätigen
-                                                                        </button>
-                                                                        <button 
-                                                                            onClick={() => openManualMap(tx)}
-                                                                            style={{
-                                                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                                                padding: '4px', border: '1px solid var(--border-color)',
-                                                                                borderRadius: '4px', backgroundColor: 'var(--surface-color)', cursor: 'pointer'
-                                                                            }}
-                                                                            title="Anders zuordnen"
-                                                                        >
-                                                                            <Settings size={12} />
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            ) : (
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                                        <AlertCircle size={12} color="#f59e0b" /> Keine Zuweisung
-                                                                    </div>
-                                                                    <div style={{ display: 'flex', gap: '4px' }}>
-                                                                        <button 
-                                                                            onClick={() => openManualMap(tx)}
-                                                                            style={{
-                                                                                flex: 1, padding: '5px 8px', fontSize: '0.75rem', fontWeight: 600,
-                                                                                backgroundColor: 'var(--primary-color)', color: 'white', border: 'none',
-                                                                                borderRadius: '4px', cursor: 'pointer'
-                                                                            }}
-                                                                        >
-                                                                            Zuweisen
-                                                                        </button>
-                                                                        <button 
-                                                                            onClick={() => handleIgnoreTransaction(tx.id)}
-                                                                            style={{
-                                                                                padding: '5px 8px', fontSize: '0.75rem', fontWeight: 500,
-                                                                                border: '1px solid var(--border-color)', borderRadius: '4px',
-                                                                                backgroundColor: 'var(--surface-color)', color: 'var(--text-secondary)', cursor: 'pointer'
-                                                                            }}
-                                                                        >
-                                                                            Ignorieren
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                            </div>
-                                        );
-                                    })}
-
                                 </div>
                             )}
                         </Card>
@@ -1267,61 +1286,63 @@ const BankReconciliation = () => {
                     {activeTab === 'rules' && (
                         <Card>
                             <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-color)' }}>
-                                <h3 style={{ fontSize: '1rem', fontWeight: 700 }}>Intelligente Zuweisungsregeln</h3>
+                                <h3 style={{ fontSize: '1rem', fontWeight: 700 }}>Zuordnungsregeln</h3>
                                 <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.4 }}>
-                                    Das System lernt aus Ihren Zuordnungen und schlägt künftige Zahlungen direkt mit hoher Konfidenz vor, sodass Sie diese mit einem Klick bestätigen können.
+                                    Aus Ihren Zuordnungen merkt sich das System den Zahlungspartner (IBAN bzw. Name) und schlägt künftige Umsätze vor.
+                                    In der Demo gemerkte Regeln gelten nur bis zum Neuladen der Seite. Vorschläge müssen immer bestätigt werden.
                                 </p>
                             </div>
-                            
-                            {rules.length === 0 ? (
+
+                            {allRules.length === 0 ? (
                                 <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                                    Noch keine gelernten Regeln in der Datenbank vorhanden.
+                                    Noch keine Regeln vorhanden.
                                 </div>
                             ) : (
                                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                    {rules.map(rule => {
-                                        const lease = leases.find(l => l.id === rule.target_id);
-                                        const category = categories.find(c => c.id === rule.target_id);
-                                        const prop = properties.find(p => p.id === rule.property_id);
+                                    {allRules.map(rule => {
+                                        const lease = allLeaseById.get(rule.target_id);
+                                        const category = categoryById.get(rule.target_id);
+                                        const prop = allPropertyById.get(rule.property_id);
 
                                         return (
-                                            <div 
-                                                key={rule.id} 
-                                                style={{ 
-                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                            <div
+                                                key={rule.id}
+                                                style={{
+                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
                                                     padding: '16px 20px', borderBottom: '1px solid var(--border-color)'
                                                 }}
                                             >
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                                                         <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>
-                                                            {rule.counterpart_name || 'Generische Regel'}
+                                                            {rule.counterpart_name || 'Ohne Namen'}
                                                         </span>
-                                                        {rule.counterpart_iban && (
-                                                            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', backgroundColor: 'var(--bg-secondary)', padding: '2px 6px', borderRadius: '4px' }}>
-                                                                IBAN: {rule.counterpart_iban}
-                                                            </span>
-                                                        )}
+                                                        {rule.isLocal
+                                                            ? <Badge variant="blue">Demo – nur lokal</Badge>
+                                                            : <Badge variant="warning">Gespeichert (frühere Testversion)</Badge>}
                                                     </div>
-                                                    
-                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                                        Erkennung: {ruleCriteria(rule)}
+                                                    </div>
+                                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                                                         <span>Zuordnung auf:</span>
                                                         {rule.target_type === 'income' ? (
-                                                            <Badge variant="success">Miete: {lease?.tenant?.last_name || 'Mieter'} ({lease?.unit?.unit_name || 'Wohnung'})</Badge>
+                                                            <Badge variant="success">Miete: {lease ? leaseLabel(lease) : 'Mietvertrag nicht (mehr) verfügbar'}</Badge>
                                                         ) : (
-                                                            <Badge variant="warning">Rechnung: {category?.name || 'Ausgabe'} {prop ? `(${prop.street})` : ''}</Badge>
+                                                            <Badge variant="warning">Ausgabe: {category?.name || 'Kostenart nicht verfügbar'} {prop ? `(${propertyLabel(prop)})` : ''}</Badge>
                                                         )}
                                                     </div>
                                                 </div>
 
-                                                <button 
-                                                    onClick={() => handleDeleteRule(rule.id)}
+                                                <button
+                                                    onClick={() => handleDeleteRule(rule)}
+                                                    disabled={actionLoading}
                                                     style={{
                                                         background: 'none', border: 'none', color: '#ef4444',
-                                                        cursor: 'pointer', padding: '6px', borderRadius: '4px',
-                                                        display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                                        cursor: actionLoading ? 'not-allowed' : 'pointer', padding: '6px', borderRadius: '4px',
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
                                                     }}
-                                                    title="Regel löschen"
+                                                    title={rule.isLocal ? 'Regel verwerfen' : 'Gespeicherte Regel löschen'}
                                                 >
                                                     <Trash2 size={16} />
                                                 </button>
@@ -1335,46 +1356,44 @@ const BankReconciliation = () => {
 
                 </div>
 
-                {/* Right Area - Connected Bank Account Info */}
+                {/* Right Area - Demo-Konto */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                    
+
                     <Card style={{ padding: '16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                            <h3 style={{ fontSize: '0.92rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>Bankverbindungen</h3>
-                            <Badge variant={connections.length > 0 ? 'success' : 'secondary'}>
-                                {connections.length > 0 ? 'FinAPI Verbunden' : 'Keine'}
+                            <h3 style={{ fontSize: '0.92rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>Bankverbindung</h3>
+                            <Badge variant={demoActive ? 'warning' : 'default'}>
+                                {demoActive ? 'Demo' : 'Keine'}
                             </Badge>
                         </div>
 
-                        {connections.length > 0 ? (
-                            connections.map(conn => (
-                                <div key={conn.id} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                    <div style={{ padding: '12px', border: '1px solid var(--border-color)', borderRadius: '8px', backgroundColor: 'var(--bg-secondary)' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, fontSize: '0.9rem' }}>
-                                            <Building2 size={16} color="var(--primary-color)" /> {conn.bank_name}
-                                        </div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px', fontFamily: 'monospace' }}>
-                                            {conn.iban}
-                                        </div>
-                                        <div style={{ fontSize: '1.2rem', fontWeight: 800, marginTop: '10px', color: 'var(--primary-color)' }}>
-                                            {formatCurrency(conn.balance)}
-                                        </div>
+                        {demoActive ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                <div style={{ padding: '12px', border: '1px solid var(--border-color)', borderRadius: '8px', backgroundColor: 'var(--bg-secondary)' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, fontSize: '0.9rem' }}>
+                                        <Building2 size={16} color="var(--primary-color)" /> Demo-Konto (Beispieldaten)
                                     </div>
-                                    <button 
-                                        onClick={() => handleDisconnectBank(conn.id)}
-                                        style={{
-                                            width: '100%', padding: '8px', fontSize: '0.8rem', fontWeight: 600,
-                                            color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.04)',
-                                            border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '6px', cursor: 'pointer'
-                                        }}
-                                    >
-                                        Verbindung trennen
-                                    </button>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px', lineHeight: 1.4 }}>
+                                        Keine echte Bank, keine IBAN, kein Kontostand.
+                                    </div>
+                                    <div style={{ fontSize: '0.82rem', marginTop: '8px' }}>
+                                        {transactions.length} Beispiel-Umsätze · {openCount} offen
+                                    </div>
                                 </div>
-                            ))
+                                <button
+                                    onClick={handleEndDemo}
+                                    style={{
+                                        width: '100%', padding: '8px', fontSize: '0.8rem', fontWeight: 600,
+                                        color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.04)',
+                                        border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '6px', cursor: 'pointer'
+                                    }}
+                                >
+                                    Demo beenden
+                                </button>
+                            </div>
                         ) : (
-                            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', padding: '12px 0' }}>
-                                Keine aktiven Bankverknüpfungen vorhanden.
+                            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', padding: '12px 0', lineHeight: 1.5 }}>
+                                Eine Anbindung an Ihre Bank ist noch nicht verfügbar. Mit „Demo starten“ sehen Sie den Abgleich mit Beispiel-Umsätzen.
                             </div>
                         )}
                     </Card>
@@ -1382,13 +1401,13 @@ const BankReconciliation = () => {
                     {/* How it works info panel */}
                     <Card style={{ padding: '16px', backgroundColor: 'rgba(14, 165, 233, 0.03)', border: '1px solid rgba(14, 165, 233, 0.15)' }}>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '0.88rem', fontWeight: 700, color: '#0ea5e9' }}>
-                            <HelpCircle size={16} /> Wie funktioniert der Abgleich?
+                            <HelpCircle size={16} /> Wie soll der Abgleich funktionieren?
                         </div>
                         <ol style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', paddingLeft: '16px', marginTop: '10px', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            <li>Verbinden Sie Ihr Girokonto über die FinAPI Rest-API.</li>
-                            <li>Das System ordnet Mieteingänge und Zahlungsabgänge automatisch zu.</li>
-                            <li>Bestätigen Sie den Vorschlag, um die Buchung festzuschreiben.</li>
-                            <li>Manuelle Korrekturen werden als Regel gespeichert und beim nächsten Mal als Vorschlag mit hoher Konfidenz bereitgestellt.</li>
+                            <li>Künftig: Kontoumsätze werden über eine Bankschnittstelle oder einen Datei-Import übernommen. In der Demo stehen Beispiel-Umsätze bereit.</li>
+                            <li>Das System schlägt passende Mietverträge bzw. Kostenarten vor (gelernte IBAN-Regeln, Mietername, Betrag).</li>
+                            <li>„Bestätigen“ zeigt, welche Buchung entstehen würde – in der Demo wird nichts gespeichert.</li>
+                            <li>Manuelle Zuordnungen werden als Regel gemerkt (in der Demo nur bis zum Neuladen der Seite).</li>
                         </ol>
                     </Card>
 
@@ -1396,115 +1415,33 @@ const BankReconciliation = () => {
 
             </div>
 
-            {/* CONNECT BANK MODAL (FinAPI interface) */}
+            {/* ZUORDNUNGS-DIALOG (Vorschau) */}
             <Modal
-                isOpen={showConnectModal}
-                onClose={() => setShowConnectModal(false)}
-                title={connectStep === 'bank-select' ? 'Bankkonto verknüpfen' : connectStep === 'login' ? 'FinAPI Bank-Anmeldung' : 'Erfolgreich verknüpft!'}
-                maxWidth="460px"
-            >
-                {connectStep === 'bank-select' && (
-                    <div>
-                        <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                            Wählen Sie Ihre Bank aus, um eine sichere Verbindung über die FinAPI.io Rest Schnittstelle aufzubauen.
-                        </p>
-
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
-                            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Ihre Bank suchen oder auswählen</label>
-                            <select 
-                                value={selectedBank} 
-                                onChange={e => setSelectedBank(e.target.value)}
-                                style={{ padding: '10px', borderRadius: '6px', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontSize: '0.9rem' }}
-                            >
-                                <option value="">-- Bitte Bank wählen --</option>
-                                <option value="Sparkasse Zweibrücken">Sparkasse Zweibrücken</option>
-                                <option value="Deutsche Bank AG">Deutsche Bank AG</option>
-                                <option value="Commerzbank AG">Commerzbank AG</option>
-                                <option value="VR-Bank eG">VR-Bank eG</option>
-                                <option value="N26 Bank">N26 Bank</option>
-                                <option value="FinAPI Web-Sandbox">FinAPI Web-Sandbox (Demo)</option>
-                            </select>
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-                            <Button variant="ghost" onClick={() => setShowConnectModal(false)}>Abbrechen</Button>
-                            <Button disabled={!selectedBank} onClick={() => setConnectStep('login')}>Weiter</Button>
-                        </div>
-                    </div>
-                )}
-
-                {connectStep === 'login' && (
-                    <div>
-                        <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                            Melden Sie sich sicher mit Ihren Online-Banking Zugangsdaten an. FinAPI verschlüsselt die Verbindung nach PSD2 Richtlinien.
-                        </p>
-
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
-                            <div>
-                                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Online-Banking Benutzername / Anmeldename</label>
-                                <Input type="text" value={loginUser} onChange={e => setLoginUser(e.target.value)} />
-                            </div>
-                            <div>
-                                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>PIN / Passwort</label>
-                                <Input type="password" value={loginPin} onChange={e => setLoginPin(e.target.value)} />
-                            </div>
-
-                            <div style={{ display: 'flex', gap: '8px', padding: '10px', backgroundColor: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: '6px', fontSize: '0.72rem', color: '#0284c7', lineHeight: 1.4 }}>
-                                <Key size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
-                                <span>Sandbox-Modus aktiv: Geben Sie beliebige Zugangsdaten ein, um das Demokonto erfolgreich zu verknüpfen.</span>
-                            </div>
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-                            <Button variant="ghost" onClick={() => setConnectStep('bank-select')}>Zurück</Button>
-                            <Button onClick={connectSandboxBank} disabled={actionLoading}>
-                                {actionLoading ? <Loader2 size={16} className="animate-spin" /> : 'Konto verbinden'}
-                            </Button>
-                        </div>
-                    </div>
-                )}
-
-                {connectStep === 'success' && (
-                    <div style={{ textAlign: 'center', padding: '16px 0' }}>
-                        <div style={{ width: '56px', height: '56px', borderRadius: '28px', backgroundColor: 'rgba(22, 163, 74, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--success-color)', margin: '0 auto 16px' }}>
-                            <Check size={28} />
-                        </div>
-                        <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: 1.4 }}>
-                            Das Konto bei der <strong>{selectedBank}</strong> wurde erfolgreich über die FinAPI Schnittstelle importiert und synchronisiert.
-                        </p>
-                        <Button onClick={() => setShowConnectModal(false)}>Schließen & Transaktionen ansehen</Button>
-                    </div>
-                )}
-            </Modal>
-
-            {/* MANUAL MAPPING / BOOKING MODAL (Exactly matching Finance.jsx structures) */}
-            <Modal
-                isOpen={!!manualMapTx}
+                isOpen={!!manualTx}
                 onClose={() => setManualMapTx(null)}
-                title="Buchung erfassen"
+                title={manualIsCredit ? 'Mieteingang zuordnen (Demo)' : 'Ausgabe zuordnen (Demo)'}
                 footer={
                     <>
                         <Button variant="secondary" onClick={() => setManualMapTx(null)}>Abbrechen</Button>
-                        <Button onClick={handleSaveManualMap} disabled={actionLoading || (manualTargetType === 'income' ? !incomeForm.tenant_id : !expenseForm.category_id)}>Speichern</Button>
+                        <Button onClick={handleSaveManualMap} disabled={saveDisabled}>Zuordnen (Vorschau)</Button>
                     </>
                 }
             >
-                {actionLoading && <LoadingOverlay message="Buche..." />}
-                
-                {/* Tabs to switch Income/Expense */}
-                <div style={{ display: 'flex', gap: '10px', marginBottom: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color-soft)', paddingBottom: '10px' }}>
-                    <button
-                        onClick={() => setManualTargetType('expense')}
-                        style={{ padding: '8px 16px', borderRadius: '20px', backgroundColor: manualTargetType === 'expense' ? 'var(--danger-color)' : '#F3F4F6', color: manualTargetType === 'expense' ? 'white' : 'var(--text-primary)', border: 'none', cursor: 'pointer' }}
-                    >Kosten</button>
-                    <button
-                        onClick={() => setManualTargetType('income')}
-                        style={{ padding: '8px 16px', borderRadius: '20px', backgroundColor: manualTargetType === 'income' ? 'var(--success-color)' : '#F3F4F6', color: manualTargetType === 'income' ? 'white' : 'var(--text-primary)', border: 'none', cursor: 'pointer' }}
-                    >Mieteingänge</button>
-                </div>
+                {manualTx && (
+                    <div style={{ padding: '10px 12px', marginBottom: 'var(--spacing-lg)', borderRadius: '8px', backgroundColor: 'var(--bg-secondary)', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                        <div><strong>{manualTx.counterpart_name || 'Unbekannt'}</strong> · {formatDate(manualTx.booking_date)} · {formatCurrency(manualTx.amount)}</div>
+                        <div style={{ color: 'var(--text-secondary)' }}>{manualTx.purpose}</div>
+                        <div style={{ marginTop: '4px' }}>Noch offen: <strong>{formatCurrency(manualRemaining)}</strong></div>
+                        <div style={{ marginTop: '4px', fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                            {manualIsCredit
+                                ? 'Gutschriften werden als Mieteingang zugeordnet. Erstattungen von Dienstleistern bitte direkt in den Finanzen erfassen.'
+                                : 'Abbuchungen werden als Ausgabe zugeordnet. Rückzahlungen an Mieter (z. B. Kaution, Nebenkosten-Guthaben) bitte direkt in den Finanzen erfassen.'}
+                        </div>
+                    </div>
+                )}
 
                 {/* Expense Form */}
-                {manualTargetType === 'expense' && (
+                {!manualIsCredit && (
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <Input label="Datum" type="date" value={expenseForm.booking_date} onChange={e => setExpenseForm({ ...expenseForm, booking_date: e.target.value })} />
@@ -1512,13 +1449,13 @@ const BankReconciliation = () => {
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <div>
-                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Kostenart</label>
+                                <label style={labelStyle}>Kostenart</label>
                                 <select
-                                    style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
+                                    style={selectStyle}
                                     value={expenseForm.category_id}
                                     onChange={e => {
                                         const catId = e.target.value;
-                                        const cat = categories.find(c => c.id === catId);
+                                        const cat = categoryById.get(catId);
                                         setExpenseForm({
                                             ...expenseForm,
                                             category_id: catId,
@@ -1536,36 +1473,36 @@ const BankReconciliation = () => {
                         </div>
 
                         <div>
-                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Zuordnung</label>
+                            <label style={labelStyle}>Zuordnung</label>
                             <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
-                                <label style={{ display: 'flex', alignItems: 'center' }}><input type="radio" checked={expenseForm.scope === 'general'} onChange={() => setExpenseForm({ ...expenseForm, scope: 'general' })} /> Allgemein</label>
+                                <label style={{ display: 'flex', alignItems: 'center' }}><input type="radio" checked={expenseForm.scope === 'general'} onChange={() => setExpenseForm({ ...expenseForm, scope: 'general', unit_id: '' })} /> Allgemein</label>
                                 <label style={{ display: 'flex', alignItems: 'center' }}><input type="radio" checked={expenseForm.scope === 'unit'} onChange={() => setExpenseForm({ ...expenseForm, scope: 'unit' })} /> Einheit</label>
                             </div>
                         </div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <div>
-                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Immobilie</label>
+                                <label style={labelStyle}>Immobilie</label>
                                 <select
-                                    style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
+                                    style={selectStyle}
                                     value={expenseForm.property_id}
                                     onChange={e => setExpenseForm({ ...expenseForm, property_id: e.target.value, unit_id: '' })}
                                 >
                                     <option value="">Wählen...</option>
-                                    {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
+                                    {scoped.properties.map(p => <option key={p.id} value={p.id}>{propertyLabel(p)}</option>)}
                                 </select>
                             </div>
                             {expenseForm.scope === 'unit' && (
                                 <div>
-                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Einheit</label>
+                                    <label style={labelStyle}>Einheit</label>
                                     <select
-                                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
+                                        style={selectStyle}
                                         value={expenseForm.unit_id}
                                         onChange={e => setExpenseForm({ ...expenseForm, unit_id: e.target.value })}
                                         disabled={!expenseForm.property_id}
                                     >
                                         <option value="">Wählen...</option>
-                                        {formUnits.map(u => <option key={u.id} value={u.id}>{u.unit_name}</option>)}
+                                        {expenseFormUnits.map(u => <option key={u.id} value={u.id}>{u.unit_name}</option>)}
                                     </select>
                                 </div>
                             )}
@@ -1582,61 +1519,56 @@ const BankReconciliation = () => {
                 )}
 
                 {/* Income Form */}
-                {manualTargetType === 'income' && (
+                {manualIsCredit && (
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <Input label="Zahldatum" type="date" value={incomeForm.payment_date} onChange={e => setIncomeForm({ ...incomeForm, payment_date: e.target.value })} />
-                            <Input label="Monat" type="month" value={incomeForm.period_month} onChange={e => setIncomeForm({ ...incomeForm, period_month: e.target.value })} />
+                            <Input label="Leistungsmonat" type="month" value={incomeForm.period_month} onChange={e => setIncomeForm({ ...incomeForm, period_month: e.target.value })} />
                         </div>
 
                         <div>
-                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Mieter</label>
+                            <label style={labelStyle}>Immobilie (Filter)</label>
                             <select
-                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
-                                value={incomeForm.tenant_id}
-                                onChange={handleTenantChange}
+                                style={selectStyle}
+                                value={incomeForm.property_id}
+                                onChange={e => {
+                                    const propertyId = e.target.value;
+                                    const keepLease = selectedIncomeLease && (!propertyId || selectedIncomeLease.unit?.property_id === propertyId);
+                                    setIncomeForm({ ...incomeForm, property_id: propertyId, lease_id: keepLease ? incomeForm.lease_id : '' });
+                                }}
+                            >
+                                <option value="">Alle Immobilien</option>
+                                {scoped.properties.map(p => <option key={p.id} value={p.id}>{propertyLabel(p)}</option>)}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label style={labelStyle}>Mietvertrag (Mieter – Einheit)</label>
+                            <select
+                                style={selectStyle}
+                                value={incomeForm.lease_id}
+                                onChange={e => {
+                                    const lease = scopedLeaseById.get(e.target.value);
+                                    setIncomeForm({ ...incomeForm, lease_id: e.target.value, property_id: incomeForm.property_id || lease?.unit?.property_id || '' });
+                                }}
                             >
                                 <option value="">Wählen...</option>
-                                {Array.from(new Map(tenants.map(t => [t.first_name + t.last_name, t])).values()).map(t => (
-                                    <option key={t.id} value={t.id}>{t.last_name}, {t.first_name}</option>
+                                {incomeLeaseOptions.map(({ lease, ended }) => (
+                                    <option key={lease.id} value={lease.id}>
+                                        {leaseLabel(lease)}{ended ? ' – beendet' : ''}
+                                    </option>
                                 ))}
                             </select>
                         </div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
-                            <div>
-                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Immobilie</label>
-                                <select
-                                    style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
-                                    value={incomeForm.property_id}
-                                    onChange={e => setIncomeForm({ ...incomeForm, property_id: e.target.value, unit_id: '' })}
-                                >
-                                    <option value="">Wählen...</option>
-                                    {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
-                                </select>
-                            </div>
-                            <div>
-                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Einheit</label>
-                                <select
-                                    style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color-soft)' }}
-                                    value={incomeForm.unit_id}
-                                    onChange={handleUnitChange}
-                                    disabled={!incomeForm.property_id}
-                                >
-                                    <option value="">Wählen...</option>
-                                    {formUnits.map(u => <option key={u.id} value={u.id}>{u.unit_name}</option>)}
-                                </select>
-                            </div>
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <CurrencyInput label="Betrag (€)" allowDecimals value={incomeForm.amount} onChange={e => setIncomeForm({ ...incomeForm, amount: e.target.value })} />
                             <div>
-                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Soll-Miete (Gesamt)</label>
+                                <label style={labelStyle}>Soll-Miete (Gesamt)</label>
                                 <input
                                     type="text"
                                     disabled
-                                    value={expectedRentDisplay ? `${expectedRentDisplay} €` : '-'}
+                                    value={selectedIncomeLease ? formatCurrency(leaseMonthlyTotal(selectedIncomeLease)) : '-'}
                                     style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', color: 'var(--text-secondary)' }}
                                 />
                             </div>
@@ -1645,9 +1577,13 @@ const BankReconciliation = () => {
                     </div>
                 )}
 
-                <div style={{ display: 'flex', gap: '8px', padding: '10px', backgroundColor: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: '6px', fontSize: '0.72rem', color: '#0ea5e9', lineHeight: 1.4, marginTop: '20px' }}>
+                <div style={{ display: 'flex', gap: '8px', padding: '10px', backgroundColor: 'rgba(56, 189, 248, 0.05)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: '6px', fontSize: '0.72rem', color: '#0284c7', lineHeight: 1.4, marginTop: '20px' }}>
                     <Save size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
-                    <span><strong>Regel lernen:</strong> Bei Bestätigung speichert die lernende Datenbank diesen Zuweisungskontext (Haus, Einheit, Kostenkategorie/Mieter) für bessere zukünftige Match-Vorschläge.</span>
+                    <span>
+                        <strong>Nur Vorschau:</strong> Es wird keine Mietzahlung bzw. Ausgabe gespeichert. Die Zuordnung wird für weitere Umsätze
+                        dieses Zahlungspartners (gleiche IBAN bzw. gleicher Name) als Regel gemerkt – nur in dieser Demo bis zum Neuladen der Seite.
+                        Bei einer eigenen Kategorie (Freitext) wird keine Regel gemerkt. Ein Teilbetrag lässt den Rest des Umsatzes offen.
+                    </span>
                 </div>
             </Modal>
         </div>

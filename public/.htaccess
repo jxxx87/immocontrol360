@@ -1,7 +1,51 @@
+# ImmoControl360 Web-App (app.immocontrol360.de)
+# Wird beim Build nach dist/ kopiert und liegt im production-Branch unter /app (= Docroot der Subdomain).
+# Komplett-Check 2026-11-27: Sicherheits-Header, Cache-Regeln, echtes 404 fuer fehlende Assets,
+# Umleitung von immocontrol360.de/app/ auf die Subdomain. Eine Content-Security-Policy folgt separat.
+
+# JavaScript-Module (.mjs, z. B. der PDF-Worker) mit JavaScript-MIME-Typ ausliefern
+<IfModule mod_mime.c>
+  AddType text/javascript .mjs
+</IfModule>
+
+<IfModule mod_headers.c>
+  # Sicherheits-Header
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Strict-Transport-Security "max-age=31536000"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+
+  # index.html (auch als SPA-Fallback) immer beim Server nachfragen,
+  # damit nach einem Deploy sofort die neuen Asset-Namen geladen werden
+  <FilesMatch "\.html$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+
+  # Von Vite gehashte Dateien (Name-<8 Zeichen Hash>.ext unter /assets/) aendern sich nie
+  <FilesMatch "-[A-Za-z0-9_-]{8}\.(js|mjs|css|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|webp|avif|ico|wasm)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
+
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
+
+  # Die App ist nur fuer die Subdomain gebaut (absolute /assets-Pfade). Ueber die Hauptdomain
+  # (immocontrol360.de/app/...) wuerde sie mit den Dateien der Marketing-Seite kaputt laden -> umleiten.
+  # Zweite Bedingung als Schleifenschutz: nur, wenn dieser Ordner NICHT selbst das Docroot ist.
+  RewriteCond %{HTTP_HOST} ^(www\.)?immocontrol360\.de$ [NC]
+  RewriteCond %{DOCUMENT_ROOT} !/app/?$
+  RewriteRule ^(.*)$ https://app.immocontrol360.de/$1 [R=301,L]
+
   RewriteRule ^index\.html$ - [L]
+
+  # Fehlende Dateien unter /assets/ (z. B. alte Hash-Namen nach einem Deploy) bekommen ein echtes 404
+  # statt index.html - sonst scheitert das Modul-Script am MIME-Typ und die Seite bleibt weiss.
+  RewriteRule ^assets/ - [L]
+
+  # SPA-Fallback: alle uebrigen unbekannten Pfade liefern index.html (React Router)
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
   RewriteCond %{REQUEST_FILENAME} !-l

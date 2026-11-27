@@ -9,10 +9,38 @@ import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
-import { 
-  Building2, Users, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Plus, 
-  MoreVertical, Link as LinkIcon, FileText, ClipboardList, Calendar, Check, X, Clock, UploadCloud, ChevronRight 
+import {
+  Building2, Users, Search, Trash2, Eye, Filter, Home, Key, AlertCircle, Plus,
+  MoreVertical, Link as LinkIcon, FileText, ClipboardList, Calendar, Check, X, Clock, UploadCloud, ChevronRight
 } from 'lucide-react';
+
+const APPLICANT_BUCKET = 'applicant-documents';
+
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+  !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+// Lokales Datum (nicht UTC) als YYYY-MM-DD
+const localDateString = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// 'YYYY-MM-DD' als lokales Datum parsen (new Date('YYYY-MM-DD') wäre UTC-Mitternacht)
+const parseLocalDate = (value) => {
+  if (!value) return null;
+  const [y, m, d] = String(value).slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+
+const formatDateDe = (value) => {
+  const d = parseLocalDate(value);
+  return d ? d.toLocaleDateString('de-DE') : '—';
+};
+
+const toAmount = (v) => {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return isNaN(n) ? 0 : n;
+};
 
 const Letting = () => {
   const { user } = useAuth();
@@ -23,7 +51,9 @@ const Letting = () => {
   const [vacantUnits, setVacantUnits] = useState([]);
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [detailLoadingId, setDetailLoadingId] = useState(null);
   const [smtpConfigured, setSmtpConfigured] = useState(true);
 
   // Filter State
@@ -40,6 +70,10 @@ const Letting = () => {
   const [applicants, setApplicants] = useState([]);
   const [viewings, setViewings] = useState([]);
   const [bookings, setBookings] = useState([]);
+  // Bewerberunterlagen im Zwischenspeicher: { [applicantId]: { loading, files, error } }
+  const [applicantDocs, setApplicantDocs] = useState({});
+  // Bestätigungsdialog "Mieter annehmen"
+  const [convertDialog, setConvertDialog] = useState(null);
 
   // Form State - Start Letting Process
   const [startForm, setStartForm] = useState({
@@ -64,20 +98,21 @@ const Letting = () => {
 
   // 3-Dots Action Menu
   const [openActionMenuId, setOpenActionMenuId] = useState(null);
-  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
   // Fetch Data
   const fetchData = async () => {
     if (!user) return;
     try {
       setLoading(true);
+      setLoadError(null);
 
       // 1. Fetch properties
-      const { data: propsData } = await supabase
+      const { data: propsData, error: propsErr } = await supabase
         .from('properties')
         .select('*')
         .eq('user_id', user.id)
         .order('street');
+      if (propsErr) throw propsErr;
       setProperties(propsData || []);
 
       // 2. Fetch units
@@ -101,55 +136,67 @@ const Letting = () => {
       if (unitsErr) throw unitsErr;
 
       // 3. Fetch active leases for vacancy check
-      const { data: leasesData } = await supabase
+      const { data: leasesData, error: leasesErr } = await supabase
         .from('leases')
-        .select('*')
+        .select('id, unit_id, start_date, end_date, status')
         .eq('user_id', user.id)
         .eq('status', 'active');
+      if (leasesErr) throw leasesErr;
 
-      const today = new Date().toISOString().split('T')[0];
-      const activeLeaseUnitIds = (leasesData || [])
+      const today = localDateString();
+      const currentLeaseUnitIds = new Set((leasesData || [])
         .filter(l => l.start_date <= today && (!l.end_date || l.end_date >= today))
-        .map(l => l.unit_id);
+        .map(l => l.unit_id));
+      // Künftige Verträge: Einheit ist bereits vermietet (ab Mietbeginn)
+      const futureLeaseStartByUnit = {};
+      (leasesData || [])
+        .filter(l => l.start_date > today)
+        .forEach(l => {
+          const known = futureLeaseStartByUnit[l.unit_id];
+          if (!known || l.start_date < known) futureLeaseStartByUnit[l.unit_id] = l.start_date;
+        });
 
-      // 4. Fetch letting processes
-      const { data: processesData } = await supabase
+      // 4. Fetch letting processes (neueste zuerst)
+      const { data: processesData, error: processesErr } = await supabase
         .from('rental_processes')
         .select('*')
-        .eq('user_id', user.id);
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      if (processesErr) throw processesErr;
 
       // 5. Merge vacancy & letting processes
-      const vacant = (unitsData || []).filter(u => !u.is_vacation_rental && !activeLeaseUnitIds.includes(u.id));
+      const vacant = (unitsData || []).filter(u => !u.is_vacation_rental && !currentLeaseUnitIds.has(u.id));
 
       const merged = vacant.map(u => {
-        // Find if there is a letting process
-        const process = (processesData || []).find(p => p.unit_id === u.id);
-        
-        let status = 'kein_prozess';
-        if (process) {
-          status = process.status;
+        const unitProcesses = (processesData || []).filter(p => p.unit_id === u.id);
+        // Laufender Prozess hat Vorrang, sonst der neueste
+        let process = unitProcesses.find(p => p.status === 'in_vermietung') || unitProcesses[0] || null;
+        const rentedFrom = futureLeaseStartByUnit[u.id] || null;
+
+        // Abgeschlossener Prozess, dessen Mietbeginn länger als 2 Wochen zurückliegt, während die
+        // Einheit wieder leer steht: alter Prozess ist erledigt, Einheit kann neu vermietet werden.
+        if (process && process.status === 'vermietet' && !rentedFrom && process.lease_start_date) {
+          const start = parseLocalDate(process.lease_start_date);
+          const diffDays = start ? Math.ceil((Date.now() - start.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+          if (diffDays > 14) process = null;
         }
+
+        let status = process ? process.status : 'kein_prozess';
+        if (rentedFrom && status !== 'in_vermietung') status = 'vermietet';
 
         return {
           ...u,
-          process: process || null,
-          letting_status: status
+          process,
+          letting_status: status,
+          rented_from: rentedFrom
         };
       });
 
-      // Filter out Vermietet items older than 2 weeks
-      const filteredMerged = merged.filter(item => {
-        if (item.letting_status === 'vermietet' && item.process?.lease_start_date) {
-          const start = new Date(item.process.lease_start_date);
-          const diffDays = Math.ceil((Date.now() - start.getTime()) / (1000 * 60 * 60 * 24));
-          if (diffDays > 14) return false;
-        }
-        return true;
-      });
-
-      setVacantUnits(filteredMerged);
+      setVacantUnits(merged);
     } catch (err) {
       console.error('Error fetching letting processes:', err);
+      setVacantUnits([]);
+      setLoadError('Die Vermietungsdaten konnten nicht geladen werden: ' + (err.message || 'Unbekannter Fehler'));
     } finally {
       setLoading(false);
     }
@@ -178,20 +225,23 @@ const Letting = () => {
   const handleOpenStartModal = (unit) => {
     setSelectedUnit(unit);
     
-    // Auto-generate values
-    const street = unit.property?.street || '';
+    // Auto-generate values (nur aus vorhandenen Angaben – keine Platzhalterwerte)
     const city = unit.property?.city || '';
     const rooms = unit.rooms || '';
-    const sqm = unit.sqm || '';
-    const floor = unit.floor ? `${unit.floor}. OG` : 'Erdgeschoss';
+    const sqm = unit.sqm ? (parseFloat(unit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '';
+    // units.floor ist Freitext: reine Zahl -> "n. OG" bzw. Erdgeschoss, sonst unverändert übernehmen
+    const rawFloor = unit.floor ? String(unit.floor).trim() : '';
+    let floor = '';
+    if (/^\d+$/.test(rawFloor)) floor = rawFloor === '0' ? 'Erdgeschoss' : `${rawFloor}. OG`;
+    else if (rawFloor) floor = rawFloor;
     const fittedKitchen = unit.fitted_kitchen ? 'Einbauküche' : '';
     const balcony = unit.balcony ? 'Balkon' : '';
-    
-    const title = `${rooms ? rooms + '-Zimmer-' : ''}Wohnung in ${city || 'Zweibrücken'}${balcony || fittedKitchen ? ' mit ' + [balcony, fittedKitchen].filter(Boolean).join(' und ') : ''}`;
-    
-    const desc = `Schöne ${rooms || '2'}-Zimmer-Wohnung mit ca. ${sqm || '60'} m² Wohnfläche im ${floor} in ${city || 'Zweibrücken'}. Die Wohnung ist ab sofort bezugsfrei und bietet eine tolle Raumaufteilung.`;
 
-    const deposit = unit.deposit_soll || (unit.target_rent ? parseFloat(unit.target_rent) * 3 : '');
+    const title = `${rooms ? rooms + '-Zimmer-' : ''}Wohnung${city ? ' in ' + city : ''}${balcony || fittedKitchen ? ' mit ' + [balcony, fittedKitchen].filter(Boolean).join(' und ') : ''}`;
+
+    const desc = `Schöne ${rooms ? rooms + '-Zimmer-' : ''}Wohnung${sqm ? ` mit ca. ${sqm} m² Wohnfläche` : ''}${floor ? ` im ${floor}` : ''}${city ? ` in ${city}` : ''}.`;
+
+    const deposit = unit.deposit_soll ?? '';
 
     setStartForm({
       property_id: unit.property_id,
@@ -200,9 +250,9 @@ const Letting = () => {
       listing_description: desc,
       required_documents: ['schufa', 'income_proof', 'id_copy', 'previous_landlord'],
       custom_requirements: [],
-      target_rent: unit.target_rent || '',
-      service_charge_soll: unit.service_charge_soll || '',
-      heating_cost_soll: unit.heating_cost_soll || '',
+      target_rent: unit.target_rent ?? '',
+      service_charge_soll: unit.service_charge_soll ?? '',
+      heating_cost_soll: unit.heating_cost_soll ?? '',
       deposit_soll: deposit,
       viewing_slots: [
         { date: '', start: '14:00', end: '17:00', duration: '15' }
@@ -214,20 +264,51 @@ const Letting = () => {
   };
 
   const handleStartProcess = async () => {
+    if (isSaving) return;
     if (!startForm.listing_title.trim()) return alert('Bitte geben Sie einen Titel an.');
+
+    // Besichtigungstage vorab prüfen (Dauer > 0, Beginn vor Ende)
+    const validSlots = startForm.viewing_slots.filter(s => s.date);
+    for (const s of validSlots) {
+      const duration = parseInt(s.duration, 10);
+      if (!(duration > 0)) return alert('Bitte eine gültige Slot-Dauer wählen.');
+      if (!s.start || !s.end || s.start >= s.end) {
+        return alert(`Besichtigung am ${formatDateDe(s.date)}: Die Uhrzeit "Beginn" muss vor "Ende" liegen.`);
+      }
+    }
+
     try {
       setIsSaving(true);
 
-      // 1. Update rents on unit
-      await supabase.from('units').update({
-        target_rent: parseFloat(startForm.target_rent) || 0,
-        service_charge_soll: parseFloat(startForm.service_charge_soll) || 0,
-        heating_cost_soll: parseFloat(startForm.heating_cost_soll) || 0,
-        deposit_soll: parseFloat(startForm.deposit_soll) || 0
-      }).eq('id', startForm.unit_id);
+      // 0. Kein zweiter laufender Prozess für dieselbe Einheit
+      const { data: running, error: runningErr } = await supabase
+        .from('rental_processes')
+        .select('id')
+        .eq('unit_id', startForm.unit_id)
+        .eq('status', 'in_vermietung')
+        .limit(1);
+      if (runningErr) throw runningErr;
+      if (running && running.length > 0) {
+        alert('Für diese Einheit läuft bereits ein Vermietungsprozess.');
+        setIsStartModalOpen(false);
+        fetchData();
+        return;
+      }
 
-      // 2. Generate random unique token
-      const token = crypto.randomUUID().replace(/-/g, '').substring(0, 16);
+      // 1. Update rents on unit
+      const { data: updatedUnits, error: unitErr } = await supabase.from('units').update({
+        target_rent: toAmount(startForm.target_rent),
+        service_charge_soll: toAmount(startForm.service_charge_soll),
+        heating_cost_soll: toAmount(startForm.heating_cost_soll),
+        deposit_soll: toAmount(startForm.deposit_soll)
+      }).eq('id', startForm.unit_id).select('id');
+      if (unitErr) throw unitErr;
+      if (!updatedUnits || updatedUnits.length === 0) {
+        throw new Error('Die Mietkonditionen der Einheit konnten nicht gespeichert werden (keine Berechtigung).');
+      }
+
+      // 2. Generate random unique token (volle 128-Bit-UUID)
+      const token = crypto.randomUUID().replace(/-/g, '');
 
       // 3. Create process
       const { data: processData, error: processErr } = await supabase.from('rental_processes').insert([
@@ -246,7 +327,7 @@ const Letting = () => {
       if (processErr) throw processErr;
 
       // 4. Create Viewing slots if viewing_slots are provided and valid
-      const validSlots = startForm.viewing_slots.filter(s => s.date);
+      let viewingWarning = '';
       if (validSlots.length > 0) {
         const slotsToInsert = validSlots.map(s => ({
           user_id: user.id,
@@ -254,21 +335,27 @@ const Letting = () => {
           date: s.date,
           start_time: s.start,
           end_time: s.end,
-          slot_duration_minutes: parseInt(s.duration) || 15
+          slot_duration_minutes: parseInt(s.duration, 10)
         }));
 
         const { error: viewingErr } = await supabase.from('rental_viewings').insert(slotsToInsert);
-        if (viewingErr) console.error('Error creating viewings:', viewingErr);
+        if (viewingErr) {
+          console.error('Error creating viewings:', viewingErr);
+          viewingWarning = viewingErr.message || 'Unbekannter Fehler';
+        }
       }
 
-      // 5. Trigger Cloud folder creation async (via cloud-sync function invoke)
-      supabase.functions.invoke('cloud-sync', {
-        body: { provider: 'onedrive', action: 'create' } // cloud-sync handles both
-      }).catch(err => console.error("Cloud folder creation failed in background:", err));
+      // Hinweis: Der Cloud-Ordner für Bewerberunterlagen wird beim ersten Unterlagen-Eingang
+      // automatisch angelegt (sync-applicant-files). Der frühere pauschale Aufruf von
+      // cloud-sync 'create' (fest auf OneDrive, ohne Bezug zur Einheit) entfällt.
 
       setIsStartModalOpen(false);
       fetchData();
-      alert('Der Vermietungsprozess wurde erfolgreich gestartet! Die Cloud-Ordner werden im Hintergrund angelegt.');
+      if (viewingWarning) {
+        alert('Der Vermietungsprozess wurde gestartet, aber die Besichtigungstermine konnten nicht gespeichert werden: ' + viewingWarning);
+      } else {
+        alert('Der Vermietungsprozess wurde erfolgreich gestartet!');
+      }
     } catch (err) {
       alert('Fehler beim Starten des Prozesses: ' + err.message);
     } finally {
@@ -282,50 +369,109 @@ const Letting = () => {
     if (!unit.process) return;
 
     try {
-      setLoading(true);
+      setDetailLoadingId(unit.id);
       // Fetch details from processes
-      const { data: process } = await supabase
+      const { data: process, error: processErr } = await supabase
         .from('rental_processes')
         .select('*')
         .eq('id', unit.process.id)
-        .single();
-      
-      setSelectedProcess(process);
+        .maybeSingle();
+      if (processErr) throw processErr;
+      if (!process) throw new Error('Der Vermietungsprozess wurde nicht gefunden.');
 
       // Fetch applicants
-      const { data: apps } = await supabase
+      const { data: apps, error: appsErr } = await supabase
         .from('rental_applicants')
         .select('*')
         .eq('process_id', unit.process.id)
         .order('created_at', { ascending: false });
-      
-      setApplicants(apps || []);
+      if (appsErr) throw appsErr;
 
       // Fetch viewings
-      const { data: vws } = await supabase
+      const { data: vws, error: vwsErr } = await supabase
         .from('rental_viewings')
         .select('*')
-        .eq('process_id', unit.process.id);
-      
-      setViewings(vws || []);
+        .eq('process_id', unit.process.id)
+        .order('date');
+      if (vwsErr) throw vwsErr;
 
       // Fetch bookings for these viewings
+      let bks = [];
       if (vws && vws.length > 0) {
-        const { data: bks } = await supabase
+        const { data: bookingData, error: bksErr } = await supabase
           .from('rental_viewing_bookings')
           .select('*, applicant:rental_applicants(*)')
           .in('viewing_id', vws.map(v => v.id));
-        setBookings(bks || []);
-      } else {
-        setBookings([]);
+        if (bksErr) throw bksErr;
+        bks = bookingData || [];
       }
 
+      setSelectedProcess(process);
+      setApplicants(apps || []);
+      setViewings(vws || []);
+      setBookings(bks);
+      setApplicantDocs({});
       setIsDetailModalOpen(true);
     } catch (err) {
       console.error(err);
+      alert('Die Details konnten nicht geladen werden: ' + (err.message || 'Unbekannter Fehler'));
     } finally {
-      setLoading(false);
+      setDetailLoadingId(null);
     }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Bewerberunterlagen (Bucket applicant-documents, nur für den Vermieter lesbar)
+  // Pfade: neu <process_id>/<applicant_id>/<datei>, alt <applicant_id>/<datei>
+  // ---------------------------------------------------------------------------
+  const listApplicantDocuments = async (app) => {
+    const prefixes = [`${app.process_id}/${app.id}`, `${app.id}`];
+    const files = [];
+    for (const prefix of prefixes) {
+      const { data, error } = await supabase.storage.from(APPLICANT_BUCKET).list(prefix, { limit: 100 });
+      if (error) throw error;
+      (data || [])
+        .filter(f => f && f.id) // Ordner-Einträge haben keine id
+        .forEach(f => files.push({ path: `${prefix}/${f.name}`, name: f.name }));
+    }
+    return files;
+  };
+
+  const handleShowDocuments = async (app) => {
+    setApplicantDocs(prev => ({ ...prev, [app.id]: { loading: true, files: [], error: null } }));
+    try {
+      const files = await listApplicantDocuments(app);
+      setApplicantDocs(prev => ({ ...prev, [app.id]: { loading: false, files, error: null } }));
+    } catch (err) {
+      setApplicantDocs(prev => ({ ...prev, [app.id]: { loading: false, files: [], error: err.message || 'Fehler beim Laden' } }));
+    }
+  };
+
+  const handleOpenDocument = async (path) => {
+    // Fenster sofort öffnen (sonst blockiert der Browser das Popup nach dem await)
+    const win = window.open('about:blank', '_blank');
+    try {
+      const { data, error } = await supabase.storage.from(APPLICANT_BUCKET).createSignedUrl(path, 120);
+      if (error) throw error;
+      if (win) win.location.href = data.signedUrl;
+      else window.location.assign(data.signedUrl);
+    } catch (err) {
+      if (win) win.close();
+      alert('Dokument konnte nicht geöffnet werden: ' + (err.message || 'Unbekannter Fehler'));
+    }
+  };
+
+  // Löscht alle Unterlagen eines Bewerbers aus dem Zwischenspeicher (wirft bei Fehler)
+  const removeApplicantDocuments = async (app) => {
+    const files = await listApplicantDocuments(app);
+    if (files.length === 0) return;
+    const { error } = await supabase.storage.from(APPLICANT_BUCKET).remove(files.map(f => f.path));
+    if (error) throw error;
+  };
+
+  const getDocLabelFromFile = (fileName) => {
+    const key = String(fileName).replace(/\.[^.]+$/, '').replace(/_\d+$/, '');
+    return getDocLabel(key);
   };
 
   const handleAddCustomRequirement = () => {
@@ -345,14 +491,18 @@ const Letting = () => {
   };
 
   const handleUpdateApplicantStatus = async (appId, newStatus) => {
+    // 'accepted' wird ausschließlich über "Mieter annehmen" gesetzt
+    if (newStatus === 'accepted') return;
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('rental_applicants')
         .update({ status: newStatus })
-        .eq('id', appId);
+        .eq('id', appId)
+        .select('id');
 
       if (error) throw error;
-      
+      if (!data || data.length === 0) throw new Error('Keine Berechtigung oder Bewerbung nicht gefunden.');
+
       // Update local state
       setApplicants(prev => prev.map(a => a.id === appId ? { ...a, status: newStatus } : a));
     } catch (err) {
@@ -360,72 +510,138 @@ const Letting = () => {
     }
   };
 
-  const handleConvertApplicantToTenant = async (app) => {
-    const confirmConvert = window.confirm(`Möchten Sie ${app.first_name} ${app.last_name} als Mieter annehmen und den Mietvertrag erstellen? Der Vermietungsprozess wird damit beendet.`);
-    if (!confirmConvert) return;
+  // Schritt 1: Bestätigungsdialog mit Mietbeginn und Beträgen öffnen
+  const handleConvertApplicantToTenant = (app) => {
+    if (isSaving) return;
+    if (!selectedProcess || selectedProcess.status !== 'in_vermietung') {
+      alert('Für diesen Vermietungsprozess wurde bereits ein Mieter angenommen.');
+      return;
+    }
+    setConvertDialog({
+      app,
+      start_date: app.earliest_move_in || localDateString(),
+      cold_rent: selectedUnit?.target_rent ?? '',
+      service_charge: selectedUnit?.service_charge_soll ?? '',
+      heating_cost: selectedUnit?.heating_cost_soll ?? '',
+      deposit: selectedUnit?.deposit_soll ?? '',
+      payment_due_day: 3
+    });
+  };
+
+  // Bisheriger Weg (falls die Datenbank-Funktion noch nicht eingespielt ist): Einzelschritte
+  const convertApplicantLegacy = async (dialog) => {
+    const { app } = dialog;
+
+    // Prozess frisch prüfen (Doppelklick / zweiter Tab)
+    const { data: freshProcess, error: freshErr } = await supabase
+      .from('rental_processes')
+      .select('id, status, unit_id')
+      .eq('id', selectedProcess.id)
+      .maybeSingle();
+    if (freshErr) throw freshErr;
+    if (!freshProcess || freshProcess.status !== 'in_vermietung') {
+      throw new Error('Für diesen Vermietungsprozess wurde bereits ein Mieter angenommen.');
+    }
+
+    // Überschneidung mit bestehendem aktiven Vertrag verhindern
+    const { data: overlapping, error: overlapErr } = await supabase
+      .from('leases')
+      .select('id, end_date')
+      .eq('unit_id', freshProcess.unit_id)
+      .eq('status', 'active');
+    if (overlapErr) throw overlapErr;
+    if ((overlapping || []).some(l => !l.end_date || l.end_date >= dialog.start_date)) {
+      throw new Error('Für diese Einheit besteht bereits ein aktiver Mietvertrag, der den gewählten Mietbeginn überschneidet.');
+    }
+
+    // 1. Create tenant row
+    const { data: tenantData, error: tenantErr } = await supabase
+      .from('tenants')
+      .insert([{
+        user_id: user.id,
+        first_name: app.first_name,
+        last_name: app.last_name,
+        email: app.email,
+        phone: app.phone,
+        occupants: app.additional_persons_count ? app.additional_persons_count + 1 : 1
+      }])
+      .select()
+      .single();
+
+    if (tenantErr) throw tenantErr;
+
+    // 2. Create lease
+    const { error: leaseErr } = await supabase
+      .from('leases')
+      .insert([{
+        user_id: user.id,
+        tenant_id: tenantData.id,
+        unit_id: freshProcess.unit_id,
+        start_date: dialog.start_date,
+        cold_rent: toAmount(dialog.cold_rent),
+        service_charge: toAmount(dialog.service_charge),
+        heating_cost: toAmount(dialog.heating_cost),
+        deposit: toAmount(dialog.deposit),
+        payment_due_day: dialog.payment_due_day,
+        lease_type: 'normal',
+        status: 'active'
+      }]);
+
+    if (leaseErr) {
+      // Angelegten Mieter wieder entfernen, damit kein verwaister Datensatz bleibt
+      await supabase.from('tenants').delete().eq('id', tenantData.id);
+      throw leaseErr;
+    }
+
+    // 3. Mark process as vermietet
+    const { error: processErr } = await supabase
+      .from('rental_processes')
+      .update({
+        status: 'vermietet',
+        lease_start_date: dialog.start_date,
+        rented_at: new Date().toISOString()
+      })
+      .eq('id', freshProcess.id);
+
+    if (processErr) {
+      throw new Error('Mieter und Mietvertrag wurden angelegt, aber der Vermietungsprozess konnte nicht abgeschlossen werden: ' + processErr.message);
+    }
+
+    // 4. Update applicant status to accepted
+    const { error: appErr } = await supabase
+      .from('rental_applicants')
+      .update({ status: 'accepted' })
+      .eq('id', app.id);
+    if (appErr) {
+      throw new Error('Mieter und Mietvertrag wurden angelegt, aber der Bewerberstatus konnte nicht aktualisiert werden: ' + appErr.message);
+    }
+  };
+
+  // Schritt 2: Umwandlung durchführen (eine Transaktion über die Datenbank-Funktion, sonst Einzelschritte)
+  const handleConfirmConvert = async () => {
+    if (isSaving || !convertDialog) return;
+    const dialog = convertDialog;
+    const dueDay = parseInt(dialog.payment_due_day, 10);
+    if (!dialog.start_date) return alert('Bitte einen Mietbeginn angeben.');
+    if (!(toAmount(dialog.cold_rent) > 0)) return alert('Bitte eine Kaltmiete größer 0 € angeben.');
+    if (!(dueDay >= 1 && dueDay <= 31)) return alert('Bitte einen Fälligkeitstag zwischen 1 und 31 angeben.');
 
     try {
       setIsSaving(true);
+      const { error, status } = await supabase.rpc('convert_rental_applicant_to_tenant', {
+        p_applicant_id: dialog.app.id,
+        p_start_date: dialog.start_date,
+        p_cold_rent: toAmount(dialog.cold_rent),
+        p_service_charge: toAmount(dialog.service_charge),
+        p_heating_cost: toAmount(dialog.heating_cost),
+        p_deposit: toAmount(dialog.deposit),
+        p_payment_due_day: dueDay
+      });
 
-      // 1. Create tenant row
-      const { data: tenantData, error: tenantErr } = await supabase
-        .from('tenants')
-        .insert([{
-          user_id: user.id,
-          first_name: app.first_name,
-          last_name: app.last_name,
-          email: app.email,
-          phone: app.phone,
-          occupants: app.additional_persons_count ? app.additional_persons_count + 1 : 1
-        }])
-        .select()
-        .single();
+      if (error && !isMissingRpc(error, status)) throw error;
+      if (error) await convertApplicantLegacy({ ...dialog, payment_due_day: dueDay });
 
-      if (tenantErr) throw tenantErr;
-
-      // 2. Create lease
-      const leaseStart = app.earliest_move_in || new Date().toISOString().split('T')[0];
-      const coldRent = parseFloat(selectedUnit.target_rent) || 0;
-      const serviceCharge = parseFloat(selectedUnit.service_charge_soll) || 0;
-      const heatingCost = parseFloat(selectedUnit.heating_cost_soll) || 0;
-      const deposit = parseFloat(selectedUnit.deposit_soll) || 0;
-
-      const { error: leaseErr } = await supabase
-        .from('leases')
-        .insert([{
-          user_id: user.id,
-          tenant_id: tenantData.id,
-          unit_id: selectedUnit.id,
-          start_date: leaseStart,
-          cold_rent: coldRent,
-          service_charge: serviceCharge,
-          heating_cost: heatingCost,
-          deposit: deposit,
-          payment_due_day: 3,
-          lease_type: 'normal',
-          status: 'active'
-        }]);
-
-      if (leaseErr) throw leaseErr;
-
-      // 3. Mark process as vermietet
-      const { error: processErr } = await supabase
-        .from('rental_processes')
-        .update({
-          status: 'vermietet',
-          lease_start_date: leaseStart,
-          rented_at: new Date().toISOString()
-        })
-        .eq('id', selectedProcess.id);
-
-      if (processErr) throw processErr;
-
-      // 4. Update applicant status to accepted
-      await supabase
-        .from('rental_applicants')
-        .update({ status: 'accepted' })
-        .eq('id', app.id);
-
+      setConvertDialog(null);
       setIsDetailModalOpen(false);
       fetchData();
       alert('Der Mieter wurde erfolgreich angelegt und das Mietverhältnis gestartet!');
@@ -436,19 +652,73 @@ const Letting = () => {
     }
   };
 
-  const handleDeleteProcess = async (processId) => {
-    if (!window.confirm('Möchten Sie diesen Vermietungsprozess wirklich löschen? Alle Bewerbungen und Termine dazu werden gelöscht.')) return;
+  // Einzelne Bewerbung samt Unterlagen löschen (DSGVO)
+  const handleDeleteApplicant = async (app) => {
+    if (isSaving) return;
+    if (!window.confirm(`Möchten Sie die Bewerbung von ${app.first_name || ''} ${app.last_name || ''} samt hochgeladener Unterlagen und Besichtigungstermine endgültig löschen?`)) return;
     try {
-      const { error } = await supabase
+      setIsSaving(true);
+      try {
+        await removeApplicantDocuments(app);
+      } catch (docErr) {
+        throw new Error('Die Unterlagen konnten nicht gelöscht werden, die Bewerbung wurde daher nicht gelöscht: ' + docErr.message);
+      }
+      const { data, error } = await supabase
+        .from('rental_applicants')
+        .delete()
+        .eq('id', app.id)
+        .select('id');
+      if (error) throw error;
+      if (!data || data.length === 0) throw new Error('Keine Berechtigung oder Bewerbung nicht gefunden.');
+
+      setApplicants(prev => prev.filter(a => a.id !== app.id));
+      setBookings(prev => prev.filter(b => b.applicant_id !== app.id));
+    } catch (err) {
+      alert('Fehler beim Löschen der Bewerbung: ' + err.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDeleteProcess = async (process) => {
+    if (!process) return;
+    if (!window.confirm('Möchten Sie diesen Vermietungsprozess wirklich löschen? Alle Bewerbungen, hochgeladenen Unterlagen und Termine dazu werden gelöscht.')) return;
+    try {
+      // Erst die Unterlagen aller Bewerber entfernen (die Datenbank-Kaskade erfasst den Speicher nicht)
+      const { data: apps, error: appsErr } = await supabase
+        .from('rental_applicants')
+        .select('id, process_id')
+        .eq('process_id', process.id);
+      if (appsErr) throw appsErr;
+      for (const app of apps || []) {
+        try {
+          await removeApplicantDocuments(app);
+        } catch (docErr) {
+          throw new Error('Die Bewerberunterlagen konnten nicht gelöscht werden, der Prozess wurde daher nicht gelöscht: ' + docErr.message);
+        }
+      }
+
+      const { data, error } = await supabase
         .from('rental_processes')
         .delete()
-        .eq('id', processId);
+        .eq('id', process.id)
+        .select('id');
 
       if (error) throw error;
+      if (!data || data.length === 0) throw new Error('Keine Berechtigung oder Prozess nicht gefunden.');
       setOpenActionMenuId(null);
       fetchData();
     } catch (err) {
       alert('Fehler beim Löschen des Prozesses: ' + err.message);
+    }
+  };
+
+  const copyLink = async (link, label) => {
+    try {
+      await navigator.clipboard.writeText(link);
+      alert(`${label} kopiert!`);
+    } catch {
+      window.prompt(`${label} konnte nicht automatisch kopiert werden. Bitte manuell kopieren:`, link);
     }
   };
 
@@ -459,7 +729,7 @@ const Letting = () => {
     return true;
   });
 
-  const getStatusBadge = (status) => {
+  const getStatusBadge = (status, rentedFrom) => {
     switch (status) {
       case 'in_vermietung':
         return (
@@ -470,7 +740,7 @@ const Letting = () => {
       case 'vermietet':
         return (
           <span style={{ backgroundColor: 'rgba(16, 185, 129, 0.1)', color: 'var(--success-color)', padding: '4px 10px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-            <Key size={12} /> Vermietet
+            <Key size={12} /> {rentedFrom ? `Vermietet ab ${formatDateDe(rentedFrom)}` : 'Vermietet'}
           </span>
         );
       default:
@@ -539,7 +809,7 @@ const Letting = () => {
               Keine E-Mail-Verbindung eingerichtet!
             </div>
             <div style={{ fontSize: '0.85rem', opacity: 0.9 }}>
-              Der E-Mail-Versand an Mietinteressenten (z.B. Einladungen, Terminbestätigungen) ist deaktiviert. 
+              Der E-Mail-Versand an Mietinteressenten (z.B. Eingangs- und Terminbestätigungen) ist deaktiviert.
               Klicken Sie hier, um Ihre SMTP-Verbindungsdaten in den Einstellungen einzurichten.
             </div>
           </div>
@@ -617,7 +887,17 @@ const Letting = () => {
         </div>
 
         {/* Vacant units list */}
-        {filteredUnits.length === 0 ? (
+        {loadError ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--danger-color)' }}>
+            <AlertCircle size={40} style={{ margin: '0 auto 12px', display: 'block', opacity: 0.7 }} />
+            <p style={{ marginBottom: '12px' }}>{loadError}</p>
+            <Button variant="secondary" onClick={fetchData}>Erneut laden</Button>
+          </div>
+        ) : loading && vacantUnits.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
+            <p>Daten werden geladen…</p>
+          </div>
+        ) : filteredUnits.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
             <Home size={40} style={{ margin: '0 auto 12px', display: 'block', opacity: 0.5 }} />
             <p>Keine vakanten Wohnungen mit den gewählten Filtern gefunden.</p>
@@ -648,7 +928,7 @@ const Letting = () => {
               {
                 header: 'Status',
                 accessor: 'letting_status',
-                render: (row) => getStatusBadge(row.letting_status)
+                render: (row) => getStatusBadge(row.letting_status, row.rented_from)
               },
               {
                 header: 'Aktionen',
@@ -659,8 +939,6 @@ const Letting = () => {
                     <button 
                       onClick={(e) => {
                         e.stopPropagation();
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setMenuPos({ top: rect.bottom + window.scrollY + 4, left: rect.left - 120 });
                         setOpenActionMenuId(openActionMenuId === row.id ? null : row.id);
                         setSelectedUnit(row);
                       }} 
@@ -692,16 +970,17 @@ const Letting = () => {
                           </button>
                         )}
                         {row.process && (
-                          <button 
+                          <button
                             onClick={() => handleOpenDetails(row)}
+                            disabled={detailLoadingId === row.id}
                             style={{ padding: '8px 16px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem' }}
                           >
-                            <Eye size={14} /> Details & Bewerber
+                            <Eye size={14} /> {detailLoadingId === row.id ? 'Wird geladen…' : 'Details & Bewerber'}
                           </button>
                         )}
                         {row.process && (
-                          <button 
-                            onClick={() => handleDeleteProcess(row.process.id)}
+                          <button
+                            onClick={() => handleDeleteProcess(row.process)}
                             style={{ padding: '8px 16px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--danger-color)' }}
                           >
                             <Trash2 size={14} /> Prozess löschen
@@ -730,19 +1009,19 @@ const Letting = () => {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
               <div>
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Soll-Kaltmiete (€)</label>
-                <CurrencyInput value={startForm.target_rent} onChange={(v) => setStartForm({ ...startForm, target_rent: v })} />
+                <CurrencyInput allowDecimals value={startForm.target_rent} onValueChange={(v) => setStartForm(prev => ({ ...prev, target_rent: v ?? '' }))} />
               </div>
               <div>
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Betriebskostenvorauszahlung (€)</label>
-                <CurrencyInput value={startForm.service_charge_soll} onChange={(v) => setStartForm({ ...startForm, service_charge_soll: v })} />
+                <CurrencyInput allowDecimals value={startForm.service_charge_soll} onValueChange={(v) => setStartForm(prev => ({ ...prev, service_charge_soll: v ?? '' }))} />
               </div>
               <div>
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Heizkostenvorauszahlung (€)</label>
-                <CurrencyInput value={startForm.heating_cost_soll} onChange={(v) => setStartForm({ ...startForm, heating_cost_soll: v })} />
+                <CurrencyInput allowDecimals value={startForm.heating_cost_soll} onValueChange={(v) => setStartForm(prev => ({ ...prev, heating_cost_soll: v ?? '' }))} />
               </div>
               <div>
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Kaution (€)</label>
-                <CurrencyInput value={startForm.deposit_soll} onChange={(v) => setStartForm({ ...startForm, deposit_soll: v })} />
+                <CurrencyInput allowDecimals value={startForm.deposit_soll} onValueChange={(v) => setStartForm(prev => ({ ...prev, deposit_soll: v ?? '' }))} />
               </div>
             </div>
 
@@ -784,6 +1063,9 @@ const Letting = () => {
                     </label>
                   ))}
                 </div>
+                <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '6px', lineHeight: 1.4 }}>
+                  Hinweis zum Datenschutz: Nach der Orientierungshilfe der Datenschutzkonferenz zur Mieterselbstauskunft sollen Bonitätsunterlagen erst kurz vor Vertragsschluss und Ausweiskopien grundsätzlich nicht verlangt werden. Bitte im Zweifel rechtlich prüfen lassen.
+                </p>
               </div>
 
               <div>
@@ -909,7 +1191,7 @@ const Letting = () => {
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '20px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
             <Button variant="secondary" onClick={() => setIsStartModalOpen(false)}>Abbrechen</Button>
-            <Button variant="primary" onClick={handleStartProcess} loading={isSaving}>Prozess Starten</Button>
+            <Button variant="primary" onClick={handleStartProcess} disabled={isSaving}>{isSaving ? 'Wird gestartet…' : 'Prozess Starten'}</Button>
           </div>
         </Modal>
       )}
@@ -941,22 +1223,14 @@ const Letting = () => {
                   <LinkIcon size={16} /> Portallinks
                 </h4>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <button 
-                    onClick={() => {
-                      const link = `${window.location.origin}/vermietung/${selectedProcess.token}`;
-                      navigator.clipboard.writeText(link);
-                      alert('Bewerbungs-Link kopiert!');
-                    }}
+                  <button
+                    onClick={() => copyLink(`${window.location.origin}/vermietung/${selectedProcess.token}`, 'Bewerbungs-Link')}
                     style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%', padding: '6px 10px', fontSize: '0.75rem', backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left' }}
                   >
                     <ClipboardList size={12} /> Bewerbungs-Portal kopieren
                   </button>
-                  <button 
-                    onClick={() => {
-                      const link = `${window.location.origin}/besichtigung/${selectedProcess.token}`;
-                      navigator.clipboard.writeText(link);
-                      alert('Besichtigungs-Link kopiert!');
-                    }}
+                  <button
+                    onClick={() => copyLink(`${window.location.origin}/besichtigung/${selectedProcess.token}`, 'Besichtigungs-Link')}
                     style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%', padding: '6px 10px', fontSize: '0.75rem', backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left' }}
                   >
                     <Calendar size={12} /> Besichtigungs-Planer kopieren
@@ -979,7 +1253,7 @@ const Letting = () => {
                     return (
                       <div key={vw.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', fontSize: '0.85rem' }}>
                         <div>
-                          <strong>{new Date(vw.date).toLocaleDateString('de-DE')}</strong> ({vw.start_time.substring(0, 5)} - {vw.end_time.substring(0, 5)} Uhr, {vw.slot_duration_minutes} min Slots)
+                          <strong>{formatDateDe(vw.date)}</strong> ({vw.start_time.substring(0, 5)} - {vw.end_time.substring(0, 5)} Uhr, {vw.slot_duration_minutes} min Slots)
                         </div>
                         <span style={{ fontWeight: 600, color: 'var(--primary-color)' }}>
                           {relatedBookings.length} Slots belegt
@@ -1008,29 +1282,49 @@ const Letting = () => {
                           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eingegangen am: {new Date(app.created_at).toLocaleDateString()}</span>
                         </div>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                          <select 
-                            value={app.status} 
+                          <select
+                            value={app.status}
                             onChange={(e) => handleUpdateApplicantStatus(app.id, e.target.value)}
+                            disabled={app.status === 'accepted'}
                             style={{ padding: '4px 8px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontSize: '0.75rem' }}
                           >
                             <option value="applied">Eingegangen</option>
                             <option value="invited">Eingeladen</option>
                             <option value="declined">Abgelehnt</option>
-                            <option value="accepted">Zusage</option>
+                            {/* 'Zusage' entsteht nur über "Mieter annehmen" (legt Mieter und Vertrag an) */}
+                            {app.status === 'accepted' && <option value="accepted" disabled>Zusage</option>}
+                            {app.status === 'contract_requested' && <option value="contract_requested" disabled>Vertrag angefragt</option>}
+                            {app.status === 'contract_declined' && <option value="contract_declined" disabled>Vertrag abgelehnt</option>}
                           </select>
                           {app.status !== 'accepted' && (
-                            <Button size="xs" variant="primary" icon={Check} onClick={() => handleConvertApplicantToTenant(app)}>
+                            <Button
+                              size="xs"
+                              variant="primary"
+                              icon={Check}
+                              onClick={() => handleConvertApplicantToTenant(app)}
+                              disabled={isSaving || selectedProcess.status !== 'in_vermietung'}
+                              title={selectedProcess.status !== 'in_vermietung' ? 'Für diesen Prozess wurde bereits ein Mieter angenommen.' : undefined}
+                            >
                               Mieter annehmen
                             </Button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteApplicant(app)}
+                            disabled={isSaving}
+                            title="Bewerbung samt Unterlagen löschen"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger-color)', padding: '4px', display: 'flex', alignItems: 'center' }}
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </div>
 
                       <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px', marginBottom: '8px' }}>
-                        <div><strong>Einkommen:</strong> {app.monthly_income ? app.monthly_income.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' }) : '—'}</div>
+                        <div><strong>Einkommen:</strong> {app.monthly_income ? Number(app.monthly_income).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' }) : '—'}</div>
                         <div><strong>Berufstätig:</strong> {app.is_employed ? 'Ja' : 'Nein'}</div>
                         <div><strong>Mitbewerber:</strong> {app.has_co_applicant ? 'Ja' : 'Nein'}</div>
-                        <div><strong>Einzug ab:</strong> {app.earliest_move_in ? new Date(app.earliest_move_in).toLocaleDateString() : 'Sofort'}</div>
+                        <div><strong>Einzug ab:</strong> {app.earliest_move_in ? formatDateDe(app.earliest_move_in) : 'Sofort'}</div>
                       </div>
 
                       {app.introduction && (
@@ -1039,12 +1333,40 @@ const Letting = () => {
                         </div>
                       )}
 
-                      <div style={{ fontSize: '0.75rem', borderTop: '1px solid var(--border-color)', paddingTop: '8px', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontSize: '0.75rem', borderTop: '1px solid var(--border-color)', paddingTop: '8px', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <span>Kontakt: {app.email} | {app.phone || 'Keine Tel.'}</span>
-                        <span style={{ color: 'var(--success-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <UploadCloud size={12} /> Unterlagen direkt in der Cloud
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleShowDocuments(app)}
+                          disabled={applicantDocs[app.id]?.loading}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', padding: 0 }}
+                        >
+                          <UploadCloud size={12} /> {applicantDocs[app.id]?.loading ? 'Unterlagen werden geladen…' : 'Unterlagen anzeigen'}
+                        </button>
                       </div>
+
+                      {applicantDocs[app.id] && !applicantDocs[app.id].loading && (
+                        <div style={{ fontSize: '0.75rem', marginTop: '8px', color: 'var(--text-secondary)' }}>
+                          {applicantDocs[app.id].error ? (
+                            <span style={{ color: 'var(--danger-color)' }}>Unterlagen konnten nicht geladen werden: {applicantDocs[app.id].error}</span>
+                          ) : applicantDocs[app.id].files.length === 0 ? (
+                            <span>Keine Unterlagen im Zwischenspeicher. Bei verbundener Cloud werden eingegangene Unterlagen in den Ordner „Neuvermietung“ des Objekts übertragen.</span>
+                          ) : (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                              {applicantDocs[app.id].files.map(f => (
+                                <button
+                                  key={f.path}
+                                  type="button"
+                                  onClick={() => handleOpenDocument(f.path)}
+                                  style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px', fontSize: '0.72rem', backgroundColor: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}
+                                >
+                                  <FileText size={12} /> {getDocLabelFromFile(f.name)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </Card>
                   ))}
                 </div>
@@ -1054,6 +1376,52 @@ const Letting = () => {
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '20px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
             <Button variant="secondary" onClick={() => setIsDetailModalOpen(false)}>Schließen</Button>
           </div>
+        </Modal>
+      )}
+
+      {/* Bestätigung "Mieter annehmen": Mietbeginn und Beträge prüfen, bevor der Vertrag angelegt wird */}
+      {convertDialog && (
+        <Modal
+          isOpen={!!convertDialog}
+          onClose={() => { if (!isSaving) setConvertDialog(null); }}
+          title={`Mieter annehmen: ${convertDialog.app.first_name || ''} ${convertDialog.app.last_name || ''}`}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConvertDialog(null)} disabled={isSaving}>Abbrechen</Button>
+              <Button variant="primary" onClick={handleConfirmConvert} disabled={isSaving}>
+                {isSaving ? 'Wird angelegt…' : 'Mieter & Mietvertrag anlegen'}
+              </Button>
+            </>
+          }
+        >
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: 1.5 }}>
+            Es werden ein Mieter und ein aktiver Mietvertrag angelegt; der Vermietungsprozess wird damit beendet. Bitte prüfen Sie Mietbeginn und Beträge.
+          </p>
+          <Input
+            label="Mietbeginn"
+            type="date"
+            value={convertDialog.start_date}
+            onChange={(e) => setConvertDialog(prev => ({ ...prev, start_date: e.target.value }))}
+          />
+          {convertDialog.app.earliest_move_in && (
+            <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '-8px', marginBottom: '12px' }}>
+              Wunsch-Einzug laut Bewerbung: {formatDateDe(convertDialog.app.earliest_move_in)}
+            </p>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+            <CurrencyInput label="Kaltmiete (€)" allowDecimals value={convertDialog.cold_rent} onValueChange={(v) => setConvertDialog(prev => ({ ...prev, cold_rent: v ?? '' }))} />
+            <CurrencyInput label="Betriebskosten (€)" allowDecimals value={convertDialog.service_charge} onValueChange={(v) => setConvertDialog(prev => ({ ...prev, service_charge: v ?? '' }))} />
+            <CurrencyInput label="Heizkosten (€)" allowDecimals value={convertDialog.heating_cost} onValueChange={(v) => setConvertDialog(prev => ({ ...prev, heating_cost: v ?? '' }))} />
+            <CurrencyInput label="Kaution (€)" allowDecimals value={convertDialog.deposit} onValueChange={(v) => setConvertDialog(prev => ({ ...prev, deposit: v ?? '' }))} />
+          </div>
+          <Input
+            label="Fälligkeitstag der Miete (Tag im Monat)"
+            type="number"
+            min="1"
+            max="31"
+            value={convertDialog.payment_due_day}
+            onChange={(e) => setConvertDialog(prev => ({ ...prev, payment_due_day: e.target.value }))}
+          />
         </Modal>
       )}
     </div>

@@ -1,16 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { translateError } from '../../lib/errorTranslator';
+import { extractStoragePath } from '../../lib/storageFiles';
 import { Pin, Calendar, Megaphone, FileText, Paperclip } from 'lucide-react';
 
+// Als "Neu" gelten Aushänge der letzten 7 Tage
+const NEW_BADGE_DAYS = 7;
+
+const isRecent = (createdAt) => {
+    if (!createdAt) return false;
+    const ageMs = Date.now() - new Date(createdAt).getTime();
+    return ageMs >= 0 && ageMs < NEW_BADGE_DAYS * 24 * 60 * 60 * 1000;
+};
+
 const TenantAnnouncements = () => {
-    const { user, roleData } = useAuth();
+    const { roleData } = useAuth();
     const [announcements, setAnnouncements] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [errorMessage, setErrorMessage] = useState(null);
+
+    const propertyId = roleData?.property_id;
 
     useEffect(() => {
-        const fetch = async () => {
-            if (!roleData?.property_id) {
+        let cancelled = false;
+        const loadAnnouncements = async () => {
+            if (!propertyId) {
                 setLoading(false);
                 return;
             }
@@ -18,15 +33,22 @@ const TenantAnnouncements = () => {
             const { data, error } = await supabase
                 .from('announcements')
                 .select('*')
-                .eq('property_id', roleData.property_id)
+                .eq('property_id', propertyId)
                 .order('created_at', { ascending: false });
 
-            if (error) console.error('Error:', error);
+            if (cancelled) return;
+            if (error) {
+                console.error('Error:', error);
+                setErrorMessage(`Aushänge konnten nicht geladen werden: ${translateError(error)}`);
+            } else {
+                setErrorMessage(null);
+            }
             setAnnouncements(data || []);
             setLoading(false);
         };
-        fetch();
-    }, [roleData]);
+        loadAnnouncements();
+        return () => { cancelled = true; };
+    }, [propertyId]);
 
     const formatDate = (d) => new Date(d).toLocaleDateString('de-DE', {
         day: '2-digit', month: 'long', year: 'numeric'
@@ -53,6 +75,16 @@ const TenantAnnouncements = () => {
                 </p>
             </div>
 
+            {errorMessage && (
+                <div role="alert" style={{
+                    padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)',
+                    border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+                    color: '#B91C1C', fontSize: '0.85rem'
+                }}>
+                    {errorMessage}
+                </div>
+            )}
+
             {announcements.length === 0 ? (
                 <div style={{
                     backgroundColor: 'var(--surface-color)',
@@ -67,13 +99,15 @@ const TenantAnnouncements = () => {
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    {announcements.map((a, idx) => (
+                    {announcements.map((a) => {
+                        const isNew = isRecent(a.created_at);
+                        return (
                         <div key={a.id} style={{
                             backgroundColor: 'var(--surface-color)',
                             borderRadius: 'var(--radius-lg)',
                             border: '1px solid var(--border-color)',
                             overflow: 'hidden',
-                            borderLeft: idx === 0 ? '4px solid var(--primary-color)' : '4px solid var(--border-color)'
+                            borderLeft: isNew ? '4px solid var(--primary-color)' : '4px solid var(--border-color)'
                         }}>
                             {/* Header */}
                             <div style={{
@@ -84,14 +118,14 @@ const TenantAnnouncements = () => {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                                     <div style={{
                                         width: '32px', height: '32px', borderRadius: '8px',
-                                        backgroundColor: idx === 0 ? '#EFF6FF' : '#F8FAFC',
+                                        backgroundColor: isNew ? '#EFF6FF' : '#F8FAFC',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        color: idx === 0 ? 'var(--primary-color)' : 'var(--text-secondary)'
+                                        color: isNew ? 'var(--primary-color)' : 'var(--text-secondary)'
                                     }}>
                                         <Pin size={16} />
                                     </div>
                                     <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>{a.title}</h3>
-                                    {idx === 0 && (
+                                    {isNew && (
                                         <span style={{
                                             padding: '2px 8px', borderRadius: '10px',
                                             fontSize: '0.65rem', fontWeight: 600,
@@ -122,18 +156,19 @@ const TenantAnnouncements = () => {
                             </div>
 
                             {/* Attachments */}
-                            {a.attachments && a.attachments.length > 0 && (
+                            {Array.isArray(a.attachments) && a.attachments.length > 0 && (
                                 <div style={{
                                     padding: '0 22px 18px',
                                     display: 'flex', flexWrap: 'wrap', gap: '8px'
                                 }}>
-                                    {a.attachments.map((att, attIdx) => (
+                                    {a.attachments.filter(Boolean).map((att, attIdx) => (
                                         <SignedAttachmentItem key={attIdx} att={att} />
                                     ))}
                                 </div>
                             )}
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
         </div>
@@ -141,27 +176,34 @@ const TenantAnnouncements = () => {
 };
 
 // Display attachment with signed URL
+// Nur Pfade des Buckets 'announcements' werden signiert; fehlender Pfad oder fremde
+// Adresse -> Hinweis statt Link (kein Absturz, kein Link auf '#').
 const SignedAttachmentItem = ({ att }) => {
     const [url, setUrl] = useState(null);
     const [loading, setLoading] = useState(true);
-    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(att.name || att.path);
-    const isPdf = /\.pdf$/i.test(att.name || att.path);
+    const storagePath = extractStoragePath(att?.path, 'announcements');
+    const displayName = att?.name || 'Datei';
+    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(att?.name || att?.path || '');
+    const isPdf = /\.pdf$/i.test(att?.name || att?.path || '');
 
     useEffect(() => {
+        let cancelled = false;
         const load = async () => {
-            if (att.path.startsWith('http')) {
-                setUrl(att.path);
+            if (!storagePath) {
                 setLoading(false);
                 return;
             }
-            const { data } = await supabase.storage
+            const { data, error } = await supabase.storage
                 .from('announcements')
-                .createSignedUrl(att.path, 3600);
+                .createSignedUrl(storagePath, 3600);
+            if (cancelled) return;
+            if (error) console.error('Error signing attachment:', error);
             if (data?.signedUrl) setUrl(data.signedUrl);
             setLoading(false);
         };
         load();
-    }, [att.path]);
+        return () => { cancelled = true; };
+    }, [storagePath]);
 
     if (loading) {
         return (
@@ -178,12 +220,29 @@ const SignedAttachmentItem = ({ att }) => {
         );
     }
 
-    if (isImage && url) {
+    if (!url) {
+        return (
+            <span
+                title="Der Anhang ist nicht verfügbar."
+                style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '8px 12px', borderRadius: '8px',
+                    backgroundColor: '#F8FAFC', border: '1px dashed var(--border-color)',
+                    fontSize: '0.78rem', color: 'var(--text-secondary)', cursor: 'not-allowed'
+                }}
+            >
+                <Paperclip size={14} />
+                {displayName} (nicht verfügbar)
+            </span>
+        );
+    }
+
+    if (isImage) {
         return (
             <img
                 src={url}
-                alt={att.name}
-                onClick={() => window.open(url, '_blank')}
+                alt={displayName}
+                onClick={() => window.open(url, '_blank', 'noopener')}
                 style={{
                     width: '120px', height: '80px', objectFit: 'cover',
                     borderRadius: '8px', cursor: 'pointer',
@@ -195,7 +254,7 @@ const SignedAttachmentItem = ({ att }) => {
 
     return (
         <a
-            href={url || '#'}
+            href={url}
             target="_blank"
             rel="noopener noreferrer"
             style={{

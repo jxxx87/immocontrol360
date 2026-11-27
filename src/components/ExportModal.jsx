@@ -3,46 +3,44 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { FileText, Download, AlertTriangle, Loader2, Shield, X, Palette } from 'lucide-react';
 import Modal from './ui/Modal';
 import Button from './ui/Button';
-import { REPORT_CONFIGS, getColumnsForPreset, generateFilename } from '../lib/reportConfigs';
+import { REPORT_CONFIGS, getColumnsForPreset, generateFilename, getDefaultExportOptions } from '../lib/reportConfigs';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePortfolio } from '../context/PortfolioContext';
-import { useAuth } from '../context/AuthContext';
 import { usePdfTemplate, fetchPdfTemplate } from '../lib/usePdfTemplate';
 
 // ─── Export Modal ────────────────────────────────────────────────────
+// Hinweis: currentFilters/currentSearch/currentSort werden von Aufrufern weiterhin übergeben,
+// hier aber nicht ausgewertet. „Gesamte Liste (ohne Filter)" wird nur angeboten, wenn der Aufrufer
+// die ungefilterten Daten als `allData` mitgibt – sonst wäre die Option wirkungslos.
 const ExportModal = ({
     isOpen,
     onClose,
     reportType,
-    data = [],              // Actual row data from the page
+    data = [],              // Actual row data from the page (aktuelle, ggf. gefilterte Ansicht)
+    allData = null,         // Optional: ungefilterte Gesamtdaten für den Umfang „Gesamte Liste"
     unitData = null,        // Optional unit details keyed by property_id
     properties = [],        // Available properties for "only property" filter
-    currentFilters = {},
-    currentSearch = '',
-    currentSort = null,
     totalRows = 0,
+    initialPreset = 'compact',
 }) => {
-    const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
     const navigate = useNavigate();
     const location = useLocation();
     const config = REPORT_CONFIGS[reportType];
     const portfolio = portfolios?.find(p => p.id === selectedPortfolioID);
     const pdfTemplate = usePdfTemplate(reportType);
+    const defaults = getDefaultExportOptions(reportType);
+    const hasAllData = Array.isArray(allData);
 
     // ─── State ──────────────────────────────────
     const [scope, setScope] = useState('current');
     const [selectedPropertyId, setSelectedPropertyId] = useState('');
-    const [selectedColumns, setSelectedColumns] = useState(() => getColumnsForPreset(reportType, 'compact'));
-    const [orientation, setOrientation] = useState('auto');
-    const [showSums, setShowSums] = useState(config?.sumsEnabled ?? false);
-    const [groupByProperty, setGroupByProperty] = useState(false);
-    const [dsgvoAnonymize, setDsgvoAnonymize] = useState(false);
-    const [extraOptions, setExtraOptions] = useState(() => {
-        const opts = {};
-        (config?.extraOptions || []).forEach(o => { opts[o.key] = o.default ?? false; });
-        return opts;
-    });
+    const [selectedColumns, setSelectedColumns] = useState(() => getColumnsForPreset(reportType, initialPreset));
+    const [orientation, setOrientation] = useState(defaults.orientation);
+    const [showSums, setShowSums] = useState(defaults.showSums);
+    const [groupByProperty, setGroupByProperty] = useState(defaults.groupByProperty);
+    const [dsgvoAnonymize, setDsgvoAnonymize] = useState(defaults.dsgvoAnonymize);
+    const [extraOptions, setExtraOptions] = useState(() => defaults.extraOptions);
     const [generating, setGenerating] = useState(false);
     const [error, setError] = useState(null);
 
@@ -50,9 +48,9 @@ const ExportModal = ({
 
     const getPropertyLabel = (p) => p?.label || `${p?.street || ''} ${p?.house_number || ''}`.trim() || '–';
     const selectedProperty = properties.find(p => p.id === selectedPropertyId);
-    const propertyLabel = selectedProperty ? getPropertyLabel(selectedProperty) : null;
+    const propertyLabel = scope === 'property' && selectedProperty ? getPropertyLabel(selectedProperty) : null;
     const filename = generateFilename(reportType, portfolio?.name, propertyLabel);
-    const rowCount = data.length || totalRows;
+    const rowCount = (scope === 'all' && hasAllData ? allData.length : data.length) || totalRows;
     const isLargeExport = rowCount > 300;
 
     // ─── Toggle column ──────────────────────────
@@ -75,9 +73,12 @@ const ExportModal = ({
         setError(null);
         try {
             // Filter data based on scope
-            let filteredData = [...data];
+            let filteredData = scope === 'all' && hasAllData ? [...allData] : [...data];
 
-            if (scope === 'property' && selectedPropertyId) {
+            if (scope === 'property') {
+                if (!selectedPropertyId) {
+                    throw new Error('Bitte eine Immobilie auswählen.');
+                }
                 filteredData = filteredData.filter(row =>
                     row.property_id === selectedPropertyId ||
                     row.propertyId === selectedPropertyId
@@ -190,12 +191,14 @@ const ExportModal = ({
                     <div style={radioStyle}>
                         <label style={{ ...radioLabelStyle, background: scope === 'current' ? 'rgba(14,165,233,0.06)' : 'transparent' }}>
                             <input type="radio" name="scope" value="current" checked={scope === 'current'} onChange={() => setScope('current')} />
-                            Aktuelle Ansicht ({rowCount} Einträge)
+                            Aktuelle Ansicht ({data.length || totalRows} Einträge)
                         </label>
-                        <label style={{ ...radioLabelStyle, background: scope === 'all' ? 'rgba(14,165,233,0.06)' : 'transparent' }}>
-                            <input type="radio" name="scope" value="all" checked={scope === 'all'} onChange={() => setScope('all')} />
-                            Gesamte Liste (ohne Filter)
-                        </label>
+                        {hasAllData && (
+                            <label style={{ ...radioLabelStyle, background: scope === 'all' ? 'rgba(14,165,233,0.06)' : 'transparent' }}>
+                                <input type="radio" name="scope" value="all" checked={scope === 'all'} onChange={() => setScope('all')} />
+                                Gesamte Liste (ohne Filter, {allData.length} Einträge)
+                            </label>
+                        )}
                         {properties.length > 0 && (
                             <label style={{ ...radioLabelStyle, background: scope === 'property' ? 'rgba(14,165,233,0.06)' : 'transparent' }}>
                                 <input type="radio" name="scope" value="property" checked={scope === 'property'} onChange={() => setScope('property')} />

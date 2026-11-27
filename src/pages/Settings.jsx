@@ -7,7 +7,7 @@ import Modal from '../components/ui/Modal';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import RateInput from '../components/ui/RateInput';
-import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText, Share2, Cloud, Mail } from 'lucide-react';
+import { User, Lock, HelpCircle, Briefcase, Plus, Edit2, Loader2, Trash2, Tag, Check, X, Upload, PanelLeft, Settings as SettingsIcon, Clock, CreditCard, Bell, FileText, Share2, Cloud, Mail, LogOut, AlertTriangle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
@@ -21,6 +21,132 @@ import { ActiveShares } from '../components/portfolio/ActiveShares';
 import { CloudSettings } from './settings/CloudSettings';
 import DocumentTemplates from './settings/DocumentTemplates';
 import { EmailSettings } from './settings/EmailSettings';
+
+// Spalten der Tabelle profiles, die das Stammdaten-Formular speichert (keine UI-Hilfsfelder)
+const PROFILE_FIELDS = [
+    'salutation', 'name_suffix', 'company', 'first_name', 'last_name', 'street', 'house_number',
+    'zip', 'city', 'phone', 'mobile', 'bank_name', 'iban', 'bic', 'tax_number', 'vat_id',
+    'portfolio_name', 'ownership_percent', 'settings_opening_hours_visible', 'settings_opening_hours_text'
+];
+
+// Profilfeld -> Spalte im Hauptportfolio (für den Abgleich beim Speichern der Stammdaten)
+const PROFILE_TO_PORTFOLIO = {
+    portfolio_name: 'name',
+    company: 'company_name',
+    street: 'street',
+    house_number: 'house_number',
+    zip: 'zip',
+    city: 'city',
+    bank_name: 'bank_name',
+    iban: 'iban',
+    bic: 'bic',
+    tax_number: 'tax_number',
+    vat_id: 'vat_id',
+    ownership_percent: 'ownership_percent'
+};
+
+const MIN_PASSWORD_LENGTH = 10;
+
+const normalizeEmail = (value) => (value || '').trim().toLowerCase();
+
+// IBAN: Format + Prüfziffer (Mod 97); BIC: 8 oder 11 Zeichen
+const isValidIban = (value) => {
+    const iban = (value || '').replace(/\s+/g, '').toUpperCase();
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+    const rearranged = iban.slice(4) + iban.slice(0, 4);
+    let remainder = 0;
+    for (const ch of rearranged) {
+        const code = ch.charCodeAt(0);
+        const digits = code >= 65 && code <= 90 ? String(code - 55) : ch;
+        for (const d of digits) remainder = (remainder * 10 + Number(d)) % 97;
+    }
+    return remainder === 1;
+};
+const isValidBic = (value) => /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test((value || '').replace(/\s+/g, '').toUpperCase());
+
+const validateBankData = ({ iban, bic }) => {
+    const errors = [];
+    if (iban && iban.trim() && !isValidIban(iban)) errors.push('Die IBAN ist ungültig (Format oder Prüfziffer stimmt nicht).');
+    if (bic && bic.trim() && !isValidBic(bic)) errors.push('Die BIC ist ungültig (8 oder 11 Zeichen, z. B. COBADEFFXXX).');
+    return errors;
+};
+
+// Leer -> 100 % (Spalte ist NOT NULL mit Standard 100); sonst 0–100
+const parseOwnershipPercent = (value) => {
+    if (value === '' || value === null || value === undefined) return { value: 100 };
+    const n = typeof value === 'number' ? value : parseFloat(String(value).replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+        return { error: 'Der Eigentumsanteil muss zwischen 0 und 100 % liegen.' };
+    }
+    return { value: n };
+};
+
+const KEY_TYPE_LABELS = { area: 'Fläche', persons: 'Personen', units: 'Wohneinheiten', equal: 'Gleich', direct: 'Direkt', mea: 'MEA' };
+const keyTypeLabel = (type) => KEY_TYPE_LABELS[type] || 'Manuell';
+
+// Zählt Zeilen (optional über eingebettete Beziehungen); null = konnte nicht ermittelt werden
+const countRows = async (table, select, filterColumn, id) => {
+    try {
+        const { count, error } = await supabase
+            .from(table)
+            .select(select, { count: 'exact', head: true })
+            .eq(filterColumn, id);
+        if (error) {
+            console.warn(`Zählung ${table} fehlgeschlagen:`, error.message);
+            return null;
+        }
+        return count ?? 0;
+    } catch (err) {
+        console.warn(`Zählung ${table} fehlgeschlagen:`, err);
+        return null;
+    }
+};
+
+const loadDeleteImpact = async (portfolioId) => {
+    const viaProperty = 'properties.portfolio_id';
+    const viaUnit = 'units.properties.portfolio_id';
+    const viaLease = 'leases.units.properties.portfolio_id';
+    const [
+        properties, units, leases, rentLedger, rentPayments, settlements, documents, claims,
+        invoices, meters, meterReadings, loans, deals, documentTemplates
+    ] = await Promise.all([
+        countRows('properties', 'id', 'portfolio_id', portfolioId),
+        countRows('units', 'id, properties!inner(portfolio_id)', viaProperty, portfolioId),
+        countRows('leases', 'id, units!inner(properties!inner(portfolio_id))', viaUnit, portfolioId),
+        countRows('rent_ledger', 'id, leases!inner(units!inner(properties!inner(portfolio_id)))', viaLease, portfolioId),
+        countRows('rent_payments', 'id, leases!inner(units!inner(properties!inner(portfolio_id)))', viaLease, portfolioId),
+        countRows('utility_settlements', 'id, properties!inner(portfolio_id)', viaProperty, portfolioId),
+        countRows('documents', 'id, properties!inner(portfolio_id)', viaProperty, portfolioId),
+        countRows('claims', 'id, leases!inner(units!inner(properties!inner(portfolio_id)))', viaLease, portfolioId),
+        countRows('invoices', 'id', 'portfolio_id', portfolioId),
+        countRows('meters', 'id', 'portfolio_id', portfolioId),
+        countRows('meter_readings', 'id', 'portfolio_id', portfolioId),
+        countRows('loans', 'id', 'portfolio_id', portfolioId),
+        countRows('deals', 'id', 'portfolio_id', portfolioId),
+        countRows('document_templates', 'id', 'portfolio_id', portfolioId)
+    ]);
+    return {
+        properties, units, leases, rentLedger, rentPayments, settlements, documents, claims,
+        invoices, meters, meterReadings, loans, deals, documentTemplates
+    };
+};
+
+const IMPACT_LABELS = [
+    ['properties', 'Objekte'],
+    ['units', 'Einheiten'],
+    ['leases', 'Mietverträge'],
+    ['rentLedger', 'Mietkonto-Einträge (Sollstellungen)'],
+    ['rentPayments', 'Mietzahlungen'],
+    ['settlements', 'Nebenkostenabrechnungen'],
+    ['invoices', 'Rechnungen'],
+    ['meters', 'Zähler'],
+    ['meterReadings', 'Zählerstände'],
+    ['loans', 'Darlehen'],
+    ['documents', 'Dokumente'],
+    ['claims', 'Forderungsakten'],
+    ['deals', 'Deals (Investorportal)'],
+    ['documentTemplates', 'Portfolio-eigene Schreibvorlagen']
+];
 
 const Settings = () => {
     const { user } = useAuth();
@@ -56,8 +182,16 @@ const Settings = () => {
         }
     }, [location]);
 
+    // Push-Schalter (eigener State statt Hilfsfeld im Profil, das sonst mitgespeichert würde)
+    const [pushEnabled, setPushEnabled] = useState(() => {
+        try { return localStorage.getItem('pushNotificationsEnabled') !== 'false'; } catch { return true; }
+    });
+
     // Profile State
     const [loadingProfile, setLoadingProfile] = useState(false);
+    const [profileLoadError, setProfileLoadError] = useState('');
+    // Zuletzt geladener/gespeicherter Stand – Basis für den Abgleich ins Hauptportfolio
+    const [loadedProfile, setLoadedProfile] = useState(null);
     const [profileData, setProfileData] = useState({
         salutation: 'Herr',
         name_suffix: '',
@@ -86,9 +220,12 @@ const Settings = () => {
         try {
             if (!user) return;
             setLoadingProfile(true);
-            const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+            setProfileLoadError('');
+            // maybeSingle: neue Nutzer haben noch keine Zeile (kein Fehler)
+            const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle();
+            if (error) throw error;
             if (data) {
-                setProfileData({
+                const mapped = {
                     salutation: data.salutation || 'Herr',
                     name_suffix: data.name_suffix || '',
                     company: data.company || '',
@@ -106,21 +243,56 @@ const Settings = () => {
                     tax_number: data.tax_number || '',
                     vat_id: data.vat_id || '',
                     portfolio_name: data.portfolio_name || '',
-                    ownership_percent: data.ownership_percent || '',
+                    ownership_percent: data.ownership_percent ?? '',
                     onboarding_complete: data.onboarding_complete || false,
                     settings_opening_hours_visible: data.settings_opening_hours_visible !== false,
                     settings_opening_hours_text: data.settings_opening_hours_text || 'Mo-Fr 9:00 - 17:00 Uhr'
-                });
+                };
+                setProfileData(mapped);
+                setLoadedProfile(mapped);
+            } else {
+                setLoadedProfile(null);
             }
         } catch (error) {
-            // Ignore error if row doesn't exist yet
-            console.log('Profile fetch error or no profile:', error.message);
+            // Nicht mit leeren Werten weiterarbeiten: Speichern würde sonst die Stammdaten
+            // (inkl. Bankverbindung im Hauptportfolio) überschreiben.
+            console.error('Profile fetch error:', error);
+            setProfileLoadError('Ihre Stammdaten konnten nicht geladen werden. Speichern ist gesperrt, damit keine vorhandenen Daten überschrieben werden. Bitte laden Sie die Seite neu.');
         } finally {
             setLoadingProfile(false);
         }
     };
 
+    // "Allgemeine Einstellungen": nur die Öffnungszeiten speichern – kein Abgleich ins Hauptportfolio
+    const handleSaveGeneralSettings = async () => {
+        if (profileLoadError) {
+            alert(profileLoadError);
+            return;
+        }
+        try {
+            const { error } = await supabase.from('profiles').upsert({
+                id: user.id,
+                settings_opening_hours_visible: profileData.settings_opening_hours_visible,
+                settings_opening_hours_text: profileData.settings_opening_hours_text,
+                updated_at: new Date().toISOString()
+            });
+            if (error) throw error;
+            setLoadedProfile(prev => prev ? {
+                ...prev,
+                settings_opening_hours_visible: profileData.settings_opening_hours_visible,
+                settings_opening_hours_text: profileData.settings_opening_hours_text
+            } : prev);
+            alert('Einstellungen gespeichert.');
+        } catch (error) {
+            alert(translateError(error));
+        }
+    };
+
     const handleSaveProfile = async () => {
+        if (profileLoadError) {
+            alert(profileLoadError);
+            return;
+        }
         // Validate required fields
         const required = [
             { key: 'first_name', label: 'Vorname' },
@@ -138,20 +310,37 @@ const Settings = () => {
             return;
         }
 
+        const ownership = parseOwnershipPercent(profileData.ownership_percent);
+        if (ownership.error) {
+            alert(ownership.error);
+            return;
+        }
+        const bankErrors = validateBankData(profileData);
+        if (bankErrors.length > 0) {
+            alert(bankErrors.join('\n'));
+            return;
+        }
+
         try {
-            // Save profile
-            const { error } = await supabase.from('profiles').upsert({
+            // Save profile – nur bekannte Spalten (keine UI-Hilfsfelder)
+            const payload = {
                 id: user.id,
-                updated_at: new Date(),
-                ...profileData,
+                updated_at: new Date().toISOString(),
                 onboarding_complete: true
-            });
+            };
+            PROFILE_FIELDS.forEach(key => { payload[key] = profileData[key]; });
+            payload.ownership_percent = ownership.value;
+
+            const { error } = await supabase.from('profiles').upsert(payload);
             if (error) throw error;
 
-            // Auto-create or update primary portfolio
-            await syncPrimaryPortfolio();
+            const savedProfile = { ...profileData, ownership_percent: ownership.value, onboarding_complete: true };
 
-            setProfileData(prev => ({ ...prev, onboarding_complete: true }));
+            // Auto-create or update primary portfolio
+            await syncPrimaryPortfolio(savedProfile);
+
+            setProfileData(savedProfile);
+            setLoadedProfile(savedProfile);
             if (unlockOnboarding) unlockOnboarding();
             alert('Stammdaten gespeichert.');
         } catch (error) {
@@ -159,41 +348,50 @@ const Settings = () => {
         }
     };
 
-    const syncPrimaryPortfolio = async () => {
-        // Check if a primary portfolio already exists
-        const { data: existing } = await supabase
+    // Hauptportfolio aus den Stammdaten anlegen bzw. aktualisieren.
+    // Beim Aktualisieren werden nur Felder übernommen, die in den Stammdaten geändert
+    // wurden – im Portfolio-Dialog abweichend gepflegte Werte bleiben sonst erhalten.
+    const syncPrimaryPortfolio = async (savedProfile) => {
+        // Check if a primary portfolio already exists (Fehler nicht ignorieren – sonst entstünde ein zweites)
+        const { data: existing, error: lookupError } = await supabase
             .from('portfolios')
             .select('id')
             .eq('user_id', user.id)
             .eq('is_primary', true)
             .maybeSingle();
+        if (lookupError) throw lookupError;
 
-        const portfolioData = {
-            user_id: user.id,
-            name: profileData.portfolio_name || `${profileData.first_name} ${profileData.last_name}`,
-            company_name: profileData.company || '',
-            street: profileData.street,
-            house_number: profileData.house_number,
-            zip: profileData.zip,
-            city: profileData.city,
-            bank_name: profileData.bank_name || '',
-            iban: profileData.iban || '',
-            bic: profileData.bic || '',
-            tax_number: profileData.tax_number || '',
-            vat_id: profileData.vat_id || '',
-            ownership_percent: parseFloat(profileData.ownership_percent) || null,
-            is_primary: true,
+        const valueFor = (profileKey) => {
+            if (profileKey === 'portfolio_name') {
+                return savedProfile.portfolio_name || `${savedProfile.first_name} ${savedProfile.last_name}`;
+            }
+            if (profileKey === 'ownership_percent') return savedProfile.ownership_percent;
+            return savedProfile[profileKey] || '';
         };
 
         if (existing) {
-            // Update existing primary portfolio
-            const { error } = await supabase
-                .from('portfolios')
-                .update(portfolioData)
-                .eq('id', existing.id);
-            if (error) throw error;
+            const changes = {};
+            Object.entries(PROFILE_TO_PORTFOLIO).forEach(([profileKey, portfolioKey]) => {
+                const before = loadedProfile ? String(loadedProfile[profileKey] ?? '') : null;
+                const after = String(savedProfile[profileKey] ?? '');
+                if (before === null || before !== after) {
+                    changes[portfolioKey] = valueFor(profileKey);
+                }
+            });
+
+            if (Object.keys(changes).length > 0) {
+                const { error } = await supabase
+                    .from('portfolios')
+                    .update(changes)
+                    .eq('id', existing.id);
+                if (error) throw error;
+            }
         } else {
             // Create new primary portfolio
+            const portfolioData = { user_id: user.id, is_primary: true };
+            Object.entries(PROFILE_TO_PORTFOLIO).forEach(([profileKey, portfolioKey]) => {
+                portfolioData[portfolioKey] = valueFor(profileKey);
+            });
             const { error } = await supabase
                 .from('portfolios')
                 .insert([portfolioData]);
@@ -213,9 +411,10 @@ const Settings = () => {
     const [portfolioForm, setPortfolioForm] = useState({
         name: '',
         company_name: '',
-        contact_person: '',
         email: '',
         phone: '',
+        tax_number: '',
+        vat_id: '',
         street: '',
         house_number: '',
         zip: '',
@@ -224,8 +423,7 @@ const Settings = () => {
         iban: '',
         bic: '',
         ownership_percent: '',
-        entity_type: 'private',
-        notes: ''
+        entity_type: 'private'
     });
 
     // Categories State
@@ -252,6 +450,9 @@ const Settings = () => {
     const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
     const [portfolioToDelete, setPortfolioToDelete] = useState(null);
     const [targetPortfolioId, setTargetPortfolioId] = useState('');
+    const [deleteImpact, setDeleteImpact] = useState(null);
+    const [loadingDeleteImpact, setLoadingDeleteImpact] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const fetchPortfolios = async () => {
         try {
@@ -299,6 +500,14 @@ const Settings = () => {
         }
     };
 
+    // Nur bei Nutzerwechsel neu laden (refreshPortfolios aus dem Context ist nicht stabil
+    // und würde sonst ungespeicherte Eingaben durch DB-Werte ersetzen).
+    // Standardschlüssel (user_id NULL) können mehrfach vorhanden sein -> nach Name zusammenfassen;
+    // eigene Schlüssel werden immer angezeigt (auch bei gleichem Namen wie ein Standardschlüssel).
+    const visibleKeys = distributionKeys.filter((k, index, self) =>
+        k.user_id || index === self.findIndex(t => !t.user_id && t.name === k.name)
+    );
+
     useEffect(() => {
         if (user) {
             fetchProfile();
@@ -306,7 +515,8 @@ const Settings = () => {
             fetchCategories();
             fetchDistributionKeys();
         }
-    }, [user, refreshPortfolios]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [user?.id]);
 
     // --- CATEGORIES ---
     const handleNewCategory = () => {
@@ -329,17 +539,21 @@ const Settings = () => {
         if (!categoryForm.name.trim()) return alert('Name fehlt.');
         try {
             const payload = {
-                user_id: user.id,
                 name: categoryForm.name,
                 is_recoverable: categoryForm.is_recoverable,
                 distribution_key_id: categoryForm.distribution_key_id || null
             };
 
             if (editingCategory) {
-                const { error } = await supabase.from('expense_categories').update(payload).eq('id', editingCategory.id);
+                if (editingCategory.user_id !== user.id) {
+                    alert('Standard-Kostenarten können nicht geändert werden. Legen Sie bei Bedarf eine eigene Kostenart an.');
+                    return;
+                }
+                const { data, error } = await supabase.from('expense_categories').update(payload).eq('id', editingCategory.id).select('id');
                 if (error) throw error;
+                if (!data || data.length === 0) throw new Error('Die Kostenart wurde nicht gespeichert (keine Berechtigung).');
             } else {
-                const { error } = await supabase.from('expense_categories').insert([payload]);
+                const { error } = await supabase.from('expense_categories').insert([{ ...payload, user_id: user.id }]);
                 if (error) throw error;
             }
             setIsCategoryModalOpen(false);
@@ -349,16 +563,33 @@ const Settings = () => {
         }
     };
 
-    const handleDeleteCategory = async (id) => {
+    const handleDeleteCategory = async (row) => {
+        if (row.user_id !== user.id) {
+            alert('Standard-Kostenarten können nicht gelöscht werden.');
+            return;
+        }
         if (!window.confirm('Kostenart löschen?')) return;
         try {
-            const { error } = await supabase.from('expense_categories').delete().eq('id', id);
+            const { data, error } = await supabase.from('expense_categories').delete().eq('id', row.id).select('id');
             if (error) throw error;
+            if (!data || data.length === 0) throw new Error('Die Kostenart wurde nicht gelöscht (keine Berechtigung).');
             fetchCategories();
         } catch (error) {
             alert(translateError(error));
         }
     };
+
+    // Standard-Kostenarten (user_id NULL) sind schreibgeschützt
+    const renderCategoryActions = (row) => (
+        row.user_id === user?.id ? (
+            <>
+                <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditCategory(row)}>Bearbeiten</Button>
+                <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteCategory(row)}>Löschen</Button>
+            </>
+        ) : (
+            <span style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic' }}>Standard</span>
+        )
+    );
 
     const categoryColumns = [
         { header: 'Bezeichnung', accessor: 'name', render: (row) => <span style={{ fontWeight: 600 }}>{row.name}</span> },
@@ -369,9 +600,8 @@ const Settings = () => {
             accessor: 'actions',
             align: 'right',
             render: (row) => (
-                <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
-                    <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditCategory(row)}>Bearbeiten</Button>
-                    <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteCategory(row.id)}>Löschen</Button>
+                <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end', alignItems: 'center' }}>
+                    {renderCategoryActions(row)}
                 </div>
             )
         }
@@ -388,16 +618,16 @@ const Settings = () => {
         if (!keyForm.name.trim()) return alert('Name fehlt.');
         try {
             const payload = {
-                user_id: user.id,
                 name: keyForm.name,
                 description: keyForm.description,
                 calculation_type: 'custom' // Always custom for user defined
             };
             if (editingKey) {
-                const { error } = await supabase.from('distribution_keys').update(payload).eq('id', editingKey.id);
+                const { data, error } = await supabase.from('distribution_keys').update(payload).eq('id', editingKey.id).select('id');
                 if (error) throw error;
+                if (!data || data.length === 0) throw new Error('Der Schlüssel wurde nicht gespeichert (keine Berechtigung).');
             } else {
-                const { error } = await supabase.from('distribution_keys').insert([payload]);
+                const { error } = await supabase.from('distribution_keys').insert([{ ...payload, user_id: user.id }]);
                 if (error) throw error;
             }
             setIsKeyEditModalOpen(false);
@@ -410,8 +640,9 @@ const Settings = () => {
     const handleDeleteKey = async (id) => {
         if (!window.confirm('Schlüssel löschen?')) return;
         try {
-            const { error } = await supabase.from('distribution_keys').delete().eq('id', id);
+            const { data, error } = await supabase.from('distribution_keys').delete().eq('id', id).select('id');
             if (error) throw error;
+            if (!data || data.length === 0) throw new Error('Der Schlüssel wurde nicht gelöscht (keine Berechtigung).');
             fetchDistributionKeys();
         } catch (error) {
             alert(translateError(error));
@@ -420,12 +651,18 @@ const Settings = () => {
 
     // ... (rest of component)
 
+    const isOwnPortfolio = (portfolio) => !!portfolio && !!user && portfolio.user_id === user.id;
+    const ownPortfolios = portfolios.filter(isOwnPortfolio);
+
     const handleEditPortfolio = (portfolio) => {
+        if (!isOwnPortfolio(portfolio)) {
+            alert('Dieses Portfolio wurde für Sie freigegeben. Bearbeiten kann es nur der Eigentümer.');
+            return;
+        }
         setEditingPortfolio(portfolio);
         setPortfolioForm({
             name: portfolio.name || '',
             company_name: portfolio.company_name || '',
-            contact_person: portfolio.contact_person || '',
             email: portfolio.email || '',
             phone: portfolio.phone || '',
             tax_number: portfolio.tax_number || '',
@@ -437,9 +674,8 @@ const Settings = () => {
             bank_name: portfolio.bank_name || '',
             iban: portfolio.iban || '',
             bic: portfolio.bic || '',
-            ownership_percent: portfolio.ownership_percent || '',
-            entity_type: portfolio.entity_type || 'private',
-            notes: portfolio.notes || ''
+            ownership_percent: portfolio.ownership_percent ?? '',
+            entity_type: portfolio.entity_type || 'private'
         });
         setIsPortfolioModalOpen(true);
     };
@@ -449,7 +685,6 @@ const Settings = () => {
         setPortfolioForm({
             name: '',
             company_name: '',
-            contact_person: '',
             email: '',
             phone: '',
             tax_number: '',
@@ -462,17 +697,35 @@ const Settings = () => {
             iban: '',
             bic: '',
             ownership_percent: '',
-            entity_type: 'private',
-            notes: ''
+            entity_type: 'private'
         });
         setIsPortfolioModalOpen(true);
     };
 
     const handleSavePortfolio = async () => {
+        if (editingPortfolio && !isOwnPortfolio(editingPortfolio)) {
+            alert('Nur der Eigentümer kann dieses Portfolio bearbeiten.');
+            return;
+        }
+        if (!portfolioForm.name || !portfolioForm.name.trim()) {
+            alert('Bitte eine Bezeichnung für das Portfolio eingeben.');
+            return;
+        }
+        const ownership = parseOwnershipPercent(portfolioForm.ownership_percent);
+        if (ownership.error) {
+            alert(ownership.error);
+            return;
+        }
+        const bankErrors = validateBankData(portfolioForm);
+        if (bankErrors.length > 0) {
+            alert(bankErrors.join('\n'));
+            return;
+        }
+
         try {
+            // user_id wird nur beim Anlegen gesetzt – nie im Update (sonst Eigentümerwechsel)
             const dataToSave = {
-                user_id: user.id,
-                name: portfolioForm.name,
+                name: portfolioForm.name.trim(),
                 company_name: portfolioForm.company_name,
                 email: portfolioForm.email,
                 phone: portfolioForm.phone,
@@ -485,29 +738,27 @@ const Settings = () => {
                 bank_name: portfolioForm.bank_name,
                 iban: portfolioForm.iban,
                 bic: portfolioForm.bic,
-                ownership_percent: parseFloat(portfolioForm.ownership_percent) || null,
+                ownership_percent: ownership.value,
                 entity_type: portfolioForm.entity_type,
             };
 
-            // Hack: If contact_person is requested but might not exist, we check if we should try inserting it.
-            // For now, I'll include it. If it fails, I'd need to remove it.
-            // dataToSave.contact_person = portfolioForm.contact_person; 
-
-            let error;
             if (editingPortfolio) {
-                const { error: updateError } = await supabase
+                const { data, error: updateError } = await supabase
                     .from('portfolios')
                     .update(dataToSave)
-                    .eq('id', editingPortfolio.id);
-                error = updateError;
+                    .eq('id', editingPortfolio.id)
+                    .eq('user_id', user.id)
+                    .select('id');
+                if (updateError) throw updateError;
+                if (!data || data.length === 0) {
+                    throw new Error('Das Portfolio wurde nicht gespeichert (keine Berechtigung).');
+                }
             } else {
                 const { error: insertError } = await supabase
                     .from('portfolios')
-                    .insert([dataToSave]);
-                error = insertError;
+                    .insert([{ ...dataToSave, user_id: user.id }]);
+                if (insertError) throw insertError;
             }
-
-            if (error) throw error;
 
             setIsPortfolioModalOpen(false);
             fetchPortfolios();
@@ -519,59 +770,238 @@ const Settings = () => {
         }
     };
 
+    // Freigegebenes (fremdes) Portfolio verlassen
+    const handleLeaveSharedPortfolio = async (portfolio) => {
+        if (!window.confirm(`Freigabe für das Portfolio "${portfolio.name}" beenden? Sie verlieren danach den Zugriff; die Daten bleiben beim Eigentümer.`)) return;
+        try {
+            const { data: shares, error } = await supabase
+                .from('portfolio_shares')
+                .select('id, shared_with_email')
+                .eq('portfolio_id', portfolio.id);
+            if (error) throw error;
+            const mine = (shares || []).filter(s => normalizeEmail(s.shared_with_email) === normalizeEmail(user.email));
+            if (mine.length === 0) throw new Error('Für Ihr Konto wurde keine Freigabe zu diesem Portfolio gefunden.');
+            for (const share of mine) {
+                const { error: declineError } = await supabase.rpc('decline_portfolio_share', { share_id: share.id });
+                if (declineError) throw declineError;
+            }
+            fetchPortfolios();
+            if (refreshPortfolios) refreshPortfolios();
+        } catch (error) {
+            alert(translateError(error));
+        }
+    };
+
     const [deleteProperties, setDeleteProperties] = useState(false);
 
-    const handleOpenDeleteModal = (portfolio) => {
+    const handleOpenDeleteModal = async (portfolio) => {
+        if (!isOwnPortfolio(portfolio)) {
+            alert('Nur der Eigentümer kann dieses Portfolio löschen.');
+            return;
+        }
         setPortfolioToDelete(portfolio);
         setTargetPortfolioId('');
         setDeleteProperties(false);
+        setDeleteImpact(null);
         setIsDeleteModalOpen(true);
+        setLoadingDeleteImpact(true);
+        try {
+            setDeleteImpact(await loadDeleteImpact(portfolio.id));
+        } finally {
+            setLoadingDeleteImpact(false);
+        }
+    };
+
+    // Überträgt alle Daten mit eigener portfolio_id in das Zielportfolio. Läuft in
+    // Einzelschritten; bricht ein Schritt ab, wird das Quellportfolio NICHT gelöscht
+    // (bereits übertragene Daten liegen dann schon im Ziel – es geht nichts verloren).
+    const transferPortfolioContents = async (fromId, toId) => {
+        const moved = [];
+        const fail = (label, error) => {
+            const err = new Error(`${label}: ${translateError(error)}`);
+            err.moved = [...moved];
+            return err;
+        };
+        const move = async (table, label) => {
+            const { error } = await supabase.from(table).update({ portfolio_id: toId }).eq('portfolio_id', fromId);
+            if (error) throw fail(label, error);
+            moved.push(label);
+        };
+
+        await move('properties', 'Objekte (mit Einheiten, Verträgen, Mietkonto, Zahlungen, Abrechnungen)');
+        await move('meters', 'Zähler');
+        await move('meter_readings', 'Zählerstände');
+        await move('invoices', 'Rechnungen');
+        await move('loans', 'Darlehen');
+        await move('deals', 'Deals');
+
+        // Rechnungsnummern-Zähler zusammenführen (höchster Stand gewinnt), damit im Ziel
+        // keine Nummern doppelt vergeben werden
+        const { data: srcCounters, error: srcCounterError } = await supabase
+            .from('invoice_counters').select('id, year, object_unit_id, last_number').eq('portfolio_id', fromId);
+        if (srcCounterError) throw fail('Rechnungsnummern-Zähler', srcCounterError);
+        if (srcCounters && srcCounters.length > 0) {
+            const { data: dstCounters, error: dstCounterError } = await supabase
+                .from('invoice_counters').select('id, year, object_unit_id, last_number').eq('portfolio_id', toId);
+            if (dstCounterError) throw fail('Rechnungsnummern-Zähler', dstCounterError);
+            for (const counter of srcCounters) {
+                const match = (dstCounters || []).find(d => d.year === counter.year && (d.object_unit_id || null) === (counter.object_unit_id || null));
+                if (match) {
+                    if ((counter.last_number || 0) > (match.last_number || 0)) {
+                        const { error } = await supabase.from('invoice_counters').update({ last_number: counter.last_number }).eq('id', match.id);
+                        if (error) throw fail('Rechnungsnummern-Zähler', error);
+                    }
+                } else {
+                    const { error } = await supabase.from('invoice_counters').update({ portfolio_id: toId }).eq('id', counter.id);
+                    if (error) throw fail('Rechnungsnummern-Zähler', error);
+                }
+            }
+            moved.push('Rechnungsnummern-Zähler');
+        }
+
+        // Portfolio-eigene Schreibvorlagen: übernehmen, sofern das Ziel keine gleiche Vorlage hat
+        const { data: srcTemplates, error: srcTplError } = await supabase
+            .from('document_templates').select('id, type').eq('portfolio_id', fromId);
+        if (srcTplError) throw fail('Schreibvorlagen', srcTplError);
+        if (srcTemplates && srcTemplates.length > 0) {
+            const { data: dstTemplates, error: dstTplError } = await supabase
+                .from('document_templates').select('type').eq('portfolio_id', toId);
+            if (dstTplError) throw fail('Schreibvorlagen', dstTplError);
+            const dstTypes = new Set((dstTemplates || []).map(t => t.type));
+            for (const tpl of srcTemplates) {
+                const { error } = dstTypes.has(tpl.type)
+                    ? await supabase.from('document_templates').delete().eq('id', tpl.id)
+                    : await supabase.from('document_templates').update({ portfolio_id: toId }).eq('id', tpl.id);
+                if (error) throw fail('Schreibvorlagen', error);
+            }
+            moved.push('Schreibvorlagen');
+        }
+
+        // PDF-Vorlage nur übernehmen, wenn das Ziel noch keine hat (eine je Portfolio)
+        const { data: srcPdf, error: srcPdfError } = await supabase.from('pdf_templates').select('id').eq('portfolio_id', fromId);
+        if (srcPdfError) throw fail('PDF-Vorlage', srcPdfError);
+        if (srcPdf && srcPdf.length > 0) {
+            const { data: dstPdf, error: dstPdfError } = await supabase.from('pdf_templates').select('id').eq('portfolio_id', toId);
+            if (dstPdfError) throw fail('PDF-Vorlage', dstPdfError);
+            if (!dstPdf || dstPdf.length === 0) {
+                const { error } = await supabase.from('pdf_templates').update({ portfolio_id: toId }).eq('id', srcPdf[0].id);
+                if (error) throw fail('PDF-Vorlage', error);
+                moved.push('PDF-Vorlage');
+            }
+        }
+
+        return moved;
     };
 
     const handleExecuteDelete = async () => {
         if (!portfolioToDelete) return;
+        if (!isOwnPortfolio(portfolioToDelete)) {
+            alert('Nur der Eigentümer kann dieses Portfolio löschen.');
+            return;
+        }
+        if (portfolioToDelete.is_primary) {
+            alert('Das Hauptportfolio kann nicht gelöscht werden.');
+            return;
+        }
 
+        const fromId = portfolioToDelete.id;
+        setIsDeleting(true);
         try {
-            // Check if there are other portfolios avail
-            const otherPortfolios = portfolios.filter(p => p.id !== portfolioToDelete.id);
+            const impact = deleteImpact || await loadDeleteImpact(fromId);
+            const n = (key) => impact[key] || 0;
 
-            // Check if properties exist
-            const { count, error: countError } = await supabase
-                .from('properties')
-                .select('*', { count: 'exact', head: true })
-                .eq('portfolio_id', portfolioToDelete.id);
-
-            if (countError) throw countError;
-
-            // If user selected a target, transfer properties
             if (targetPortfolioId) {
-                const { error: updateError } = await supabase
-                    .from('properties')
-                    .update({ portfolio_id: targetPortfolioId })
-                    .eq('portfolio_id', portfolioToDelete.id);
-
-                if (updateError) throw updateError;
-            } else if (count > 0) {
-                if (!deleteProperties) {
-                    alert('Dieses Portfolio enthält Immobilien. Bitte wähle ein Ziel-Portfolio für den Transfer aus ODER bestätige die Löschung der Immobilien.');
+                if (!ownPortfolios.some(p => p.id === targetPortfolioId && p.id !== fromId)) {
+                    alert('Bitte wählen Sie eines Ihrer eigenen Portfolios als Ziel.');
                     return;
-                } else {
+                }
+
+                // Doppelte Rechnungsnummern im Ziel würden den Übertrag mittendrin abbrechen
+                if (n('invoices') > 0) {
+                    const [{ data: srcInv, error: srcErr }, { data: dstInv, error: dstErr }] = await Promise.all([
+                        supabase.from('invoices').select('invoice_number').eq('portfolio_id', fromId),
+                        supabase.from('invoices').select('invoice_number').eq('portfolio_id', targetPortfolioId)
+                    ]);
+                    if (srcErr) throw srcErr;
+                    if (dstErr) throw dstErr;
+                    const dstNumbers = new Set((dstInv || []).map(i => i.invoice_number));
+                    const duplicates = (srcInv || []).map(i => i.invoice_number).filter(num => dstNumbers.has(num));
+                    if (duplicates.length > 0) {
+                        alert(`Im Zielportfolio gibt es bereits Rechnungen mit denselben Nummern (z. B. ${duplicates.slice(0, 3).join(', ')}). Die Rechnungen können deshalb nicht übertragen werden. Bitte wählen Sie ein anderes Zielportfolio. Es wurde nichts verändert.`);
+                        return;
+                    }
+                }
+
+                try {
+                    await transferPortfolioContents(fromId, targetPortfolioId);
+                } catch (transferError) {
+                    const done = transferError.moved && transferError.moved.length > 0
+                        ? `\n\nBereits übertragen: ${transferError.moved.join(', ')}.`
+                        : '';
+                    alert(`Die Übertragung wurde abgebrochen – das Portfolio wurde NICHT gelöscht.\n\n${transferError.message}${done}`);
+                    return;
+                }
+            } else {
+                // Ohne Ziel: Rechnungen (Aufbewahrungspflicht) und Darlehen nie mitlöschen
+                if (impact.invoices === null || impact.loans === null || impact.properties === null) {
+                    alert('Die abhängigen Daten konnten nicht vollständig ermittelt werden. Zur Sicherheit wird nicht gelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder versuchen Sie es später erneut.');
+                    return;
+                }
+                if (n('invoices') > 0) {
+                    alert(`Dieses Portfolio enthält ${n('invoices')} Rechnung(en). Rechnungen unterliegen Aufbewahrungspflichten (§ 147 AO, § 14b UStG) und werden nicht mitgelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio.`);
+                    return;
+                }
+                if (n('loans') > 0) {
+                    alert(`Dieses Portfolio enthält ${n('loans')} Darlehen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder löschen Sie die Darlehen zuerst unter „Finanzierungen".`);
+                    return;
+                }
+                if (n('properties') > 0) {
+                    if (!deleteProperties) {
+                        alert('Dieses Portfolio enthält Immobilien. Bitte wählen Sie ein Ziel-Portfolio für die Übertragung aus ODER bestätigen Sie die endgültige Löschung.');
+                        return;
+                    }
+                    if (n('documents') > 0 || n('claims') > 0) {
+                        alert('Zu den Objekten gibt es noch Dokumente oder Forderungsakten. Diese verhindern das Löschen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder entfernen Sie Dokumente/Forderungen zuerst.');
+                        return;
+                    }
                     // Explicitly delete properties if user chose to not transfer and confirmed deletion
                     const { error: propDelError } = await supabase
                         .from('properties')
                         .delete()
-                        .eq('portfolio_id', portfolioToDelete.id);
+                        .eq('portfolio_id', fromId);
                     if (propDelError) throw propDelError;
+                }
+
+                // Portfolio-eigene Vorlagen, die es schon als allgemeine Vorlage gibt, würden das
+                // Löschen blockieren (eine allgemeine Vorlage je Typ) – diese entfallen.
+                const { data: srcTemplates, error: tplError } = await supabase
+                    .from('document_templates').select('id, type, user_id').eq('portfolio_id', fromId);
+                if (tplError) throw tplError;
+                if (srcTemplates && srcTemplates.length > 0) {
+                    const { data: globalTemplates, error: globalError } = await supabase
+                        .from('document_templates').select('type').is('portfolio_id', null).eq('user_id', user.id);
+                    if (globalError) throw globalError;
+                    const globalTypes = new Set((globalTemplates || []).map(t => t.type));
+                    for (const tpl of srcTemplates) {
+                        if (tpl.user_id === user.id && globalTypes.has(tpl.type)) {
+                            const { error } = await supabase.from('document_templates').delete().eq('id', tpl.id);
+                            if (error) throw error;
+                        }
+                    }
                 }
             }
 
             // Delete the portfolio
-            const { error: deleteError } = await supabase
+            const { data: deleted, error: deleteError } = await supabase
                 .from('portfolios')
                 .delete()
-                .eq('id', portfolioToDelete.id);
+                .eq('id', fromId)
+                .select('id');
 
             if (deleteError) throw deleteError;
+            if (!deleted || deleted.length === 0) {
+                throw new Error('Das Portfolio wurde nicht gelöscht (keine Berechtigung).');
+            }
 
             // Success
             setIsDeleteModalOpen(false);
@@ -582,11 +1012,40 @@ const Settings = () => {
 
         } catch (error) {
             alert(translateError(error));
+        } finally {
+            setIsDeleting(false);
         }
     };
 
+    const openShareModal = (row) => { setSharePortfolioId(row.id); setIsShareModalOpen(true); };
+
+    // Aktionen je Portfolio: Teilen/Bearbeiten/Löschen nur für den Eigentümer
+    const renderPortfolioActions = (row) => (
+        isOwnPortfolio(row) ? (
+            <>
+                <Button variant="ghost" size="sm" icon={Share2} onClick={() => openShareModal(row)}>Teilen</Button>
+                <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
+                {!row.is_primary && (
+                    <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>
+                )}
+            </>
+        ) : (
+            <Button variant="ghost" size="sm" icon={LogOut} onClick={() => handleLeaveSharedPortfolio(row)}>Freigabe beenden</Button>
+        )
+    );
+
     const portfolioColumns = [
-        { header: 'Name', accessor: 'name', render: row => <div style={{ fontWeight: 600 }}>{row.name}</div> },
+        {
+            header: 'Name',
+            accessor: 'name',
+            render: row => (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 600 }}>{row.name}</span>
+                    {row.is_primary && isOwnPortfolio(row) && <Badge variant="blue">Hauptportfolio</Badge>}
+                    {!isOwnPortfolio(row) && <Badge variant="warning">Für mich freigegeben</Badge>}
+                </div>
+            )
+        },
         { header: 'Firma', accessor: 'company_name' },
         { header: 'Ort', accessor: 'city', render: row => `${row.zip || ''} ${row.city || ''}` },
         {
@@ -595,11 +1054,7 @@ const Settings = () => {
             align: 'right',
             render: (row) => (
                 <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end' }}>
-                    <Button variant="ghost" size="sm" icon={Share2} onClick={() => { setSharePortfolioId(row.id); setIsShareModalOpen(true); }}>Teilen</Button>
-                    <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
-                    {!row.is_primary && (
-                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>
-                    )}
+                    {renderPortfolioActions(row)}
                 </div>
             )
         }
@@ -635,8 +1090,8 @@ const Settings = () => {
         if (passwordForm.newPassword !== passwordForm.confirmPassword) {
             return alert('Die neuen Passwörter stimmen nicht überein.');
         }
-        if (passwordForm.newPassword.length < 6) {
-            return alert('Das neue Passwort muss mindestens 6 Zeichen lang sein.');
+        if (passwordForm.newPassword.length < MIN_PASSWORD_LENGTH) {
+            return alert(`Das neue Passwort muss mindestens ${MIN_PASSWORD_LENGTH} Zeichen lang sein.`);
         }
 
         try {
@@ -855,13 +1310,13 @@ const Settings = () => {
                                     </div>
                                     <button
                                         onClick={() => {
-                                            const current = localStorage.getItem('pushNotificationsEnabled') !== 'false';
-                                            localStorage.setItem('pushNotificationsEnabled', !current ? 'true' : 'false');
-                                            setProfileData(prev => ({ ...prev, _pushToggle: Date.now() }));
+                                            const next = !pushEnabled;
+                                            try { localStorage.setItem('pushNotificationsEnabled', next ? 'true' : 'false'); } catch { /* ignore */ }
+                                            setPushEnabled(next);
                                         }}
                                         style={{
                                             width: '44px', height: '24px', borderRadius: '12px',
-                                            backgroundColor: localStorage.getItem('pushNotificationsEnabled') !== 'false' ? 'var(--primary-color)' : '#D1D5DB',
+                                            backgroundColor: pushEnabled ? 'var(--primary-color)' : '#D1D5DB',
                                             border: 'none', cursor: 'pointer',
                                             position: 'relative', transition: 'background-color 0.2s',
                                             flexShrink: 0
@@ -871,7 +1326,7 @@ const Settings = () => {
                                             width: '18px', height: '18px', borderRadius: '50%',
                                             backgroundColor: 'var(--surface-color)',
                                             position: 'absolute', top: '3px',
-                                            left: localStorage.getItem('pushNotificationsEnabled') !== 'false' ? '23px' : '3px',
+                                            left: pushEnabled ? '23px' : '3px',
                                             transition: 'left 0.2s',
                                             boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
                                         }}></div>
@@ -879,7 +1334,7 @@ const Settings = () => {
                                 </div>
 
                                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--spacing-md)' }}>
-                                    <Button onClick={handleSaveProfile}>Einstellungen speichern</Button>
+                                    <Button onClick={handleSaveGeneralSettings} disabled={!!profileLoadError}>Einstellungen speichern</Button>
                                 </div>
                             </div>
                         </Card>
@@ -891,6 +1346,13 @@ const Settings = () => {
                                 <div style={{ display: 'flex', justifyContent: 'center', padding: '50px' }}><Loader2 className="animate-spin" /></div>
                             ) : (
                                 <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
+                                    {profileLoadError && (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', borderRadius: 'var(--radius-md)', backgroundColor: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: '0.9rem' }}>
+                                            <AlertTriangle size={18} />
+                                            <span style={{ flex: 1 }}>{profileLoadError}</span>
+                                            <Button size="sm" variant="secondary" onClick={fetchProfile}>Erneut laden</Button>
+                                        </div>
+                                    )}
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                         <div>
                                             <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Anrede</label>
@@ -931,7 +1393,7 @@ const Settings = () => {
                                     </div>
 
                                     <div>
-                                        <Input label="E-Mailadresse" value={profileData.email} disabled />
+                                        <Input label="E-Mailadresse" value={user?.email || ''} disabled />
                                         <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
                                             Hinweis: Die E-Mailadresse kann nur im Bereich Sicherheit geändert werden.
                                         </p>
@@ -945,7 +1407,7 @@ const Settings = () => {
                                         <Input label="Eigentumsanteil (%) *" type="number" placeholder="100" value={profileData.ownership_percent} onChange={e => setProfileData({ ...profileData, ownership_percent: e.target.value })} required />
                                     </div>
                                     <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '-8px' }}>
-                                        Ihr Hauptportfolio wird automatisch aus Ihren Stammdaten erstellt und aktualisiert.
+                                        Ihr Hauptportfolio wird automatisch aus Ihren Stammdaten erstellt. Später geänderte Angaben (Name, Adresse, Bankverbindung, Steuerdaten) werden beim Übernehmen ins Hauptportfolio übertragen; nicht geänderte Felder lassen dort gepflegte Werte unberührt.
                                     </p>
 
                                     <div style={{ borderTop: '1px solid var(--border-color)', margin: 'var(--spacing-sm) 0' }}></div>
@@ -964,7 +1426,7 @@ const Settings = () => {
                                     </div>
 
                                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--spacing-md)' }}>
-                                        <Button onClick={handleSaveProfile}>Übernehmen</Button>
+                                        <Button onClick={handleSaveProfile} disabled={!!profileLoadError}>Übernehmen</Button>
                                     </div>
                                 </div>
                             )}
@@ -1027,15 +1489,14 @@ const Settings = () => {
                                                             </div>
                                                         )}
 
-                                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center' }}>
-                                                            {row.is_primary && (
-                                                                <Badge variant="info" style={{ marginRight: 'auto' }}>Hauptportfolio</Badge>
+                                                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                            {row.is_primary && isOwnPortfolio(row) && (
+                                                                <span style={{ marginRight: 'auto' }}><Badge variant="blue">Hauptportfolio</Badge></span>
                                                             )}
-                                                            <Button variant="ghost" size="sm" icon={Share2} onClick={() => { setSharePortfolioId(row.id); setIsShareModalOpen(true); }}>Teilen</Button>
-                                                            <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditPortfolio(row)}>Bearbeiten</Button>
-                                                            {!row.is_primary && (
-                                                                <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleOpenDeleteModal(row)}>Löschen</Button>
+                                                            {!isOwnPortfolio(row) && (
+                                                                <span style={{ marginRight: 'auto' }}><Badge variant="warning">Für mich freigegeben</Badge></span>
                                                             )}
+                                                            {renderPortfolioActions(row)}
                                                         </div>
                                                     </div>
                                                 ))}
@@ -1087,9 +1548,8 @@ const Settings = () => {
                                                         Standard-Schlüssel: {row.distribution_key?.name || '-'}
                                                     </div>
 
-                                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                                                        <Button variant="ghost" size="sm" icon={Edit2} onClick={() => handleEditCategory(row)}>Bearbeiten</Button>
-                                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} icon={Trash2} onClick={() => handleDeleteCategory(row.id)}>Löschen</Button>
+                                                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center' }}>
+                                                        {renderCategoryActions(row)}
                                                     </div>
                                                 </div>
                                             ))}
@@ -1121,7 +1581,7 @@ const Settings = () => {
                                     onClick={async () => {
                                         if (window.confirm('Soll eine E-Mail zum Zurücksetzen des Passworts an Ihre E-Mail-Adresse gesendet werden?')) {
                                             const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
-                                                redirectTo: window.location.origin + '/update-password',
+                                                redirectTo: window.location.origin + '/reset-password',
                                             });
                                             if (error) alert('Fehler: ' + (error.message === 'User not found' ? 'Benutzer nicht gefunden' : error.message));
                                             else alert('E-Mail versendet. Bitte prüfen Sie Ihren Posteingang.');
@@ -1199,7 +1659,6 @@ const Settings = () => {
                         <Card title="Support">
                             <p style={{ marginBottom: 'var(--spacing-md)' }}>Haben Sie Fragen oder benötigen Sie Unterstützung?</p>
                             <div style={{ padding: 'var(--spacing-md)', backgroundColor: 'var(--background-color)', borderRadius: '8px' }}>
-                                <strong>Support-Hotline:</strong> 0800 - 123 456<br />
                                 <strong>E-Mail:</strong> support@immocontrol360.de
                             </div>
                         </Card>
@@ -1356,70 +1815,126 @@ const Settings = () => {
             </Modal>
 
             {/* Delete Portfolio Modal */}
-            <Modal
-                isOpen={isDeleteModalOpen}
-                onClose={() => setIsDeleteModalOpen(false)}
-                title="Portfolio löschen"
-                footer={
-                    <>
-                        <Button variant="secondary" onClick={() => setIsDeleteModalOpen(false)}>Abbrechen</Button>
-                        <Button variant="danger" onClick={handleExecuteDelete}>Löschen</Button>
-                    </>
-                }
-            >
-                <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                    <p style={{ marginBottom: 'var(--spacing-md)' }}>
-                        Möchten Sie das Portfolio <strong>{portfolioToDelete?.name}</strong> wirklich löschen?
-                    </p>
+            {(() => {
+                const transferTargets = ownPortfolios.filter(p => p.id !== portfolioToDelete?.id);
+                const impactEntries = deleteImpact
+                    ? IMPACT_LABELS.filter(([key]) => deleteImpact[key] === null || deleteImpact[key] > 0)
+                    : [];
+                const n = (key) => (deleteImpact && deleteImpact[key]) || 0;
+                const hasBlockingForDelete = !!deleteImpact && (n('invoices') > 0 || n('loans') > 0
+                    || ((n('documents') > 0 || n('claims') > 0) && n('properties') > 0)
+                    || deleteImpact.invoices === null || deleteImpact.loans === null || deleteImpact.properties === null);
+                const deleteDisabled = isDeleting || loadingDeleteImpact
+                    || (!targetPortfolioId && (hasBlockingForDelete || (n('properties') > 0 && !deleteProperties)));
 
-                    {portfolios.filter(p => p.id !== portfolioToDelete?.id).length > 0 && (
-                        <div style={{ backgroundColor: 'var(--surface-color)', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', marginBottom: 'var(--spacing-md)' }}>
-                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#991B1B' }}>
-                                Immobilien übertragen an:
-                            </label>
-                            <p style={{ fontSize: '0.8rem', color: '#B91C1C', marginBottom: '10px' }}>
-                                Wenn dieses Portfolio Immobilien enthält, müssen diese einem anderen Portfolio zugewiesen oder gelöscht werden.
+                return (
+                    <Modal
+                        isOpen={isDeleteModalOpen}
+                        onClose={() => { if (!isDeleting) setIsDeleteModalOpen(false); }}
+                        title="Portfolio löschen"
+                        maxWidth="620px"
+                        footer={
+                            <>
+                                <Button variant="secondary" onClick={() => setIsDeleteModalOpen(false)} disabled={isDeleting}>Abbrechen</Button>
+                                <Button variant="danger" onClick={handleExecuteDelete} disabled={deleteDisabled}>
+                                    {isDeleting ? 'Wird ausgeführt...' : (targetPortfolioId ? 'Übertragen & Portfolio löschen' : 'Endgültig löschen')}
+                                </Button>
+                            </>
+                        }
+                    >
+                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                            <p style={{ marginBottom: 'var(--spacing-md)' }}>
+                                Möchten Sie das Portfolio <strong>{portfolioToDelete?.name}</strong> wirklich löschen?
                             </p>
-                            <select
-                                style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', opacity: deleteProperties ? 0.5 : 1 }}
-                                value={targetPortfolioId}
-                                onChange={(e) => {
-                                    setTargetPortfolioId(e.target.value);
-                                    if(e.target.value) setDeleteProperties(false);
-                                }}
-                                disabled={deleteProperties}
-                            >
-                                <option value="">Bitte wählen...</option>
-                                {portfolios.filter(p => p.id !== portfolioToDelete?.id).map(p => (
-                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: '#FEF2F2', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FCA5A5' }}>
-                        <input
-                            type="checkbox"
-                            id="deleteProperties"
-                            checked={deleteProperties}
-                            onChange={(e) => {
-                                setDeleteProperties(e.target.checked);
-                                if(e.target.checked) setTargetPortfolioId('');
-                            }}
-                            style={{ width: '18px', height: '18px', accentColor: 'var(--danger-color)' }}
-                        />
-                        <label htmlFor="deleteProperties" style={{ fontSize: '0.875rem', color: '#991B1B', fontWeight: 500, cursor: 'pointer' }}>
-                            Ich möchte alle Immobilien in diesem Portfolio endgültig löschen (statt sie zu übertragen).
-                        </label>
-                    </div>
+                            {/* Was hängt an diesem Portfolio? */}
+                            <div style={{ backgroundColor: 'var(--background-color)', padding: '12px 15px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', marginBottom: 'var(--spacing-md)', fontSize: '0.875rem' }}>
+                                <div style={{ fontWeight: 600, marginBottom: '6px' }}>An diesem Portfolio hängen:</div>
+                                {loadingDeleteImpact ? (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+                                        <Loader2 size={14} className="animate-spin" /> Daten werden gezählt...
+                                    </div>
+                                ) : impactEntries.length === 0 ? (
+                                    <div style={{ color: 'var(--text-secondary)' }}>Keine Objekte, Rechnungen oder weiteren Daten.</div>
+                                ) : (
+                                    <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                                        {impactEntries.map(([key, label]) => (
+                                            <li key={key}>{label}: <strong>{deleteImpact[key] === null ? 'unbekannt' : deleteImpact[key]}</strong></li>
+                                        ))}
+                                    </ul>
+                                )}
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '8px' }}>
+                                    Freigaben an andere Nutzer und die Cloud-Ordner-Verknüpfung dieses Portfolios werden in jedem Fall entfernt (Dateien in der Cloud bleiben erhalten).
+                                </div>
+                            </div>
 
-                    {portfolios.filter(p => p.id !== portfolioToDelete?.id).length === 0 && (
-                        <div style={{ color: 'var(--danger-color)', fontSize: '0.875rem' }}>
-                            Warnung: Dies ist ihr einziges Portfolio. Löschen ist nur möglich, wenn keine Immobilien mehr zugeordnet sind.
+                            {transferTargets.length > 0 && (
+                                <div style={{ backgroundColor: 'var(--surface-color)', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', marginBottom: 'var(--spacing-md)' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 600, marginBottom: '0.5rem', color: '#991B1B' }}>
+                                        Inhalte übertragen an (empfohlen):
+                                    </label>
+                                    <p style={{ fontSize: '0.8rem', color: '#B91C1C', marginBottom: '10px' }}>
+                                        Übertragen werden Objekte samt Einheiten, Mietverträgen, Mietkonto, Zahlungen, Abrechnungen, Dokumenten und Forderungen,
+                                        außerdem Zähler und Zählerstände, Rechnungen mit Rechnungsnummern-Zähler, Darlehen und Deals. Portfolio-eigene
+                                        Schreibvorlagen und die PDF-Vorlage werden übernommen, sofern das Zielportfolio keine gleichartige hat (sonst entfallen sie).
+                                    </p>
+                                    <select
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid #FECACA', opacity: deleteProperties ? 0.5 : 1 }}
+                                        value={targetPortfolioId}
+                                        onChange={(e) => {
+                                            setTargetPortfolioId(e.target.value);
+                                            if (e.target.value) setDeleteProperties(false);
+                                        }}
+                                        disabled={deleteProperties || isDeleting}
+                                    >
+                                        <option value="">Bitte wählen...</option>
+                                        {transferTargets.map(p => (
+                                            <option key={p.id} value={p.id}>{p.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {!targetPortfolioId && hasBlockingForDelete && (
+                                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', backgroundColor: '#FEF2F2', padding: '12px 15px', borderRadius: 'var(--radius-md)', border: '1px solid #FCA5A5', marginBottom: 'var(--spacing-md)', color: '#991B1B', fontSize: '0.85rem' }}>
+                                    <AlertTriangle size={18} style={{ flexShrink: 0 }} />
+                                    <div>
+                                        Endgültiges Löschen ist nicht möglich:
+                                        <ul style={{ margin: '4px 0 0 0', paddingLeft: '18px' }}>
+                                            {n('invoices') > 0 && <li>Rechnungen unterliegen Aufbewahrungspflichten (§ 147 AO, § 14b UStG) und werden nicht mitgelöscht.</li>}
+                                            {n('loans') > 0 && <li>Darlehen müssen zuerst übertragen oder unter „Finanzierungen" gelöscht werden.</li>}
+                                            {(n('documents') > 0 || n('claims') > 0) && n('properties') > 0 && <li>Dokumente bzw. Forderungsakten zu den Objekten verhindern das Löschen.</li>}
+                                            {deleteImpact && (deleteImpact.invoices === null || deleteImpact.loans === null || deleteImpact.properties === null) && <li>Die abhängigen Daten konnten nicht vollständig ermittelt werden.</li>}
+                                        </ul>
+                                        {transferTargets.length > 0 ? 'Bitte übertragen Sie die Inhalte in ein anderes Portfolio.' : 'Legen Sie ggf. zuerst ein weiteres Portfolio an und übertragen Sie die Inhalte dorthin.'}
+                                    </div>
+                                </div>
+                            )}
+
+                            {n('properties') > 0 && !hasBlockingForDelete && (
+                                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', backgroundColor: '#FEF2F2', padding: '15px', borderRadius: 'var(--radius-md)', border: '1px solid #FCA5A5' }}>
+                                    <input
+                                        type="checkbox"
+                                        id="deleteProperties"
+                                        checked={deleteProperties}
+                                        onChange={(e) => {
+                                            setDeleteProperties(e.target.checked);
+                                            if (e.target.checked) setTargetPortfolioId('');
+                                        }}
+                                        disabled={isDeleting}
+                                        style={{ width: '18px', height: '18px', accentColor: 'var(--danger-color)', flexShrink: 0, marginTop: '2px' }}
+                                    />
+                                    <label htmlFor="deleteProperties" style={{ fontSize: '0.875rem', color: '#991B1B', fontWeight: 500, cursor: 'pointer' }}>
+                                        Ich möchte stattdessen alles endgültig löschen: alle Objekte mit Einheiten, Mietverträgen, Mietkonto,
+                                        Mietzahlungen, Nebenkostenabrechnungen, Zählern und Zählerständen (siehe Aufstellung oben).
+                                        Das kann nicht rückgängig gemacht werden.
+                                    </label>
+                                </div>
+                            )}
                         </div>
-                    )}
-                </div>
-            </Modal>
+                    </Modal>
+                );
+            })()}
 
             {/* Manage Keys List Modal */}
             <Modal
@@ -1432,18 +1947,14 @@ const Settings = () => {
                 }
             >
                 <div>
-                    {/* Filter local duplicates if any exist (e.g. standard key also in user keys with same name) */}
+                    {/* Doppelte Standardschlüssel werden zusammengefasst; eigene Schlüssel immer angezeigt */}
                     <h4 style={{ marginBottom: '1rem', color: 'var(--text-secondary)' }}>Verfügbare Verteilerschlüssel</h4>
                     <div className="hidden-mobile">
                         <Table
-                            data={distributionKeys.filter((k, index, self) =>
-                                index === self.findIndex((t) => (
-                                    t.name === k.name
-                                ))
-                            )}
+                            data={visibleKeys}
                             columns={[
                                 { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
-                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{keyTypeLabel(r.calculation_type)}</Badge> },
                                 { header: 'Beschreibung', accessor: 'description' },
                                 { header: '', accessor: 'actions', render: r => <span style={{ fontSize: '0.8rem', color: '#9CA3AF', fontStyle: 'italic' }}>{r.user_id ? 'Eigener' : 'Standard'}</span> }
                             ]}
@@ -1452,11 +1963,7 @@ const Settings = () => {
 
                     {/* Mobile Card View for Available Keys */}
                     <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                        {distributionKeys.filter((k, index, self) =>
-                            index === self.findIndex((t) => (
-                                t.name === k.name
-                            ))
-                        ).map((row) => (
+                        {visibleKeys.map((row) => (
                             <div key={row.id} style={{
                                 border: '1px solid var(--border-color)',
                                 borderRadius: 'var(--radius-md)',
@@ -1466,7 +1973,7 @@ const Settings = () => {
                             }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
                                     <div style={{ fontWeight: 600 }}>{row.name}</div>
-                                    <Badge>{row.calculation_type === 'area' ? 'Fläche' : row.calculation_type === 'persons' ? 'Personen' : row.calculation_type === 'units' ? 'Wohneinheiten' : row.calculation_type === 'equal' ? 'Gleich' : row.calculation_type === 'direct' ? 'Direkt' : row.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge>
+                                    <Badge>{keyTypeLabel(row.calculation_type)}</Badge>
                                 </div>
                                 <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                                     {row.description}
@@ -1487,7 +1994,7 @@ const Settings = () => {
                             data={distributionKeys.filter(k => k.user_id)} // Filter for user-defined keys
                             columns={[
                                 { header: 'Name', accessor: 'name', render: r => <strong>{r.name}</strong> },
-                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{r.calculation_type === 'area' ? 'Fläche' : r.calculation_type === 'persons' ? 'Personen' : r.calculation_type === 'units' ? 'Wohneinheiten' : r.calculation_type === 'equal' ? 'Gleich' : r.calculation_type === 'direct' ? 'Direkt' : r.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge> },
+                                { header: 'Typ', accessor: 'calculation_type', render: r => <Badge>{keyTypeLabel(r.calculation_type)}</Badge> },
                                 { header: 'Beschreibung', accessor: 'description' },
                                 {
                                     header: '',
@@ -1516,7 +2023,7 @@ const Settings = () => {
                             }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
                                     <div style={{ fontWeight: 600 }}>{row.name}</div>
-                                    <Badge>{row.calculation_type === 'area' ? 'Fläche' : row.calculation_type === 'persons' ? 'Personen' : row.calculation_type === 'units' ? 'Wohneinheiten' : row.calculation_type === 'equal' ? 'Gleich' : row.calculation_type === 'direct' ? 'Direkt' : row.calculation_type === 'mea' ? 'MEA' : 'Manuell'}</Badge>
+                                    <Badge>{keyTypeLabel(row.calculation_type)}</Badge>
                                 </div>
                                 <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
                                     {row.description}
@@ -1589,13 +2096,9 @@ const Settings = () => {
                             onChange={e => setCategoryForm({ ...categoryForm, distribution_key_id: e.target.value })}
                         >
                             <option value="">Bitte wählen...</option>
-                            {/* Deduplicate keys for dropdown */}
-                            {distributionKeys.filter((k, index, self) =>
-                                index === self.findIndex((t) => (
-                                    t.name === k.name
-                                ))
-                            ).map(k => (
-                                <option key={k.id} value={k.id}>{k.name}</option>
+                            {/* Standardschlüssel zusammengefasst, eigene Schlüssel gekennzeichnet */}
+                            {visibleKeys.map(k => (
+                                <option key={k.id} value={k.id}>{k.user_id ? `${k.name} (eigener)` : k.name}</option>
                             ))}
                         </select>
                     </div>
@@ -1684,7 +2187,7 @@ const Settings = () => {
                             autoComplete="new-password"
                             name="confirm_pass_custom"
                         />
-                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Mindestens 6 Zeichen.</p>
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Mindestens {MIN_PASSWORD_LENGTH} Zeichen.</p>
                     </form>
                 </div>
             </Modal>

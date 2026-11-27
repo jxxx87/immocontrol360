@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from './AuthContext';
 import { registerPushNotifications, setupPushListeners, unregisterPushNotifications } from '../lib/pushNotifications';
@@ -7,45 +8,91 @@ const NotificationContext = createContext();
 
 export const useNotifications = () => useContext(NotificationContext);
 
+// Debug-Ausgaben nur im Entwicklungsmodus (keine Inhalte im Geräte-Log der Produktion)
+const debugLog = (...args) => { if (import.meta.env.DEV) console.log(...args); };
+
+// Push-Typen, die im Vordergrund bereits über die Realtime-Kanäle gemeldet werden
+const REALTIME_COVERED_TYPES = new Set(['message', 'ticket_comment', 'ticket', 'announcement', 'document', 'registration']);
+
+// Ab dieser Anzahl werden Fristen-Treffer zu einer Sammelmeldung gebündelt
+const BUNDLE_THRESHOLD = 3;
+
+// Nur App-interne Routen aus Push-Daten übernehmen
+const isInternalRoute = (route) => typeof route === 'string' && route.startsWith('/') && !route.startsWith('//');
+
 // ── CAPACITOR PUSH PLUGIN ────────────────────────────────────
 import { PushNotifications as CapPush } from '@capacitor/push-notifications';
-const loadPushPlugin = async () => {
+
+// Detect if running inside Capacitor native app
+const IS_NATIVE = (() => {
     try {
-        if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-            return CapPush;
+        return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    } catch {
+        return false;
+    }
+})();
+
+const loadPushPlugin = async () => (IS_NATIVE ? CapPush : null);
+
+// ── SYSTEM NOTIFICATION (Browser / OS-level) ────────────────────
+// Chrome auf Android erlaubt new Notification() nicht (TypeError) – dann über einen
+// ggf. vorhandenen Service Worker anzeigen, sonst still überspringen.
+const showSystemNotification = (title, body, onClick) => {
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    const options = {
+        body,
+        icon: '/logo.png',
+        badge: '/logo.png',
+        tag: Date.now().toString(),
+        renotify: true,
+    };
+    try {
+        const n = new Notification(title, options);
+        if (onClick) n.onclick = onClick;
+    } catch {
+        try {
+            navigator.serviceWorker?.getRegistration?.()
+                .then(reg => reg?.showNotification?.(title, options))
+                .catch(() => {});
+        } catch {
+            // Systembenachrichtigung nicht möglich – In-App-Meldung genügt
         }
-        return null;
+    }
+};
+
+const toDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const storageGet = (key) => {
+    try {
+        return localStorage.getItem(key);
     } catch {
         return null;
     }
 };
 
-// ── SYSTEM NOTIFICATION (Browser / OS-level) ────────────────────
-const showSystemNotification = (title, body, onClick) => {
-    if (!('Notification' in window)) return;
-    if (Notification.permission === 'granted') {
-        const n = new Notification(title, {
-            body,
-            icon: '/logo.png',
-            badge: '/logo.png',
-            tag: Date.now().toString(),
-            renotify: true,
-        });
-        if (onClick) n.onclick = onClick;
+const storageSet = (key, value) => {
+    try {
+        localStorage.setItem(key, value);
+    } catch {
+        // localStorage nicht verfügbar
     }
 };
 
 export const NotificationProvider = ({ children }) => {
     const { user, userRole } = useAuth();
+    const navigate = useNavigate();
+    const navigateRef = useRef(navigate);
     const [notifications, setNotifications] = useState([]);
     const [unreadCount, setUnreadCount] = useState(0);
     const [toasts, setToasts] = useState([]);
     const [permissionGranted, setPermissionGranted] = useState(false);
     const channelsRef = useRef([]);
+    const lastUserIdRef = useRef(null);
 
-    // ── HELPERS ───────────────────────────────────────────────────
-    // Detect if running inside Capacitor native app
-    const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    useEffect(() => {
+        navigateRef.current = navigate;
+    }, [navigate]);
 
     // ── REQUEST PERMISSION ──────────────────────────────────────
     const requestPermission = useCallback(async () => {
@@ -70,7 +117,7 @@ export const NotificationProvider = ({ children }) => {
         }
 
         // ── NATIVE APP (Capacitor) ──
-        if (isNative) {
+        if (IS_NATIVE) {
             try {
                 const plugin = await loadPushPlugin();
                 if (plugin) {
@@ -92,7 +139,7 @@ export const NotificationProvider = ({ children }) => {
         // No notification API available — hide the banner
         setPermissionGranted(true);
         return true;
-    }, [isNative]);
+    }, []);
 
     // ── ADD NOTIFICATION ────────────────────────────────────────
     const addNotification = useCallback((notification) => {
@@ -114,6 +161,16 @@ export const NotificationProvider = ({ children }) => {
 
         return entry;
     }, []);
+
+    // Mehrere gleichartige Treffer bündeln (statt einer Meldungsflut)
+    const notifyBundled = useCallback((items, toSingle, toSummary) => {
+        if (!items || items.length === 0) return;
+        if (items.length <= BUNDLE_THRESHOLD) {
+            items.forEach(item => addNotification(toSingle(item)));
+        } else {
+            addNotification(toSummary(items));
+        }
+    }, [addNotification]);
 
     // ── REMOVE TOAST ────────────────────────────────────────────
     const removeToast = useCallback((toastId) => {
@@ -148,6 +205,16 @@ export const NotificationProvider = ({ children }) => {
         });
     }, []);
 
+    // ── ABMELDUNG: Push-Token dieses Geräts entfernen ───────────
+    // Nach dem Logout darf das Gerät keine Pushes des abgemeldeten Kontos mehr erhalten.
+    useEffect(() => {
+        const previousUserId = lastUserIdRef.current;
+        lastUserIdRef.current = user?.id || null;
+        if (previousUserId && !user) {
+            unregisterPushNotifications(previousUserId).catch(() => {});
+        }
+    }, [user]);
+
     // ── SUBSCRIBE TO REALTIME EVENTS ────────────────────────────
     useEffect(() => {
         if (!user) return;
@@ -160,7 +227,7 @@ export const NotificationProvider = ({ children }) => {
                 return;
             }
             // Native (Capacitor)
-            if (isNative) {
+            if (IS_NATIVE) {
                 try {
                     const plugin = await loadPushPlugin();
                     if (plugin) {
@@ -183,14 +250,15 @@ export const NotificationProvider = ({ children }) => {
         // unmount kills the WebSocket before the second mount can subscribe.
         let aborted = false;
         let channels = [];
+        const isTenant = userRole === 'tenant';
 
         const setupChannels = () => {
             if (aborted) {
-                console.log('[Notifications] Setup aborted (StrictMode cleanup)');
+                debugLog('[Notifications] Setup aborted (StrictMode cleanup)');
                 return;
             }
 
-            console.log('[Notifications] Setting up realtime channels for user:', user.id, 'role:', userRole);
+            debugLog('[Notifications] Setting up realtime channels, role:', userRole);
 
             // 1️⃣ NEW MESSAGES
             const msgChannel = supabase
@@ -201,7 +269,6 @@ export const NotificationProvider = ({ children }) => {
                     table: 'messages',
                     filter: `receiver_id=eq.${user.id}`
                 }, (payload) => {
-                    console.log('[Notifications] New message received:', payload);
                     const msg = payload.new;
                     if (msg.sender_id === user.id) return;
                     // Skip ticket messages — handled by notif-ticket-msgs channel
@@ -210,12 +277,12 @@ export const NotificationProvider = ({ children }) => {
                         type: 'message',
                         title: '💬 Neue Nachricht',
                         body: msg.text?.substring(0, 100) || 'Sie haben eine neue Nachricht erhalten.',
-                        route: userRole === 'tenant' ? '/tenant/messages' : '/investor-messages',
+                        route: isTenant ? '/tenant/messages' : '/investor-messages',
                         data: msg,
                     });
                 })
                 .subscribe((status, err) => {
-                    console.log('[Notifications] messages channel:', status, err || '');
+                    debugLog('[Notifications] messages channel:', status, err?.message || '');
                 });
             channels.push(msgChannel);
 
@@ -227,9 +294,8 @@ export const NotificationProvider = ({ children }) => {
                     schema: 'public',
                     table: 'tickets',
                 }, (payload) => {
-                    console.log('[Notifications] New ticket received:', payload);
                     const ticket = payload.new;
-                    if (userRole !== 'tenant') {
+                    if (!isTenant) {
                         addNotification({
                             type: 'ticket',
                             title: '🎫 Neues Ticket',
@@ -240,7 +306,7 @@ export const NotificationProvider = ({ children }) => {
                     }
                 })
                 .subscribe((status, err) => {
-                    console.log('[Notifications] tickets channel:', status, err || '');
+                    debugLog('[Notifications] tickets channel:', status, err?.message || '');
                 });
             channels.push(ticketChannel);
 
@@ -262,12 +328,12 @@ export const NotificationProvider = ({ children }) => {
                         type: 'ticket_comment',
                         title: '💬 Neuer Ticket-Kommentar',
                         body: msg.text?.substring(0, 100) || 'Neuer Kommentar zu einem Ticket.',
-                        route: userRole === 'tenant' ? '/tenant/tickets' : '/ticket-board',
+                        route: isTenant ? '/tenant/tickets' : '/ticket-board',
                         data: msg,
                     });
                 })
                 .subscribe((status, err) => {
-                    console.log('[Notifications] ticket-msgs channel:', status, err || '');
+                    debugLog('[Notifications] ticket-msgs channel:', status, err?.message || '');
                 });
             channels.push(ticketMsgChannel);
 
@@ -280,21 +346,23 @@ export const NotificationProvider = ({ children }) => {
                     table: 'announcements',
                 }, (payload) => {
                     const ann = payload.new;
+                    // Eigene Aushänge nicht als "neu" melden
+                    if (ann.created_by && ann.created_by === user.id) return;
                     addNotification({
                         type: 'announcement',
                         title: '📢 Neuer Aushang',
                         body: ann.title || 'Ein neuer Aushang wurde erstellt.',
-                        route: userRole === 'tenant' ? '/tenant/announcements' : '/announcements',
+                        route: isTenant ? '/tenant/announcements' : '/announcements',
                         data: ann,
                     });
                 })
                 .subscribe((status, err) => {
-                    console.log('[Notifications] announcements channel:', status, err || '');
+                    debugLog('[Notifications] announcements channel:', status, err?.message || '');
                 });
             channels.push(announcementChannel);
 
             // 5️⃣ NEW DOCUMENTS (only for tenants — investor uploads them)
-            if (userRole === 'tenant') {
+            if (isTenant) {
                 const docChannel = supabase
                     .channel('notif-documents-' + Date.now())
                     .on('postgres_changes', {
@@ -312,13 +380,13 @@ export const NotificationProvider = ({ children }) => {
                         });
                     })
                     .subscribe((status, err) => {
-                        console.log('[Notifications] documents channel:', status, err || '');
+                        debugLog('[Notifications] documents channel:', status, err?.message || '');
                     });
                 channels.push(docChannel);
             }
 
             // 6️⃣ TENANT REGISTRATION (for investors)
-            if (userRole !== 'tenant') {
+            if (!isTenant) {
                 const regChannel = supabase
                     .channel('notif-registrations-' + Date.now())
                     .on('postgres_changes', {
@@ -336,7 +404,7 @@ export const NotificationProvider = ({ children }) => {
                         });
                     })
                     .subscribe((status, err) => {
-                        console.log('[Notifications] registrations channel:', status, err || '');
+                        debugLog('[Notifications] registrations channel:', status, err?.message || '');
                     });
                 channels.push(regChannel);
             }
@@ -345,9 +413,9 @@ export const NotificationProvider = ({ children }) => {
 
             // ── 🔔 RENOVATION DEADLINE CHECK (once per day, if enabled) ──────
             const localToday = new Date();
-            const todayStr = `${localToday.getFullYear()}-${String(localToday.getMonth() + 1).padStart(2, '0')}-${String(localToday.getDate()).padStart(2, '0')}`;
+            const todayStr = toDateStr(localToday);
             const sessionKey = `renovation_deadline_check_${user.id}_${todayStr}`;
-            const pushEnabled = localStorage.getItem('pushNotificationsEnabled') !== 'false';
+            const pushEnabled = storageGet('pushNotificationsEnabled') !== 'false';
 
             // Clean up old renovation check keys
             try {
@@ -356,12 +424,13 @@ export const NotificationProvider = ({ children }) => {
                         localStorage.removeItem(k);
                     }
                 });
-            } catch (e) { /* ignore */ }
+            } catch { /* ignore */ }
 
-            if (pushEnabled && !localStorage.getItem(sessionKey)) {
+            // Sanierungsfristen betreffen nur Vermieter (Mieter haben keine Projekte)
+            if (pushEnabled && !isTenant && !storageGet(sessionKey)) {
                 (async () => {
                     try {
-                        console.log('[Notifications] Checking renovation deadlines for', todayStr);
+                        debugLog('[Notifications] Checking renovation deadlines for', todayStr);
 
                         // 1. Tasks with due_date <= today, not completed
                         const { data: dueTasks, error: taskErr } = await supabase
@@ -371,18 +440,26 @@ export const NotificationProvider = ({ children }) => {
                             .eq('is_completed', false)
                             .lte('due_date', todayStr);
 
-                        if (taskErr) console.warn('[Notifications] Task query error:', taskErr);
-                        console.log('[Notifications] Due tasks found:', dueTasks?.length || 0);
+                        if (taskErr) console.warn('[Notifications] Task query error:', taskErr.message);
 
-                        (dueTasks || []).forEach(t => {
-                            const isOverdue = t.due_date < todayStr;
-                            addNotification({
+                        notifyBundled(
+                            dueTasks || [],
+                            (t) => {
+                                const isOverdue = t.due_date < todayStr;
+                                return {
+                                    type: 'renovation_task_due',
+                                    title: isOverdue ? '🔴 Aufgabe überfällig' : '⚠️ Aufgabe fällig',
+                                    body: `„${t.title}"${t.project?.name ? ` (${t.project.name})` : ''} ${isOverdue ? 'war am ' + new Date(t.due_date).toLocaleDateString('de-DE') + ' fällig' : 'ist heute fällig'} und noch nicht abgeschlossen.`,
+                                    route: '/renovation?tab=tasks',
+                                };
+                            },
+                            (list) => ({
                                 type: 'renovation_task_due',
-                                title: isOverdue ? '🔴 Aufgabe überfällig' : '⚠️ Aufgabe fällig',
-                                body: `„${t.title}"${t.project?.name ? ` (${t.project.name})` : ''} ${isOverdue ? 'war am ' + new Date(t.due_date).toLocaleDateString('de-DE') + ' fällig' : 'ist heute fällig'} und noch nicht abgeschlossen.`,
+                                title: `⚠️ ${list.length} Sanierungsaufgaben fällig`,
+                                body: `${list.slice(0, BUNDLE_THRESHOLD).map(t => `„${t.title}"`).join(', ')} und weitere sind fällig oder überfällig.`,
                                 route: '/renovation?tab=tasks',
-                            });
-                        });
+                            }),
+                        );
 
                         // 2. Projects with target_end_date <= today, not completed
                         const { data: dueProjects, error: projErr } = await supabase
@@ -392,28 +469,38 @@ export const NotificationProvider = ({ children }) => {
                             .neq('status', 'completed')
                             .lte('target_end_date', todayStr);
 
-                        if (projErr) console.warn('[Notifications] Project query error:', projErr);
-                        console.log('[Notifications] Due projects found:', dueProjects?.length || 0);
+                        if (projErr) console.warn('[Notifications] Project query error:', projErr.message);
 
-                        (dueProjects || []).forEach(p => {
-                            const isOverdue = p.target_end_date < todayStr;
-                            addNotification({
+                        notifyBundled(
+                            dueProjects || [],
+                            (p) => {
+                                const isOverdue = p.target_end_date < todayStr;
+                                return {
+                                    type: 'renovation_project_due',
+                                    title: isOverdue ? '🔴 Projekt überfällig' : '⚠️ Projekt-Zieldatum erreicht',
+                                    body: `Das Sanierungsprojekt „${p.name}" ${isOverdue ? 'war am ' + new Date(p.target_end_date).toLocaleDateString('de-DE') + ' fällig' : 'hat heute sein Ziel-Enddatum erreicht'} und ist noch nicht abgeschlossen.`,
+                                    route: '/renovation',
+                                };
+                            },
+                            (list) => ({
                                 type: 'renovation_project_due',
-                                title: isOverdue ? '🔴 Projekt überfällig' : '⚠️ Projekt-Zieldatum erreicht',
-                                body: `Das Sanierungsprojekt „${p.name}" ${isOverdue ? 'war am ' + new Date(p.target_end_date).toLocaleDateString('de-DE') + ' fällig' : 'hat heute sein Ziel-Enddatum erreicht'} und ist noch nicht abgeschlossen.`,
+                                title: `⚠️ ${list.length} Sanierungsprojekte über dem Zieldatum`,
+                                body: `${list.slice(0, BUNDLE_THRESHOLD).map(p => `„${p.name}"`).join(', ')} und weitere sind noch nicht abgeschlossen.`,
                                 route: '/renovation',
-                            });
-                        });
+                            }),
+                        );
 
-                        localStorage.setItem(sessionKey, '1');
+                        storageSet(sessionKey, '1');
                     } catch (e) {
-                        console.warn('[Notifications] Renovation deadline check failed:', e);
+                        console.warn('[Notifications] Renovation deadline check failed:', e?.message || e);
                     }
                 })();
             }
 
             // ── 🗓️ OBJEKTKALENDER DAILY CHECK ──────────────────────
             const okSessionKey = `ok_daily_check_${user.id}_${todayStr}`;
+            // Der Objektkalender ist auch für Mieter freigegeben (Route allowTenant, Mieter-Menü)
+            const okRoute = '/object-calendar';
             // Clean up old daily check keys from previous days
             try {
                 Object.keys(localStorage).forEach(k => {
@@ -421,98 +508,124 @@ export const NotificationProvider = ({ children }) => {
                         localStorage.removeItem(k);
                     }
                 });
-            } catch (e) { /* ignore */ }
+            } catch { /* ignore */ }
 
-            if (pushEnabled && !localStorage.getItem(okSessionKey)) {
+            if (pushEnabled && !storageGet(okSessionKey)) {
                 (async () => {
                     try {
-                        console.log('[Notifications] Checking Objektkalender tasks for', todayStr);
+                        debugLog('[Notifications] Checking Objektkalender tasks for', todayStr);
                         // Events due today
-                        const { data: todayEvents } = await supabase
+                        const { data: todayEvents, error: todayErr } = await supabase
                             .from('objektkalender_events')
                             .select('id, title, event_date, event_type, assigned_unit_name, push_enabled')
                             .eq('status', 'pending')
                             .eq('event_date', todayStr)
                             .eq('push_enabled', true);
+                        if (todayErr) console.warn('[Notifications] Objektkalender query error:', todayErr.message);
 
-                        (todayEvents || []).forEach(ev => {
-                            const icon = ev.event_type === 'cleaning' ? '🧹' : ev.event_type === 'waste' ? '🗑️' : '📋';
-                            addNotification({
+                        notifyBundled(
+                            todayEvents || [],
+                            (ev) => {
+                                const icon = ev.event_type === 'cleaning' ? '🧹' : ev.event_type === 'waste' ? '🗑️' : '📋';
+                                return {
+                                    type: 'ok_event_due',
+                                    title: `${icon} ${ev.title} – heute fällig`,
+                                    body: ev.assigned_unit_name ? `Zuständig: ${ev.assigned_unit_name}` : 'Heute zu erledigen.',
+                                    route: okRoute,
+                                };
+                            },
+                            (list) => ({
                                 type: 'ok_event_due',
-                                title: `${icon} ${ev.title} – heute fällig`,
-                                body: ev.assigned_unit_name ? `Zuständig: ${ev.assigned_unit_name}` : 'Heute zu erledigen.',
-                                route: '/object-calendar',
-                            });
-                        });
+                                title: `📋 ${list.length} Objektkalender-Aufgaben heute fällig`,
+                                body: `${list.slice(0, BUNDLE_THRESHOLD).map(ev => ev.title).join(', ')} und weitere.`,
+                                route: okRoute,
+                            }),
+                        );
 
                         // Overdue events — only check last 2 days to avoid notification flood
                         const twoDaysAgo = new Date(localToday);
                         twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-                        const twoDaysAgoStr = `${twoDaysAgo.getFullYear()}-${String(twoDaysAgo.getMonth() + 1).padStart(2, '0')}-${String(twoDaysAgo.getDate()).padStart(2, '0')}`;
                         const yesterday = new Date(localToday);
                         yesterday.setDate(yesterday.getDate() - 1);
-                        const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-                        const { data: overdueEvents } = await supabase
+                        const { data: overdueEvents, error: overdueErr } = await supabase
                             .from('objektkalender_events')
                             .select('id, title, event_date, event_type, assigned_unit_name')
                             .eq('status', 'pending')
-                            .gte('event_date', twoDaysAgoStr)
-                            .lte('event_date', yesterdayStr);
+                            .gte('event_date', toDateStr(twoDaysAgo))
+                            .lte('event_date', toDateStr(yesterday));
+                        if (overdueErr) console.warn('[Notifications] Objektkalender query error:', overdueErr.message);
 
-                        (overdueEvents || []).forEach(ev => {
-                            addNotification({
+                        notifyBundled(
+                            overdueEvents || [],
+                            (ev) => ({
                                 type: 'ok_event_overdue',
                                 title: `🔴 ${ev.title} – überfällig`,
                                 body: `War am ${new Date(ev.event_date).toLocaleDateString('de-DE')} fällig.${ev.assigned_unit_name ? ` Zuständig: ${ev.assigned_unit_name}` : ''}`,
-                                route: '/object-calendar',
-                            });
-                        });
+                                route: okRoute,
+                            }),
+                            (list) => ({
+                                type: 'ok_event_overdue',
+                                title: `🔴 ${list.length} Objektkalender-Aufgaben überfällig`,
+                                body: `${list.slice(0, BUNDLE_THRESHOLD).map(ev => ev.title).join(', ')} und weitere sind noch offen.`,
+                                route: okRoute,
+                            }),
+                        );
 
-                        localStorage.setItem(okSessionKey, '1');
+                        storageSet(okSessionKey, '1');
                     } catch (e) {
-                        console.warn('[Notifications] Objektkalender check failed:', e);
+                        console.warn('[Notifications] Objektkalender check failed:', e?.message || e);
                     }
                 })();
             }
 
             if (!pushEnabled) {
-                console.log('[Notifications] Push notifications disabled by user setting.');
+                debugLog('[Notifications] Push notifications disabled by user setting.');
             }
         };
 
         // Delay setup to survive React StrictMode double-mount cleanup
         const timer = setTimeout(setupChannels, 150);
 
+        // Handle push received in foreground / tapped (Listener vor der Registrierung setzen)
+        const removePushListeners = setupPushListeners((notification) => {
+            const route = isInternalRoute(notification.data?.route) ? notification.data.route : undefined;
+            if (notification.tapped) {
+                // Antippen einer Benachrichtigung: direkt zur passenden Seite
+                if (route) navigateRef.current?.(route);
+                return;
+            }
+            if (notification.foreground) {
+                const type = notification.data?.type || 'message';
+                // Diese Ereignisse meldet bereits der Realtime-Kanal – keine Doppelmeldung
+                if (REALTIME_COVERED_TYPES.has(type)) return;
+                addNotification({
+                    type,
+                    title: notification.title || 'Neue Benachrichtigung',
+                    body: notification.body || '',
+                    route,
+                });
+            }
+        });
+
         // ── REGISTER FCM PUSH (Capacitor) ───────────────────────
         registerPushNotifications(user.id).then(result => {
             if (result && result.success) {
-                console.log('FCM registered:', result.token?.substring(0, 20) + '...');
+                debugLog('FCM registered');
                 setPermissionGranted(true);
-            } else if (result) {
+            } else if (result && result.step !== 'plugin') {
                 console.warn('FCM registration failed:', result.step, result.error);
             }
         }).catch(err => {
-            console.error('FCM registration error:', err);
-        });
-
-        // Handle push received in foreground
-        setupPushListeners((notification) => {
-            if (notification.foreground) {
-                addNotification({
-                    type: notification.data?.type || 'message',
-                    title: notification.title || 'Neue Benachrichtigung',
-                    body: notification.body || '',
-                    route: notification.data?.route,
-                });
-            }
+            console.error('FCM registration error:', err?.message || err);
         });
 
         return () => {
             aborted = true;
             clearTimeout(timer);
+            removePushListeners();
             channels.forEach(ch => supabase.removeChannel(ch));
         };
-    }, [user, userRole, addNotification]);
+    }, [user, userRole, addNotification, notifyBundled]);
 
     const value = {
         notifications,

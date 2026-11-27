@@ -26,13 +26,41 @@ dist-ssr
 # Build and cache
 android/
 *.apk
+*.aab
 .vite/
 backups/
 .agent/
 .env
+# Supabase-CLI-Zwischenspeicher (wird von `supabase link` lokal angelegt)
+supabase/.temp/
+supabase/.branches/
+# Deploy-Zwischenordner (deploy_all.ps1 nutzt inzwischen %TEMP%, alter Ort zur Sicherheit)
+temp_deploy/
 
 # Credentials & Temp
 *Zugangsdaten*
 *.rtf
 temp.sql
 scratch_*
+scratch/
+
+# Personenbezogene Daten / Extrakte aus privaten Dokumenten – nie ins Repo
+extracted_*
+*.zip
+
+# Einmal-Hilfsskripte im Projekt-Root (Komplett-Check 2026-11-27: gelöscht; nicht wieder einchecken).
+# Datenbank-Änderungen nur als Migration in supabase/migrations (siehe SOP_DEPLOYS.md).
+/*.sql
+/analyze_*.cjs
+/apply_*.cjs
+/check_*.cjs
+/debug_*.js
+/debug_*.cjs
+/execute_*.cjs
+/fix_*.cjs
+/generate_*.cjs
+/get_*.cjs
+/run_*.cjs
+/test_*.js
+/test_*.cjs
+/update_*.cjs

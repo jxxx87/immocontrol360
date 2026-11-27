@@ -33,21 +33,517 @@ import CurrencyInput from '../components/ui/CurrencyInput';
 import RateInput from '../components/ui/RateInput';
 import FixFlipCalculator from './investor/FixFlipCalculator';
 import InvestorCalculators from './investor/InvestorCalculators';
+import { TRANSFER_TAX_RATES, TRANSFER_TAX_RATES_AS_OF } from './investor/transferTaxRates';
 import { supabase } from '../lib/supabase';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePdfTemplate } from '../lib/usePdfTemplate';
+import { translateError } from '../lib/errorTranslator';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { useViewMode } from '../context/ViewModeContext';
 import ExportDropdown from '../components/ExportDropdown';
 import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 
+// ─── Reine Rechenfunktionen (ohne React-State) ──────────────────────────────
+
+const MAX_LOAN_MONTHS = 600; // 50 Jahre
+const MAX_FIXED_YEARS = 50;
+const DEFAULT_FIXED_YEARS = 10;
+const DEFAULT_AFA_RATE = 2;
+const DEFAULT_BUILDING_SHARE = 80;
+const DEFAULT_TAX_RATE = 42;
+const PROPERTY_SAVE_DELAY_MS = 600;
+
+// Zahl aus Eingabe/DB-Wert; leer oder ungültig -> null (eine eingegebene 0 bleibt 0)
+const parseNum = (v) => {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+    return Number.isFinite(n) ? n : null;
+};
+// Standardwert nur für leere/ungültige Eingaben – 0 % bleibt 0 %
+const numOr = (v, def) => {
+    const n = parseNum(v);
+    return n === null ? def : n;
+};
+const round2 = (v) => Math.round((v + Number.EPSILON) * 100) / 100;
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const toLocalDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+// Heutiges Datum als 'YYYY-MM-DD' in lokaler Zeit (toISOString wäre UTC und zwischen 0 und 2 Uhr noch der Vortag)
+const localTodayStr = () => toLocalDateStr(new Date());
+const dateStr = (v) => (v ? String(v).slice(0, 10) : '');
+// 'YYYY-MM-DD' als lokales Datum (nicht UTC)
+const parseLocalDate = (value) => {
+    if (!value) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return isNaN(d.getTime()) ? null : d;
+};
+// Volle Monate zwischen zwei Daten (der Tag im Monat zählt mit)
+const fullMonthsBetween = (from, to) => {
+    let months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+    if (to.getDate() < from.getDate()) months -= 1;
+    return months;
+};
+// i-ter Ratentermin ab Startdatum; Tag wird auf das Monatsende begrenzt (wie auf der Darlehen-Seite)
+const paymentDateAt = (start, i) => {
+    const y = start.getFullYear();
+    const m0 = start.getMonth() + i;
+    const lastDay = new Date(y, m0 + 1, 0).getDate();
+    return new Date(y, m0, Math.min(start.getDate(), lastDay));
+};
+
+// Monatliche Rate wie auf der Darlehen-Seite: feste Rate oder Darlehensbetrag × (Zins + anf. Tilgung) / 12
+const getLoanMonthlyPayment = (loan) => {
+    const fixed = parseNum(loan.fixed_annuity);
+    if (fixed !== null && fixed > 0) return round2(fixed);
+    const amount = parseNum(loan.loan_amount);
+    const rate = parseNum(loan.interest_rate);
+    const repayment = parseNum(loan.initial_repayment_rate);
+    if (!(amount > 0) || rate === null || repayment === null) return null;
+    const payment = round2((amount * (rate + repayment)) / 100 / 12);
+    return payment > 0 ? payment : null;
+};
+
+// Aktuelle Restschuld – dieselbe Rechnung wie der Tilgungsplan der Darlehen-Seite (Loans.jsx), damit Cockpit
+// und Darlehen-Seite dieselbe Restschuld zeigen: Raten bis einschließlich Stichtag laufen regulär, danach gilt
+// die tatsächliche Restschuld und es wird nur ab dem Stichtag weiter getilgt. Altbestand ohne Stichtag gilt
+// (wie dort) ab dem Startdatum; neue Einträge verlangen den Stichtag.
+const calculateCurrentDebt = (loan, today = new Date()) => {
+    const original = parseNum(loan.loan_amount) || 0;
+    const start = parseLocalDate(loan.start_date);
+    const actual = parseNum(loan.actual_residual_debt);
+    let actualDate = parseLocalDate(loan.actual_residual_debt_date);
+    if (actual !== null && !actualDate && start) {
+        actualDate = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
+    }
+    const hasReset = actual !== null && !!actualDate;
+    const until = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const resetApplies = hasReset && actualDate <= until;
+
+    const annualRate = parseNum(loan.interest_rate);
+    const payment = getLoanMonthlyPayment(loan);
+    if (!start || annualRate === null || payment === null) {
+        return Math.max(0, round2(resetApplies ? actual : original));
+    }
+
+    let balance = round2(original);
+    let resetDone = false;
+    for (let i = 0; i < MAX_LOAN_MONTHS; i++) {
+        const date = paymentDateAt(start, i);
+        if (hasReset && !resetDone && date > actualDate) {
+            if (actualDate > until) break;
+            balance = round2(actual);
+            resetDone = true;
+        }
+        if (date > until) break;
+        if (balance <= 0.005) {
+            if (hasReset && !resetDone) continue;
+            break;
+        }
+        const interest = round2((balance * annualRate) / 100 / 12);
+        if (payment <= interest + 0.005) {
+            if (hasReset && !resetDone) continue;
+            break;
+        }
+        const principal = Math.min(round2(payment - interest), balance);
+        balance = round2(balance - principal);
+    }
+    return Math.max(0, balance);
+};
+
+// Kennzahlen eines Darlehens für den laufenden Monat: getilgte Darlehen zählen nicht mehr mit,
+// die Rate ist auf Restschuld + Monatszins begrenzt (letzte Rate)
+const getLoanSnapshot = (loan, today = new Date()) => {
+    const debt = calculateCurrentDebt(loan, today);
+    const rate = (parseNum(loan.interest_rate) || 0) / 100;
+    if (debt <= 0) return { debt: 0, payment: 0, interest: 0, repayment: 0, rate };
+    const nominal = getLoanMonthlyPayment(loan) || 0;
+    const interest = (debt * rate) / 12;
+    const payment = Math.min(nominal, debt + interest);
+    return { debt, payment, interest, repayment: Math.max(0, payment - interest), rate };
+};
+
+// Einheitliche Definition "laufender Mietvertrag" (Einnahmen, Leerstand, Optimierungen):
+// Status aktiv und der Stichtag liegt innerhalb der Vertragslaufzeit
+const isLeaseCurrent = (lease, todayStr) => !!lease && lease.status === 'active'
+    && (!lease.start_date || dateStr(lease.start_date) <= todayStr)
+    && (!lease.end_date || dateStr(lease.end_date) >= todayStr);
+const getActiveLease = (unit, todayStr = localTodayStr()) => (unit?.leases || []).find(l => isLeaseCurrent(l, todayStr)) || null;
+const hasUpcomingLease = (unit, todayStr) => (unit?.leases || []).some(l => l.status === 'active' && l.start_date && dateStr(l.start_date) > todayStr);
+
+// Wartefristen für Mieterhöhungen in Monaten seit der letzten Erhöhung bzw. dem Mietbeginn:
+// § 558 Abs. 1 BGB (Vergleichsmiete): Wirksamkeit frühestens 15 Monate nach der letzten Erhöhung;
+// § 557a Abs. 2 / § 557b Abs. 2 BGB (Staffel-/Indexmiete): Miete mindestens 1 Jahr unverändert.
+// Kappungsgrenze, Mietspiegel und Vertragsinhalt sind in jedem Fall gesondert zu prüfen.
+const getRentIncreaseWaitMonths = (leaseType) => (leaseType === 'index' || leaseType === 'staffel' ? 12 : 15);
+
+let loanKeySeq = 0;
+const newLoanKey = () => `loan_${Date.now().toString(36)}_${++loanKeySeq}`;
+const createAuditLoan = () => ({ amount: 0, interest: 3.5, repayment: 2, fixedYears: DEFAULT_FIXED_YEARS, _key: newLoanKey() });
+
+// Ein Satz Standardwerte für Startzustand, "Neuer Deal" und das Laden gespeicherter Deals
+const createDefaultAuditData = () => ({
+    purchasePrice: '',
+    transferTaxRate: 5,
+    brokerRate: 3.57,
+    notaryRate: 1.5,
+    registryRate: 0.5,
+    renovationCosts: '',
+    // Ertrag IST (Summe Mo.)
+    coldRentIst: '',
+    garageIst: '',
+    otherCostsIst: '',
+    // Ertrag SOLL (Summe Mo.)
+    coldRentSoll: '',
+    garageSoll: '',
+    otherCostsSoll: '',
+    targetYear: '',
+    // Kosten
+    housegeld: '',
+    reserves: '',
+    // Finanzierung
+    equity: 0,
+    loans: [createAuditLoan()],
+    // Steuern
+    afaRate: DEFAULT_AFA_RATE,
+    buildingShare: DEFAULT_BUILDING_SHARE,
+    taxRate: DEFAULT_TAX_RATE
+});
+
+// Gespeicherte bzw. extern geschriebene deal_data robust machen (fehlende Felder, fehlendes loans-Array)
+const normalizeAuditData = (data) => {
+    const src = data && typeof data === 'object' ? data : {};
+    const merged = { ...createDefaultAuditData(), ...src };
+    merged.loans = Array.isArray(src.loans)
+        ? src.loans.map(l => {
+            const loan = l && typeof l === 'object' ? l : {};
+            return { ...loan, _key: loan._key || newLoanKey() };
+        })
+        : [createAuditLoan()];
+    return merged;
+};
+
+// Neuer Zins leer = bisheriger (gewichteter) Zins der Darlehen
+const DEFAULT_SCENARIO = { rentGrowth: 3, interestAdj: '', repaymentAdj: 2 };
+const normalizeScenario = (s) => ({ ...DEFAULT_SCENARIO, ...(s && typeof s === 'object' ? s : {}) });
+
+const clampFixedYears = (v) => {
+    const n = parseNum(v);
+    const years = n !== null && n > 0 ? n : DEFAULT_FIXED_YEARS;
+    return Math.min(MAX_FIXED_YEARS, years);
+};
+
+// Ankaufsprüfung Buy & Hold
+const computeAuditMetrics = (data, scen) => {
+    const p = data || {};
+    const s = scen || {};
+    const purchasePrice = parseNum(p.purchasePrice) || 0;
+
+    // KNK – ein leeres Satz-Feld zählt als 0 %
+    const knkRate = (parseNum(p.transferTaxRate) || 0) + (parseNum(p.brokerRate) || 0)
+        + (parseNum(p.notaryRate) || 0) + (parseNum(p.registryRate) || 0);
+    const knk = purchasePrice * (knkRate / 100);
+    const renovCosts = parseNum(p.renovationCosts) || 0;
+    const totalInvestment = purchasePrice + knk + renovCosts;
+
+    // Nicht umlagefähige Kosten (Mo.)
+    const housegeldMo = parseNum(p.housegeld) || 0;
+    const reservesMo = parseNum(p.reserves) || 0;
+    const nonRecoverableMo = housegeldMo + reservesMo;
+    const nonRecoverablePA = nonRecoverableMo * 12;
+
+    // Brutto-Einnahmen (Mo.) = Miete + Garage
+    const grossIstMo = (parseNum(p.coldRentIst) || 0) + (parseNum(p.garageIst) || 0);
+    const grossSollMo = (parseNum(p.coldRentSoll) || 0) + (parseNum(p.garageSoll) || 0);
+
+    // SOLL hat eigene Felder? Hausgeld/Rücklage nur abziehen wenn SOLL gefüllt
+    const sollHasValues = grossSollMo > 0;
+    const nonRecoverableSollMo = sollHasValues ? nonRecoverableMo : 0;
+    const nonRecoverableSollPA = nonRecoverableSollMo * 12;
+
+    // Netto-Einnahmen (Mo.) = Brutto - Hausgeld - Rücklage
+    const netIstMo = grossIstMo - nonRecoverableMo;
+    const netSollMo = grossSollMo - nonRecoverableSollMo;
+
+    // Income PA für Renditeberechnungen (Brutto)
+    const incomeIstPA = grossIstMo * 12;
+    const incomeSollPA = grossSollMo * 12;
+
+    // Yields IST
+    const br100 = purchasePrice > 0 ? (incomeIstPA / purchasePrice) * 100 : 0;
+    const netYield = totalInvestment > 0 ? ((incomeIstPA - nonRecoverablePA) / totalInvestment) * 100 : 0;
+    const factor = incomeIstPA > 0 ? purchasePrice / incomeIstPA : 0;
+
+    // Yields SOLL
+    const br100Soll = purchasePrice > 0 ? (incomeSollPA / purchasePrice) * 100 : 0;
+    const netYieldSoll = totalInvestment > 0 ? ((incomeSollPA - nonRecoverableSollPA) / totalInvestment) * 100 : 0;
+    const factorSoll = incomeSollPA > 0 ? purchasePrice / incomeSollPA : 0;
+
+    // Financing
+    const loansArr = Array.isArray(p.loans) ? p.loans : [];
+    let totalInterestPA = 0;
+    let totalRepaymentPA = 0;
+    let loansTotal = 0;
+    loansArr.forEach(loan => {
+        const amt = parseNum(loan?.amount) || 0;
+        loansTotal += amt;
+        totalInterestPA += amt * ((parseNum(loan?.interest) || 0) / 100);
+        totalRepaymentPA += amt * ((parseNum(loan?.repayment) || 0) / 100);
+    });
+    const annuMo = (totalInterestPA + totalRepaymentPA) / 12;
+
+    // Steuer IST – AfA nur auf das Gebäude: Gebäudeanteil der Anschaffungskosten (Kaufpreis + KNK);
+    // Grund und Boden wird nicht abgeschrieben. Sanierung über 15 % der Gebäude-Anschaffungskosten gilt als
+    // anschaffungsnahe Herstellungskosten (§ 6 Abs. 1 Nr. 1a EStG) und erhöht die AfA-Basis; darunter ist sie
+    // sofort abziehbarer Erhaltungsaufwand (einmalig, nicht Teil der laufenden Jahressteuer). Nichts doppelt.
+    const taxDefaultsUsed = [];
+    if (parseNum(p.afaRate) === null) taxDefaultsUsed.push(`AfA-Satz ${DEFAULT_AFA_RATE} %`);
+    if (parseNum(p.buildingShare) === null) taxDefaultsUsed.push(`Gebäudeanteil ${DEFAULT_BUILDING_SHARE} %`);
+    if (parseNum(p.taxRate) === null) taxDefaultsUsed.push(`Grenzsteuersatz ${DEFAULT_TAX_RATE} %`);
+    const afaRatePct = Math.max(0, numOr(p.afaRate, DEFAULT_AFA_RATE));
+    const buildingSharePct = Math.min(100, Math.max(0, numOr(p.buildingShare, DEFAULT_BUILDING_SHARE)));
+    const taxRatePct = Math.max(0, numOr(p.taxRate, DEFAULT_TAX_RATE));
+
+    const buildingCost = (purchasePrice + knk) * (buildingSharePct / 100);
+    const renovIn15 = renovCosts > 0 && renovCosts > buildingCost * 0.15;
+    const afaBase = buildingCost + (renovIn15 ? renovCosts : 0);
+    const maintenanceExpense = renovIn15 ? 0 : Math.max(0, renovCosts);
+    const afaSum = afaBase * (afaRatePct / 100);
+    const taxable = incomeIstPA - totalInterestPA - afaSum - (housegeldMo * 12);
+    const taxBurden = Math.max(0, taxable * (taxRatePct / 100));
+
+    const housegeldSollPA = sollHasValues ? (housegeldMo * 12) : 0;
+    const taxableSoll = incomeSollPA - totalInterestPA - afaSum - housegeldSollPA;
+    const taxBurdenSoll = Math.max(0, taxableSoll * (taxRatePct / 100));
+
+    // Cashflow IST
+    const cfPreTaxMo = (incomeIstPA - nonRecoverablePA - totalInterestPA - totalRepaymentPA) / 12;
+    const cfPostTaxMo = cfPreTaxMo - (taxBurden / 12);
+
+    // Cashflow SOLL
+    const cfPreTaxSollMo = (incomeSollPA - nonRecoverableSollPA - totalInterestPA - totalRepaymentPA) / 12;
+    const cfPostTaxSollMo = cfPreTaxSollMo - (taxBurdenSoll / 12);
+
+    // Szenario: alle Darlehen bis zum Ende der längsten Zinsbindung fortschreiben; Darlehen mit kürzerer
+    // Zinsbindung laufen ab deren Ende mit neuem Zins und neuer Tilgung (Annuität auf die Restschuld) weiter
+    const targetYr = parseNum(p.targetYear) || 0;
+    const rentGrowthRate = (parseNum(s.rentGrowth) || 0) / 100;
+    const currentWeightedRate = loansTotal > 0 ? (totalInterestPA / loansTotal) * 100 : 0;
+    const interestAdjRaw = parseNum(s.interestAdj);
+    const interestAdjIsDefault = interestAdjRaw === null;
+    const newIntRatePct = interestAdjIsDefault ? currentWeightedRate : Math.max(0, interestAdjRaw);
+    const newIntRate = newIntRatePct / 100;
+    const newRepRate = Math.max(0, parseNum(s.repaymentAdj) || 0) / 100;
+
+    const fixedYearsList = loansArr.map(l => clampFixedYears(l?.fixedYears));
+    const maxFixedYears = fixedYearsList.length > 0 ? Math.max(...fixedYearsList) : DEFAULT_FIXED_YEARS;
+    const mixedFixedYears = new Set(fixedYearsList).size > 1;
+    const horizonMonths = Math.round(maxFixedYears * 12);
+
+    let totalRestschuld = 0;
+    let newTotalAnnuPA = 0;
+    let newTotalInterestPA = 0;
+    loansArr.forEach((loan, idx) => {
+        const amt = parseNum(loan?.amount) || 0;
+        const intRate = (parseNum(loan?.interest) || 0) / 100;
+        const repRate = (parseNum(loan?.repayment) || 0) / 100;
+        const fixedMonths = Math.round(fixedYearsList[idx] * 12);
+        const monthlyPayment = (amt * (intRate + repRate)) / 12;
+
+        // Restschuld am Ende der eigenen Zinsbindung
+        let balance = amt;
+        for (let m = 0; m < fixedMonths; m++) {
+            const monthlyInterest = balance * intRate / 12;
+            balance = Math.max(0, balance - (monthlyPayment - monthlyInterest));
+        }
+        // Anschlussfinanzierung bis zum gemeinsamen Zeithorizont
+        const newAnnuThisLoanPA = balance * (newIntRate + newRepRate);
+        for (let m = fixedMonths; m < horizonMonths && balance > 0; m++) {
+            const monthlyInterest = balance * newIntRate / 12;
+            balance = Math.max(0, balance - (newAnnuThisLoanPA / 12 - monthlyInterest));
+        }
+        totalRestschuld += balance;
+        if (balance > 0) {
+            newTotalAnnuPA += newAnnuThisLoanPA;
+            newTotalInterestPA += balance * newIntRate;
+        }
+    });
+    const newAnnuMo = newTotalAnnuPA / 12;
+
+    // Future Income: SOLL-Basis + Mietsteigerung ab targetYear
+    const growthYears = Math.max(0, maxFixedYears - targetYr);
+    const futureMultiplier = Math.pow(1 + rentGrowthRate, growthYears);
+    const futureBasePA = sollHasValues ? incomeSollPA : incomeIstPA;
+    const futureNonRecoverablePA = sollHasValues ? nonRecoverableSollPA : nonRecoverablePA;
+    const futureIncomePA = futureBasePA * futureMultiplier;
+
+    // Future Cashflow mit neuer Annuität
+    // AfA sinkt jährlich: nach maxFixedYears Jahren ist die Basis reduziert
+    const futureAfaBase = Math.max(0, afaBase - (afaSum * maxFixedYears));
+    const futureAfaSum = futureAfaBase > 0 ? Math.min(afaSum, futureAfaBase) : 0;
+    const futureHausgeldPA = housegeldMo * 12;
+    const futureTaxable = futureIncomePA - newTotalInterestPA - futureAfaSum - futureHausgeldPA;
+    const futureTaxBurden = Math.max(0, futureTaxable * (taxRatePct / 100));
+    const futureCfPreTaxMo = (futureIncomePA - futureNonRecoverablePA - newTotalAnnuPA) / 12;
+    const futureCfPostTaxMo = futureCfPreTaxMo - (futureTaxBurden / 12);
+
+    // EK-Rendite: Cashflow nach Steuern p.a. / Eigenkapital * 100
+    const equityVal = parseNum(p.equity) || 0;
+    const ekRenditeIst = equityVal > 0 ? ((cfPostTaxMo * 12) / equityVal) * 100 : 0;
+    const ekRenditeSoll = equityVal > 0 ? ((cfPostTaxSollMo * 12) / equityVal) * 100 : 0;
+
+    return {
+        knk, totalInvestment,
+        grossIstMo, grossSollMo,
+        netIstMo, netSollMo,
+        nonRecoverableMo, nonRecoverableSollMo,
+        sollHasValues,
+        incomeIstMo: incomeIstPA / 12, incomeIstPA,
+        incomeSollMo: incomeSollPA / 12, incomeSollPA,
+        br100, netYield, factor,
+        br100Soll, netYieldSoll, factorSoll,
+        ekRenditeIst, ekRenditeSoll,
+        annuMo, annuPA: annuMo * 12, loansTotal,
+        afaBase, afaSum, buildingCost, buildingSharePct, renovIn15, maintenanceExpense, taxDefaultsUsed,
+        taxBurdenMo: taxBurden / 12, taxBurdenSollMo: taxBurdenSoll / 12,
+        cfPreTaxMo, cfPostTaxMo,
+        cfPreTaxSollMo, cfPostTaxSollMo,
+        totalRestschuld, newAnnuMo, maxFixedYears, mixedFixedYears,
+        currentWeightedRate, newIntRatePct, interestAdjIsDefault,
+        futureIncomeMo: futureIncomePA / 12, futureIncomePA,
+        futureCfPreTaxMo, futureCfPostTaxMo, futureTaxBurdenMo: futureTaxBurden / 12
+    };
+};
+
+// Deal-Ranking: Buy & Hold über dieselbe Rechnung wie der Deal-Rechner (kein eigener Nachbau)
+const getDealRanking = (deal) => {
+    const type = deal.deal_type || deal.deal_data?.deal_type || 'buy_hold';
+    if (type === 'buy_hold') {
+        // Buy & Hold: Cashflow vor Steuer/Mo × 12 × 10 = 10-Jahres-Cashflow
+        const m = computeAuditMetrics(normalizeAuditData(deal.deal_data), normalizeScenario(deal.scenario_data));
+        return Number.isFinite(m.cfPreTaxMo) ? m.cfPreTaxMo * 12 * 10 : 0;
+    }
+    // Fix & Flip: Durchschnitt aller positiven Gewinne
+    const res = deal.scenario_data || {};
+    const profits = [];
+    if ((res.profitLow || 0) > 0) profits.push(res.profitLow);
+    if ((res.profitHigh || 0) > 0) profits.push(res.profitHigh);
+    if ((res.kapProfitIst || 0) > 0) profits.push(res.kapProfitIst);
+    if ((res.kapProfitSoll || 0) > 0) profits.push(res.kapProfitSoll);
+    return profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
+};
+
+// Cockpit-Kennzahlen aus Objekten, Darlehen und WE-Werten. Nicht berechenbare Quoten (fehlender Nenner) = null.
+const computeCockpitStats = (props, lns, WEs, getSnapshot, todayStr) => {
+    let totalMonthlyIncome = 0;
+    let totalTargetRent = 0;
+    let totalDebt = 0;
+    let totalMonthlyAnnuity = 0;
+    let totalMonthlyInterest = 0;
+    let totalMonthlyRepayment = 0;
+
+    // Group properties to sum market value taking WEs into account
+    const groups = {};
+    let ungroupedMarketValue = 0;
+    let ungroupedEquity = 0;
+    let ungroupedInvestment = 0;
+
+    props.forEach(p => {
+        if (p.economic_unit_id) {
+            if (!groups[p.economic_unit_id]) {
+                groups[p.economic_unit_id] = { sumMarketValue: 0, sumEquity: 0, sumInvestment: 0 };
+            }
+            groups[p.economic_unit_id].sumMarketValue += parseFloat(p.market_value_total) || 0;
+            groups[p.economic_unit_id].sumEquity += parseFloat(p.equity_invested) || 0;
+            groups[p.economic_unit_id].sumInvestment += parseFloat(p.total_investment_cost) || 0;
+        } else {
+            ungroupedMarketValue += parseFloat(p.market_value_total) || 0;
+            ungroupedEquity += parseFloat(p.equity_invested) || 0;
+            ungroupedInvestment += parseFloat(p.total_investment_cost) || 0;
+        }
+
+        (p.units || []).forEach(u => {
+            if (u.is_vacation_rental) {
+                const fewoRent = parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0;
+                totalMonthlyIncome += fewoRent;
+                totalTargetRent += fewoRent;
+            } else {
+                const activeLease = getActiveLease(u, todayStr);
+                totalMonthlyIncome += activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0;
+                totalTargetRent += (parseFloat(u.target_rent) || 0);
+            }
+        });
+    });
+
+    // Sum up groups, using WE-level override if present
+    let groupedMarketValue = 0;
+    let groupedEquity = 0;
+    let groupedInvestment = 0;
+    Object.entries(groups).forEach(([weId, g]) => {
+        const weRow = WEs.find(eu => eu.id === weId);
+        if (weRow) {
+            groupedMarketValue += parseFloat(weRow.market_value_total) > 0 ? parseFloat(weRow.market_value_total) : g.sumMarketValue;
+            groupedEquity += parseFloat(weRow.equity_invested) > 0 ? parseFloat(weRow.equity_invested) : g.sumEquity;
+            groupedInvestment += parseFloat(weRow.total_investment_cost) > 0 ? parseFloat(weRow.total_investment_cost) : g.sumInvestment;
+        } else {
+            groupedMarketValue += g.sumMarketValue;
+            groupedEquity += g.sumEquity;
+            groupedInvestment += g.sumInvestment;
+        }
+    });
+
+    const totalMarketValue = ungroupedMarketValue + groupedMarketValue;
+    const totalEquity = ungroupedEquity + groupedEquity;
+    const totalInvestment = ungroupedInvestment + groupedInvestment;
+
+    let weightedInterestSum = 0;
+    lns.forEach(loan => {
+        const snap = getSnapshot(loan);
+        totalDebt += snap.debt;
+        totalMonthlyAnnuity += snap.payment;
+        totalMonthlyInterest += snap.interest;
+        totalMonthlyRepayment += snap.repayment;
+        weightedInterestSum += snap.debt * snap.rate;
+    });
+
+    return {
+        netCashflow: totalMonthlyIncome - totalMonthlyAnnuity,
+        ltv: totalMarketValue > 0 ? (totalDebt / totalMarketValue) * 100 : null,
+        rentPotential: totalTargetRent - totalMonthlyIncome,
+        totalMarketValue,
+        totalDebt,
+        totalMonthlyIncome,
+        totalMonthlyInterest,
+        totalMonthlyRepayment,
+        totalMonthlyAnnuity,
+        totalEquity,
+        totalInvestment,
+        wacd: totalDebt > 0 ? (weightedInterestSum / totalDebt) * 100 : null,
+        dscr: totalMonthlyAnnuity > 0 ? totalTargetRent / totalMonthlyAnnuity : null,
+        coc: totalEquity > 0 ? ((totalTargetRent - totalMonthlyAnnuity) * 12 / totalEquity) * 100 : null,
+        netYield: totalInvestment > 0 ? ((totalTargetRent * 12) / totalInvestment) * 100 : null,
+        tilgungseffekt: totalMonthlyRepayment * 12,
+        totalTargetRent,
+        debtYield: totalDebt > 0 ? ((totalTargetRent * 12) / totalDebt) * 100 : null
+    };
+};
+
+// Quote formatieren; fehlende Basisdaten -> "n/a"
+const fmtKpi = (v, digits, suffix = '') => (isNum(v) ? `${v.toFixed(digits)}${suffix}` : 'n/a');
+
 const InvestorPortal = () => {
     const { user } = useAuth();
     const location = useLocation();
     const navigate = useNavigate();
     const { selectedPortfolioID } = usePortfolio();
-    const auditRef = useRef(null);
+    // Getrennte Refs: Desktop-Zeile und Mobile-Card sind beide im DOM (per CSS ausgeblendet)
+    const auditRefDesktop = useRef(null);
+    const auditRefMobile = useRef(null);
+    // Verzögert gespeicherte Objekt-Änderungen (Marktwert, Lage-Score, DD) je Objekt-ID
+    const pendingPropUpdatesRef = useRef({});
 
     // UI State
     const { isMobile } = useViewMode();
@@ -56,6 +552,8 @@ const InvestorPortal = () => {
     const pdfTemplate = usePdfTemplate('deal_kalkulation');
     const [auditStep, setAuditStep] = useState(0);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [dealsError, setDealsError] = useState(null);
     // eslint-disable-next-line no-unused-vars
     const [saving, setSaving] = useState(null);
 
@@ -78,26 +576,7 @@ const InvestorPortal = () => {
     const [loans, setLoans] = useState([]);
     const [economicUnits, setEconomicUnits] = useState([]);
     const [weEditModal, setWeEditModal] = useState(null);
-    const [stats, setStats] = useState({
-        netCashflow: 0,
-        ltv: 0,
-        rentPotential: 0,
-        totalMarketValue: 0,
-        totalDebt: 0,
-        totalMonthlyIncome: 0,
-        totalMonthlyInterest: 0,
-        totalMonthlyRepayment: 0,
-        totalMonthlyAnnuity: 0,
-        totalEquity: 0,
-        totalInvestment: 0,
-        wacd: 0,
-        dscr: 0,
-        coc: 0,
-        netYield: 0,
-        tilgungseffekt: 0,
-        totalTargetRent: 0,
-        debtYield: 0
-    });
+    const [savingWE, setSavingWE] = useState(false);
 
     // Enhanced Cockpit UI States
     const [waterfallPeriod, setWaterfallPeriod] = useState('monthly');
@@ -120,72 +599,34 @@ const InvestorPortal = () => {
     const [savingDeal, setSavingDeal] = useState(false);
 
     // Ankaufsprüfung (standalone page) State
-    const [auditData, setAuditData] = useState({
-        purchasePrice: 0,
-        transferTaxRate: 5,
-        brokerRate: 3.57,
-        notaryRate: 1.5,
-        registryRate: 0.5,
-        renovationCosts: 0,
-        // Ertrag IST (Summe Mo.)
-        coldRentIst: 0,
-        garageIst: 0,
-        otherCostsIst: 0,
-        // Ertrag SOLL (Summe Mo.)
-        coldRentSoll: 0,
-        garageSoll: 0,
-        otherCostsSoll: 0,
-        targetYear: '',
-        // Kosten
-        housegeld: '',
-        reserves: '',
-        // Finanzierung
-        equity: 0,
-        loans: [{ amount: 0, interest: 3.5, repayment: 2, fixedYears: 10 }],
-        // Steuern
-        afaRate: 2,
-        buildingShare: 80,
-        taxRate: 42
-    });
+    const [auditData, setAuditData] = useState(createDefaultAuditData);
 
-    const [scenario, setScenario] = useState({
-        rentGrowth: 3,
-        interestAdj: 0,
-        repaymentAdj: 2
-    });
+    const [scenario, setScenario] = useState(() => ({ ...DEFAULT_SCENARIO }));
 
     // Tooltip for Grunderwerbsteuer
     const [showTaxInfo, setShowTaxInfo] = useState(false);
     const [showRenovInfo, setShowRenovInfo] = useState(false);
 
-    // State Tax Reference
-    const statesTaxRef = [
-        { name: 'Bayern', tax: 3.5 },
-        { name: 'Hamburg', tax: 4.5 },
-        { name: 'Baden-Württemberg', tax: 5.0 },
-        { name: 'Bremen', tax: 5.0 },
-        { name: 'Rheinland-Pfalz', tax: 5.0 },
-        { name: 'Sachsen-Anhalt', tax: 5.0 },
-        { name: 'Sachsen', tax: 5.5 },
-        { name: 'Schleswig-Holstein', tax: 5.5 },
-        { name: 'Berlin', tax: 6.0 },
-        { name: 'Hessen', tax: 6.0 },
-        { name: 'Mecklenburg-Vorpommern', tax: 6.0 },
-        { name: 'Brandenburg', tax: 6.5 },
-        { name: 'Nordrhein-Westfalen', tax: 6.5 },
-        { name: 'Saarland', tax: 6.5 },
-        { name: 'Niedersachsen', tax: 5.0 },
-        { name: 'Thüringen', tax: 5.0 }
-    ];
+    // State Tax Reference – gemeinsame, gepflegte Tabelle der Investor-Rechner
+    // (die frühere eigene Liste war veraltet: Hamburg 4,5 / Bremen 5,0 / Schleswig-Holstein 5,5 %)
+    const statesTaxRef = TRANSFER_TAX_RATES;
 
+    // Tab aus der URL übernehmen und Deals laden – nur bei URL-/Nutzerwechsel, NICHT bei geänderten Deals
+    // (früher hing der Effekt an `deals` und lud sich selbst endlos neu)
     useEffect(() => {
         const params = new URLSearchParams(location.search);
         const tab = params.get('tab');
         setActiveTab(tab || 'cockpit');
         const urlDealId = params.get('dealId');
         if (tab === 'deals' || !tab || tab === 'cockpit' || (tab === 'audit' && urlDealId)) fetchDeals();
-        // Auto-load a deal when returning from Sanierungsrechner with ?dealId=xxx
-        if (tab === 'audit' && urlDealId && deals.length > 0 && editingDealId !== urlDealId) {
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.search, user?.id]);
+
+    // Auto-load a deal when returning from Sanierungsrechner with ?dealId=xxx (ohne erneutes Laden der Deals)
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const urlDealId = params.get('dealId');
+        if (params.get('tab') === 'audit' && urlDealId && deals.length > 0 && editingDealId !== urlDealId) {
             const deal = deals.find(d => d.id === urlDealId);
             if (deal) loadDeal(deal);
         }
@@ -197,14 +638,26 @@ const InvestorPortal = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user, selectedPortfolioID]);
 
-    // Close menu on outside click
+    // Beim Verlassen der Seite noch ausstehende Objekt-Änderungen sofort speichern
+    useEffect(() => {
+        const pending = pendingPropUpdatesRef.current;
+        return () => {
+            Object.keys(pending).forEach(id => {
+                const entry = pending[id];
+                delete pending[id];
+                if (entry.timer) clearTimeout(entry.timer);
+                supabase.from('properties').update(entry.updates).eq('id', id)
+                    .then(({ error }) => { if (error) console.error('Objekt-Änderung nicht gespeichert:', error); });
+            });
+        };
+    }, []);
+
     // Close audit panel on click outside
     useEffect(() => {
         if (!auditPropertyId) return;
         const handleClickOutsideAudit = (e) => {
-            if (auditRef.current && !auditRef.current.contains(e.target)) {
-                setAuditPropertyId(null);
-            }
+            const inside = [auditRefDesktop.current, auditRefMobile.current].some(el => el && el.contains(e.target));
+            if (!inside) setAuditPropertyId(null);
         };
         document.addEventListener('mousedown', handleClickOutsideAudit);
         return () => document.removeEventListener('mousedown', handleClickOutsideAudit);
@@ -216,26 +669,38 @@ const InvestorPortal = () => {
         return () => document.removeEventListener('click', handleClick);
     }, [openMenuId]);
 
-    const fetchData = async () => {
+    const fetchData = async ({ silent = false } = {}) => {
         try {
-            setLoading(true);
+            if (!silent) setLoading(true);
             let propQuery = supabase.from('properties').select('*, units(*, leases(*, tenant:tenants(first_name, last_name)))');
             if (selectedPortfolioID) propQuery = propQuery.eq('portfolio_id', selectedPortfolioID);
-            const { data: propData } = await propQuery;
+            const { data: propData, error: propError } = await propQuery;
+            if (propError) throw propError;
 
             let loanQuery = supabase.from('loans').select('*');
             if (selectedPortfolioID) {
                 loanQuery = loanQuery.eq('portfolio_id', selectedPortfolioID);
             }
-            const { data: loanData } = loanQuery ? await loanQuery : { data: [] };
+            const { data: loanData, error: loanError } = await loanQuery;
+            if (loanError) throw loanError;
 
-            let weQuery = supabase.from('economic_units').select('*');
-            const { data: weData } = await weQuery;
+            // Nur die Wirtschaftseinheiten der geladenen Objekte/Darlehen (gewähltes Portfolio)
+            const weIds = Array.from(new Set([
+                ...(propData || []).map(p => p.economic_unit_id),
+                ...(loanData || []).map(l => l.economic_unit_id)
+            ].filter(Boolean)));
+            let weData = [];
+            if (weIds.length > 0) {
+                const { data, error: weError } = await supabase.from('economic_units').select('*').in('id', weIds);
+                if (weError) throw weError;
+                weData = data || [];
+            }
 
             setProperties(propData || []);
             setLoans(loanData || []);
-            setEconomicUnits(weData || []);
-            calculateCockpitStats(propData || [], loanData || [], weData || []);
+            setEconomicUnits(weData);
+            setDetailProperty(prev => (prev ? ((propData || []).find(p => p.id === prev.id) || prev) : prev));
+            setLoadError(null);
 
             // Fetch renovation stats for cockpit card
             try {
@@ -246,21 +711,21 @@ const InvestorPortal = () => {
                 setRenovationStats({ activeProjects: projRes.count || 0, openTasks: taskRes.count || 0 });
             } catch { /* renovation tables may not exist yet */ }
 
-            // Calculate pending rent increases
+            // Calculate pending rent increases (Wartefristen siehe getRentIncreaseWaitMonths)
             const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietvertrag', index: 'Indexmietvertrag' };
             const now = new Date();
+            const todayStr = localTodayStr();
             const pending = [];
             (propData || []).forEach(p => {
                 const addr = `${p.street} ${p.house_number || ''}`.trim();
                 (p.units || []).forEach(u => {
-                    const activeLease = u.leases?.find(l => l.status === 'active');
+                    const activeLease = getActiveLease(u, todayStr);
                     if (!activeLease) return;
                     const type = activeLease.lease_type || 'normal';
-                    const yearsToAdd = type === 'normal' ? 3 : 1;
-                    const baseDate = activeLease.last_rent_increase || activeLease.start_date;
+                    const baseDate = parseLocalDate(activeLease.last_rent_increase || activeLease.start_date);
                     if (!baseDate) return;
                     const nextDate = new Date(baseDate);
-                    nextDate.setFullYear(nextDate.getFullYear() + yearsToAdd);
+                    nextDate.setMonth(nextDate.getMonth() + getRentIncreaseWaitMonths(type));
                     const oneMonthBefore = new Date(nextDate);
                     oneMonthBefore.setMonth(oneMonthBefore.getMonth() - 1);
                     if (now >= oneMonthBefore) {
@@ -279,167 +744,44 @@ const InvestorPortal = () => {
             setPendingIncreases(pending);
         } catch (error) {
             console.error('Fehler beim Laden der Daten:', error);
+            // Keine Kennzahlen aus unvollständigen Daten – Fehlerhinweis mit "Erneut laden" anzeigen
+            setLoadError(translateError(error));
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
-    const calculateCockpitStats = (props, lns, WEs = economicUnits) => {
-        let totalMonthlyIncome = 0;
-        let totalTargetRent = 0;
-        let totalDebt = 0;
-        let totalMarketValue = 0;
-        let totalMonthlyAnnuity = 0;
-        let totalMonthlyInterest = 0;
-        let totalMonthlyRepayment = 0;
-
-        // Group properties to sum market value taking WEs into account
-        const groups = {};
-        let ungroupedMarketValue = 0;
-        let ungroupedEquity = 0;
-        let ungroupedInvestment = 0;
-
-        props.forEach(p => {
-            if (p.economic_unit_id) {
-                if (!groups[p.economic_unit_id]) {
-                    groups[p.economic_unit_id] = { sumMarketValue: 0, sumEquity: 0, sumInvestment: 0 };
-                }
-                groups[p.economic_unit_id].sumMarketValue += parseFloat(p.market_value_total) || 0;
-                groups[p.economic_unit_id].sumEquity += parseFloat(p.equity_invested) || 0;
-                groups[p.economic_unit_id].sumInvestment += parseFloat(p.total_investment_cost) || 0;
-            } else {
-                ungroupedMarketValue += parseFloat(p.market_value_total) || 0;
-                ungroupedEquity += parseFloat(p.equity_invested) || 0;
-                ungroupedInvestment += parseFloat(p.total_investment_cost) || 0;
-            }
-
-            (p.units || []).forEach(u => {
-                if (u.is_vacation_rental) {
-                    const fewoRent = parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0;
-                    totalMonthlyIncome += fewoRent;
-                    totalTargetRent += fewoRent;
-                } else {
-                    const activeLease = u.leases?.find(l => l.status === 'active');
-                    totalMonthlyIncome += activeLease ? (parseFloat(activeLease.cold_rent) || 0) : 0;
-                    totalTargetRent += (parseFloat(u.target_rent) || 0);
-                }
-            });
-        });
-
-        // Sum up groups, using WE-level override if present
-        let groupedMarketValue = 0;
-        let groupedEquity = 0;
-        let groupedInvestment = 0;
-        Object.entries(groups).forEach(([weId, g]) => {
-            const weRow = WEs.find(eu => eu.id === weId);
-            if (weRow) {
-                groupedMarketValue += parseFloat(weRow.market_value_total) > 0 ? parseFloat(weRow.market_value_total) : g.sumMarketValue;
-                groupedEquity += parseFloat(weRow.equity_invested) > 0 ? parseFloat(weRow.equity_invested) : g.sumEquity;
-                groupedInvestment += parseFloat(weRow.total_investment_cost) > 0 ? parseFloat(weRow.total_investment_cost) : g.sumInvestment;
-            } else {
-                groupedMarketValue += g.sumMarketValue;
-                groupedEquity += g.sumEquity;
-                groupedInvestment += g.sumInvestment;
-            }
-        });
-
-        totalMarketValue = ungroupedMarketValue + groupedMarketValue;
-        const totalEquity = ungroupedEquity + groupedEquity;
-        const totalInvestment = ungroupedInvestment + groupedInvestment;
-
-        let weightedInterestSum = 0;
-        let totalCurrentDebt = 0;
-
-        lns.forEach(loan => {
-            const debt = calculateCurrentDebt(loan);
-            totalDebt += debt;
-
-            const amount = parseFloat(loan.loan_amount) || 0;
-            const interestRate = (parseFloat(loan.interest_rate) || 0) / 100;
-            const repaymentRate = (parseFloat(loan.initial_repayment_rate) || 0) / 100;
-
-            let monthlyPayment = 0;
-            if (loan.fixed_annuity) {
-                monthlyPayment = parseFloat(loan.fixed_annuity);
-            } else {
-                monthlyPayment = (amount * (interestRate + repaymentRate)) / 12;
-            }
-
-            const monthlyInterest = debt * interestRate / 12;
-            const monthlyRepayment = Math.max(0, monthlyPayment - monthlyInterest);
-
-            totalMonthlyAnnuity += monthlyPayment;
-            totalMonthlyInterest += monthlyInterest;
-            totalMonthlyRepayment += monthlyRepayment;
-
-            weightedInterestSum += debt * interestRate;
-            totalCurrentDebt += debt;
-        });
-
-        const wacd = totalCurrentDebt > 0 ? (weightedInterestSum / totalCurrentDebt) * 100 : 0;
-        const coc = totalEquity > 0 ? ((totalTargetRent - totalMonthlyAnnuity) * 12 / totalEquity) * 100 : 0;
-        const netYield = totalInvestment > 0 ? ((totalTargetRent * 12) / totalInvestment) * 100 : 0;
-        const debtYield = totalDebt > 0 ? ((totalTargetRent * 12) / totalDebt) * 100 : 0;
-
-        setStats({
-            netCashflow: totalMonthlyIncome - totalMonthlyAnnuity,
-            ltv: totalMarketValue > 0 ? (totalDebt / totalMarketValue) * 100 : 0,
-            rentPotential: totalTargetRent - totalMonthlyIncome,
-            totalMarketValue,
-            totalDebt,
-            totalMonthlyIncome,
-            totalMonthlyInterest,
-            totalMonthlyRepayment,
-            totalMonthlyAnnuity,
-            totalEquity,
-            totalInvestment,
-            wacd,
-            dscr: totalMonthlyAnnuity > 0 ? totalTargetRent / totalMonthlyAnnuity : 0,
-            coc,
-            netYield,
-            tilgungseffekt: totalMonthlyRepayment * 12,
-            totalTargetRent,
-            debtYield
-        });
-    };
-
-    const calculateCurrentDebt = (loan) => {
-        const originalAmount = parseFloat(loan.loan_amount) || 0;
-        const interestRate = (parseFloat(loan.interest_rate) || 0) / 100;
-        const repaymentRate = (parseFloat(loan.initial_repayment_rate) || 0) / 100;
-        const payment = loan.fixed_annuity ? parseFloat(loan.fixed_annuity) : (originalAmount * (interestRate + repaymentRate) / 12);
-
-        const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined;
-        let balance = hasActual ? parseFloat(loan.actual_residual_debt) : originalAmount;
-        const startDateStr = hasActual && loan.actual_residual_debt_date ? loan.actual_residual_debt_date : loan.start_date;
-
-        const startDate = new Date(startDateStr);
+    // Restschuld/Rate je Darlehen einmal je Datenstand berechnen (gleiche Logik wie die Darlehen-Seite)
+    const loanSnapshots = React.useMemo(() => {
         const today = new Date();
-        if (isNaN(startDate.getTime())) return balance;
-        const monthsDiff = (today.getFullYear() - startDate.getFullYear()) * 12 + (today.getMonth() - startDate.getMonth());
-        if (monthsDiff <= 0) return balance;
+        const map = new Map();
+        loans.forEach(l => map.set(l.id, getLoanSnapshot(l, today)));
+        return map;
+    }, [loans]);
+    const getSnapshot = (loan) => loanSnapshots.get(loan.id) || getLoanSnapshot(loan);
+    const calculateCurrentLoanDebt = (loan) => getSnapshot(loan).debt;
 
-        for (let i = 0; i < monthsDiff; i++) {
-            const interest = balance * interestRate / 12;
-            balance -= (payment - interest);
-            if (balance < 0) return 0;
-        }
-        return balance;
-    };
+    // Cockpit-Kennzahlen immer aus dem aktuellen Datenstand ableiten (auch nach DD-/WE-Änderungen)
+    const stats = React.useMemo(
+        () => computeCockpitStats(properties, loans, economicUnits, getSnapshot, localTodayStr()),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [properties, loans, economicUnits, loanSnapshots]
+    );
 
     const getPropertyDebt = (propertyId) => {
         return loans
             .filter(l => l.property_id === propertyId)
-            .reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
+            .reduce((sum, l) => sum + calculateCurrentLoanDebt(l), 0);
     };
 
     const getPropertyRentIst = (property) => {
+        const todayStr = localTodayStr();
         let total = 0;
         (property.units || []).forEach(u => {
             if (u.is_vacation_rental) {
                 total += parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0;
             } else {
-                const activeLease = u.leases?.find(l => l.status === 'active');
+                const activeLease = getActiveLease(u, todayStr);
                 if (activeLease) total += parseFloat(activeLease.cold_rent) || 0;
             }
         });
@@ -455,57 +797,49 @@ const InvestorPortal = () => {
         }, 0);
     };
 
+    // Aktuelle Monatsrate (getilgte Darlehen = 0, letzte Rate auf Restschuld + Zins begrenzt)
     const getPropertyLoanPayment = (propertyId) => {
         return loans
             .filter(l => l.property_id === propertyId)
-            .reduce((sum, l) => {
-                const amount = parseFloat(l.loan_amount) || 0;
-                const interestRate = (parseFloat(l.interest_rate) || 0) / 100;
-                const repaymentRate = (parseFloat(l.initial_repayment_rate) || 0) / 100;
-                if (l.fixed_annuity) return sum + parseFloat(l.fixed_annuity);
-                return sum + (amount * (interestRate + repaymentRate)) / 12;
-            }, 0);
+            .reduce((sum, l) => sum + getSnapshot(l).payment, 0);
     };
 
     const getGroupOrPropertyLoanPayment = (p) => {
         if (p.isGroup) {
             let sum = p.properties.reduce((s, subP) => s + getPropertyLoanPayment(subP.id), 0);
             const weLoans = loans.filter(l => l.economic_unit_id === p.economic_unit_id && !l.property_id);
-            weLoans.forEach(l => {
-                const amount = parseFloat(l.loan_amount) || 0;
-                const interestRate = (parseFloat(l.interest_rate) || 0) / 100;
-                const repaymentRate = (parseFloat(l.initial_repayment_rate) || 0) / 100;
-                if (l.fixed_annuity) sum += parseFloat(l.fixed_annuity);
-                else sum += (amount * (interestRate + repaymentRate)) / 12;
-            });
+            weLoans.forEach(l => { sum += getSnapshot(l).payment; });
             return sum;
         }
         return getPropertyLoanPayment(p.id);
     };
 
     const getVacancy = (p) => {
+        const todayStr = localTodayStr();
         const units = p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || []);
         const total = units.length;
         if (total === 0) return '–';
-        const vacant = units.filter(u => !u.is_vacation_rental && !u.leases?.some(l => l.status === 'active')).length;
+        const vacant = units.filter(u => !u.is_vacation_rental && !getActiveLease(u, todayStr)).length;
         return `${vacant} / ${total}`;
     };
 
     const rentOptimizations = React.useMemo(() => {
         const optims = [];
         const now = new Date();
+        const todayStr = localTodayStr();
 
         properties.forEach(p => {
             const addr = `${p.street} ${p.house_number || ''}`.trim();
             (p.units || []).forEach(u => {
                 if (u.is_vacation_rental) return;
 
-                const activeLease = u.leases?.find(l => l.status === 'active');
+                const activeLease = getActiveLease(u, todayStr);
                 const targetRent = parseFloat(u.target_rent) || 0;
                 const sqm = parseFloat(u.sqm) || 0;
 
                 if (!activeLease) {
-                    if (targetRent > 0) {
+                    // Bereits unterschriebener, später beginnender Vertrag: kein Neuvermietungsvorschlag
+                    if (targetRent > 0 && !hasUpcomingLease(u, todayStr)) {
                         optims.push({
                             id: `vacant_${u.id}`,
                             unitId: u.id,
@@ -523,31 +857,27 @@ const InvestorPortal = () => {
                 }
 
                 const currentRent = parseFloat(activeLease.cold_rent) || 0;
-                const lastIncreaseStr = activeLease.last_rent_increase || activeLease.start_date;
-                const baseDate = lastIncreaseStr ? new Date(lastIncreaseStr) : null;
-
-                const monthsSinceLastIncrease = baseDate
-                    ? (now.getFullYear() - baseDate.getFullYear()) * 12 + (now.getMonth() - baseDate.getMonth())
-                    : 999;
+                const baseDate = parseLocalDate(activeLease.last_rent_increase || activeLease.start_date);
+                const monthsSinceLastIncrease = baseDate ? fullMonthsBetween(baseDate, now) : 999;
 
                 if (targetRent > currentRent) {
                     const diff = targetRent - currentRent;
                     const maxIncrease = Math.min(diff, currentRent * 0.20);
+                    const leaseType = activeLease.lease_type || 'normal';
 
-                    if (monthsSinceLastIncrease >= 15) {
-                        const leaseType = activeLease.lease_type || 'normal';
+                    if (monthsSinceLastIncrease >= getRentIncreaseWaitMonths(leaseType)) {
                         let reason = '';
                         let actionLabel = 'Brief erstellen';
 
                         if (leaseType === 'index') {
-                            reason = `Indexmiete anpassbar. Verbraucherpreisindex gestiegen.`;
+                            reason = `Indexmiete seit ${monthsSinceLastIncrease} Mon. unverändert – Anpassung anhand der Indexentwicklung prüfen.`;
                         } else if (leaseType === 'staffel') {
-                            reason = `Staffelerhöhung steht laut Vertrag an.`;
+                            reason = `Staffelmiete – nächste Staffel laut Vertrag prüfen.`;
                             actionLabel = 'Staffel prüfen';
                         } else {
                             const curPerSqm = sqm > 0 ? (currentRent / sqm).toFixed(2) : '–';
                             const targetPerSqm = sqm > 0 ? (targetRent / sqm).toFixed(2) : '–';
-                            reason = `Seit ${monthsSinceLastIncrease} Mon. unverändert & unter Soll-Miete (Ist: ${curPerSqm} €/m² vs. Soll: ${targetPerSqm} €/m²).`;
+                            reason = `Seit ${monthsSinceLastIncrease} Mon. unverändert & unter Soll-Miete (Ist: ${curPerSqm} €/m² vs. Soll: ${targetPerSqm} €/m²) – Erhöhung prüfen (Mietspiegel, Kappungsgrenze).`;
                         }
 
                         optims.push({
@@ -572,11 +902,12 @@ const InvestorPortal = () => {
 
     const thresholdUnits = React.useMemo(() => {
         const list = [];
+        const todayStr = localTodayStr();
         properties.forEach(p => {
             const addr = `${p.street} ${p.house_number || ''}`.trim();
             (p.units || []).forEach(u => {
                 if (u.is_vacation_rental) return;
-                const activeLease = u.leases?.find(l => l.status === 'active');
+                const activeLease = getActiveLease(u, todayStr);
                 if (!activeLease) return;
                 const currentRent = parseFloat(activeLease.cold_rent) || 0;
                 const targetRent = parseFloat(u.target_rent) || 0;
@@ -600,23 +931,30 @@ const InvestorPortal = () => {
         return list;
     }, [properties]);
 
-    const nextLoanReset = React.useMemo(() => {
+    // Nächste Zinsbindung (Zukunft) und bereits abgelaufene Zinsbindungen mit Restschuld (überfällig)
+    const { nextLoanReset, overdueLoanResets } = React.useMemo(() => {
         let nearest = null;
         let nearestDiff = Infinity;
-        const now = new Date();
+        const overdue = [];
+        const today = new Date();
+        const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
         loans.forEach(l => {
-            if (!l.end_date) return;
-            const resetDate = new Date(l.end_date);
-            if (resetDate <= now) return;
-            const diff = resetDate - now;
+            const resetDate = parseLocalDate(l.end_date);
+            if (!resetDate) return;
+            if (resetDate < todayStart) {
+                if (calculateCurrentDebt(l, today) > 0) overdue.push({ loan: l, date: resetDate });
+                return;
+            }
+            const diff = resetDate - todayStart;
             if (diff < nearestDiff) {
                 nearestDiff = diff;
                 nearest = { loan: l, date: resetDate };
             }
         });
 
-        return nearest;
+        overdue.sort((a, b) => a.date - b.date);
+        return { nextLoanReset: nearest, overdueLoanResets: overdue };
     }, [loans]);
 
     // Group Properties by Economic Unit
@@ -675,7 +1013,7 @@ const InvestorPortal = () => {
                 // Add WE-level loans to _debt
                 const weLoans = loans.filter(l => l.economic_unit_id === g.economic_unit_id && !l.property_id);
                 weLoans.forEach(l => {
-                    g._debt += calculateCurrentDebt(l);
+                    g._debt += calculateCurrentLoanDebt(l);
                 });
 
                 result.push(g);
@@ -684,48 +1022,100 @@ const InvestorPortal = () => {
 
         return result.sort((a, b) => (a.street || '').localeCompare(b.street || ''));
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [properties, loans, economicUnits]);
+    }, [properties, loans, economicUnits, loanSnapshots]);
 
-    const handleUpdateProperty = async (id, updates) => {
+    // Ausstehende Änderungen eines Objekts gesammelt in die DB schreiben
+    const flushPropertyUpdate = async (id) => {
+        const entry = pendingPropUpdatesRef.current[id];
+        if (!entry) return;
+        delete pendingPropUpdatesRef.current[id];
+        setSaving(id);
         try {
-            setSaving(id);
-            const { error } = await supabase.from('properties').update(updates).eq('id', id);
+            const { data, error } = await supabase.from('properties').update(entry.updates).eq('id', id).select('id');
             if (error) throw error;
-            const updatedProps = properties.map(p => p.id === id ? { ...p, ...updates } : p);
-            setProperties(updatedProps);
-            if (detailProperty?.id === id) setDetailProperty({ ...detailProperty, ...updates });
-            if (updates.market_value_total !== undefined) {
-                calculateCockpitStats(updatedProps, loans, economicUnits);
-            }
+            if (!data || data.length === 0) throw new Error('Das Objekt wurde nicht gefunden oder Sie haben keine Berechtigung, es zu ändern.');
         } catch (err) {
-            alert('Fehler beim Speichern: ' + err.message);
+            alert('Fehler beim Speichern: ' + translateError(err));
+            // Anzeige wieder auf den gespeicherten Stand bringen
+            fetchData({ silent: true });
         } finally {
             setSaving(null);
         }
     };
 
-    const handleUpdateWE = async (id, updates) => {
-        try {
-            const rowData = {
-                id,
-                user_id: user.id,
-                ...updates,
-                updated_at: new Date().toISOString()
-            };
-            const { error } = await supabase.from('economic_units').upsert(rowData, { onConflict: 'id' });
-            if (error) throw error;
-            const exists = economicUnits.some(eu => eu.id === id);
-            let updatedWEs;
-            if (exists) {
-                updatedWEs = economicUnits.map(eu => eu.id === id ? { ...eu, ...updates } : eu);
-            } else {
-                updatedWEs = [...economicUnits, rowData];
+    // Sofort in der Anzeige übernehmen (funktional, kein veralteter State), in die DB erst nach einer kurzen
+    // Eingabepause – statt eines UPDATE pro Tastendruck bzw. Slider-Schritt
+    const handleUpdateProperty = (id, updates) => {
+        setProperties(prev => prev.map(p => (p.id === id ? { ...p, ...updates } : p)));
+        setDetailProperty(prev => (prev && prev.id === id ? { ...prev, ...updates } : prev));
+        const pending = pendingPropUpdatesRef.current;
+        const entry = pending[id] || { updates: {}, timer: null };
+        entry.updates = { ...entry.updates, ...updates };
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => flushPropertyUpdate(id), PROPERTY_SAVE_DELAY_MS);
+        pending[id] = entry;
+    };
+
+    // WE-Finanzen bearbeiten: Ausgangswerte merken, damit nur tatsächlich geänderte Felder gespeichert werden
+    // (sonst würden die vorbefüllten Objektsummen als feste WE-Werte eingefroren)
+    const openWeEditModal = (p, field) => {
+        setWeEditModal({
+            ...p,
+            field,
+            _orig: {
+                total_investment_cost: p.total_investment_cost,
+                equity_invested: p.equity_invested,
+                market_value_total: p.market_value_total
             }
-            setEconomicUnits(updatedWEs);
-            calculateCockpitStats(properties, loans, updatedWEs);
+        });
+    };
+
+    // Bestehende WE per update (user_id bleibt beim Eigentümer), fehlende Zeile per insert mit dem
+    // Eigentümer der Objekte. Rückgabe: true bei Erfolg.
+    const handleUpdateWE = async (id, updates, groupProps = []) => {
+        try {
+            const stamped = { ...updates, updated_at: new Date().toISOString() };
+            const exists = economicUnits.some(eu => eu.id === id);
+            let row;
+            if (exists) {
+                const { data, error } = await supabase.from('economic_units').update(stamped).eq('id', id).select();
+                if (error) throw error;
+                if (!data || data.length === 0) throw new Error('Die Wirtschaftseinheit wurde nicht gefunden oder Sie haben keine Berechtigung, sie zu ändern.');
+                row = data[0];
+            } else {
+                const ownerId = groupProps.find(pr => pr.user_id)?.user_id || user.id;
+                const { data, error } = await supabase.from('economic_units').insert({ id, user_id: ownerId, ...stamped }).select();
+                if (error) throw error;
+                row = data?.[0] || { id, user_id: ownerId, ...stamped };
+            }
+            setEconomicUnits(prev => (prev.some(eu => eu.id === id)
+                ? prev.map(eu => (eu.id === id ? { ...eu, ...row } : eu))
+                : [...prev, row]));
+            return true;
         } catch (err) {
-            alert('Fehler beim Speichern der Wirtschaftseinheit: ' + err.message);
+            alert('Fehler beim Speichern der Wirtschaftseinheit: ' + translateError(err));
+            return false;
         }
+    };
+
+    const saveWeEditModal = async () => {
+        if (!weEditModal || savingWE) return;
+        const orig = weEditModal._orig || {};
+        const updates = {};
+        ['total_investment_cost', 'equity_invested', 'market_value_total'].forEach(key => {
+            const next = parseNum(weEditModal[key]) ?? 0;
+            const before = parseNum(orig[key]) ?? 0;
+            if (Math.abs(next - before) > 0.004) updates[key] = round2(next);
+        });
+        if (Object.keys(updates).length === 0) {
+            setWeEditModal(null);
+            return;
+        }
+        setSavingWE(true);
+        const ok = await handleUpdateWE(weEditModal.economic_unit_id, updates, weEditModal.properties || []);
+        setSavingWE(false);
+        // Bei Fehler bleibt das Modal mit den Eingaben offen
+        if (ok) setWeEditModal(null);
     };
 
     const formatCurrency = (val) => {
@@ -738,55 +1128,80 @@ const InvestorPortal = () => {
     // ─── DEAL CRUD ──────────────────────────────────────────────────
     const fetchDeals = async () => {
         if (!user) return;
-        const { data } = await supabase
+        const { data, error } = await supabase
             .from('deals')
             .select('*')
             .eq('user_id', user.id)
             .order('updated_at', { ascending: false });
-        if (data) setDeals(data);
+        if (error) {
+            console.error('Fehler beim Laden der Deals:', error);
+            setDealsError(translateError(error));
+            return;
+        }
+        setDealsError(null);
+        setDeals(data || []);
+    };
+
+    // Update-Payload: Eigentümer (user_id) nie umschreiben, Portfolio nicht auf "kein Portfolio" zurücksetzen
+    const toDealUpdatePayload = (payload) => {
+        // eslint-disable-next-line no-unused-vars
+        const { user_id, portfolio_id, ...rest } = payload;
+        return selectedPortfolioID ? { ...rest, portfolio_id: selectedPortfolioID } : rest;
+    };
+
+    // Speichert den Deal; liefert die Deal-ID bei Erfolg, sonst null (Fehler wird angezeigt)
+    const writeDeal = async (payload) => {
+        if (editingDealId) {
+            const { data, error } = await supabase.from('deals').update(toDealUpdatePayload(payload)).eq('id', editingDealId).select('id');
+            if (error) throw error;
+            if (!data || data.length === 0) throw new Error('Der Deal wurde nicht gefunden oder Sie haben keine Berechtigung, ihn zu ändern.');
+            return editingDealId;
+        }
+        const { data, error } = await supabase.from('deals').insert(payload).select();
+        if (error) throw error;
+        if (!data?.[0]) throw new Error('Der Deal konnte nicht gespeichert werden.');
+        setEditingDealId(data[0].id);
+        return data[0].id;
     };
 
     const saveDeal = async (skipNavigate = false) => {
         if (!user || savingDeal) return editingDealId;
         setSavingDeal(true);
-        let resultId = editingDealId;
+        let resultId = null;
         try {
-            const metrics = calculateAuditMetrics();
-            const loanTotal = auditData.loans.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+            const metrics = computeAuditMetrics(auditData, scenario);
             const payload = {
                 user_id: user.id,
                 portfolio_id: selectedPortfolioID || null,
                 name: dealName || 'Neuer Deal',
                 deal_type: 'buy_hold',
-                purchase_price: parseFloat(auditData.purchasePrice) || 0,
-                total_investment: metrics.totalInvestment,
-                cold_rent_ist: parseFloat(auditData.coldRentIst) || 0,
-                cold_rent_soll: parseFloat(auditData.coldRentSoll) || 0,
-                equity: parseFloat(auditData.equity) || 0,
-                loan_total: loanTotal,
+                purchase_price: parseNum(auditData.purchasePrice) || 0,
+                total_investment: Number.isFinite(metrics.totalInvestment) ? round2(metrics.totalInvestment) : 0,
+                cold_rent_ist: parseNum(auditData.coldRentIst) || 0,
+                cold_rent_soll: parseNum(auditData.coldRentSoll) || 0,
+                equity: parseNum(auditData.equity) || 0,
+                loan_total: metrics.loansTotal,
                 deal_data: { ...auditData, deal_type: 'buy_hold' },
                 scenario_data: scenario,
                 updated_at: new Date().toISOString()
             };
-            if (editingDealId) {
-                await supabase.from('deals').update(payload).eq('id', editingDealId);
-            } else {
-                const { data } = await supabase.from('deals').insert(payload).select();
-                if (data?.[0]) {
-                    resultId = data[0].id;
-                    setEditingDealId(data[0].id);
-                }
-            }
+            resultId = await writeDeal(payload);
             await fetchDeals();
             if (!skipNavigate) navigate('/investor-portal?tab=deals');
+        } catch (err) {
+            // Eingaben bleiben erhalten, keine Navigation
+            alert('Fehler beim Speichern des Deals: ' + translateError(err));
+            resultId = null;
         } finally {
             setSavingDeal(false);
         }
         return resultId;
     };
 
-    const saveFixFlipDeal = async (inputs, results) => {
-        if (!user || savingDeal) return;
+    // Rückgabe true/false: der Fix-&-Flip-Rechner speichert vor dem Sprung in den Sanierungsrechner mit
+    // { skipNavigate: true } und bricht den Sprung ab, wenn das Speichern fehlschlägt
+    const saveFixFlipDeal = async (inputs, results, opts = {}) => {
+        if (!user || savingDeal) return false;
         setSavingDeal(true);
         try {
             const payload = {
@@ -804,34 +1219,43 @@ const InvestorPortal = () => {
                 scenario_data: results,
                 updated_at: new Date().toISOString()
             };
-            if (editingDealId) {
-                await supabase.from('deals').update(payload).eq('id', editingDealId);
-            } else {
-                const { data } = await supabase.from('deals').insert(payload).select();
-                if (data?.[0]) setEditingDealId(data[0].id);
-            }
+            await writeDeal(payload);
             await fetchDeals();
-            navigate('/investor-portal?tab=deals');
+            if (!opts?.skipNavigate) navigate('/investor-portal?tab=deals');
+            return true;
         } catch (e) {
             console.error(e);
+            alert('Fehler beim Speichern des Deals: ' + translateError(e));
+            return false;
         } finally {
             setSavingDeal(false);
         }
     };
 
+    // Rückgabe true nur bei tatsächlich gelöschtem Deal (der Fix-&-Flip-Rechner wechselt dann zur Übersicht)
     const deleteDeal = async (id) => {
-        if (!confirm('Deal wirklich löschen?')) return;
-        await supabase.from('deals').delete().eq('id', id);
+        if (!confirm('Deal wirklich löschen?')) return false;
+        const { data, error } = await supabase.from('deals').delete().eq('id', id).select('id');
+        if (error || !data || data.length === 0) {
+            alert('Der Deal konnte nicht gelöscht werden: ' + (error ? translateError(error) : 'nicht gefunden oder keine Berechtigung.'));
+            await fetchDeals();
+            return false;
+        }
+        setDeals(prev => prev.filter(d => d.id !== id));
         if (editingDealId === id) setEditingDealId(null);
         await fetchDeals();
+        return true;
     };
 
     const loadDeal = (deal) => {
         const type = deal.deal_type || deal.deal_data?.deal_type || 'buy_hold';
         setActiveDealType(type);
-        setAuditData(deal.deal_data);
         if (type === 'buy_hold') {
-            setScenario(deal.scenario_data || { rentGrowth: 3, interestAdj: 0, repaymentAdj: 2 });
+            // Fehlende Felder/Darlehen aus alten oder extern geschriebenen Deals mit Standardwerten ergänzen
+            setAuditData(normalizeAuditData(deal.deal_data));
+            setScenario(normalizeScenario(deal.scenario_data));
+        } else {
+            setAuditData(deal.deal_data && typeof deal.deal_data === 'object' ? deal.deal_data : {});
         }
         setDealName(deal.name);
         setEditingDealId(deal.id);
@@ -840,56 +1264,21 @@ const InvestorPortal = () => {
 
     const startNewDeal = (type = 'buy_hold') => {
         setActiveDealType(type);
-        setAuditData({
-            purchasePrice: '', coldRentIst: '', coldRentSoll: '',
-            housegeld: '', reserves: '', equity: 0,
-            loans: [{ amount: 0, interest: 3.5, repayment: 2, fixedYears: 10 }],
-            afaRate: 2, buildingShare: 80, taxRate: 42
-        });
-        setScenario({ rentGrowth: 3, interestAdj: 0, repaymentAdj: 2 });
+        // Gleiche Standardwerte wie der Startzustand – inkl. Kaufnebenkosten-Sätzen
+        setAuditData(createDefaultAuditData());
+        setScenario({ ...DEFAULT_SCENARIO });
         setDealName(type === 'fix_flip' ? 'Neuer Fix & Flip Deal' : 'Neuer Deal');
         setEditingDealId(null);
         navigate('/investor-portal?tab=audit');
     };
 
     // ─── RANKING LOGIC ─────────────────────────────────────────────
-    const getDealRanking = (deal) => {
-        const type = deal.deal_type || deal.deal_data?.deal_type || 'buy_hold';
-        if (type === 'buy_hold') {
-            // Buy & Hold: Cashflow vor Steuer/Mo × 12 × 10 = 10-Jahres-Cashflow
-            const d = deal.deal_data || {};
-            const pp = parseFloat(d.purchasePrice) || 0;
-            const ttr = parseFloat(d.transferTaxRate) || 0;
-            const br = parseFloat(d.brokerRate) || 0;
-            const nr = parseFloat(d.notaryRate) || 0;
-            const rr = parseFloat(d.registryRate) || 0;
-            const knk = pp * ((ttr + br + nr + rr) / 100);
-            // eslint-disable-next-line no-unused-vars
-            const totalInv = pp + knk + (parseFloat(d.renovationCosts) || 0);
-            const grossIstMo = (parseFloat(d.coldRentIst) || 0) + (parseFloat(d.garageIst) || 0);
-            const hg = parseFloat(d.housegeld) || 0;
-            const res = parseFloat(d.reserves) || 0;
-            const nonRecPA = (hg + res) * 12;
-            const incomeIstPA = grossIstMo * 12;
-            let totalIntPA = 0, totalRepPA = 0;
-            (d.loans || []).forEach(l => {
-                const amt = parseFloat(l.amount) || 0;
-                totalIntPA += amt * ((parseFloat(l.interest) || 0) / 100);
-                totalRepPA += amt * ((parseFloat(l.repayment) || 0) / 100);
-            });
-            const cfPreTaxMo = (incomeIstPA - nonRecPA - totalIntPA - totalRepPA) / 12;
-            return cfPreTaxMo * 12 * 10; // 10-Jahres-Cashflow
-        } else {
-            // Fix & Flip: Durchschnitt aller positiven Gewinne
-            const res = deal.scenario_data || {};
-            const profits = [];
-            if ((res.profitLow || 0) > 0) profits.push(res.profitLow);
-            if ((res.profitHigh || 0) > 0) profits.push(res.profitHigh);
-            if ((res.kapProfitIst || 0) > 0) profits.push(res.kapProfitIst);
-            if ((res.kapProfitSoll || 0) > 0) profits.push(res.kapProfitSoll);
-            return profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
-        }
-    };
+    const rankedDeals = React.useMemo(
+        () => deals
+            .map(deal => ({ ...deal, _ranking: getDealRanking(deal) }))
+            .sort((a, b) => b._ranking - a._ranking),
+        [deals]
+    );
 
     // ─── RENDER: DEALS OVERVIEW ─────────────────────────────────────
     const renderDealsOverview = () => (
@@ -899,7 +1288,13 @@ const InvestorPortal = () => {
                 <Button icon={Plus} onClick={() => startNewDeal('fix_flip')}>Fix & Flip</Button>
             </div>
             <Card title="Gespeicherte Deals" icon={FileText} color="#8B5CF6">
-                {deals.length === 0 ? (
+                {dealsError ? (
+                    <div style={{ textAlign: 'center', padding: '40px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                        <p style={{ fontSize: '0.95rem', fontWeight: 600, color: '#EF4444' }}>Die Deals konnten nicht geladen werden.</p>
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{dealsError}</p>
+                        <Button variant="secondary" size="sm" onClick={() => fetchDeals()}>Erneut laden</Button>
+                    </div>
+                ) : deals.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '60px 0', opacity: 0.5 }}>
                         <FileText size={48} style={{ margin: '0 auto 16px', display: 'block' }} />
                         <p style={{ fontSize: '1rem', fontWeight: 500 }}>Noch keine Deals gespeichert</p>
@@ -917,10 +1312,7 @@ const InvestorPortal = () => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {[...deals]
-                                        .map(deal => ({ ...deal, _ranking: getDealRanking(deal) }))
-                                        .sort((a, b) => b._ranking - a._ranking)
-                                        .map((deal, idx) => (
+                                    {rankedDeals.map((deal, idx) => (
                                             <tr key={deal.id} style={{ borderBottom: '1px solid var(--border-color)', cursor: 'pointer', transition: 'background-color 0.15s' }}
                                                 onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
                                                 onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
@@ -964,10 +1356,7 @@ const InvestorPortal = () => {
 
                         {/* Mobile View for Deals */}
                         <div className="hidden-desktop" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
-                            {[...deals]
-                                .map(deal => ({ ...deal, _ranking: getDealRanking(deal) }))
-                                .sort((a, b) => b._ranking - a._ranking)
-                                .map((deal, idx) => (
+                            {rankedDeals.map((deal, idx) => (
                                     <div key={deal.id}
                                         onClick={() => loadDeal(deal)}
                                         style={{
@@ -1054,10 +1443,8 @@ const InvestorPortal = () => {
                                 const rentIst = p.isGroup ? p._rentIst : getPropertyRentIst(p);
                                 const bankrate = getGroupOrPropertyLoanPayment(p);
                                 const cf = rentIst - bankrate;
-                                const addr = p.isGroup ? (() => {
-                                    const streets = Array.from(new Set(p.properties.map(pr => pr.street).filter(Boolean)));
-                                    return (p.name || `Wirtschaftseinheit: ${streets.join(', ')}`);
-                                })() : `${p.street} ${p.house_number || ''}`.trim();
+                                // Gruppen tragen den WE-Namen (bzw. "Wirtschaftseinheit: Straßen") im Feld street
+                                const addr = p.isGroup ? (p.street || 'Wirtschaftseinheit') : `${p.street} ${p.house_number || ''}`.trim();
                                 
                                 return (
                                     <tr key={p.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
@@ -1084,7 +1471,7 @@ const InvestorPortal = () => {
         const KPI_DETAILS = {
             ltv: {
                 name: 'LTV (Loan-to-Value)',
-                value: `${stats.ltv.toFixed(1)} %`,
+                value: fmtKpi(stats.ltv, 1, ' %'),
                 definition: 'Der Beleihungsauslauf (LTV) beschreibt das Verhältnis der Summe aller ausstehenden Kredite zum aktuellen Gesamtmarktwert deines Immobilienportfolios.',
                 bankRelevance: 'Banken nutzen den LTV zur Risikobewertung. Ein LTV unter 60% gilt als sehr gut (günstige Zinsen), während ein LTV über 80% kritischer eingestuft wird.',
                 formula: 'Restschuld gesamt / Marktwert gesamt * 100',
@@ -1094,7 +1481,7 @@ const InvestorPortal = () => {
             },
             dscr: {
                 name: 'DSCR (Debt Service Coverage Ratio) - Soll',
-                value: stats.dscr.toFixed(2),
+                value: fmtKpi(stats.dscr, 2),
                 definition: 'Die Kapitaldienstdeckungsquote (DSCR) misst das Verhältnis von Mieteinnahmen (Soll) zur Bankrate (Zins + Tilgung). Sie zeigt, wie sicher der Schuldendienst bei Vollvermietung bzw. Soll-Miete gedeckt ist.',
                 bankRelevance: 'Für Banken ist ein DSCR von mindestens 1,10 (110% Deckung) meist die Mindestanforderung. Werte ab 1,30 gelten als sehr gut.',
                 formula: 'Mieterträge Soll (mtl.) / Bankrate (mtl.)',
@@ -1104,7 +1491,7 @@ const InvestorPortal = () => {
             },
             wacd: {
                 name: 'Mischzins (WACD)',
-                value: `${stats.wacd.toFixed(2)} %`,
+                value: fmtKpi(stats.wacd, 2, ' %'),
                 definition: 'Der gewichtete Durchschnittszins (Weighted Average Cost of Debt) gibt den durchschnittlichen Zinssatz deines Fremdkapitals an, gewichtet nach der Höhe der jeweiligen Restschulden.',
                 bankRelevance: 'Zeigt die finanzielle Belastung des Portfolios. Ein niedriger Mischzins erhöht den Netto-Cashflow.',
                 formula: 'Summe(Restschuld_i * Zins_i) / Restschuld gesamt',
@@ -1114,7 +1501,7 @@ const InvestorPortal = () => {
             },
             coc: {
                 name: 'Eigenkapitalrendite (CoC) - Soll',
-                value: `${stats.coc.toFixed(2)} %`,
+                value: fmtKpi(stats.coc, 2, ' %'),
                 definition: 'Die Cash-on-Cash-Rendite (Soll) setzt den jährlichen Netto-Cashflow (Soll) ins Verhältnis zum eingesetzten Eigenkapital. Sie zeigt die Verzinsung deines tatsächlich investierten Kapitals bei Erreichen der Soll-Mieten.',
                 bankRelevance: 'Wichtige Kennzahl für Investoren zur Beurteilung der Effizienz des eingesetzten Kapitals.',
                 formula: 'Netto-Cashflow Soll p.a. / Eigenkapital gesamt * 100',
@@ -1123,9 +1510,9 @@ const InvestorPortal = () => {
                 ratingColor: stats.coc >= 8 ? '#10B981' : stats.coc >= 4 ? '#F59E0B' : '#EF4444'
             },
             netYield: {
-                name: 'Nettorendite (Soll)',
-                value: `${stats.netYield.toFixed(2)} %`,
-                definition: 'Die Nettomietrendite (Soll) setzt die jährlichen Soll-Mieteinnahmen ins Verhältnis zu den Gesamtinvestitionskosten (inkl. Nebenkosten). Sie ist die Standard-Kennzahl zum Objektvergleich auf Basis des vollen Potenzials.',
+                name: 'Mietrendite brutto (Soll)',
+                value: fmtKpi(stats.netYield, 2, ' %'),
+                definition: 'Die Brutto-Mietrendite (Soll) setzt die jährlichen Soll-Mieteinnahmen ins Verhältnis zu den Gesamtinvestitionskosten (inkl. Nebenkosten). Nicht umlagefähige Bewirtschaftungskosten (Verwaltung, Instandhaltung, Mietausfall) sind NICHT abgezogen – die Nettorendite liegt entsprechend darunter.',
                 bankRelevance: 'Dient der Beurteilung der grundlegenden Ertragskraft der Immobilien.',
                 formula: 'Mieteinnahmen Soll p.a. / Gesamtinvestitionskosten * 100',
                 calculation: `${formatCurrency(stats.totalTargetRent * 12)} / ${formatCurrency(stats.totalInvestment)} * 100`,
@@ -1144,17 +1531,17 @@ const InvestorPortal = () => {
             },
             netWorth: {
                 name: 'Net-Worth (Reinvermögen)',
-                value: formatCurrency(Math.max(0, stats.totalMarketValue - stats.totalDebt)),
+                value: formatCurrency(stats.totalMarketValue - stats.totalDebt),
                 definition: 'Das Reinvermögen (Net-Worth) beschreibt das im Immobilienbestand gebundene Eigenkapital nach Abzug aller ausstehenden Kredite (Restschuld) vom aktuellen Gesamt-Marktwert.',
                 bankRelevance: 'Das Reinvermögen zeigt deine echte wirtschaftliche Bonität und die stille Reserve in deinem Portfolio. Es dient Banken als zusätzliche Sicherheit für künftige Finanzierungen.',
                 formula: 'Marktwert gesamt - Restschuld gesamt',
                 calculation: `${formatCurrency(stats.totalMarketValue)} - ${formatCurrency(stats.totalDebt)}`,
-                rating: (stats.totalMarketValue - stats.totalDebt) > 0 ? 'Positiver Net-Worth (Eigenkapital vorhanden)' : 'Kein positives Reinvermögen',
+                rating: (stats.totalMarketValue - stats.totalDebt) > 0 ? 'Positiver Net-Worth (Eigenkapital vorhanden)' : 'Negatives bzw. kein Reinvermögen (Restschuld über Marktwert)',
                 ratingColor: (stats.totalMarketValue - stats.totalDebt) > 0 ? '#10B981' : '#EF4444'
             },
             debtYield: {
                 name: 'Rendite auf Restschuld (Debt Yield)',
-                value: `${stats.debtYield ? stats.debtYield.toFixed(2) : '0.00'} %`,
+                value: fmtKpi(stats.debtYield, 2, ' %'),
                 definition: 'Die Rendite auf die Restschuld (auch Debt Yield genannt) beschreibt das Verhältnis der jährlichen Soll-Mieteinnahmen zur verbleibenden Restschuld der Bankkredite. Sie zeigt die Verzinsung bzw. Ertragskraft bezogen auf das ausstehende Fremdkapital.',
                 bankRelevance: 'Banken und Kreditgeber nutzen diese Kennzahl zur Risikobewertung. Ein höherer Debt Yield bedeutet ein geringeres Risiko für den Kreditgeber, da die Mieteinnahmen die ausstehende Schuld besser tragen können.',
                 formula: 'Mieteinnahmen Soll p.a. / Gesamtrestschuld * 100',
@@ -1164,8 +1551,23 @@ const InvestorPortal = () => {
             }
         };
 
-        const kpi = KPI_DETAILS[selectedKpi];
-        if (!kpi) return null;
+        // Fehlender Nenner -> keine Bewertung ("Sehr gut" bei fehlendem Marktwert o. Ä. wäre irreführend)
+        const MISSING_DATA = {
+            ltv: stats.ltv === null ? 'Marktwert fehlt – bitte die Marktwerte der Objekte pflegen.' : null,
+            dscr: stats.dscr === null ? 'Keine laufende Darlehensrate vorhanden.' : null,
+            wacd: stats.wacd === null ? 'Keine Restschuld vorhanden.' : null,
+            coc: stats.coc === null ? 'Eigenkapital fehlt – bitte das investierte Eigenkapital pflegen.' : null,
+            netYield: stats.netYield === null ? 'Gesamtinvestition fehlt – bitte die Gesamtinvestition pflegen.' : null,
+            debtYield: stats.debtYield === null ? 'Keine Restschuld vorhanden.' : null,
+            netWorth: (stats.totalMarketValue <= 0 && stats.totalDebt > 0) ? 'Marktwert fehlt – bitte die Marktwerte der Objekte pflegen.' : null
+        };
+
+        const baseKpi = KPI_DETAILS[selectedKpi];
+        if (!baseKpi) return null;
+        const missingReason = MISSING_DATA[selectedKpi];
+        const kpi = missingReason
+            ? { ...baseKpi, value: 'n/a', rating: `n/a – ${missingReason}`, ratingColor: '#9CA3AF' }
+            : baseKpi;
 
         return (
             <Modal
@@ -1210,12 +1612,10 @@ const InvestorPortal = () => {
     const renderCockpit = () => {
         const isAnnual = waterfallPeriod === 'annual';
         const multiplier = isAnnual ? 12 : 1;
-        const factorLabel = isAnnual ? 'p.a.' : 'mtl.';
 
         const incomeVal = stats.totalMonthlyIncome * multiplier;
         const interestVal = stats.totalMonthlyInterest * multiplier;
         const repaymentVal = stats.totalMonthlyRepayment * multiplier;
-        const annuityVal = stats.totalMonthlyAnnuity * multiplier;
         const cashflowVal = stats.netCashflow * multiplier;
 
         const steps = [
@@ -1225,68 +1625,59 @@ const InvestorPortal = () => {
             { label: 'Netto-Cashflow', value: cashflowVal, type: 'total', color: cashflowVal >= 0 ? '#10B981' : '#EF4444', desc: 'Verbleibender freier Cashflow nach Zins und Tilgung.' }
         ];
 
-        // Next refinance countdown / details
-        let nextRefinancePropName = '';
-        if (nextLoanReset) {
-            if (nextLoanReset.loan.economic_unit_id) {
-                const we = economicUnits.find(eu => eu.id === nextLoanReset.loan.economic_unit_id);
-                const weProps = properties.filter(p => p.economic_unit_id === nextLoanReset.loan.economic_unit_id);
+        // Objekt- bzw. WE-Bezeichnung eines Darlehens
+        const getLoanObjectName = (loan) => {
+            if (loan.economic_unit_id) {
+                const we = economicUnits.find(eu => eu.id === loan.economic_unit_id);
+                const weProps = properties.filter(p => p.economic_unit_id === loan.economic_unit_id);
                 const streets = Array.from(new Set(weProps.map(p => p.street).filter(Boolean)));
                 const streetsStr = streets.join(', ');
-                nextRefinancePropName = we 
+                return we
                     ? (streetsStr ? `${we.name} (${streetsStr})` : we.name)
                     : `WE: ${streetsStr || 'Unbekannt'}`;
-            } else if (nextLoanReset.loan.property_id) {
-                const prop = properties.find(p => p.id === nextLoanReset.loan.property_id);
-                nextRefinancePropName = prop ? `${prop.street} ${prop.house_number}` : 'Immobilie';
             }
-        }
+            if (loan.property_id) {
+                const prop = properties.find(p => p.id === loan.property_id);
+                return prop ? `${prop.street} ${prop.house_number}` : 'Immobilie';
+            }
+            return '';
+        };
 
+        // Next refinance countdown / details
         const nextRefinanceText = nextLoanReset
-            ? `${new Date(nextLoanReset.date).toLocaleDateString('de-DE')} - ${nextRefinancePropName} (${nextLoanReset.loan.bank_name || 'Bank'}, ${formatCurrency(calculateCurrentDebt(nextLoanReset.loan))})`
+            ? `${nextLoanReset.date.toLocaleDateString('de-DE')} - ${getLoanObjectName(nextLoanReset.loan)} (${nextLoanReset.loan.bank_name || 'Bank'}, ${formatCurrency(calculateCurrentLoanDebt(nextLoanReset.loan))})`
             : 'Keine ausstehenden Fristen';
+        const openLoansPage = (loan) => {
+            const pid = loan.economic_unit_id ? 'we_' + loan.economic_unit_id : loan.property_id;
+            navigate(`/loans?propertyId=${pid}`);
+        };
 
-        // Leerstandsquote matching Dashboard logic
+        // Leerstandsquote matching Dashboard logic (gemeinsame Definition "laufender Mietvertrag")
         let totalResUnits = 0;
         let vacantResUnits = 0;
-        const todayStr = new Date().toISOString().split('T')[0];
+        const todayStr = localTodayStr();
 
         properties.forEach(p => {
             (p.units || []).forEach(u => {
                 totalResUnits++;
-                const hasActive = (u.leases || []).some(l => 
-                    l.status === 'active' &&
-                    (!l.start_date || l.start_date <= todayStr) &&
-                    (!l.end_date || l.end_date >= todayStr)
-                );
-                if (!u.is_vacation_rental && !hasActive) {
+                if (!u.is_vacation_rental && !getActiveLease(u, todayStr)) {
                     vacantResUnits++;
                 }
             });
         });
         const vacancyRate = totalResUnits > 0 ? (vacantResUnits / totalResUnits) * 100 : 0;
 
-        // Kappungsgrenzen / 15% thresholds
-        let unitsAboveThreshold = 0;
-        properties.forEach(p => {
-            (p.units || []).forEach(u => {
-                if (u.is_vacation_rental) return;
-                const activeLease = u.leases?.find(l => l.status === 'active');
-                if (!activeLease) return;
-                const currentRent = parseFloat(activeLease.cold_rent) || 0;
-                const targetRent = parseFloat(u.target_rent) || 0;
-                if (currentRent > 0 && (targetRent - currentRent) / currentRent > 0.15) {
-                    unitsAboveThreshold++;
-                }
-            });
-        });
+        // Kappungsgrenzen / 15% thresholds (gleiche Liste wie im Detail-Modal)
+        const unitsAboveThreshold = thresholdUnits.length;
 
-        // Top 3 Rent Optimizations
-        const topOptimizations = rentOptimizations
+        // Top 3 Rent Optimizations (Kopie sortieren – den memoisierten Wert nicht verändern)
+        const topOptimizations = [...rentOptimizations]
             .sort((a, b) => b.potential - a.potential)
             .slice(0, 3);
 
         const totalPotentialSum = rentOptimizations.reduce((sum, o) => sum + o.potential, 0);
+        const netWorth = stats.totalMarketValue - stats.totalDebt;
+        const netWorthMissing = stats.totalMarketValue <= 0 && stats.totalDebt > 0;
 
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
@@ -1459,27 +1850,27 @@ const InvestorPortal = () => {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.825rem' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('ltv')}>
                                 <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>LTV (Beleihung):</span>
-                                <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>{stats.ltv.toFixed(1)} %</span>
+                                <span style={{ fontWeight: 700, color: stats.ltv === null ? 'var(--text-secondary)' : 'var(--primary-color)' }}>{fmtKpi(stats.ltv, 1, ' %')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('dscr')}>
-                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>DSCR (Schuldendienst):</span>
-                                <span style={{ fontWeight: 700, color: stats.dscr >= 1.1 ? '#10B981' : '#EF4444' }}>{stats.dscr.toFixed(2)}</span>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>DSCR (Soll):</span>
+                                <span style={{ fontWeight: 700, color: stats.dscr === null ? 'var(--text-secondary)' : stats.dscr >= 1.1 ? '#10B981' : '#EF4444' }}>{fmtKpi(stats.dscr, 2)}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('wacd')}>
                                 <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Mischzins (WACD):</span>
-                                <span style={{ fontWeight: 700 }}>{stats.wacd.toFixed(2)} %</span>
+                                <span style={{ fontWeight: 700 }}>{fmtKpi(stats.wacd, 2, ' %')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('coc')}>
-                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Eigenkapitalrendite (CoC):</span>
-                                <span style={{ fontWeight: 700 }}>{stats.coc.toFixed(2)} %</span>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Eigenkapitalrendite (CoC, Soll):</span>
+                                <span style={{ fontWeight: 700 }}>{fmtKpi(stats.coc, 2, ' %')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('netYield')}>
-                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Nettorendite (Soll):</span>
-                                <span style={{ fontWeight: 700 }}>{stats.netYield.toFixed(2)} %</span>
+                                <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Mietrendite brutto (Soll):</span>
+                                <span style={{ fontWeight: 700 }}>{fmtKpi(stats.netYield, 2, ' %')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('debtYield')}>
                                 <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Rendite auf Restschuld:</span>
-                                <span style={{ fontWeight: 700 }}>{stats.debtYield ? stats.debtYield.toFixed(2) : '0.00'} %</span>
+                                <span style={{ fontWeight: 700 }}>{fmtKpi(stats.debtYield, 2, ' %')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('tilgungseffekt')}>
                                 <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Tilgungseffekt (p.a.):</span>
@@ -1520,12 +1911,7 @@ const InvestorPortal = () => {
                                         transition: 'all 0.2s ease'
                                     }}
                                     onClick={() => {
-                                        if (nextLoanReset) {
-                                            const pid = nextLoanReset.loan.economic_unit_id 
-                                                ? 'we_' + nextLoanReset.loan.economic_unit_id 
-                                                : nextLoanReset.loan.property_id;
-                                            navigate(`/loans?propertyId=${pid}`);
-                                        }
+                                        if (nextLoanReset) openLoansPage(nextLoanReset.loan);
                                     }}
                                     title={nextLoanReset ? 'Klicken, um die Finanzierungsdetails anzuzeigen' : ''}
                                 >
@@ -1535,6 +1921,18 @@ const InvestorPortal = () => {
                                         <div style={{ color: 'var(--text-secondary)' }}>{nextRefinanceText}</div>
                                     </div>
                                 </div>
+                                {overdueLoanResets.length > 0 && (
+                                    <div style={{ marginTop: '6px', padding: '6px 8px', borderRadius: '6px', backgroundColor: 'rgba(239, 68, 68, 0.06)', border: '1px dashed rgba(239, 68, 68, 0.35)', fontSize: '0.75rem', lineHeight: 1.3 }}>
+                                        <div style={{ fontWeight: 600, color: '#EF4444' }}>
+                                            Zinsbindung abgelaufen ({overdueLoanResets.length} Darlehen) – Anschlussfinanzierung prüfen:
+                                        </div>
+                                        {overdueLoanResets.slice(0, 3).map(o => (
+                                            <div key={o.loan.id} style={{ color: 'var(--text-secondary)', cursor: 'pointer', marginTop: '2px' }} onClick={() => openLoansPage(o.loan)} title="Klicken, um die Finanzierungsdetails anzuzeigen">
+                                                {o.date.toLocaleDateString('de-DE')} - {getLoanObjectName(o.loan)} ({o.loan.bank_name || 'Bank'}, {formatCurrency(calculateCurrentLoanDebt(o.loan))})
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </Card>
@@ -1580,7 +1978,7 @@ const InvestorPortal = () => {
                             
                             <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Top 3 Vorschläge:</div>
-                                {topOptimizations.map((o, idx) => (
+                                {topOptimizations.map(o => (
                                     <div key={o.id} style={{ display: 'flex', flexDirection: 'column', gap: '2px', backgroundColor: 'rgba(255,255,255,0.01)', padding: '6px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
                                             <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '170px' }}>{o.property} ({o.unit})</span>
@@ -1615,7 +2013,7 @@ const InvestorPortal = () => {
                             <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '2px 0' }} onClick={() => setSelectedKpi('netWorth')}>
                                     <span style={{ color: 'var(--text-secondary)', borderBottom: '1px dashed var(--text-secondary)' }}>Net-Worth (EK Marktwert):</span>
-                                    <span style={{ fontWeight: 700, color: '#10B981' }}>{formatCurrency(Math.max(0, stats.totalMarketValue - stats.totalDebt))}</span>
+                                    <span style={{ fontWeight: 700, color: netWorthMissing ? 'var(--text-secondary)' : cashflowColor(netWorth) }}>{netWorthMissing ? 'n/a' : formatCurrency(netWorth)}</span>
                                 </div>
                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                     <span style={{ color: 'var(--text-secondary)' }}>Gesamtrestschuld:</span>
@@ -1706,7 +2104,7 @@ const InvestorPortal = () => {
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
                                                             p.isGroup ? (
-                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
+                                                                <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'total_investment_cost'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
                                                                     {formatCurrency(p.total_investment_cost)}
                                                                 </span>
                                                             ) : (
@@ -1716,7 +2114,7 @@ const InvestorPortal = () => {
                                                             <button
                                                                 onClick={(e) => { 
                                                                     e.stopPropagation(); 
-                                                                    if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
+                                                                    if (p.isGroup) openWeEditModal(p, 'total_investment_cost');
                                                                     else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
                                                                 }}
                                                                 style={{
@@ -1733,7 +2131,7 @@ const InvestorPortal = () => {
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {(parseFloat(p.equity_invested) || 0) > 0 ? (
                                                             p.isGroup ? (
-                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
+                                                                <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'equity_invested'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
                                                                     {formatCurrency(p.equity_invested)}
                                                                 </span>
                                                             ) : (
@@ -1743,7 +2141,7 @@ const InvestorPortal = () => {
                                                             <button
                                                                 onClick={(e) => { 
                                                                     e.stopPropagation(); 
-                                                                    if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
+                                                                    if (p.isGroup) openWeEditModal(p, 'equity_invested');
                                                                     else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`); 
                                                                 }}
                                                                 style={{
@@ -1772,7 +2170,7 @@ const InvestorPortal = () => {
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {marketValue > 0 ? (
                                                             p.isGroup ? (
-                                                                <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
+                                                                <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'market_value_total'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
                                                                     {formatCurrency(marketValue)}
                                                                 </span>
                                                             ) : (
@@ -1783,7 +2181,7 @@ const InvestorPortal = () => {
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     if (p.isGroup) {
-                                                                        setWeEditModal({ ...p, field: 'market_value_total' });
+                                                                        openWeEditModal(p, 'market_value_total');
                                                                     } else {
                                                                         setDetailProperty(p);
                                                                         setIsDetailOpen(true);
@@ -1825,7 +2223,7 @@ const InvestorPortal = () => {
                                                 {auditPropertyId === p.id && !p.isGroup && (
                                                     <tr>
                                                         <td colSpan="11" style={{ padding: '0 16px 20px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                                                            <div ref={auditRef}>
+                                                            <div ref={auditRefDesktop}>
                                                                 {renderInlineAudit(p)}
                                                             </div>
                                                         </td>
@@ -1910,7 +2308,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
                                                         p.isGroup ? (
-                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'total_investment_cost' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
+                                                            <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'total_investment_cost'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
                                                                 {formatCurrency(p.total_investment_cost)}
                                                             </span>
                                                         ) : (
@@ -1920,7 +2318,7 @@ const InvestorPortal = () => {
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                if (p.isGroup) setWeEditModal({ ...p, field: 'total_investment_cost' });
+                                                                if (p.isGroup) openWeEditModal(p, 'total_investment_cost');
                                                                 else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                             }}
                                                             style={{
@@ -1940,7 +2338,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.equity_invested) || 0) > 0 ? (
                                                         p.isGroup ? (
-                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'equity_invested' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
+                                                            <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'equity_invested'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
                                                                 {formatCurrency(p.equity_invested)}
                                                             </span>
                                                         ) : (
@@ -1950,7 +2348,7 @@ const InvestorPortal = () => {
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                if (p.isGroup) setWeEditModal({ ...p, field: 'equity_invested' });
+                                                                if (p.isGroup) openWeEditModal(p, 'equity_invested');
                                                                 else navigate(`/properties?editPropertyId=${p.id}&returnTo=cockpit`);
                                                             }}
                                                             style={{
@@ -1986,7 +2384,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {marketValue > 0 ? (
                                                         p.isGroup ? (
-                                                            <span onClick={(e) => { e.stopPropagation(); setWeEditModal({ ...p, field: 'market_value_total' }); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
+                                                            <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'market_value_total'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
                                                                 {formatCurrency(marketValue)}
                                                             </span>
                                                         ) : (
@@ -1997,7 +2395,7 @@ const InvestorPortal = () => {
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
                                                                 if (p.isGroup) {
-                                                                    setWeEditModal({ ...p, field: 'market_value_total' });
+                                                                    openWeEditModal(p, 'market_value_total');
                                                                 } else {
                                                                     setDetailProperty(p);
                                                                     setIsDetailOpen(true);
@@ -2041,7 +2439,7 @@ const InvestorPortal = () => {
                                                     )}
                                                 </div>
                                                 {!window.Capacitor?.isNativePlatform?.() && auditPropertyId === p.id && (
-                                                    <div ref={auditRef} style={{ marginTop: '8px' }}>
+                                                    <div ref={auditRefMobile} style={{ marginTop: '8px' }}>
                                                         {renderInlineAudit(p)}
                                                     </div>
                                                 )}
@@ -2081,6 +2479,12 @@ const InvestorPortal = () => {
                     }}>
                         <Eye size={14} /> Details
                     </button>
+                    <button style={menuItemStyle} onClick={() => {
+                        setAuditPropertyId(auditPropertyId === openMenuId ? null : openMenuId);
+                        setOpenMenuId(null);
+                    }}>
+                        <ShieldCheck size={14} /> Zustand / DD
+                    </button>
                 </div>
             )}
 
@@ -2096,18 +2500,14 @@ const InvestorPortal = () => {
                     footer={
                         <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
                             <Button variant="secondary" onClick={() => setWeEditModal(null)}>Abbrechen</Button>
-                            <Button onClick={async () => {
-                                await handleUpdateWE(weEditModal.economic_unit_id, {
-                                    total_investment_cost: weEditModal.total_investment_cost,
-                                    equity_invested: weEditModal.equity_invested,
-                                    market_value_total: weEditModal.market_value_total
-                                });
-                                setWeEditModal(null);
-                            }}>Speichern</Button>
+                            <Button onClick={saveWeEditModal} disabled={savingWE}>{savingWE ? 'Speichert...' : 'Speichern'}</Button>
                         </div>
                     }
                 >
                     <div style={{ display: 'grid', gap: 'var(--spacing-md)' }}>
+                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
+                            Vorbelegt mit dem festen Wert der Wirtschaftseinheit bzw. der Summe der verknüpften Objekte. Gespeichert werden nur geänderte Felder – sie gelten dann als fester Wert der Wirtschaftseinheit (0 = wieder die Objektsumme verwenden).
+                        </p>
                         <CurrencyInput
                             label="Gesamtinvestition (€)"
                             value={weEditModal.total_investment_cost}
@@ -2280,9 +2680,11 @@ const InvestorPortal = () => {
                                 label="Marktwert gesamt (€)"
                                 value={p.market_value_total}
                                 onChange={e => {
-                                    const val = e.target.value;
-                                    const perSqm = totalSqm > 0 && val ? (val / totalSqm) : 0;
-                                    handleUpdateProperty(p.id, { market_value_total: val, market_value_per_sqm: parseFloat(perSqm.toFixed(2)) });
+                                    const val = parseNum(e.target.value) || 0;
+                                    // Abgeleiteten m²-Wert nur mit bekannter Fläche schreiben
+                                    const updates = { market_value_total: val };
+                                    if (totalSqm > 0) updates.market_value_per_sqm = round2(val / totalSqm);
+                                    handleUpdateProperty(p.id, updates);
                                 }}
                             />
                             <CurrencyInput
@@ -2290,12 +2692,19 @@ const InvestorPortal = () => {
                                 value={p.market_value_per_sqm}
                                 allowDecimals
                                 onChange={e => {
-                                    const val = e.target.value;
-                                    const total = val ? (val * totalSqm) : 0;
-                                    handleUpdateProperty(p.id, { market_value_per_sqm: val, market_value_total: parseFloat(total.toFixed(2)) });
+                                    const val = parseNum(e.target.value) || 0;
+                                    // Ohne Fläche den Gesamt-Marktwert nicht mit 0 überschreiben
+                                    const updates = { market_value_per_sqm: val };
+                                    if (totalSqm > 0) updates.market_value_total = round2(val * totalSqm);
+                                    handleUpdateProperty(p.id, updates);
                                 }}
                             />
                         </div>
+                        {totalSqm <= 0 && (
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
+                                Keine Wohnfläche hinterlegt – Gesamt- und m²-Wert werden unabhängig voneinander gespeichert.
+                            </p>
+                        )}
                     </div>
 
                     {/* Darlehen */}
@@ -2316,164 +2725,26 @@ const InvestorPortal = () => {
     };
 
     // ─── RENDER: ANKAUFSPRÜFUNG ─────────────────────────────────────
-    const calculateAuditMetrics = () => {
-        const p = auditData;
-        const purchasePrice = parseFloat(p.purchasePrice) || 0;
+    // Nur bei geänderten Eingaben neu rechnen (nicht bei jedem Render des Portals)
+    const metrics = React.useMemo(() => computeAuditMetrics(auditData, scenario), [auditData, scenario]);
 
-        // KNK
-        const transferTax = parseFloat(p.transferTaxRate) || 0;
-        const knk = purchasePrice * ((transferTax + parseFloat(p.brokerRate) + parseFloat(p.notaryRate) + parseFloat(p.registryRate)) / 100);
-        const totalInvestment = purchasePrice + knk + (parseFloat(p.renovationCosts) || 0);
+    // Fix-&-Flip-Rechner: stabiles initialData, damit Eingaben nicht bei jedem Render überschrieben werden
+    const fixFlipInitialData = React.useMemo(() => ({ ...auditData, name: dealName }), [auditData, dealName]);
 
-        // Nicht umlagefähige Kosten (Mo.)
-        const housegeldMo = parseFloat(p.housegeld) || 0;
-        const reservesMo = parseFloat(p.reserves) || 0;
-        const nonRecoverableMo = housegeldMo + reservesMo;
-        const nonRecoverablePA = nonRecoverableMo * 12;
-
-        // Brutto-Einnahmen (Mo.) = Miete + Garage
-        const grossIstMo = (parseFloat(p.coldRentIst) || 0) + (parseFloat(p.garageIst) || 0);
-        const grossSollMo = (parseFloat(p.coldRentSoll) || 0) + (parseFloat(p.garageSoll) || 0);
-
-        // SOLL hat eigene Felder? Hausgeld/Rücklage nur abziehen wenn SOLL gefüllt
-        const sollHasValues = grossSollMo > 0;
-        const nonRecoverableSollMo = sollHasValues ? nonRecoverableMo : 0;
-        const nonRecoverableSollPA = nonRecoverableSollMo * 12;
-
-        // Netto-Einnahmen (Mo.) = Brutto - Hausgeld - Rücklage
-        const netIstMo = grossIstMo - nonRecoverableMo;
-        const netSollMo = grossSollMo - nonRecoverableSollMo;
-
-        // Income PA für Renditeberechnungen (Brutto)
-        const incomeIstPA = grossIstMo * 12;
-        const incomeSollPA = grossSollMo * 12;
-
-        // Yields IST
-        const br100 = purchasePrice > 0 ? (incomeIstPA / purchasePrice) * 100 : 0;
-        const netYield = totalInvestment > 0 ? ((incomeIstPA - nonRecoverablePA) / totalInvestment) * 100 : 0;
-        const factor = incomeIstPA > 0 ? purchasePrice / incomeIstPA : 0;
-
-        // Yields SOLL
-        const br100Soll = purchasePrice > 0 ? (incomeSollPA / purchasePrice) * 100 : 0;
-        const netYieldSoll = totalInvestment > 0 ? ((incomeSollPA - nonRecoverableSollPA) / totalInvestment) * 100 : 0;
-        const factorSoll = incomeSollPA > 0 ? purchasePrice / incomeSollPA : 0;
-
-        // Financing
-        let totalInterestPA = 0;
-        let totalRepaymentPA = 0;
-        // eslint-disable-next-line no-unused-vars
-        let loansTotal = 0;
-        p.loans.forEach(loan => {
-            const amt = parseFloat(loan.amount) || 0;
-            loansTotal += amt;
-            totalInterestPA += amt * ((parseFloat(loan.interest) || 0) / 100);
-            totalRepaymentPA += amt * ((parseFloat(loan.repayment) || 0) / 100);
-        });
-        const annuMo = (totalInterestPA + totalRepaymentPA) / 12;
-
-        // Taxes IST – AfA: Gesamtinvestition × AfA-Satz
-        const renovCosts = parseFloat(p.renovationCosts) || 0;
-        const renovIn15 = renovCosts > (purchasePrice * 0.15);
-        const afaBase = totalInvestment + (renovIn15 ? renovCosts : 0);
-        const afaSum = afaBase * ((parseFloat(p.afaRate) || 2) / 100);
-        const taxable = incomeIstPA - totalInterestPA - afaSum - (housegeldMo * 12);
-        const taxBurden = Math.max(0, taxable * ((parseFloat(p.taxRate) || 42) / 100));
-
-        const housegeldSollPA = sollHasValues ? (housegeldMo * 12) : 0;
-        const taxableSoll = incomeSollPA - totalInterestPA - afaSum - housegeldSollPA;
-        const taxBurdenSoll = Math.max(0, taxableSoll * ((parseFloat(p.taxRate) || 42) / 100));
-
-        // Cashflow IST
-        const cfPreTaxMo = (incomeIstPA - nonRecoverablePA - totalInterestPA - totalRepaymentPA) / 12;
-        const cfPostTaxMo = cfPreTaxMo - (taxBurden / 12);
-
-        // Cashflow SOLL
-        const cfPreTaxSollMo = (incomeSollPA - nonRecoverableSollPA - totalInterestPA - totalRepaymentPA) / 12;
-        const cfPostTaxSollMo = cfPreTaxSollMo - (taxBurdenSoll / 12);
-
-        // Scenario: Restschuld nach Zinsbindungsende, neue Annuität
-        const targetYr = parseFloat(p.targetYear) || 0;
-        const rentGrowthRate = (parseFloat(scenario.rentGrowth) || 0) / 100;
-        const interestAdj = parseFloat(scenario.interestAdj) || 0;
-
-        // Max Zinsfestschreibung als Zeitrahmen
-        const maxFixedYears = Math.max(...p.loans.map(l => parseFloat(l.fixedYears) || 10));
-
-        // Restschuld pro Darlehen berechnen (iterativ, monatsgenau)
-        let totalRestschuld = 0;
-        let newTotalAnnuPA = 0;
-        let newTotalInterestPA = 0;
-        p.loans.forEach(loan => {
-            const amt = parseFloat(loan.amount) || 0;
-            const intRate = (parseFloat(loan.interest) || 0) / 100;
-            const repRate = (parseFloat(loan.repayment) || 0) / 100;
-            const fixedYrs = parseFloat(loan.fixedYears) || 10;
-            const monthlyRate = intRate / 12;
-            const annuPA = amt * (intRate + repRate);
-            const monthlyPayment = annuPA / 12;
-
-            // Restschuld nach fixedYears
-            let balance = amt;
-            for (let m = 0; m < fixedYrs * 12; m++) {
-                const monthlyInterest = balance * monthlyRate;
-                const monthlyPrincipal = monthlyPayment - monthlyInterest;
-                balance = Math.max(0, balance - monthlyPrincipal);
-            }
-            totalRestschuld += balance;
-
-            // Neue Annuität mit neuem Zins und neuer Tilgung aus Szenario auf Restschuld
-            const newIntRate = Math.max(0, interestAdj / 100);
-            const newRepRate = (parseFloat(scenario.repaymentAdj) || 0) / 100;
-            const newAnnuThisLoan = balance * (newIntRate + newRepRate);
-            newTotalAnnuPA += newAnnuThisLoan;
-            newTotalInterestPA += balance * newIntRate;
-        });
-        const newAnnuMo = newTotalAnnuPA / 12;
-
-        // Future Income: SOLL-Basis + Mietsteigerung ab targetYear
-        const growthYears = Math.max(0, maxFixedYears - targetYr);
-        const futureMultiplier = Math.pow(1 + rentGrowthRate, growthYears);
-        const futureBasePA = sollHasValues ? incomeSollPA : incomeIstPA;
-        const futureNonRecoverablePA = sollHasValues ? nonRecoverableSollPA : nonRecoverablePA;
-        const futureIncomePA = futureBasePA * futureMultiplier;
-
-        // Future Cashflow mit neuer Annuität
-        // AfA sinkt jährlich: nach maxFixedYears Jahren ist die Basis reduziert
-        const futureAfaBase = Math.max(0, afaBase - (afaSum * maxFixedYears));
-        const futureAfaSum = futureAfaBase > 0 ? Math.min(afaSum, futureAfaBase) : 0;
-        const futureHausgeldPA = housegeldMo * 12;
-        const futureTaxable = futureIncomePA - newTotalInterestPA - futureAfaSum - futureHausgeldPA;
-        const futureTaxBurden = Math.max(0, futureTaxable * ((parseFloat(p.taxRate) || 42) / 100));
-        const futureCfPreTaxMo = (futureIncomePA - futureNonRecoverablePA - newTotalAnnuPA) / 12;
-        const futureCfPostTaxMo = futureCfPreTaxMo - (futureTaxBurden / 12);
-
-        // EK-Rendite: Cashflow nach Steuern p.a. / Eigenkapital * 100
-        const equityVal = parseFloat(p.equity) || 0;
-        const ekRenditeIst = equityVal > 0 ? ((cfPostTaxMo * 12) / equityVal) * 100 : 0;
-        const ekRenditeSoll = equityVal > 0 ? ((cfPostTaxSollMo * 12) / equityVal) * 100 : 0;
-
-        return {
-            knk, totalInvestment,
-            grossIstMo, grossSollMo,
-            netIstMo, netSollMo,
-            nonRecoverableMo, nonRecoverableSollMo,
-            sollHasValues,
-            incomeIstMo: incomeIstPA / 12, incomeIstPA,
-            incomeSollMo: incomeSollPA / 12, incomeSollPA,
-            br100, netYield, factor,
-            br100Soll, netYieldSoll, factorSoll,
-            ekRenditeIst, ekRenditeSoll,
-            annuMo, annuPA: annuMo * 12,
-            taxBurdenMo: taxBurden / 12, taxBurdenSollMo: taxBurdenSoll / 12,
-            cfPreTaxMo, cfPostTaxMo,
-            cfPreTaxSollMo, cfPostTaxSollMo,
-            totalRestschuld, newAnnuMo, maxFixedYears,
-            futureIncomeMo: futureIncomePA / 12, futureIncomePA,
-            futureCfPreTaxMo, futureCfPostTaxMo, futureTaxBurdenMo: futureTaxBurden / 12
-        };
+    // Darlehen im Deal-Rechner unveränderlich aktualisieren (kein Mutieren des alten States)
+    const updateAuditLoan = (idx, field, value) => {
+        setAuditData(prev => ({
+            ...prev,
+            loans: (Array.isArray(prev.loans) ? prev.loans : []).map((l, i) => (i === idx ? { ...l, [field]: value } : l))
+        }));
     };
-
-    const metrics = calculateAuditMetrics();
+    const removeAuditLoan = (idx) => {
+        setAuditData(prev => ({ ...prev, loans: (Array.isArray(prev.loans) ? prev.loans : []).filter((_, i) => i !== idx) }));
+    };
+    const addAuditLoan = () => {
+        setAuditData(prev => ({ ...prev, loans: [...(Array.isArray(prev.loans) ? prev.loans : []), createAuditLoan()] }));
+    };
+    const auditLoans = Array.isArray(auditData.loans) ? auditData.loans : [];
 
     // ─── BUY & HOLD PDF EXPORT ─────────────────────────────────────
     const handleBuyHoldPrint = () => {
@@ -2508,6 +2779,11 @@ const InvestorPortal = () => {
             ] : []),
             { position: '─', wert: '' },
             { position: 'Annuität (Mo.)', wert: fc(m.annuMo) },
+            { position: `AfA-Bemessungsgrundlage (Gebäudeanteil ${m.buildingSharePct} %${m.renovIn15 ? ' + Sanierung' : ''})`, wert: fc(m.afaBase) },
+            { position: 'AfA p.a.', wert: fc(m.afaSum) },
+            ...(m.maintenanceExpense > 0 ? [
+                { position: 'Sanierung als Erhaltungsaufwand (einmalig, nicht in lfd. Steuer)', wert: fc(m.maintenanceExpense) },
+            ] : []),
             { position: 'Steuerbelastung IST (Mo.)', wert: fc(m.taxBurdenMo) },
             { position: 'Cashflow vor Steuern IST', wert: fc(m.cfPreTaxMo) },
             { position: 'Cashflow nach Steuern IST', wert: fc(m.cfPostTaxMo) },
@@ -2516,6 +2792,7 @@ const InvestorPortal = () => {
                 { position: 'Cashflow nach Steuern SOLL', wert: fc(m.cfPostTaxSollMo) },
             ] : []),
             { position: '─', wert: '' },
+            { position: 'Szenario: Anschlusszins', wert: m.newIntRatePct.toFixed(2) + ' %' },
             { position: `Szenario: Restschuld nach ${m.maxFixedYears} J.`, wert: fc(m.totalRestschuld) },
             { position: 'Szenario: Neue Annuität (Mo.)', wert: fc(m.newAnnuMo) },
             { position: 'Szenario: Cashflow vor Steuern', wert: fc(m.futureCfPreTaxMo) },
@@ -2553,7 +2830,7 @@ const InvestorPortal = () => {
                 <Button variant="secondary" icon={FileText} onClick={handleBuyHoldPrint}>
                     PDF
                 </Button>
-                <Button icon={savingDeal ? Loader2 : Save} onClick={saveDeal} disabled={savingDeal} style={savingDeal ? { opacity: 0.7, pointerEvents: 'none' } : {}}>
+                <Button icon={savingDeal ? Loader2 : Save} onClick={() => saveDeal(true)} disabled={savingDeal} style={savingDeal ? { opacity: 0.7, pointerEvents: 'none' } : {}}>
                     {savingDeal ? 'Speichert...' : (editingDealId ? 'Aktualisieren' : 'Speichern')}
                 </Button>
             </div>
@@ -2600,19 +2877,22 @@ const InvestorPortal = () => {
                                                 <div style={{ fontWeight: 700, marginBottom: '6px', fontSize: '0.8rem' }}>Grunderwerbsteuer je Bundesland</div>
                                                 {statesTaxRef.map(s => (
                                                     <div key={s.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
-                                                        <span>{s.name}</span><span style={{ fontWeight: 600 }}>{s.tax} %</span>
+                                                        <span>{s.name}</span><span style={{ fontWeight: 600 }}>{s.tax.toLocaleString('de-DE')} %</span>
                                                     </div>
                                                 ))}
+                                                <div style={{ marginTop: '6px', color: 'var(--text-secondary)', fontSize: '0.7rem' }}>Stand: {TRANSFER_TAX_RATES_AS_OF}</div>
                                             </div>
                                         )}
                                     </div>
                                 </div>
                                 <input
                                     type="number" step="0.1"
-                                    value={auditData.transferTaxRate}
+                                    min="0" max="999"
+                                    value={auditData.transferTaxRate ?? ''}
                                     onChange={e => {
+                                        // Leeres Feld bleibt leer (kein NaN im State); Wert auf 0–999 begrenzen
                                         let val = parseFloat(e.target.value);
-                                        if (val > 999) val = 999;
+                                        val = Number.isFinite(val) ? Math.min(999, Math.max(0, val)) : '';
                                         setAuditData({ ...auditData, transferTaxRate: val });
                                     }}
                                     style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontSize: '0.9rem' }}
@@ -2632,27 +2912,26 @@ const InvestorPortal = () => {
                                         title="Sanierungsrechner öffnen"
                                         onClick={async (e) => {
                                             e.stopPropagation();
-                                            let currentDealId = editingDealId;
-                                            // First save the deal if not yet saved
-                                            if (!currentDealId) {
-                                                currentDealId = await saveDeal(true);
-                                            }
+                                            // Vor dem Sprung immer speichern (auch bestehende Deals) – sonst gehen geänderte
+                                            // Eingaben verloren, weil bei der Rückkehr der gespeicherte Stand geladen wird
+                                            const currentDealId = await saveDeal(true);
+                                            if (!currentDealId) return; // Fehler wurde angezeigt – nicht navigieren
                                             const currentName = encodeURIComponent(dealName || 'Neuer Deal');
-                                            if (currentDealId) {
-                                                const ret = encodeURIComponent(`/investor-portal?tab=audit&dealId=${currentDealId}`);
-                                                const { data } = await supabase
-                                                    .from('renovation_calculations')
-                                                    .select('id')
-                                                    .contains('building_config', { dealId: currentDealId })
-                                                    .limit(1);
-                                                if (data && data.length > 0) {
-                                                    navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
-                                                } else {
-                                                    navigate(`/renovation/calculator/new?dealId=${currentDealId}&dealName=${currentName}&returnTo=${ret}`);
-                                                }
+                                            const ret = encodeURIComponent(`/investor-portal?tab=audit&dealId=${currentDealId}`);
+                                            const { data, error } = await supabase
+                                                .from('renovation_calculations')
+                                                .select('id')
+                                                .contains('building_config', { dealId: currentDealId })
+                                                .limit(1);
+                                            if (error) {
+                                                // Nicht blind eine neue (ggf. doppelte) Kalkulation anlegen
+                                                alert('Die Sanierungskalkulation konnte nicht geladen werden: ' + translateError(error));
+                                                return;
+                                            }
+                                            if (data && data.length > 0) {
+                                                navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
                                             } else {
-                                                const ret = encodeURIComponent('/investor-portal?tab=audit');
-                                                navigate(`/renovation/calculator/new?dealName=${currentName}&returnTo=${ret}`);
+                                                navigate(`/renovation/calculator/new?dealId=${currentDealId}&dealName=${currentName}&returnTo=${ret}`);
                                             }
                                         }}
                                     />
@@ -2669,7 +2948,7 @@ const InvestorPortal = () => {
                                                 boxShadow: '0 4px 20px rgba(0,0,0,0.15)', fontSize: '0.75rem', marginBottom: '4px',
                                                 color: 'var(--text-secondary)', lineHeight: 1.5
                                             }}>
-                                                Sanierungskosten werden in die AfA-Berechnung übernommen, wenn die Summe 15&nbsp;% höher ist als der Kaufpreis.
+                                                Sanierungskosten innerhalb von 3 Jahren nach dem Kauf, die 15&nbsp;% der Anschaffungskosten des Gebäudes (Gebäudeanteil von Kaufpreis + Kaufnebenkosten) übersteigen, gelten als anschaffungsnahe Herstellungskosten und werden über die AfA abgeschrieben. Darunter sind sie sofort abziehbarer Erhaltungsaufwand (einmalig; in der laufenden Steuer nicht enthalten). Maßgeblich sind die Netto-Beträge ohne USt. – der Rechner prüft vereinfacht mit dem eingegebenen Betrag.
                                             </div>
                                         )}
                                     </div>
@@ -2732,48 +3011,53 @@ const InvestorPortal = () => {
                         <div style={{ marginBottom: '1.5rem' }}>
                             <CurrencyInput label="Eigenkapital (€)" value={auditData.equity} onChange={e => setAuditData({ ...auditData, equity: e.target.value })} />
                         </div>
-                        {auditData.loans.map((loan, idx) => (
-                            <div key={idx} style={{ padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '1rem', backgroundColor: 'var(--background-color)' }}>
+                        {auditLoans.map((loan, idx) => (
+                            <div key={loan._key || idx} style={{ padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '1rem', backgroundColor: 'var(--background-color)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                                     <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>Darlehen {idx + 1}</span>
-                                    {idx > 0 && <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7, display: 'flex', alignItems: 'center' }} onClick={() => {
-                                        const lns = [...auditData.loans]; lns.splice(idx, 1);
-                                        setAuditData({ ...auditData, loans: lns });
-                                    }}><Trash2 size={14} /></span>}
+                                    {idx > 0 && <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7, display: 'flex', alignItems: 'center' }} onClick={() => removeAuditLoan(idx)}><Trash2 size={14} /></span>}
                                 </div>
                                 <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : '1fr 1fr 1fr 1fr', gap: '1rem' }}>
-                                    <CurrencyInput label="Summe (€)" value={loan.amount} onChange={e => {
-                                        const lns = [...auditData.loans]; lns[idx].amount = e.target.value;
-                                        setAuditData({ ...auditData, loans: lns });
-                                    }} />
-                                    <RateInput label="Zins (%)" value={loan.interest} onChange={e => {
-                                        const lns = [...auditData.loans]; lns[idx].interest = e.target.value;
-                                        setAuditData({ ...auditData, loans: lns });
-                                    }} />
-                                    <RateInput label="Tilgung (%)" value={loan.repayment} onChange={e => {
-                                        const lns = [...auditData.loans]; lns[idx].repayment = e.target.value;
-                                        setAuditData({ ...auditData, loans: lns });
-                                    }} />
-                                    <Input label="Zinsbindung (J.)" type="number" value={loan.fixedYears} onChange={e => {
-                                        const lns = [...auditData.loans]; lns[idx].fixedYears = e.target.value;
-                                        setAuditData({ ...auditData, loans: lns });
-                                    }} />
+                                    <CurrencyInput label="Summe (€)" value={loan.amount} onChange={e => updateAuditLoan(idx, 'amount', e.target.value)} />
+                                    <RateInput label="Zins (%)" value={loan.interest} onChange={e => updateAuditLoan(idx, 'interest', e.target.value)} />
+                                    <RateInput label="Tilgung (%)" value={loan.repayment} onChange={e => updateAuditLoan(idx, 'repayment', e.target.value)} />
+                                    <Input label="Zinsbindung (J.)" type="number" min="1" max={MAX_FIXED_YEARS} value={loan.fixedYears} onChange={e => updateAuditLoan(idx, 'fixedYears', e.target.value)} />
                                 </div>
+                                {parseNum(loan.fixedYears) > MAX_FIXED_YEARS && (
+                                    <div style={{ fontSize: '0.75rem', color: '#F59E0B', marginTop: '-0.5rem' }}>Gerechnet wird mit höchstens {MAX_FIXED_YEARS} Jahren Zinsbindung.</div>
+                                )}
                             </div>
                         ))}
-                        <Button size="sm" variant="secondary" icon={Plus} onClick={() => setAuditData({ ...auditData, loans: [...auditData.loans, { amount: 0, interest: 3.5, repayment: 2, fixedYears: 10 }] })}>Weiteres Darlehen</Button>
+                        <Button size="sm" variant="secondary" icon={Plus} onClick={addAuditLoan}>Weiteres Darlehen</Button>
                         <div style={{ marginTop: '1rem', padding: '10px 14px', backgroundColor: 'var(--background-color)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>Gesamtdarlehen</span>
-                            <span style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--primary-color)' }}>{formatCurrency(auditData.loans.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0))}</span>
+                            <span style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--primary-color)' }}>{formatCurrency(metrics.loansTotal)}</span>
                         </div>
                     </Card>}
 
                     {/* 4. Steuer-Parameter */}
                     {(!isMobile || auditStep === 3) && <Card title="4. Steuer-Parameter">
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '1rem' }}>
-                            <RateInput label="AfA Satz (%)" step="0.1" value={auditData.afaRate} onChange={e => setAuditData({ ...auditData, afaRate: e.target.value })} />
-                            <RateInput label="Gebäudeanteil (%)" value={auditData.buildingShare} onChange={e => setAuditData({ ...auditData, buildingShare: e.target.value })} />
-                            <RateInput label="Grenzsteuersatz (%)" value={auditData.taxRate} onChange={e => setAuditData({ ...auditData, taxRate: e.target.value })} />
+                            <RateInput label="AfA Satz (%)" step="0.1" value={auditData.afaRate} placeholder={String(DEFAULT_AFA_RATE)} onChange={e => setAuditData({ ...auditData, afaRate: e.target.value })} />
+                            <RateInput label="Gebäudeanteil (%)" max={100} value={auditData.buildingShare} placeholder={String(DEFAULT_BUILDING_SHARE)} onChange={e => setAuditData({ ...auditData, buildingShare: e.target.value })} />
+                            <RateInput label="Grenzsteuersatz (%)" max={100} value={auditData.taxRate} placeholder={String(DEFAULT_TAX_RATE)} onChange={e => setAuditData({ ...auditData, taxRate: e.target.value })} />
+                        </div>
+                        <div style={{ marginTop: '0.25rem', padding: '10px 14px', backgroundColor: 'var(--background-color)', borderRadius: '8px', fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                                <span>AfA-Bemessungsgrundlage (Gebäudeanteil {metrics.buildingSharePct.toLocaleString('de-DE')} % von Kaufpreis + KNK{metrics.renovIn15 ? ' + anschaffungsnahe Sanierung' : ''})</span>
+                                <span style={{ fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{formatCurrency(metrics.afaBase)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                                <span>AfA p.a. (Grund und Boden wird nicht abgeschrieben)</span>
+                                <span style={{ fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{formatCurrency(metrics.afaSum)}</span>
+                            </div>
+                            {metrics.maintenanceExpense > 0 && (
+                                <div>Sanierung {formatCurrency(metrics.maintenanceExpense)} liegt nicht über 15 % der Gebäude-Anschaffungskosten: sofort abziehbarer Erhaltungsaufwand im Jahr der Zahlung – in der laufenden Steuer unten nicht enthalten.</div>
+                            )}
+                            {metrics.taxDefaultsUsed.length > 0 && (
+                                <div style={{ color: '#F59E0B' }}>Leeres Feld – gerechnet wird mit dem Standardwert: {metrics.taxDefaultsUsed.join(', ')}.</div>
+                            )}
+                            <div>Verluste aus Vermietung werden konservativ nicht mit anderen Einkünften verrechnet (keine Steuererstattung, Steuer mindestens 0 €).</div>
                         </div>
                     </Card>}
 
@@ -2871,11 +3155,25 @@ const InvestorPortal = () => {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             <RateInput label="Mietsteigerung p.a. (%)" value={scenario.rentGrowth} onChange={e => setScenario({ ...scenario, rentGrowth: e.target.value })} />
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                                <RateInput label="Neuer Zins (%)" step="0.1" value={scenario.interestAdj} onChange={e => setScenario({ ...scenario, interestAdj: e.target.value })} />
+                                <RateInput label="Neuer Zins (%)" step="0.1" value={scenario.interestAdj} placeholder={`wie bisher: ${metrics.currentWeightedRate.toFixed(2)}`} onChange={e => setScenario({ ...scenario, interestAdj: e.target.value })} />
                                 <RateInput label="Neue Tilgung (%)" step="0.1" value={scenario.repaymentAdj} onChange={e => setScenario({ ...scenario, repaymentAdj: e.target.value })} />
                             </div>
+                            {metrics.interestAdjIsDefault ? (
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '-0.5rem' }}>
+                                    Kein neuer Zins eingetragen – gerechnet wird mit dem bisherigen (gewichteten) Zins der Darlehen von {metrics.currentWeightedRate.toFixed(2)} %.
+                                </div>
+                            ) : metrics.newIntRatePct === 0 && metrics.loansTotal > 0 && (
+                                <div style={{ fontSize: '0.75rem', color: '#F59E0B', marginTop: '-0.5rem' }}>
+                                    Achtung: Anschlussfinanzierung mit 0 % Zins – bitte einen realistischen Zins eintragen (Feld leeren = bisheriger Zins).
+                                </div>
+                            )}
                             <div style={{ marginTop: '8px', padding: '14px', backgroundColor: 'var(--background-color)', borderRadius: '10px' }}>
-                                <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px' }}>Nach {metrics.maxFixedYears} Jahren Zinsbindung</div>
+                                <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: metrics.mixedFixedYears ? '2px' : '8px' }}>Nach {metrics.maxFixedYears.toLocaleString('de-DE')} Jahren {metrics.mixedFixedYears ? '(Ende der längsten Zinsbindung)' : 'Zinsbindung'}</div>
+                                {metrics.mixedFixedYears && (
+                                    <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                        Darlehen mit kürzerer Zinsbindung laufen ab deren Ende mit dem neuen Zins und der neuen Tilgung weiter.
+                                    </div>
+                                )}
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                                     <span style={{ fontSize: '0.8rem' }}>Restschuld</span>
                                     <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{formatCurrency(metrics.totalRestschuld)}</span>
@@ -2897,7 +3195,7 @@ const InvestorPortal = () => {
                                 <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '4px' }}>Cashflow nach Steuern (nach Zinsbindung)</div>
                                 <div style={{ fontSize: '1.5rem', fontWeight: 800, color: cashflowColor(metrics.futureCfPostTaxMo) }}>{formatCurrency(metrics.futureCfPostTaxMo)}</div>
                                 <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                                    Basierend auf {scenario.rentGrowth}% Mietwachstum, {scenario.interestAdj}% Zins und {scenario.repaymentAdj}% Tilgung.
+                                    Basierend auf {parseNum(scenario.rentGrowth) || 0}% Mietwachstum, {metrics.newIntRatePct.toFixed(2)}% Zins und {parseNum(scenario.repaymentAdj) || 0}% Tilgung.
                                 </p>
                             </div>
                         </div>
@@ -2945,7 +3243,7 @@ const InvestorPortal = () => {
                         {activeTab === 'calculator' && 'Cashflow-Optimierung und Refinanzierungstools'}
                     </p>
                 </div>
-                {activeTab === 'cockpit' && (
+                {activeTab === 'cockpit' && !loadError && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <ExportDropdown
                             reportType="immobilien"
@@ -2988,8 +3286,8 @@ const InvestorPortal = () => {
                                     rooms: u.rooms || '–',
                                     target_rent: u.is_vacation_rental 
                                         ? (parseFloat(u.cold_rent_ist) || parseFloat(u.target_rent) || 0) 
-                                        : (parseFloat(u.leases?.find(l => l.status === 'active')?.cold_rent) || 0),
-                                    status: u.is_vacation_rental ? 'Ferienwohnung' : (u.leases?.find(l => l.status === 'active') ? 'Vermietet' : 'Leerstand'),
+                                        : (parseFloat(getActiveLease(u)?.cold_rent) || 0),
+                                    status: u.is_vacation_rental ? 'Ferienwohnung' : (getActiveLease(u) ? 'Vermietet' : 'Leerstand'),
                                 })),
                             ]))}
                             properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number || ''}`.trim() }))}
@@ -2999,20 +3297,33 @@ const InvestorPortal = () => {
                 )}
             </div>
 
-            {activeTab === 'cockpit' && renderCockpit()}
+            {/* Ladefehler: keine Kennzahlen aus unvollständigen Daten anzeigen */}
+            {loadError && (activeTab === 'cockpit' || activeTab === 'calculator') && (
+                <Card title="Daten konnten nicht geladen werden" icon={Info} color="#EF4444">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'flex-start' }}>
+                        <p style={{ fontSize: '0.9rem', margin: 0 }}>
+                            Objekte, Darlehen oder Wirtschaftseinheiten konnten nicht vollständig geladen werden. Die Kennzahlen werden erst angezeigt, wenn alle Daten vorliegen.
+                        </p>
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>{loadError}</p>
+                        <Button variant="secondary" size="sm" onClick={() => fetchData()}>Erneut laden</Button>
+                    </div>
+                </Card>
+            )}
+            {activeTab === 'cockpit' && !loadError && renderCockpit()}
             {activeTab === 'deals' && renderDealsOverview()}
             {activeTab === 'audit' && (
                 activeDealType === 'fix_flip' ? (
                     <FixFlipCalculator
-                        initialData={{ ...auditData, name: dealName }}
+                        initialData={fixFlipInitialData}
                         onSave={saveFixFlipDeal}
                         onBack={() => navigate('/investor-portal?tab=deals')}
                         onDelete={editingDealId ? () => deleteDeal(editingDealId) : null}
                         isSaving={savingDeal}
+                        dealId={editingDealId}
                     />
                 ) : renderAudit()
             )}
-            {activeTab === 'calculator' && (
+            {activeTab === 'calculator' && !loadError && (
                 <InvestorCalculators properties={properties} loans={loans} economicUnits={economicUnits} />
             )}
 
@@ -3020,11 +3331,11 @@ const InvestorPortal = () => {
             <Modal
                 isOpen={showIncreasesModal}
                 onClose={() => setShowIncreasesModal(false)}
-                title="Mieterhöhungen möglich"
+                title="Mieterhöhungen prüfen"
                 footer={<Button variant="secondary" onClick={() => setShowIncreasesModal(false)}>Schließen</Button>}
             >
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                    Folgende Mietverhältnisse sind innerhalb der nächsten 30 Tage für eine Mieterhöhung fällig:
+                    Bei folgenden Mietverhältnissen ist die gesetzliche Wartefrist für eine Mieterhöhung (§§ 557a, 557b, 558 BGB) abgelaufen oder läuft in den nächsten 30 Tagen ab. Ob und in welcher Höhe erhöht werden kann (Vertrag, Mietspiegel, Kappungsgrenze), bitte gesondert prüfen:
                 </p>
                 {pendingIncreases.length === 0 ? (
                     <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)' }}>Keine Erhöhungen fällig.</div>
@@ -3043,7 +3354,7 @@ const InvestorPortal = () => {
                                         fontSize: '0.75rem', fontWeight: 600, padding: '2px 8px',
                                         borderRadius: '12px', backgroundColor: 'rgba(236, 72, 153, 0.1)', color: '#EC4899'
                                     }}>
-                                        ⚠️ {item.nextDate.toLocaleDateString()}
+                                        ⚠️ {item.nextDate.toLocaleDateString('de-DE')}
                                     </span>
                                 </div>
                                 <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>

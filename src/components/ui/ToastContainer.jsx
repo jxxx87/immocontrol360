@@ -35,7 +35,8 @@ const ToastContainer = () => {
             flexDirection: 'column',
             gap: '10px',
             maxWidth: '380px',
-            width: '100%',
+            // Abzüglich der Ränder links/rechts, sonst ragt der Container auf schmalen Displays links hinaus
+            width: 'calc(100% - 32px)',
             pointerEvents: 'none',
         }}>
             {toasts.map((toast) => {
@@ -110,6 +111,8 @@ const ToastContainer = () => {
 
                         {/* Close */}
                         <button
+                            type="button"
+                            aria-label="Benachrichtigung schließen"
                             onClick={() => removeToast(toast.toastId)}
                             style={{
                                 background: 'none',

@@ -1,162 +1,295 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePermission } from '../context/PermissionContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
+import CurrencyInput from '../components/ui/CurrencyInput';
 import {
     ArrowLeft, User, Phone, Mail, Users, Home, Calendar,
     FileText, Trash2, Edit, Plus, Upload, Download, Loader2,
-    Lock, RefreshCw, Key, Building2, Bell, MessageSquare,
-    AlertCircle, CheckCircle2, ChevronRight, Settings, FileSpreadsheet,
-    Eye, Cloud, DollarSign
+    Lock, RefreshCw, Building2, MessageSquare,
+    AlertCircle, AlertTriangle, CheckCircle2, ChevronRight, Eye, Cloud, TrendingUp
 } from 'lucide-react';
+import {
+    RENT_PERIOD_FIELDS, localISODate, monthStart, addMonths, formatDateDE, formatMonthDE, formatEUR,
+    isValidISODate, sumRent, getLeaseTimeState, fetchRentPeriods, getEffectivePeriod, saveRentPeriod,
+    deleteRentPeriod, checkLeaseDeletion, describeDeletionBlock, deletionConfirmText,
+    translateLeaseDeleteError, findOverlappingLeases, describeLease, buildTemplateTenantData
+} from '../lib/leaseRentPeriods';
+
+// Status der Forderungen (wie im Forderungsmodul / ClaimDetail)
+const CLAIM_STATUS = {
+    draft: { label: 'Entwurf', variant: 'default' },
+    open: { label: 'Offen', variant: 'blue' },
+    sent: { label: 'Versendet', variant: 'blue' },
+    action_required: { label: 'Aktion erforderlich', variant: 'danger' },
+    payment_plan_requested: { label: 'Ratenzahlung angefragt', variant: 'warning' },
+    payment_plan_active: { label: 'Ratenzahlung aktiv', variant: 'success' },
+    settled: { label: 'Erledigt', variant: 'success' },
+    cancelled: { label: 'Storniert', variant: 'default' },
+    archived: { label: 'Archiviert', variant: 'default' }
+};
+const CLOSED_CLAIM_STATUSES = ['settled', 'cancelled', 'archived'];
+const HIDDEN_CLAIM_STATUSES = ['cancelled', 'archived'];
+
+// Status/Priorität der Tickets (wie im Mieterportal)
+const TICKET_STATUS = {
+    received: { label: 'Eingegangen', variant: 'warning' },
+    in_progress: { label: 'In Bearbeitung', variant: 'blue' },
+    completed: { label: 'Abgeschlossen', variant: 'success' }
+};
+const TICKET_PRIORITY = { low: 'Niedrig', normal: 'Normal', high: 'Hoch', urgent: 'Dringend' };
+
+const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietvertrag', index: 'Indexmietvertrag' };
+
+const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'];
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+const RETRO_CONFIRM_LABEL = 'Ich habe verstanden, dass die Änderung rückwirkend auf alle Monate seit Vertragsbeginn wirkt.';
+
+const toAmount = (v) => {
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+};
+
+// Datum + n Monate, Tag bleibt erhalten
+const addMonthsKeepDay = (iso, months) => {
+    const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+    return localISODate(new Date(y, m - 1 + months, d));
+};
+
+// Speicher-Schlüssel: ASCII, keine Sonderzeichen (Supabase Storage lehnt Umlaute ab)
+const sanitizeFileName = (name) => {
+    const map = { ä: 'ae', ö: 'oe', ü: 'ue', Ä: 'Ae', Ö: 'Oe', Ü: 'Ue', ß: 'ss' };
+    const replaced = String(name || 'datei').replace(/[äöüÄÖÜß]/g, ch => map[ch]);
+    const ascii = replaced.normalize('NFKD').replace(/[̀-ͯ]/g, '');
+    const cleaned = ascii.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^[._]+/, '');
+    return (cleaned || 'datei').slice(-120);
+};
+
+const getFileExtension = (name) => {
+    const match = /\.([A-Za-z0-9]+)$/.exec(name || '');
+    return match ? match[1].toLowerCase() : '';
+};
+
+// Fehler von supabase.functions.invoke auswerten (FunctionsHttpError trägt die Response)
+const getFunctionErrorStatus = (err) => err?.context?.status ?? err?.status ?? null;
+const readFunctionErrorMessage = async (err) => {
+    try {
+        if (err?.context && typeof err.context.json === 'function') {
+            const body = await err.context.json();
+            if (body?.error) return String(body.error);
+        }
+    } catch {
+        // Antwort ohne JSON-Inhalt
+    }
+    return err?.message || String(err);
+};
+
+const buildTenantForm = (t = {}) => ({
+    first_name: t.first_name || '',
+    last_name: t.last_name || '',
+    phone: t.phone || '',
+    email: t.email || '',
+    occupants: t.occupants || 1,
+    street: t.street || '',
+    house_number: t.house_number || '',
+    postal_code: t.postal_code || '',
+    city: t.city || ''
+});
+
+const buildLeaseForm = (l) => ({
+    start_date: l?.start_date || '',
+    end_date: l?.end_date || '',
+    deposit: l?.deposit ?? '',
+    lease_type: l?.lease_type || 'normal',
+    last_rent_increase: l?.last_rent_increase || ''
+});
+
+const buildRentForm = (l, periodsState) => {
+    const today = localISODate();
+    const nextMonth = addMonths(today, 1);
+    const validFrom = l?.start_date && l.start_date > nextMonth ? monthStart(l.start_date) : nextMonth;
+    const source = periodsState?.supported ? (getEffectivePeriod(periodsState.periods, validFrom) || l) : l;
+    return {
+        valid_from: validFrom,
+        cold_rent: toAmount(source?.cold_rent),
+        service_charge: toAmount(source?.service_charge),
+        heating_cost: toAmount(source?.heating_cost),
+        other_costs: toAmount(source?.other_costs),
+        payment_due_day: source?.payment_due_day || 3,
+        mark_increase: true
+    };
+};
+
+const infoBoxStyle = {
+    fontSize: '0.8rem', lineHeight: 1.45, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+    backgroundColor: 'rgba(59, 130, 246, 0.06)', border: '1px solid rgba(59, 130, 246, 0.2)', color: 'var(--text-primary)'
+};
+const warnBoxStyle = {
+    fontSize: '0.8rem', lineHeight: 1.45, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+    backgroundColor: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.3)', color: 'var(--text-primary)'
+};
+const dangerBoxStyle = {
+    fontSize: '0.82rem', lineHeight: 1.5, padding: '12px 14px', borderRadius: 'var(--radius-md)',
+    backgroundColor: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239, 68, 68, 0.3)', color: 'var(--text-primary)'
+};
+const tileErrorStyle = {
+    padding: '12px', borderRadius: 'var(--radius-md)', backgroundColor: 'rgba(239, 68, 68, 0.05)',
+    border: '1px solid rgba(239, 68, 68, 0.15)', fontSize: '0.8rem', color: 'var(--danger-color)',
+    display: 'flex', alignItems: 'center', gap: '6px'
+};
+const selectStyle = {
+    width: '100%', padding: '9px 12px', borderRadius: 'var(--radius-md)',
+    border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
+    backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)'
+};
+const modalFooterStyle = { display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px', flexWrap: 'wrap' };
 
 const TenantDetail = () => {
     const { id: leaseId } = useParams();
     const navigate = useNavigate();
-    const { user } = useAuth();
+    const location = useLocation();
+    const { user, userRole } = useAuth();
+    const perm = usePermission();
+
+    // Navigationswunsch aus der Mieterübersicht (Bearbeiten / Mietänderung direkt öffnen)
+    const initialNavState = useRef(location.state || null);
 
     // Data States
     const [lease, setLease] = useState(null);
+
+    // UI-Rechte für Freigabe-Nutzer, bezogen auf das Portfolio dieses Mietverhältnisses
+    // (die Datenbank prüft zusätzlich per RLS)
+    const canWriteFor = (category, portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite(category, portfolioId) : perm.canWrite(category);
+    };
+    const leasePortfolioId = lease?.unit?.property?.portfolio_id || null;
+    const canEditLease = canWriteFor('mietverhaeltnisse', leasePortfolioId);
+    const canEditFinance = canWriteFor('finanzen', leasePortfolioId);
+    const canEditDocuments = canWriteFor('immobilien', leasePortfolioId);
+    const canEditTickets = canWriteFor('mieterportal', leasePortfolioId);
     const [tickets, setTickets] = useState([]);
+    const [ticketsError, setTicketsError] = useState(null);
+    const [tenantUserId, setTenantUserId] = useState(null);
     const [documents, setDocuments] = useState([]);
+    const [documentsError, setDocumentsError] = useState(null);
     const [claims, setClaims] = useState([]);
+    const [hiddenClaimsCount, setHiddenClaimsCount] = useState(0);
+    const [claimsError, setClaimsError] = useState(null);
+    const [rentPeriods, setRentPeriods] = useState({ supported: null, periods: [], error: null });
     const [cloudFiles, setCloudFiles] = useState([]);
     const [loadingCloud, setLoadingCloud] = useState(false);
     const [cloudLoadingMessage, setCloudLoadingMessage] = useState('Lade Cloud-Dateien...');
     const [cloudError, setCloudError] = useState(null);
+    const [cloudFolderMissing, setCloudFolderMissing] = useState(false);
     const [tenantCloudPath, setTenantCloudPath] = useState('');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
-    // Edit Forms States
+    // Modals
     const [isEditTenantOpen, setIsEditTenantOpen] = useState(false);
     const [isEditLeaseOpen, setIsEditLeaseOpen] = useState(false);
+    const [isRentChangeOpen, setIsRentChangeOpen] = useState(false);
+    const [isTerminateOpen, setIsTerminateOpen] = useState(false);
+    const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
+    const [paymentClaim, setPaymentClaim] = useState(null);
+    const [writeOffClaim, setWriteOffClaim] = useState(null);
+    const [retroWarning, setRetroWarning] = useState(null); // { title, message, onConfirm }
+    const [retroAccepted, setRetroAccepted] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
-    const [tenantForm, setTenantForm] = useState({
-        first_name: '',
-        last_name: '',
-        phone: '',
-        email: '',
-        occupants: 1,
-        street: '',
-        house_number: '',
-        postal_code: '',
-        city: ''
-    });
+    // Forms
+    const [tenantForm, setTenantForm] = useState(buildTenantForm());
+    const [leaseForm, setLeaseForm] = useState(buildLeaseForm(null));
+    const [rentForm, setRentForm] = useState(buildRentForm(null, null));
+    const [terminateForm, setTerminateForm] = useState({ end_date: '' });
+    const [ticketForm, setTicketForm] = useState({ title: '', description: '', priority: 'normal' });
+    const [paymentForm, setPaymentForm] = useState({ amount: '', date: '', note: '' });
+    const [writeOffForm, setWriteOffForm] = useState({ reason: '' });
 
-    const [leaseForm, setLeaseForm] = useState({
-        start_date: '',
-        end_date: '',
-        cold_rent: '',
-        service_charge: '',
-        heating_cost: '',
-        other_costs: '',
-        deposit: '',
-        payment_due_day: 3,
-        lease_type: 'normal',
-        last_rent_increase: ''
-    });
-
-    // Sub-modules state
+    // Interne Notizen (nur lokal im Browser)
     const [notes, setNotes] = useState('');
-    const [warningSettings, setWarningSettings] = useState({
-        globalActive: true,
-        tenantActive: true,
-        emailNotify: true
-    });
 
-    // Upload & Ticket States
     const [uploading, setUploading] = useState(false);
-    const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
-    const [ticketForm, setTicketForm] = useState({
-        title: '',
-        description: '',
-        priority: 'medium',
-        category: 'repair'
-    });
     const fileInputRef = useRef(null);
 
+    // Heute gültige Miete: aus der Miethistorie, sonst die Vertragswerte
+    const today = localISODate();
+    const currentPeriod = rentPeriods.supported === true ? getEffectivePeriod(rentPeriods.periods, today) : null;
+    const currentRent = currentPeriod || lease;
+
     useEffect(() => {
-        if (leaseId) {
-            loadTenantData();
-            // Load persistent LocalStorage notes and warning settings
-            const savedNotes = localStorage.getItem(`tenant_notes_${leaseId}`);
-            if (savedNotes) setNotes(savedNotes);
-
-            const savedWarnings = localStorage.getItem(`warning_settings_${leaseId}`);
-            if (savedWarnings) {
-                try {
-                    setWarningSettings(JSON.parse(savedWarnings));
-                } catch (e) {
-                    console.error("Error parsing warning settings", e);
-                }
-            }
+        if (!leaseId || userRole === 'tenant') return;
+        let savedNotes = '';
+        try {
+            savedNotes = localStorage.getItem(`tenant_notes_${leaseId}`) || '';
+        } catch {
+            savedNotes = '';
         }
-    }, [leaseId]);
+        // Notizen beim Wechsel des Mietverhältnisses immer neu setzen (nicht vom vorherigen übernehmen)
+        setNotes(savedNotes);
+        loadTenantData();
+    }, [leaseId, userRole]);
 
-    const loadCloudFiles = async (provider, path, propertyId) => {
+    const loadCloudFiles = async (provider, path) => {
         setLoadingCloud(true);
         setCloudLoadingMessage('Lese Cloud-Ordner...');
         setCloudError(null);
+        setCloudFolderMissing(false);
         try {
-            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+            const { data, error: fnError } = await supabase.functions.invoke('cloud-drive', {
                 body: { action: 'list', provider, path }
             });
 
-            let fetchErr = error;
-            let detailedErrMsg = error ? error.message || String(error) : "";
-            
-            if (data && data.error) {
-                fetchErr = new Error(data.error);
-                detailedErrMsg = data.error;
-            }
-
-            const isFolderNotFound = fetchErr && (
-                fetchErr.status === 404 ||
-                (typeof fetchErr.message === 'string' && fetchErr.message.includes('404')) ||
-                detailedErrMsg.includes("nicht gefunden") ||
-                detailedErrMsg.includes("not found") ||
-                detailedErrMsg.includes("404") ||
-                detailedErrMsg.includes("non-2xx")
-            );
-
-            if (isFolderNotFound) {
-                // Trigger cloud sync to create the missing folder structure
-                setCloudLoadingMessage('Prüfe und erstelle fehlende Cloud-Ordner...');
-                const syncRes = await supabase.functions.invoke('cloud-sync', {
-                    body: { provider, action: 'create', propertyId }
-                });
-                if (syncRes.error) throw syncRes.error;
-                if (syncRes.data?.error) throw new Error(syncRes.data.error);
-                
-                // Retry listing files once
-                setCloudLoadingMessage('Lade aktualisierte Dateien...');
-                const retryRes = await supabase.functions.invoke('cloud-drive', {
-                    body: { action: 'list', provider, path }
-                });
-                if (retryRes.data?.files) {
-                    setCloudFiles(retryRes.data.files);
-                } else {
+            if (fnError) {
+                // Nur ein echter 404 bedeutet "Ordner fehlt"; alle anderen Fehler werden angezeigt
+                if (getFunctionErrorStatus(fnError) === 404) {
+                    setCloudFolderMissing(true);
                     setCloudFiles([]);
+                    return;
                 }
-            } else if (fetchErr) {
-                throw fetchErr;
-            } else {
-                setCloudFiles(data?.files || []);
+                throw new Error(await readFunctionErrorMessage(fnError));
             }
+            if (data?.error) throw new Error(data.error);
+            setCloudFiles(data?.files || []);
         } catch (err) {
-            console.error("Error loading cloud files:", err);
+            console.error('Error loading cloud files:', err);
             setCloudError(err.message || String(err));
+            setCloudFiles([]);
         } finally {
             setLoadingCloud(false);
             setCloudLoadingMessage('Lade Cloud-Dateien...');
         }
+    };
+
+    const handleCreateCloudFolder = async () => {
+        const prop = lease?.unit?.property;
+        if (!prop?.cloud_connection || !tenantCloudPath) return;
+        if (!window.confirm('Der Cloud-Ordner für dieses Mietverhältnis existiert noch nicht.\n\nJetzt die Ordnerstruktur für dieses Objekt in der Cloud anlegen?')) return;
+
+        setLoadingCloud(true);
+        setCloudLoadingMessage('Erstelle Cloud-Ordner...');
+        setCloudError(null);
+        try {
+            const syncRes = await supabase.functions.invoke('cloud-sync', {
+                body: { provider: prop.cloud_connection.provider, action: 'create', propertyId: prop.id }
+            });
+            if (syncRes.error) throw new Error(await readFunctionErrorMessage(syncRes.error));
+            if (syncRes.data?.error) throw new Error(syncRes.data.error);
+        } catch (err) {
+            setCloudError(err.message || String(err));
+            setLoadingCloud(false);
+            setCloudLoadingMessage('Lade Cloud-Dateien...');
+            return;
+        }
+        await loadCloudFiles(prop.cloud_connection.provider, tenantCloudPath);
     };
 
     const loadTenantData = async () => {
@@ -175,26 +308,42 @@ const TenantDetail = () => {
                     )
                 `)
                 .eq('id', leaseId)
-                .single();
+                .maybeSingle();
 
             if (leaseError) throw leaseError;
-            if (!leaseData) throw new Error('Mietverhältnis nicht gefunden');
+            if (!leaseData) throw new Error('Mietverhältnis nicht gefunden oder keine Berechtigung.');
 
-            // Fetch cloud connection via portfolio_cloud_links if available
+            const today = localISODate();
+            const mayEditLease = canWriteFor('mietverhaeltnisse', leaseData.unit?.property?.portfolio_id || null);
+
+            // Status nachziehen: Vertragsende abgelaufen -> beendet (Vertrag bleibt bis zum Ende aktiv)
+            if (leaseData.status === 'active' && leaseData.end_date && leaseData.end_date < today && mayEditLease) {
+                const { data: stData, error: stError } = await supabase
+                    .from('leases')
+                    .update({ status: 'ended' })
+                    .eq('id', leaseId)
+                    .select('id');
+                if (!stError && stData && stData.length > 0) leaseData.status = 'ended';
+            }
+
+            // Cloud-Verbindung über portfolio_cloud_links (nur Provider, keine Tokens laden)
+            let cloudLinkError = null;
             if (leaseData.unit?.property?.portfolio_id) {
-                const { data: linkData } = await supabase
+                const { data: linkData, error: linkError } = await supabase
                     .from('portfolio_cloud_links')
                     .select('cloud_connection_id')
                     .eq('portfolio_id', leaseData.unit.property.portfolio_id)
                     .maybeSingle();
+                if (linkError) cloudLinkError = linkError.message;
 
                 if (linkData?.cloud_connection_id) {
-                    const { data: connData } = await supabase
+                    const { data: connData, error: connError } = await supabase
                         .from('cloud_connections')
-                        .select('*')
+                        .select('id, provider')
                         .eq('id', linkData.cloud_connection_id)
                         .maybeSingle();
-                    
+                    if (connError) cloudLinkError = connError.message;
+
                     if (connData && leaseData.unit.property) {
                         leaseData.unit.property.cloud_connection = connData;
                     }
@@ -202,84 +351,108 @@ const TenantDetail = () => {
             }
 
             setLease(leaseData);
+            setTenantForm(buildTenantForm(leaseData.tenant || {}));
+            setLeaseForm(buildLeaseForm(leaseData));
 
-            // Populate forms
-            const tenant = leaseData.tenant || {};
-            setTenantForm({
-                first_name: tenant.first_name || '',
-                last_name: tenant.last_name || '',
-                phone: tenant.phone || '',
-                email: tenant.email || '',
-                occupants: tenant.occupants || 1,
-                street: tenant.street || '',
-                house_number: tenant.house_number || '',
-                postal_code: tenant.postal_code || '',
-                city: tenant.city || ''
-            });
+            // Miethistorie ("gültig ab") – fehlt die Tabelle noch, gilt der bisherige Modus
+            const periodsResult = await fetchRentPeriods(leaseId);
+            setRentPeriods(periodsResult);
 
-            setLeaseForm({
-                start_date: leaseData.start_date || '',
-                end_date: leaseData.end_date || '',
-                cold_rent: leaseData.cold_rent || '',
-                service_charge: leaseData.service_charge || '',
-                heating_cost: leaseData.heating_cost || '',
-                other_costs: leaseData.other_costs || '',
-                deposit: leaseData.deposit || '',
-                payment_due_day: leaseData.payment_due_day || 3,
-                lease_type: leaseData.lease_type || 'normal',
-                last_rent_increase: leaseData.last_rent_increase || ''
-            });
+            // Portalzugang des Mieters (für Tickets)
+            let portalUserId = null;
+            if (leaseData.tenant_id) {
+                const { data: roleRows } = await supabase
+                    .from('user_roles')
+                    .select('user_id')
+                    .eq('tenant_id', leaseData.tenant_id)
+                    .eq('role', 'tenant')
+                    .limit(1);
+                portalUserId = roleRows?.[0]?.user_id || null;
+            }
+            setTenantUserId(portalUserId);
 
-            // Fetch linked tickets
-            if (leaseData.unit_id) {
-                const { data: ticketData } = await supabase
+            // Tickets dieses Mieters (nicht aller Mieter der Einheit)
+            setTicketsError(null);
+            if (leaseData.unit_id && portalUserId) {
+                const { data: ticketData, error: ticketErr } = await supabase
                     .from('tickets')
                     .select('*')
                     .eq('unit_id', leaseData.unit_id)
+                    .eq('tenant_user_id', portalUserId)
                     .order('created_at', { ascending: false });
-                setTickets(ticketData || []);
+                if (ticketErr) {
+                    setTicketsError(ticketErr.message);
+                    setTickets([]);
+                } else {
+                    setTickets(ticketData || []);
+                }
+            } else {
+                setTickets([]);
             }
 
-            // Fetch linked documents (fallback local list)
+            // Dokumente (lokale Ablage)
+            setDocumentsError(null);
             if (leaseData.tenant_id) {
-                const { data: docData } = await supabase
+                const { data: docData, error: docErr } = await supabase
                     .from('documents')
                     .select('*')
                     .eq('tenant_id', leaseData.tenant_id)
                     .order('created_at', { ascending: false });
-                setDocuments(docData || []);
+                if (docErr) {
+                    setDocumentsError(docErr.message);
+                    setDocuments([]);
+                } else {
+                    setDocuments(docData || []);
+                }
+            } else {
+                setDocuments([]);
             }
 
-            // Fetch claims for this lease
-            const { data: claimsData } = await supabase
+            // Forderungen zu diesem Mietverhältnis
+            setClaimsError(null);
+            const { data: claimsData, error: claimsErr } = await supabase
                 .from('claims')
                 .select(`
-                    id, status, escalation_level, deadline, created_at,
+                    id, user_id, status, escalation_level, deadline, created_at,
                     interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees
                 `)
                 .eq('lease_id', leaseId)
                 .order('created_at', { ascending: false });
 
-            let claimsWithTotals = [];
-            if (claimsData && claimsData.length > 0) {
-                const claimIds = claimsData.map(c => c.id);
-                const { data: totalsData } = await supabase
-                    .from('claim_totals_view')
-                    .select('*')
-                    .in('claim_id', claimIds);
+            if (claimsErr) {
+                setClaimsError(claimsErr.message);
+                setClaims([]);
+                setHiddenClaimsCount(0);
+            } else {
+                const allClaims = claimsData || [];
+                const visibleClaims = allClaims.filter(c => !HIDDEN_CLAIM_STATUSES.includes(c.status));
+                setHiddenClaimsCount(allClaims.length - visibleClaims.length);
 
-                claimsWithTotals = claimsData.map(c => {
-                    const total = totalsData?.find(t => t.claim_id === c.id);
+                let totalsData = [];
+                if (visibleClaims.length > 0) {
+                    const { data: tData, error: tErr } = await supabase
+                        .from('claim_totals_view')
+                        .select('claim_id, total_due, current_principal_open, total_fees_open, total_interest_open')
+                        .in('claim_id', visibleClaims.map(c => c.id));
+                    if (tErr) {
+                        setClaimsError('Die Beträge der Forderungen konnten nicht geladen werden: ' + tErr.message);
+                    } else {
+                        totalsData = tData || [];
+                    }
+                }
+
+                setClaims(visibleClaims.map(c => {
+                    const total = totalsData.find(t => t.claim_id === c.id);
                     return {
                         ...c,
-                        total_open: total?.total_open || 0,
-                        total_fees: total?.total_fees || 0,
-                        total_interest: total?.total_interest || 0,
-                        total_principal: total?.total_principal || 0,
+                        hasTotals: !!total,
+                        total_due: total ? toAmount(total.total_due) : null,
+                        principal_open: total ? toAmount(total.current_principal_open) : null,
+                        fees_open: total ? toAmount(total.total_fees_open) : null,
+                        interest_open: total ? toAmount(total.total_interest_open) : null
                     };
-                });
+                }));
             }
-            setClaims(claimsWithTotals);
 
             // Compute cloud folder path and fetch files if cloud connection exists
             let displayFolderName = '';
@@ -290,7 +463,7 @@ const TenantDetail = () => {
                         .from('properties')
                         .select('street, house_number')
                         .eq('economic_unit_id', prop.economic_unit_id);
-                    
+
                     const groupedByStreet = {};
                     (siblingProps || []).forEach(m => {
                         if (!m.street) return;
@@ -325,11 +498,29 @@ const TenantDetail = () => {
                     fullCloudPath = `${displayFolderName}/Einheiten/${unitName}/Mietverhältnisse/${tenantFolderName}`;
                 }
             }
-            
+
             setTenantCloudPath(fullCloudPath);
 
-            if (prop?.cloud_connection && fullCloudPath) {
-                loadCloudFiles(prop.cloud_connection.provider, fullCloudPath, prop.id);
+            if (cloudLinkError) {
+                setCloudError('Die Cloud-Verbindung konnte nicht geprüft werden: ' + cloudLinkError);
+            } else if (prop?.cloud_connection && fullCloudPath) {
+                loadCloudFiles(prop.cloud_connection.provider, fullCloudPath);
+            }
+
+            // Direkt "Bearbeiten" bzw. "Mietänderung" öffnen, wenn aus der Übersicht gewünscht
+            const navState = initialNavState.current;
+            if (navState && (navState.openRentChange || navState.openEditLease)) {
+                initialNavState.current = null;
+                if (mayEditLease) {
+                    if (navState.openRentChange) {
+                        setRentForm(buildRentForm(leaseData, periodsResult));
+                        setIsRentChangeOpen(true);
+                    } else {
+                        setLeaseForm(buildLeaseForm(leaseData));
+                        setIsEditLeaseOpen(true);
+                    }
+                }
+                navigate(location.pathname, { replace: true, state: {} });
             }
 
         } catch (err) {
@@ -340,32 +531,72 @@ const TenantDetail = () => {
         }
     };
 
-    // Save Notes to LocalStorage
+    // Notizen lokal speichern
     const handleSaveNotes = (val) => {
         setNotes(val);
-        localStorage.setItem(`tenant_notes_${leaseId}`, val);
+        try {
+            localStorage.setItem(`tenant_notes_${leaseId}`, val);
+        } catch {
+            // Speicher nicht verfügbar (privates Fenster o. Ä.)
+        }
     };
 
-    // Save Warnings to LocalStorage
-    const handleWarningToggle = (key) => {
-        const updated = { ...warningSettings, [key]: !warningSettings[key] };
-        setWarningSettings(updated);
-        localStorage.setItem(`warning_settings_${leaseId}`, JSON.stringify(updated));
+    const openRetroWarning = (config) => {
+        setRetroAccepted(false);
+        setRetroWarning(config);
     };
 
-    // Save Tenant Form
+    // Ist-/Soll-Werte der Einheit nur für den heute laufenden Vertrag angleichen
+    const syncUnitFromLease = async (leaseLike, rentValues) => {
+        if (!leaseLike?.unit_id || getLeaseTimeState(leaseLike) !== 'running') return null;
+        const { error: unitError } = await supabase
+            .from('units')
+            .update({
+                cold_rent_ist: toAmount(rentValues?.cold_rent),
+                service_charge_soll: toAmount(rentValues?.service_charge),
+                heating_cost_soll: toAmount(rentValues?.heating_cost),
+                other_costs_soll: toAmount(rentValues?.other_costs),
+                deposit_soll: toAmount(leaseLike.deposit)
+            })
+            .eq('id', leaseLike.unit_id);
+        return unitError
+            ? 'Hinweis: Die Werte der Einheit konnten nicht angeglichen werden: ' + unitError.message
+            : null;
+    };
+
+    // Nach einer Mietänderung: heute gültige Werte erneut laden und in die Einheit übernehmen
+    const refreshUnitAfterRentChange = async (leaseLike) => {
+        const refreshed = await fetchRentPeriods(leaseId);
+        if (refreshed.supported !== true) return null;
+        const effective = getEffectivePeriod(refreshed.periods, localISODate());
+        if (!effective) return null;
+        return syncUnitFromLease(leaseLike, effective);
+    };
+
+    // ---------------------------------------------------------------------
+    // Mieter-Stammdaten
+    // ---------------------------------------------------------------------
+    const openEditTenant = () => {
+        setTenantForm(buildTenantForm(lease?.tenant || {}));
+        setIsEditTenantOpen(true);
+    };
+
     const handleSaveTenant = async () => {
-        if (!tenantForm.first_name || !tenantForm.last_name) {
+        if (!tenantForm.first_name.trim() || !tenantForm.last_name.trim()) {
             alert('Bitte Vor- und Nachnamen ausfüllen.');
+            return;
+        }
+        if (!lease?.tenant_id) {
+            alert('Diesem Mietverhältnis ist kein Mieter zugeordnet.');
             return;
         }
         setIsSaving(true);
         try {
-            const { error: tError } = await supabase
+            const { data, error: tError } = await supabase
                 .from('tenants')
                 .update({
-                    first_name: tenantForm.first_name,
-                    last_name: tenantForm.last_name,
+                    first_name: tenantForm.first_name.trim(),
+                    last_name: tenantForm.last_name.trim(),
                     phone: tenantForm.phone,
                     email: tenantForm.email,
                     occupants: parseInt(tenantForm.occupants) || 1,
@@ -374,12 +605,14 @@ const TenantDetail = () => {
                     postal_code: tenantForm.postal_code,
                     city: tenantForm.city
                 })
-                .eq('id', lease.tenant_id);
+                .eq('id', lease.tenant_id)
+                .select('id');
 
             if (tError) throw tError;
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, diesen Mieter zu ändern.');
 
             setIsEditTenantOpen(false);
-            loadTenantData();
+            await loadTenantData();
         } catch (err) {
             alert('Fehler beim Speichern der Mieterdaten: ' + err.message);
         } finally {
@@ -387,75 +620,309 @@ const TenantDetail = () => {
         }
     };
 
-    // Save Lease Form
+    // ---------------------------------------------------------------------
+    // Vertragsdaten (Laufzeit, Vertragsart, Kaution, letzte Mieterhöhung)
+    // ---------------------------------------------------------------------
+    const openEditLease = () => {
+        setLeaseForm(buildLeaseForm(lease));
+        setIsEditLeaseOpen(true);
+    };
+
     const handleSaveLease = async () => {
-        if (!leaseForm.start_date || !leaseForm.cold_rent) {
-            alert('Bitte Mietbeginn und Kaltmiete angeben.');
-            return;
+        const f = leaseForm;
+        const today = localISODate();
+
+        if (!isValidISODate(f.start_date)) return alert('Bitte ein gültiges Datum für den Mietbeginn angeben.');
+        if (f.end_date && !isValidISODate(f.end_date)) return alert('Bitte ein gültiges Datum für das Mietende angeben.');
+        if (f.end_date && f.end_date < f.start_date) return alert('Das Mietende darf nicht vor dem Mietbeginn liegen.');
+        if (f.last_rent_increase && !isValidISODate(f.last_rent_increase)) return alert('Bitte ein gültiges Datum für die letzte Mieterhöhung angeben.');
+
+        const deposit = f.deposit === '' || f.deposit === null || f.deposit === undefined ? null : toAmount(f.deposit);
+        if (deposit !== null && deposit < 0) return alert('Die Kaution darf nicht negativ sein.');
+
+        const coldRentNow = toAmount(currentRent?.cold_rent);
+        if (deposit && coldRentNow > 0 && deposit > coldRentNow * 3 + 0.005) {
+            if (!window.confirm(
+                `Hinweis: Die Kaution (${formatEUR(deposit)}) übersteigt drei Monatskaltmieten (${formatEUR(coldRentNow * 3)}).\n` +
+                'Nach § 551 BGB darf die Mietsicherheit höchstens das Dreifache der Nettokaltmiete betragen.\n\nTrotzdem speichern?'
+            )) return;
         }
-        setIsSaving(true);
-        try {
-            const coldRent = parseFloat(leaseForm.cold_rent) || 0;
-            const serviceCharge = parseFloat(leaseForm.service_charge) || 0;
-            const heatingCost = parseFloat(leaseForm.heating_cost) || 0;
-            const otherCosts = parseFloat(leaseForm.other_costs) || 0;
-            const deposit = parseFloat(leaseForm.deposit) || 0;
 
-            const { error: lError } = await supabase
-                .from('leases')
-                .update({
-                    start_date: leaseForm.start_date,
-                    end_date: leaseForm.end_date || null,
-                    cold_rent: coldRent,
-                    service_charge: serviceCharge,
-                    heating_cost: heatingCost,
-                    other_costs: otherCosts,
-                    deposit: deposit,
-                    payment_due_day: parseInt(leaseForm.payment_due_day) || 3,
-                    lease_type: leaseForm.lease_type || 'normal',
-                    last_rent_increase: leaseForm.last_rent_increase || null
-                })
-                .eq('id', leaseId);
+        const startChanged = f.start_date !== lease.start_date;
+        const endChanged = (f.end_date || null) !== (lease.end_date || null);
 
-            if (lError) throw lError;
+        // Überschneidung mit anderen Verträgen der Einheit
+        if (startChanged || endChanged) {
+            const { error: ovErr, overlaps } = await findOverlappingLeases({
+                unitId: lease.unit_id, startDate: f.start_date, endDate: f.end_date || null, excludeLeaseId: leaseId
+            });
+            if (ovErr) return alert('Die Prüfung auf überschneidende Mietverträge ist fehlgeschlagen: ' + ovErr.message);
+            if (overlaps.length > 0) {
+                return alert(
+                    'Die neue Laufzeit überschneidet sich mit einem anderen Mietvertrag dieser Einheit:\n\n' +
+                    overlaps.map(describeLease).join('\n') +
+                    '\n\nBitte passen Sie zuerst den anderen Vertrag an.'
+                );
+            }
+        }
 
-            // Also update unit Soll-fields to keep them in sync
-            if (lease.unit_id) {
-                await supabase.from('units').update({
-                    cold_rent_ist: coldRent,
-                    service_charge_soll: serviceCharge,
-                    heating_cost_soll: heatingCost,
-                    other_costs_soll: otherCosts,
-                    deposit_soll: deposit
-                }).eq('id', lease.unit_id);
+        const payload = {
+            start_date: f.start_date,
+            end_date: f.end_date || null,
+            deposit,
+            lease_type: f.lease_type || 'normal',
+            last_rent_increase: f.last_rent_increase || null,
+            // Status folgt dem Vertragsende: beendet erst nach Ablauf
+            status: f.end_date && f.end_date < today ? 'ended' : 'active'
+        };
+
+        const doSave = async () => {
+            setIsSaving(true);
+            try {
+                const { data, error: lError } = await supabase
+                    .from('leases')
+                    .update(payload)
+                    .eq('id', leaseId)
+                    .select('id');
+
+                if (lError) throw lError;
+                if (!data || data.length === 0) throw new Error('Keine Berechtigung, diesen Mietvertrag zu ändern.');
+
+                const unitWarning = await syncUnitFromLease({ ...lease, ...payload }, currentRent);
+
+                setIsEditLeaseOpen(false);
+                await loadTenantData();
+                if (unitWarning) alert(unitWarning);
+            } catch (err) {
+                alert('Fehler beim Speichern des Mietvertrags: ' + (err.message || err));
+            } finally {
+                setIsSaving(false);
+            }
+        };
+
+        if (startChanged && (f.start_date <= today || lease.start_date <= today)) {
+            if (rentPeriods.supported !== true) {
+                openRetroWarning({
+                    title: 'Achtung: Änderung wirkt rückwirkend',
+                    message:
+                        `Der Mietbeginn wird von ${formatDateDE(lease.start_date)} auf ${formatDateDE(f.start_date)} geändert. ` +
+                        'Die Miethistorie („gültig ab") ist in der Datenbank noch nicht eingerichtet: Die Änderung wirkt rückwirkend auf alle Monate seit Vertragsbeginn. ' +
+                        'Die Datenbank berechnet dabei das Soll jedes Monats mit der heutigen Miete neu – frühere Mieterhöhungen gehen im Mietkonto verloren, ' +
+                        'bereits bezahlte Monate können als offen (Rückstand) erscheinen und in Forderungen bzw. Mahnungen übernommen werden.',
+                    onConfirm: doSave
+                });
+                return;
+            }
+            if (!window.confirm(
+                `Der Mietbeginn wird von ${formatDateDE(lease.start_date)} auf ${formatDateDE(f.start_date)} geändert.\n\n` +
+                'Das Mietkonto wird für die neue Laufzeit neu berechnet: Für hinzukommende Monate werden Sollstellungen angelegt, ' +
+                'unbezahlte Sollstellungen vor dem neuen Mietbeginn entfallen. Fortfahren?'
+            )) return;
+        }
+
+        await doSave();
+    };
+
+    // ---------------------------------------------------------------------
+    // Mietänderung ab Datum (Miethistorie) bzw. bisheriger Modus mit Warnung
+    // ---------------------------------------------------------------------
+    const openRentChange = () => {
+        setRentForm(buildRentForm(lease, rentPeriods));
+        setIsRentChangeOpen(true);
+    };
+
+    const handleSaveRentChange = async () => {
+        const f = rentForm;
+        const today = localISODate();
+        const currentMonth = monthStart(today);
+
+        const values = {
+            cold_rent: toAmount(f.cold_rent),
+            service_charge: toAmount(f.service_charge),
+            heating_cost: toAmount(f.heating_cost),
+            other_costs: toAmount(f.other_costs),
+            payment_due_day: parseInt(f.payment_due_day, 10)
+        };
+
+        if ([values.cold_rent, values.service_charge, values.heating_cost, values.other_costs].some(v => v < 0)) {
+            return alert('Beträge dürfen nicht negativ sein.');
+        }
+        if (!values.payment_due_day || values.payment_due_day < 1 || values.payment_due_day > 28) {
+            return alert('Bitte einen Zahltag zwischen 1 und 28 angeben (Kalendertag im Monat).');
+        }
+
+        if (rentPeriods.supported === true) {
+            if (!isValidISODate(f.valid_from)) return alert('Bitte ein gültiges Datum für „gültig ab" angeben.');
+
+            const target = monthStart(f.valid_from);
+            const periods = rentPeriods.periods;
+            const reference = getEffectivePeriod(periods, target) || lease;
+            const unchanged = RENT_PERIOD_FIELDS.every(k => toAmount(reference?.[k]) === toAmount(values[k]));
+            if (unchanged) return alert('Die Werte entsprechen bereits der ab diesem Monat gültigen Miete. Es wurde nichts geändert.');
+
+            const first = periods[0];
+            const isCorrection = (first ? target <= monthStart(first.valid_from) : false) || target <= monthStart(lease.start_date);
+
+            if (isCorrection) {
+                if (!window.confirm(
+                    `Korrektur der Anfangsmiete: Die Werte gelten ab Vertragsbeginn (${formatDateDE(lease.start_date)}). ` +
+                    'Alle Monate im Mietkonto werden mit den neuen Werten neu berechnet; bereits bezahlte Monate können dadurch wieder als offen erscheinen.\n\n' +
+                    'Bitte nur für die Korrektur von Erfassungsfehlern verwenden. Für eine Mieterhöhung wählen Sie den Monat, ab dem die neue Miete gilt.\n\nFortfahren?'
+                )) return;
+            } else if (target < currentMonth) {
+                if (!window.confirm(
+                    `Die Mietänderung gilt rückwirkend ab ${formatMonthDE(target)}. ` +
+                    'Die Sollstellungen ab diesem Monat werden neu berechnet, frühere Monate bleiben unverändert.\n\nFortfahren?'
+                )) return;
             }
 
-            setIsEditLeaseOpen(false);
-            loadTenantData();
+            setIsSaving(true);
+            try {
+                let basePeriods = periods;
+                if (!first) {
+                    // Vertrag ohne Zeitraum (Altdaten): zuerst die Anfangsmiete aus den Vertragswerten sichern
+                    const { data: baseData, error: baseError } = await supabase
+                        .from('lease_rent_periods')
+                        .insert([{
+                            lease_id: leaseId,
+                            valid_from: lease.start_date,
+                            cold_rent: toAmount(lease.cold_rent),
+                            service_charge: toAmount(lease.service_charge),
+                            heating_cost: toAmount(lease.heating_cost),
+                            other_costs: toAmount(lease.other_costs),
+                            payment_due_day: lease.payment_due_day || 3
+                        }])
+                        .select('id, lease_id, valid_from, cold_rent, service_charge, heating_cost, other_costs, payment_due_day, created_at');
+                    if (baseError) throw baseError;
+                    basePeriods = baseData || [];
+                }
+
+                const { error: pErr, corrected } = await saveRentPeriod({
+                    leaseId, periods: basePeriods, validFrom: target, leaseStartDate: lease.start_date, values
+                });
+                if (pErr) throw pErr;
+
+                const warnings = [];
+                const isIncrease = values.cold_rent > toAmount(reference?.cold_rent);
+                if (f.mark_increase && isIncrease && !corrected) {
+                    const { error: incErr } = await supabase
+                        .from('leases')
+                        .update({ last_rent_increase: target })
+                        .eq('id', leaseId);
+                    if (incErr) warnings.push('Das Datum der letzten Mieterhöhung konnte nicht gespeichert werden: ' + incErr.message);
+                }
+
+                const unitWarning = await refreshUnitAfterRentChange(lease);
+                if (unitWarning) warnings.push(unitWarning);
+
+                setIsRentChangeOpen(false);
+                await loadTenantData();
+                alert(
+                    (corrected
+                        ? 'Die Anfangsmiete wurde korrigiert.'
+                        : `Die Mietänderung ab ${formatMonthDE(target)} wurde gespeichert.`) +
+                    (warnings.length ? '\n\n' + warnings.join('\n') : '')
+                );
+            } catch (err) {
+                alert('Fehler beim Speichern der Mietänderung: ' + (err.message || err));
+            } finally {
+                setIsSaving(false);
+            }
+            return;
+        }
+
+        if (rentPeriods.supported === false) {
+            const unchanged = RENT_PERIOD_FIELDS.every(k => toAmount(lease?.[k]) === toAmount(values[k]));
+            if (unchanged) return alert('Es wurde nichts geändert.');
+
+            const doLegacySave = async () => {
+                setIsSaving(true);
+                try {
+                    const { data, error: lError } = await supabase
+                        .from('leases')
+                        .update(values)
+                        .eq('id', leaseId)
+                        .select('id');
+                    if (lError) throw lError;
+                    if (!data || data.length === 0) throw new Error('Keine Berechtigung, diesen Mietvertrag zu ändern.');
+
+                    const unitWarning = await syncUnitFromLease(lease, values);
+                    setIsRentChangeOpen(false);
+                    await loadTenantData();
+                    if (unitWarning) alert(unitWarning);
+                } catch (err) {
+                    alert('Fehler beim Speichern der Mietänderung: ' + (err.message || err));
+                } finally {
+                    setIsSaving(false);
+                }
+            };
+
+            if (lease.start_date && lease.start_date <= today) {
+                openRetroWarning({
+                    title: 'Achtung: Änderung wirkt rückwirkend',
+                    message:
+                        `Die Miethistorie („gültig ab") ist in der Datenbank noch nicht eingerichtet. Diese Änderung wirkt rückwirkend auf alle Monate seit Vertragsbeginn (${formatDateDE(lease.start_date)}): ` +
+                        'Die Datenbank berechnet das Soll jedes Monats mit den neuen Werten neu. Nach einer Erhöhung erscheinen bereits bezahlte Monate als offen (Rückstand) ' +
+                        'und können in Forderungen bzw. Mahnungen übernommen werden; nach einer Senkung entstehen rückwirkend Überzahlungen.\n\n' +
+                        'Für eine Mietänderung ab einem bestimmten Monat speichern Sie bitte erst, wenn die Miethistorie eingerichtet ist.',
+                    onConfirm: doLegacySave
+                });
+                return;
+            }
+            await doLegacySave();
+            return;
+        }
+
+        alert('Die Miethistorie konnte nicht geladen werden. Bitte laden Sie die Seite neu und versuchen Sie es erneut.');
+    };
+
+    const handleDeleteRentPeriod = async (period) => {
+        if (!window.confirm(
+            `Mietänderung ab ${formatMonthDE(period.valid_from)} löschen?\n\n` +
+            'Ab diesem Monat gelten dann wieder die Werte des vorherigen Zeitraums; das Mietkonto wird entsprechend neu berechnet.'
+        )) return;
+        setIsSaving(true);
+        try {
+            const { error: delError } = await deleteRentPeriod(period.id);
+            if (delError) throw delError;
+            const unitWarning = await refreshUnitAfterRentChange(lease);
+            await loadTenantData();
+            if (unitWarning) alert(unitWarning);
         } catch (err) {
-            alert('Fehler beim Speichern des Mietvertrags: ' + err.message);
+            alert('Fehler beim Löschen der Mietänderung: ' + (err.message || err));
         } finally {
             setIsSaving(false);
         }
     };
 
-    // Terminate Lease
+    // ---------------------------------------------------------------------
+    // Beenden / Reaktivieren / Löschen
+    // ---------------------------------------------------------------------
+    const openTerminate = () => {
+        setTerminateForm({ end_date: lease?.end_date || localISODate() });
+        setIsTerminateOpen(true);
+    };
+
     const handleTerminateLease = async () => {
-        const endDate = prompt('Bitte geben Sie das Auszugsdatum ein (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
-        if (endDate === null) return; // cancelled
+        const endDate = terminateForm.end_date;
+        if (!isValidISODate(endDate)) return alert('Bitte ein gültiges Datum für das Vertragsende angeben.');
+        if (lease.start_date && endDate < lease.start_date) return alert('Das Vertragsende darf nicht vor dem Mietbeginn liegen.');
+
+        const today = localISODate();
+        const newStatus = endDate < today ? 'ended' : 'active';
 
         setIsSaving(true);
         try {
-            const { error: termError } = await supabase
+            const { data, error: termError } = await supabase
                 .from('leases')
-                .update({
-                    end_date: endDate,
-                    status: 'ended'
-                })
-                .eq('id', leaseId);
+                .update({ end_date: endDate, status: newStatus })
+                .eq('id', leaseId)
+                .select('id');
 
             if (termError) throw termError;
-            loadTenantData();
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, diesen Mietvertrag zu ändern.');
+            setIsTerminateOpen(false);
+            await loadTenantData();
         } catch (err) {
             alert('Fehler beim Beenden des Mietverhältnisses: ' + err.message);
         } finally {
@@ -463,21 +930,43 @@ const TenantDetail = () => {
         }
     };
 
-    // Reactivate Lease
     const handleReactivateLease = async () => {
-        if (!window.confirm('Möchten Sie dieses Mietverhältnis wirklich reaktivieren?')) return;
         setIsSaving(true);
         try {
-            const { error: reactError } = await supabase
+            const { error: ovErr, overlaps } = await findOverlappingLeases({
+                unitId: lease.unit_id, startDate: lease.start_date, endDate: null, excludeLeaseId: leaseId
+            });
+            if (ovErr) {
+                alert('Die Prüfung auf andere Mietverträge der Einheit ist fehlgeschlagen: ' + ovErr.message);
+                return;
+            }
+            if (overlaps.length > 0) {
+                alert(
+                    'Das Mietverhältnis kann nicht unbefristet fortgesetzt werden, weil für die Einheit ein anderer Mietvertrag besteht:\n\n' +
+                    overlaps.map(describeLease).join('\n') +
+                    '\n\nBitte legen Sie bei Bedarf ein neues Mietverhältnis an.'
+                );
+                return;
+            }
+
+            const message = lease.end_date
+                ? `Das Vertragsende (${formatDateDE(lease.end_date)}) wird entfernt; das Mietverhältnis läuft unbefristet weiter.\n\n` +
+                  'Für alle Monate seit dem bisherigen Vertragsende werden wieder Sollmieten angelegt. Sie erscheinen als offen, bis Zahlungen gebucht sind.\n\nFortfahren?'
+                : 'Möchten Sie dieses Mietverhältnis wirklich reaktivieren?';
+            if (!window.confirm(message)) return;
+
+            const { data, error: reactError } = await supabase
                 .from('leases')
-                .update({
-                    end_date: null,
-                    status: 'active'
-                })
-                .eq('id', leaseId);
+                .update({ end_date: null, status: 'active' })
+                .eq('id', leaseId)
+                .select('id');
 
             if (reactError) throw reactError;
-            loadTenantData();
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, diesen Mietvertrag zu ändern.');
+
+            const unitWarning = await syncUnitFromLease({ ...lease, end_date: null, status: 'active' }, currentRent);
+            await loadTenantData();
+            if (unitWarning) alert(unitWarning);
         } catch (err) {
             alert('Fehler beim Reaktivieren: ' + err.message);
         } finally {
@@ -485,109 +974,232 @@ const TenantDetail = () => {
         }
     };
 
-    // Delete Lease Completely
     const handleDeleteLease = async () => {
-        if (!window.confirm('WARNUNG: Möchten Sie dieses Mietverhältnis wirklich unwiderruflich löschen? Alle verknüpften Zahlungsrückstände und Belege könnten verwaisen.')) return;
         setIsSaving(true);
         try {
-            const { error: delError } = await supabase
+            const info = await checkLeaseDeletion(leaseId);
+            if (!info.ok) {
+                alert('Die Prüfung vor dem Löschen ist fehlgeschlagen: ' + (info.error?.message || 'Unbekannter Fehler') + '\n\nDas Mietverhältnis wurde nicht gelöscht.');
+                return;
+            }
+            if (info.blocked) {
+                alert(describeDeletionBlock(info));
+                return;
+            }
+            if (!window.confirm(deletionConfirmText(info))) return;
+
+            const { data, error: delError } = await supabase
                 .from('leases')
                 .delete()
-                .eq('id', leaseId);
+                .eq('id', leaseId)
+                .select('id');
 
             if (delError) throw delError;
-            alert('Mietverhältnis erfolgreich gelöscht.');
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, dieses Mietverhältnis zu löschen.');
+            alert('Mietverhältnis gelöscht.');
             navigate('/tenants');
         } catch (err) {
-            alert('Fehler beim Löschen: ' + err.message);
+            alert('Fehler beim Löschen: ' + translateLeaseDeleteError(err));
         } finally {
             setIsSaving(false);
         }
     };
 
-    // Update Claim Status
-    const handleUpdateClaimStatus = async (claimId, newStatus) => {
+    // ---------------------------------------------------------------------
+    // Forderungen: Zahlung über das Forderungsmodul buchen, Ausfall mit Grund
+    // ---------------------------------------------------------------------
+    const openPaymentModal = (claim) => {
+        setPaymentForm({
+            amount: claim.total_due !== null ? Math.round(claim.total_due * 100) / 100 : '',
+            date: localISODate(),
+            note: ''
+        });
+        setPaymentClaim(claim);
+    };
+
+    const handleRecordClaimPayment = async () => {
+        const claim = paymentClaim;
+        if (!claim) return;
+        const amount = toAmount(paymentForm.amount);
+        if (!(amount > 0)) return alert('Bitte einen Betrag größer als 0 eingeben.');
+        if (claim.total_due !== null && amount > claim.total_due + 0.01) {
+            return alert('Der Zahlungsbetrag darf die offene Gesamtforderung nicht übersteigen.');
+        }
+        if (!isValidISODate(paymentForm.date)) return alert('Bitte ein gültiges Zahlungsdatum angeben.');
+        if (!window.confirm(`Zahlung über ${formatEUR(amount)} vom ${formatDateDE(paymentForm.date)} auf diese Forderung buchen?`)) return;
+
+        setIsSaving(true);
         try {
-            setIsSaving(true);
-            const { error } = await supabase
-                .from('claims')
-                .update({ status: newStatus })
-                .eq('id', claimId);
+            const { error: rpcError } = await supabase.rpc('record_claim_payment', {
+                p_claim_id: claim.id,
+                p_payment_date: paymentForm.date,
+                p_amount: amount,
+                p_note: paymentForm.note || '',
+                p_installment_id: null,
+                p_target_type: 'auto',
+                p_target_claim_item_id: null
+            });
+            if (rpcError) throw rpcError;
 
-            if (error) throw error;
+            setPaymentClaim(null);
             await loadTenantData();
-            alert('Status der Forderung erfolgreich aktualisiert.');
+            alert('Die Zahlung wurde verbucht.');
         } catch (err) {
-            console.error('Error updating claim status:', err);
-            alert('Fehler beim Aktualisieren des Status: ' + err.message);
+            console.error('Error recording claim payment:', err);
+            alert('Fehler beim Buchen der Zahlung: ' + (err.message || err.details || 'Unbekannter Fehler'));
         } finally {
             setIsSaving(false);
         }
     };
 
-    // Cloud Upload
+    const openWriteOffModal = (claim) => {
+        setWriteOffForm({ reason: '' });
+        setWriteOffClaim(claim);
+    };
+
+    const handleWriteOffClaim = async () => {
+        const claim = writeOffClaim;
+        if (!claim) return;
+        const reason = writeOffForm.reason.trim();
+        if (!reason) return alert('Bitte geben Sie einen Grund für den Forderungsausfall an.');
+
+        setIsSaving(true);
+        try {
+            // Laufender Ratenplan: zuerst in der Forderungsakte beenden (Ratenpläne ändert nur das Forderungsmodul)
+            const { data: activePlans, error: planError } = await supabase
+                .from('payment_plans')
+                .select('id')
+                .eq('claim_id', claim.id)
+                .eq('status', 'active');
+            if (planError) throw planError;
+            if ((activePlans || []).length > 0) {
+                alert('Für diese Forderung läuft ein Ratenplan. Bitte beenden Sie den Ratenplan zuerst in der Forderungsakte (Details), bevor Sie einen Forderungsausfall buchen.');
+                return;
+            }
+
+            const nowIso = new Date().toISOString();
+            const { data, error: updateError } = await supabase
+                .from('claims')
+                .update({
+                    status: 'cancelled',
+                    cancelled_at: nowIso,
+                    cancelled_by: user?.id || null,
+                    cancellation_reason: `Forderungsausfall: ${reason}`,
+                    updated_at: nowIso
+                })
+                .eq('id', claim.id)
+                .select('id');
+
+            if (updateError) throw updateError;
+            if (!data || data.length === 0) throw new Error('Keine Berechtigung, diese Forderung zu ändern.');
+
+            // Portal-Link sperren wie beim Stornieren im Forderungsmanagement (Fehler hier sind nicht kritisch)
+            const { error: linkError } = await supabase
+                .from('claim_access_links')
+                .update({ is_active: false, revoked_at: nowIso })
+                .eq('claim_id', claim.id)
+                .eq('is_active', true);
+            if (linkError) console.warn('Portal-Link konnte nicht deaktiviert werden:', linkError);
+
+            const { error: eventError } = await supabase.from('claim_events').insert([{
+                user_id: claim.user_id,
+                claim_id: claim.id,
+                event_type: 'status_changed',
+                description: 'Forderungsausfall gebucht',
+                event_metadata: {
+                    old_status: claim.status,
+                    new_status: 'cancelled',
+                    reason,
+                    write_off: true
+                }
+            }]);
+
+            setWriteOffClaim(null);
+            await loadTenantData();
+            alert(eventError
+                ? 'Die Forderung wurde als Ausfall storniert. Der Eintrag im Verlauf konnte nicht gespeichert werden: ' + eventError.message
+                : 'Die Forderung wurde als Ausfall storniert.');
+        } catch (err) {
+            alert('Fehler beim Buchen des Forderungsausfalls: ' + err.message);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // Dokumente
+    // ---------------------------------------------------------------------
     const handleCloudUpload = async (files) => {
         if (!files || files.length === 0 || uploading) return;
         const file = files[0];
-        
+
         setUploading(true);
         try {
+            if (file.size > MAX_UPLOAD_BYTES) {
+                alert('Datei ist zu groß (max. 10 MB).');
+                return;
+            }
+            if (!ALLOWED_UPLOAD_EXTENSIONS.includes(getFileExtension(file.name))) {
+                alert('Dieser Dateityp wird nicht unterstützt. Erlaubt sind PDF, PNG, JPG, DOC und DOCX.');
+                return;
+            }
             const provider = lease.unit.property.cloud_connection.provider;
             const formData = new FormData();
             formData.append('action', 'upload');
             formData.append('provider', provider);
             formData.append('path', tenantCloudPath);
             formData.append('file', file);
-            
-            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+
+            const { data, error: fnError } = await supabase.functions.invoke('cloud-drive', {
                 body: formData
             });
-            
-            if (error) throw error;
+
+            if (fnError) throw new Error(await readFunctionErrorMessage(fnError));
             if (data?.error) throw new Error(data.error);
-            
-            loadCloudFiles(provider, tenantCloudPath, lease.unit.property.id);
+
+            loadCloudFiles(provider, tenantCloudPath);
             alert('Dokument erfolgreich in die Cloud hochgeladen.');
         } catch (err) {
-            console.error("Cloud upload error:", err);
-            alert("Fehler beim Cloud-Upload: " + err.message);
+            console.error('Cloud upload error:', err);
+            alert('Fehler beim Cloud-Upload: ' + err.message);
         } finally {
             setUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
-    // Cloud Delete
     const handleCloudDelete = async (item) => {
         if (!window.confirm(`Möchten Sie '${item.name}' wirklich aus der Cloud löschen? Diese Aktion kann nicht rückgängig gemacht werden.`)) return;
         setLoadingCloud(true);
         try {
             const provider = lease.unit.property.cloud_connection.provider;
-            const { data, error } = await supabase.functions.invoke('cloud-drive', {
+            const { data, error: fnError } = await supabase.functions.invoke('cloud-drive', {
                 body: { action: 'delete', provider, itemId: item.id }
             });
-            
-            if (error) throw error;
+
+            if (fnError) throw new Error(await readFunctionErrorMessage(fnError));
             if (data?.error) throw new Error(data.error);
-            
-            loadCloudFiles(provider, tenantCloudPath, lease.unit.property.id);
+
+            loadCloudFiles(provider, tenantCloudPath);
             alert('Datei erfolgreich gelöscht.');
         } catch (err) {
-            console.error("Cloud delete error:", err);
-            alert("Fehler beim Löschen: " + err.message);
-        } finally {
+            console.error('Cloud delete error:', err);
+            alert('Fehler beim Löschen: ' + err.message);
             setLoadingCloud(false);
         }
     };
 
-    // Upload Document
     const handleUploadDocument = async (files) => {
         if (!files || files.length === 0 || uploading) return;
         setUploading(true);
         try {
             const file = files[0];
-            if (file.size > 10 * 1024 * 1024) {
-                alert('Datei ist zu groß (max 10MB).');
+            if (file.size > MAX_UPLOAD_BYTES) {
+                alert('Datei ist zu groß (max. 10 MB).');
+                return;
+            }
+            if (!ALLOWED_UPLOAD_EXTENSIONS.includes(getFileExtension(file.name))) {
+                alert('Dieser Dateityp wird nicht unterstützt. Erlaubt sind PDF, PNG, JPG, DOC und DOCX.');
                 return;
             }
 
@@ -596,15 +1208,15 @@ const TenantDetail = () => {
             if (!propertyId || !tenantId) throw new Error('Zuweisungsdaten unvollständig');
 
             const timestamp = Date.now();
-            const filePath = `${propertyId}/tenant/${tenantId}/${timestamp}_${file.name}`;
+            // Originalname bleibt in documents.file_name, der Speicher-Schlüssel wird bereinigt
+            const filePath = `${propertyId}/tenant/${tenantId}/${timestamp}_${sanitizeFileName(file.name)}`;
 
             const { error: uploadError } = await supabase.storage
                 .from('documents')
-                .upload(filePath, file);
+                .upload(filePath, file, { contentType: file.type || undefined });
 
             if (uploadError) throw uploadError;
 
-            // Save metadata
             const { error: dbError } = await supabase
                 .from('documents')
                 .insert({
@@ -618,9 +1230,13 @@ const TenantDetail = () => {
                     category: 'personal'
                 });
 
-            if (dbError) throw dbError;
+            if (dbError) {
+                // Datei ohne Datensatz nicht liegen lassen
+                await supabase.storage.from('documents').remove([filePath]);
+                throw dbError;
+            }
 
-            loadTenantData();
+            await loadTenantData();
             alert('Dokument erfolgreich hochgeladen.');
         } catch (err) {
             console.error(err);
@@ -631,26 +1247,27 @@ const TenantDetail = () => {
         }
     };
 
-    // Delete Document
     const handleDeleteDocument = async (doc) => {
         if (!window.confirm(`Möchten Sie das Dokument "${doc.file_name}" wirklich löschen?`)) return;
         try {
-            await supabase.storage.from('documents').remove([doc.file_path]);
-            const { error } = await supabase.from('documents').delete().eq('id', doc.id);
-            if (error) throw error;
-            loadTenantData();
+            if (doc.file_path) {
+                const { error: removeError } = await supabase.storage.from('documents').remove([doc.file_path]);
+                if (removeError) throw new Error('Die Datei konnte nicht aus dem Speicher entfernt werden: ' + removeError.message);
+            }
+            const { error: delError } = await supabase.from('documents').delete().eq('id', doc.id);
+            if (delError) throw delError;
+            await loadTenantData();
         } catch (err) {
             alert('Fehler beim Löschen des Dokuments: ' + err.message);
         }
     };
 
-    // Download Document
     const handleDownloadDocument = async (doc) => {
         try {
-            const { data, error } = await supabase.storage
+            const { data, error: urlError } = await supabase.storage
                 .from('documents')
                 .createSignedUrl(doc.file_path, 3600);
-            if (error) throw error;
+            if (urlError) throw urlError;
             if (data?.signedUrl) {
                 window.open(data.signedUrl, '_blank');
             }
@@ -659,10 +1276,26 @@ const TenantDetail = () => {
         }
     };
 
-    // Create Support Ticket
+    // ---------------------------------------------------------------------
+    // Tickets
+    // ---------------------------------------------------------------------
+    const openTicketModal = () => {
+        setTicketForm({ title: '', description: '', priority: 'normal' });
+        setIsTicketModalOpen(true);
+    };
+
     const handleCreateTicket = async () => {
-        if (!ticketForm.title) {
+        if (!ticketForm.title.trim()) {
             alert('Bitte geben Sie einen Titel für das Ticket an.');
+            return;
+        }
+        if (!tenantUserId) {
+            alert('Für diesen Mieter besteht kein Zugang zum Mieterportal. Tickets können nur für Mieter mit Portalzugang angelegt werden.');
+            return;
+        }
+        const propertyId = lease?.unit?.property?.id || lease?.unit?.property_id;
+        if (!propertyId || !lease?.unit_id) {
+            alert('Objekt oder Einheit des Mietvertrags fehlt.');
             return;
         }
         setIsSaving(true);
@@ -670,21 +1303,20 @@ const TenantDetail = () => {
             const { error: ticketError } = await supabase
                 .from('tickets')
                 .insert({
-                    user_id: user.id,
                     unit_id: lease.unit_id,
-                    title: ticketForm.title,
-                    description: ticketForm.description,
+                    property_id: propertyId,
+                    tenant_user_id: tenantUserId,
+                    title: ticketForm.title.trim(),
+                    description: ticketForm.description.trim() || null,
                     priority: ticketForm.priority,
-                    category: ticketForm.category,
-                    status: 'new'
+                    status: 'received'
                 });
 
             if (ticketError) throw ticketError;
 
             setIsTicketModalOpen(false);
-            setTicketForm({ title: '', description: '', priority: 'medium', category: 'repair' });
-            loadTenantData();
-            alert('Support-Ticket wurde erfolgreich erstellt.');
+            await loadTenantData();
+            alert('Ticket wurde erstellt.');
         } catch (err) {
             alert('Fehler beim Erstellen des Tickets: ' + err.message);
         } finally {
@@ -692,37 +1324,69 @@ const TenantDetail = () => {
         }
     };
 
-    const formatCurrency = (amount) => {
-        return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount || 0);
-    };
+    // ---------------------------------------------------------------------
+    // Render
+    // ---------------------------------------------------------------------
+    if (userRole === 'tenant') {
+        return <Navigate to="/tenant" replace />;
+    }
 
-    const formatDate = (dateString) => {
-        if (!dateString) return '—';
-        return new Date(dateString).toLocaleDateString('de-DE');
-    };
+    if (loading && !lease) {
+        return (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', padding: '60px', color: 'var(--text-secondary)' }}>
+                <Loader2 className="animate-spin" /> Lade Mietverhältnis...
+            </div>
+        );
+    }
 
-    const getStatusColor = (s) => {
-        switch (s) {
-            case 'resolved': return 'success';
-            case 'in_progress': return 'warning';
-            default: return 'blue';
-        }
-    };
+    if (error || !lease) {
+        return (
+            <div style={{ maxWidth: '640px', margin: '40px auto' }}>
+                <Card title="Mietverhältnis konnte nicht geladen werden">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={tileErrorStyle}>
+                            <AlertCircle size={16} /> {error || 'Mietverhältnis nicht gefunden.'}
+                        </div>
+                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            <Button variant="secondary" icon={ArrowLeft} onClick={() => navigate('/tenants')}>Zurück zur Übersicht</Button>
+                            <Button variant="ghost" icon={RefreshCw} onClick={() => loadTenantData()}>Erneut versuchen</Button>
+                        </div>
+                    </div>
+                </Card>
+            </div>
+        );
+    }
 
-    const calcNextRentIncrease = (l) => {
-        if (!l) return null;
-        const baseDate = l.last_rent_increase || l.start_date;
-        if (!baseDate) return null;
-        const d = new Date(baseDate);
-        d.setFullYear(d.getFullYear() + 1); // 12-month lock-in period
-        return d.toISOString().split('T')[0];
-    };
+    const timeState = getLeaseTimeState(lease, today);
+    const totalWarmRent = sumRent(currentRent);
+    const firstPeriodId = rentPeriods.periods[0]?.id;
 
-    const nextRentIncreaseDate = calcNextRentIncrease(lease);
-    const totalWarmRent = (parseFloat(lease?.cold_rent) || 0) +
-        (parseFloat(lease?.service_charge) || 0) +
-        (parseFloat(lease?.heating_cost) || 0) +
-        (parseFloat(lease?.other_costs) || 0);
+    // Mieterhöhung nach § 558 BGB: Verlangen frühestens 12 Monate nach Einzug bzw. letzter
+    // Erhöhung, wirksam frühestens zu Beginn des dritten Kalendermonats nach Zugang
+    const isStaffelOrIndex = lease.lease_type === 'staffel' || lease.lease_type === 'index';
+    const increaseBase = lease.last_rent_increase || lease.start_date;
+    const earliestIncreaseRequest = increaseBase ? addMonthsKeepDay(increaseBase, 12) : null;
+    const earliestIncreaseEffective = earliestIncreaseRequest ? addMonths(earliestIncreaseRequest, 3) : null;
+    const increaseLocked = !!earliestIncreaseRequest && earliestIncreaseRequest > today;
+
+    // Vorschau im Dialog "Mietänderung"
+    const rentFormTarget = isValidISODate(rentForm.valid_from) ? monthStart(rentForm.valid_from) : null;
+    const rentFormReference = rentPeriods.supported === true && rentFormTarget
+        ? (getEffectivePeriod(rentPeriods.periods, rentFormTarget) || lease)
+        : lease;
+    const rentFormIsCorrection = rentPeriods.supported === true && !!rentFormTarget && (
+        (rentPeriods.periods[0] ? rentFormTarget <= monthStart(rentPeriods.periods[0].valid_from) : false) ||
+        rentFormTarget <= monthStart(lease.start_date)
+    );
+    const rentFormIsIncrease = toAmount(rentForm.cold_rent) > toAmount(rentFormReference?.cold_rent);
+
+    const statusBadge = timeState === 'ended'
+        ? <Badge variant="default">Beendet</Badge>
+        : timeState === 'future'
+            ? <Badge variant="blue">Beginnt am {formatDateDE(lease.start_date)}</Badge>
+            : lease.end_date
+                ? <Badge variant="warning">Gekündigt zum {formatDateDE(lease.end_date)}</Badge>
+                : <Badge variant="success">Aktiv</Badge>;
 
     return (
         <div style={{ paddingBottom: '60px' }}>
@@ -740,21 +1404,18 @@ const TenantDetail = () => {
                     >
                         <ArrowLeft size={14} /> Zurück zur Übersicht
                     </button>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                         <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
-                            {lease?.tenant?.first_name} {lease?.tenant?.last_name}
+                            {lease.tenant?.first_name} {lease.tenant?.last_name}
                         </h1>
-                        {lease?.status === 'active' ? (
-                            <Badge variant="success">Aktiv</Badge>
-                        ) : (
-                            <Badge variant="default">Beendet</Badge>
-                        )}
+                        {statusBadge}
+                        {loading && <Loader2 size={16} className="animate-spin" style={{ color: 'var(--text-secondary)' }} />}
                     </div>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <Building2 size={15} />
-                        {lease?.unit?.property?.street} {lease?.unit?.property?.house_number}, {lease?.unit?.property?.city}
+                        {lease.unit?.property?.street} {lease.unit?.property?.house_number}, {lease.unit?.property?.city}
                         <ChevronRight size={14} />
-                        Einheit: {lease?.unit?.unit_name}
+                        Einheit: {lease.unit?.unit_name}
                     </p>
                 </div>
             </div>
@@ -768,15 +1429,15 @@ const TenantDetail = () => {
             }}>
                 {/* LEFT SIDE TILES */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                    
+
                     {/* Tile 1: Stammdaten (Persönliche Daten) */}
                     <Card
                         title="Stammdaten"
-                        headerActions={
-                            <Button variant="ghost" size="sm" onClick={() => setIsEditTenantOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        action={canEditLease && lease.tenant_id ? (
+                            <Button variant="ghost" size="sm" onClick={openEditTenant} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <Edit size={14} /> Bearbeiten
                             </Button>
-                        }
+                        ) : null}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '4px 0' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -785,7 +1446,7 @@ const TenantDetail = () => {
                                 </div>
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Name</div>
-                                    <div style={{ fontSize: '0.92rem', fontWeight: 600 }}>{lease?.tenant?.first_name} {lease?.tenant?.last_name}</div>
+                                    <div style={{ fontSize: '0.92rem', fontWeight: 600 }}>{lease.tenant?.first_name} {lease.tenant?.last_name}</div>
                                 </div>
                             </div>
 
@@ -796,7 +1457,7 @@ const TenantDetail = () => {
                                     </div>
                                     <div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Telefon</div>
-                                        <div style={{ fontSize: '0.92rem', fontWeight: 500 }}>{lease?.tenant?.phone || '—'}</div>
+                                        <div style={{ fontSize: '0.92rem', fontWeight: 500 }}>{lease.tenant?.phone || '—'}</div>
                                     </div>
                                 </div>
 
@@ -806,7 +1467,7 @@ const TenantDetail = () => {
                                     </div>
                                     <div style={{ minWidth: 0 }}>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>E-Mail</div>
-                                        <div style={{ fontSize: '0.92rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lease?.tenant?.email || '—'}</div>
+                                        <div style={{ fontSize: '0.92rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lease.tenant?.email || '—'}</div>
                                     </div>
                                 </div>
                             </div>
@@ -818,7 +1479,7 @@ const TenantDetail = () => {
                                     </div>
                                     <div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Personenanzahl</div>
-                                        <div style={{ fontSize: '0.92rem', fontWeight: 500 }}>{lease?.tenant?.occupants || 1} {lease?.tenant?.occupants === 1 ? 'Person' : 'Personen'}</div>
+                                        <div style={{ fontSize: '0.92rem', fontWeight: 500 }}>{lease.tenant?.occupants || 1} {(lease.tenant?.occupants || 1) === 1 ? 'Person' : 'Personen'}</div>
                                     </div>
                                 </div>
 
@@ -829,8 +1490,8 @@ const TenantDetail = () => {
                                     <div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Kontaktadresse</div>
                                         <div style={{ fontSize: '0.92rem', fontWeight: 500 }}>
-                                            {lease?.tenant?.street ? `${lease.tenant.street} ${lease.tenant.house_number || ''}` : 'Wie Mietobjekt'}
-                                            {lease?.tenant?.city && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{lease.tenant.postal_code} {lease.tenant.city}</div>}
+                                            {lease.tenant?.street ? `${lease.tenant.street} ${lease.tenant.house_number || ''}` : 'Wie Mietobjekt'}
+                                            {lease.tenant?.city && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{lease.tenant.postal_code} {lease.tenant.city}</div>}
                                         </div>
                                     </div>
                                 </div>
@@ -839,42 +1500,47 @@ const TenantDetail = () => {
                     </Card>
 
                     {/* Tile 2: Zahlungen & Forderungen */}
-                    <Card 
+                    <Card
                         title="Zahlungen & Forderungen"
-                        headerActions={
-                            <Button 
-                                variant="ghost" 
-                                size="sm" 
+                        action={canEditFinance ? (
+                            <Button
+                                variant="ghost"
+                                size="sm"
                                 icon={Plus}
                                 onClick={() => navigate('/forderungen', { state: { openCreate: true, defaultLeaseId: leaseId } })}
                             >
                                 Neue Forderung
                             </Button>
-                        }
+                        ) : null}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                             <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
                                 Übersicht der Zahlungsrückstände und laufenden Forderungen für dieses Mietverhältnis.
                             </div>
 
+                            {claimsError && (
+                                <div style={tileErrorStyle}>
+                                    <AlertCircle size={14} /> Forderungen konnten nicht vollständig geladen werden: {claimsError}
+                                </div>
+                            )}
+
                             {/* Claims list */}
                             {claims.length === 0 ? (
-                                <div style={{ padding: '16px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem', backgroundColor: 'rgba(255,255,255,0.01)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--border-color)' }}>
-                                    <CheckCircle2 size={24} style={{ margin: '0 auto 6px', color: 'var(--success-color)' }} />
-                                    Keine offenen Forderungen oder Zahlungsrückstände.
-                                </div>
+                                !claimsError && (
+                                    <div style={{ padding: '16px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem', backgroundColor: 'rgba(255,255,255,0.01)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--border-color)' }}>
+                                        <CheckCircle2 size={24} style={{ margin: '0 auto 6px', color: 'var(--success-color)' }} />
+                                        Keine offenen Forderungen vorhanden.
+                                    </div>
+                                )
                             ) : (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                                     {claims.map(claim => {
-                                        let badgeVar = 'default';
-                                        let statusText = claim.status;
-                                        if (claim.status === 'active') { badgeVar = 'danger'; statusText = 'Aktiv'; }
-                                        else if (claim.status === 'settled') { badgeVar = 'success'; statusText = 'Bezahlt'; }
-                                        else if (claim.status === 'default') { badgeVar = 'default'; statusText = 'Ausfall'; }
-                                        else if (claim.status === 'payment_plan') { badgeVar = 'warning'; statusText = 'Zahlungsplan'; }
+                                        const statusCfg = CLAIM_STATUS[claim.status] || { label: claim.status, variant: 'default' };
+                                        const isClosed = CLOSED_CLAIM_STATUSES.includes(claim.status);
+                                        const formatOrDash = (v) => (v === null ? '—' : formatEUR(v));
 
                                         return (
-                                            <div 
+                                            <div
                                                 key={claim.id}
                                                 style={{
                                                     padding: '12px',
@@ -888,47 +1554,49 @@ const TenantDetail = () => {
                                             >
                                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                        <Badge variant={badgeVar}>{statusText}</Badge>
+                                                        <Badge variant={statusCfg.variant}>{statusCfg.label}</Badge>
                                                         <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Stufe {claim.escalation_level}</span>
                                                     </div>
-                                                    <div style={{ fontWeight: 700, fontSize: '0.95rem', color: claim.total_open > 0 ? 'var(--danger-color)' : 'var(--text-primary)' }}>
-                                                        {claim.total_open.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}
+                                                    <div style={{ fontWeight: 700, fontSize: '0.95rem', color: (claim.total_due || 0) > 0 ? 'var(--danger-color)' : 'var(--text-primary)' }} title="Offener Gesamtbetrag">
+                                                        {formatOrDash(claim.total_due)}
                                                     </div>
                                                 </div>
 
                                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                                    <div><strong>Hauptforderung:</strong> {claim.total_principal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
-                                                    <div><strong>Gebühren/Zinsen:</strong> {(claim.total_fees + claim.total_interest).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
-                                                    {claim.deadline && <div><strong>Frist:</strong> {formatDate(claim.deadline)}</div>}
-                                                    <div><strong>Erstellt am:</strong> {formatDate(claim.created_at)}</div>
+                                                    <div><strong>Hauptforderung offen:</strong> {formatOrDash(claim.principal_open)}</div>
+                                                    <div><strong>Gebühren/Zinsen offen:</strong> {claim.fees_open === null ? '—' : formatEUR((claim.fees_open || 0) + (claim.interest_open || 0))}</div>
+                                                    {claim.deadline && <div><strong>Frist:</strong> {formatDateDE(claim.deadline)}</div>}
+                                                    <div><strong>Erstellt am:</strong> {formatDateDE(claim.created_at)}</div>
                                                 </div>
 
-                                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px', borderTop: '1px solid var(--border-color)', paddingTop: '8px', marginTop: '4px' }}>
-                                                    <Button 
-                                                        size="xs" 
-                                                        variant="ghost" 
-                                                        icon={Eye} 
+                                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px', borderTop: '1px solid var(--border-color)', paddingTop: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
+                                                    <Button
+                                                        size="xs"
+                                                        variant="ghost"
+                                                        icon={Eye}
                                                         onClick={() => navigate(`/forderungen/${claim.id}`)}
                                                     >
                                                         Details
                                                     </Button>
-                                                    {claim.status !== 'settled' && (
-                                                        <Button 
-                                                            size="xs" 
-                                                            variant="secondary" 
-                                                            onClick={() => handleUpdateClaimStatus(claim.id, 'settled')}
-                                                        >
-                                                            Bezahlt
-                                                        </Button>
-                                                    )}
-                                                    {claim.status !== 'default' && claim.status !== 'settled' && (
-                                                        <Button 
-                                                            size="xs" 
-                                                            variant="outline" 
-                                                            onClick={() => handleUpdateClaimStatus(claim.id, 'default')}
-                                                        >
-                                                            Ausfall
-                                                        </Button>
+                                                    {!isClosed && canEditFinance && (
+                                                        <>
+                                                            <Button
+                                                                size="xs"
+                                                                variant="secondary"
+                                                                onClick={() => openPaymentModal(claim)}
+                                                                disabled={isSaving}
+                                                            >
+                                                                Zahlung erfassen
+                                                            </Button>
+                                                            <Button
+                                                                size="xs"
+                                                                variant="ghost"
+                                                                onClick={() => openWriteOffModal(claim)}
+                                                                disabled={isSaving}
+                                                            >
+                                                                Ausfall buchen
+                                                            </Button>
+                                                        </>
                                                     )}
                                                 </div>
                                             </div>
@@ -937,103 +1605,68 @@ const TenantDetail = () => {
                                 </div>
                             )}
 
-                            {/* Warning Settings section */}
-                            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '14px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mietwarnung-Einstellungen</div>
-                                
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>Mietwarnungen aktiv</div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>Automatische Generierung bei Verzug</div>
-                                    </div>
-                                    <label style={{ position: 'relative', display: 'inline-block', width: '38px', height: '22px', cursor: 'pointer' }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={warningSettings.tenantActive}
-                                            onChange={() => handleWarningToggle('tenantActive')}
-                                            style={{ opacity: 0, width: 0, height: 0 }}
-                                        />
-                                        <span style={{
-                                            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-                                            backgroundColor: warningSettings.tenantActive ? 'var(--primary-color)' : '#cbd5e1',
-                                            transition: '0.2s', borderRadius: '34px'
-                                        }} />
-                                        <span style={{
-                                            position: 'absolute', height: '16px', width: '16px', left: warningSettings.tenantActive ? '18px' : '4px', bottom: '3px',
-                                            backgroundColor: 'white', transition: '0.2s', borderRadius: '50%'
-                                        }} />
-                                    </label>
+                            {hiddenClaimsCount > 0 && (
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    {hiddenClaimsCount} stornierte bzw. archivierte Forderung{hiddenClaimsCount === 1 ? '' : 'en'} ausgeblendet (siehe Forderungsmanagement).
                                 </div>
-
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>Direkter E-Mail-Versand</div>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>Erinnerung direkt an Mieter mailen</div>
-                                    </div>
-                                    <label style={{ position: 'relative', display: 'inline-block', width: '38px', height: '22px', cursor: 'pointer' }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={warningSettings.emailNotify}
-                                            onChange={() => handleWarningToggle('emailNotify')}
-                                            style={{ opacity: 0, width: 0, height: 0 }}
-                                        />
-                                        <span style={{
-                                            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-                                            backgroundColor: warningSettings.emailNotify ? 'var(--primary-color)' : '#cbd5e1',
-                                            transition: '0.2s', borderRadius: '34px'
-                                        }} />
-                                        <span style={{
-                                            position: 'absolute', height: '16px', width: '16px', left: warningSettings.emailNotify ? '18px' : '4px', bottom: '3px',
-                                            backgroundColor: 'white', transition: '0.2s', borderRadius: '50%'
-                                        }} />
-                                    </label>
-                                </div>
-                            </div>
+                            )}
                         </div>
                     </Card>
 
                     {/* Tile 3: Verknüpfte Tickets */}
                     <Card
                         title="Verknüpfte Tickets"
-                        headerActions={
-                            <Button variant="ghost" size="sm" onClick={() => setIsTicketModalOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        action={canEditTickets && tenantUserId ? (
+                            <Button variant="ghost" size="sm" onClick={openTicketModal} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <Plus size={14} /> Neues Ticket
                             </Button>
-                        }
+                        ) : null}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {tickets.length === 0 ? (
+                            {ticketsError ? (
+                                <div style={tileErrorStyle}>
+                                    <AlertCircle size={14} /> Tickets konnten nicht geladen werden: {ticketsError}
+                                </div>
+                            ) : !tenantUserId ? (
                                 <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                                     <MessageSquare size={28} style={{ margin: '0 auto 8px', opacity: 0.4 }} />
-                                    Keine Tickets für diese Einheit vorhanden.
+                                    Dieser Mieter hat keinen Zugang zum Mieterportal – Tickets sind daher nicht verfügbar.
+                                </div>
+                            ) : tickets.length === 0 ? (
+                                <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                    <MessageSquare size={28} style={{ margin: '0 auto 8px', opacity: 0.4 }} />
+                                    Keine Tickets dieses Mieters vorhanden.
                                 </div>
                             ) : (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                    {tickets.map(ticket => (
-                                        <div
-                                            key={ticket.id}
-                                            onClick={() => navigate('/ticket-board')}
-                                            style={{
-                                                padding: '12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)',
-                                                display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer',
-                                                transition: 'all 0.2s', backgroundColor: 'rgba(255,255,255,0.01)'
-                                            }}
-                                            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.borderColor = 'var(--primary-color)'; }}
-                                            onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.borderColor = 'var(--border-color)'; }}
-                                        >
-                                            <div style={{ minWidth: 0, flex: 1, paddingRight: '12px' }}>
-                                                <div style={{ fontSize: '0.88rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket.title}</div>
-                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px', display: 'flex', gap: '8px' }}>
-                                                    <span>{formatDate(ticket.created_at)}</span>
-                                                    <span>•</span>
-                                                    <span>Prio: {ticket.priority}</span>
+                                    {tickets.map(ticket => {
+                                        const st = TICKET_STATUS[ticket.status] || { label: ticket.status, variant: 'default' };
+                                        return (
+                                            <div
+                                                key={ticket.id}
+                                                onClick={() => navigate('/ticket-board')}
+                                                style={{
+                                                    padding: '12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)',
+                                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer',
+                                                    transition: 'all 0.2s', backgroundColor: 'rgba(255,255,255,0.01)'
+                                                }}
+                                                onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.borderColor = 'var(--primary-color)'; }}
+                                                onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.borderColor = 'var(--border-color)'; }}
+                                            >
+                                                <div style={{ minWidth: 0, flex: 1, paddingRight: '12px' }}>
+                                                    <div style={{ fontSize: '0.88rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket.title}</div>
+                                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px', display: 'flex', gap: '8px' }}>
+                                                        <span>{formatDateDE(ticket.created_at)}</span>
+                                                        <span>•</span>
+                                                        <span>Priorität: {TICKET_PRIORITY[ticket.priority] || ticket.priority || 'Normal'}</span>
+                                                    </div>
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '6px' }}>
+                                                    <Badge variant={st.variant}>{st.label}</Badge>
                                                 </div>
                                             </div>
-                                            <div style={{ display: 'flex', gap: '6px' }}>
-                                                <Badge variant={getStatusColor(ticket.status)}>{ticket.status}</Badge>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -1043,7 +1676,8 @@ const TenantDetail = () => {
                     <Card title="Interne Notizen">
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                                Diese Notizen sind privat und nur für Sie sichtbar. Mieter haben keinen Zugriff darauf.
+                                Die Notizen werden nur lokal in diesem Browser gespeichert – nicht auf anderen Geräten und nicht für Mitnutzer sichtbar.
+                                Beim Löschen der Browserdaten gehen sie verloren. Mieter haben keinen Zugriff darauf.
                             </div>
                             <textarea
                                 value={notes}
@@ -1065,24 +1699,24 @@ const TenantDetail = () => {
                     {/* Tile 5: Mietvertrag */}
                     <Card
                         title="Mietvertrag"
-                        headerActions={
-                            <Button variant="ghost" size="sm" onClick={() => setIsEditLeaseOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        action={canEditLease ? (
+                            <Button variant="ghost" size="sm" onClick={openEditLease} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <Edit size={14} /> Bearbeiten
                             </Button>
-                        }
+                        ) : null}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '4px 0' }}>
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Mietbeginn</div>
                                     <div style={{ fontSize: '0.92rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
-                                        <Calendar size={14} color="var(--primary-color)" /> {formatDate(lease?.start_date)}
+                                        <Calendar size={14} color="var(--primary-color)" /> {formatDateDE(lease.start_date)}
                                     </div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Mietende</div>
                                     <div style={{ fontSize: '0.92rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
-                                        <Calendar size={14} color="var(--primary-color)" /> {lease?.end_date ? formatDate(lease.end_date) : 'Unbefristet'}
+                                        <Calendar size={14} color="var(--primary-color)" /> {lease.end_date ? formatDateDE(lease.end_date) : 'Unbefristet'}
                                     </div>
                                 </div>
                             </div>
@@ -1091,89 +1725,155 @@ const TenantDetail = () => {
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Vertragsart</div>
                                     <div style={{ fontSize: '0.92rem', fontWeight: 600, marginTop: '2px' }}>
-                                        {lease?.lease_type === 'staffel' ? 'Staffelvertrag' : lease?.lease_type === 'index' ? 'Indexvertrag' : 'Normalmietvertrag'}
+                                        {LEASE_TYPE_LABELS[lease.lease_type] || 'Normalmietvertrag'}
                                     </div>
                                 </div>
                                 <div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Kaution</div>
-                                    <div style={{ fontSize: '0.92rem', fontWeight: 600, marginTop: '2px' }}>{formatCurrency(lease?.deposit)}</div>
+                                    <div style={{ fontSize: '0.92rem', fontWeight: 600, marginTop: '2px' }}>{lease.deposit === null || lease.deposit === undefined ? '—' : formatEUR(lease.deposit)}</div>
                                 </div>
                             </div>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                                     <div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Letzte Mieterhöhung</div>
-                                        <div style={{ fontSize: '0.92rem', fontWeight: 500, marginTop: '2px' }}>{formatDate(lease?.last_rent_increase) || 'Bisher keine'}</div>
+                                        <div style={{ fontSize: '0.92rem', fontWeight: 500, marginTop: '2px' }}>{formatDateDE(lease.last_rent_increase, 'Bisher keine')}</div>
                                     </div>
                                     <Button
                                         size="sm"
                                         variant="secondary"
                                         icon={FileText}
+                                        disabled={isStaffelOrIndex}
+                                        title={isStaffelOrIndex ? 'Bei Staffel- oder Indexmiete ist eine Mieterhöhung nach § 558 BGB ausgeschlossen.' : undefined}
                                         onClick={() => navigate('/settings', {
                                             state: {
                                                 activeTab: 'document-templates',
                                                 templateId: 'rent_increase',
-                                                tenant: {
-                                                    first_name: lease?.tenant?.first_name,
-                                                    last_name: lease?.tenant?.last_name,
-                                                    gender: lease?.tenant?.gender,
-                                                    street: lease?.tenant?.street || lease?.unit?.property?.street,
-                                                    house_number: lease?.tenant?.house_number || lease?.unit?.property?.house_number,
-                                                    zip: lease?.tenant?.postal_code || lease?.unit?.property?.zip,
-                                                    city: lease?.tenant?.city || lease?.unit?.property?.city,
-                                                    objekt_name: lease?.unit?.property?.street,
-                                                    einheit_name: lease?.unit?.unit_name,
-                                                    cold_rent: lease?.cold_rent,
-                                                }
+                                                tenant: buildTemplateTenantData({
+                                                    lease: { ...lease, ...currentRent, id: lease.id, deposit: lease.deposit },
+                                                    tenant: lease.tenant,
+                                                    unit: lease.unit,
+                                                    property: lease.unit?.property
+                                                })
                                             }
                                         })}
                                     >
                                         Mieterhöhungsschreiben erstellen
                                     </Button>
                                 </div>
+                                {isStaffelOrIndex ? (
+                                    <div style={infoBoxStyle}>
+                                        Bei einer {lease.lease_type === 'staffel' ? 'Staffelmiete' : 'Indexmiete'} ist eine Erhöhung auf die ortsübliche
+                                        Vergleichsmiete (§ 558 BGB) ausgeschlossen; Anpassungen richten sich nach der vereinbarten
+                                        {lease.lease_type === 'staffel' ? ' Staffel (§ 557a BGB)' : ' Indexklausel (§ 557b BGB)'}.
+                                    </div>
+                                ) : earliestIncreaseRequest && (
+                                    <div style={increaseLocked ? warnBoxStyle : infoBoxStyle}>
+                                        Mieterhöhungsverlangen nach § 558 BGB frühestens ab <strong>{formatDateDE(earliestIncreaseRequest)}</strong> möglich
+                                        (12 Monate nach {lease.last_rent_increase ? 'der letzten Erhöhung' : 'Mietbeginn'}); wirksam frühestens ab{' '}
+                                        <strong>{formatDateDE(earliestIncreaseEffective)}</strong> (§ 558b BGB). Kappungsgrenze und ortsübliche Vergleichsmiete beachten.
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </Card>
 
                     {/* Tile 6: Finanzen / Mietkosten */}
-                    <Card title="Mietkosten & Fälligkeit">
+                    <Card
+                        title="Mietkosten & Fälligkeit"
+                        action={canEditLease ? (
+                            <Button variant="ghost" size="sm" onClick={openRentChange} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <TrendingUp size={14} /> Mietänderung
+                            </Button>
+                        ) : null}
+                    >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                {currentPeriod ? `Heute gültige Miete (seit ${currentPeriod.id === firstPeriodId ? 'Vertragsbeginn' : formatMonthDE(currentPeriod.valid_from)})` : 'Aktuelle Miete laut Vertrag'}
+                            </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border-color)', fontSize: '0.88rem' }}>
                                 <span style={{ color: 'var(--text-secondary)' }}>Kaltmiete:</span>
-                                <span style={{ fontWeight: 500 }}>{formatCurrency(lease?.cold_rent)}</span>
+                                <span style={{ fontWeight: 500 }}>{formatEUR(currentRent?.cold_rent)}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border-color)', fontSize: '0.88rem' }}>
                                 <span style={{ color: 'var(--text-secondary)' }}>Nebenkostenvorauszahlung:</span>
-                                <span style={{ fontWeight: 500 }}>{formatCurrency(lease?.service_charge)}</span>
+                                <span style={{ fontWeight: 500 }}>{formatEUR(currentRent?.service_charge)}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border-color)', fontSize: '0.88rem' }}>
                                 <span style={{ color: 'var(--text-secondary)' }}>Heizkostenvorauszahlung:</span>
-                                <span style={{ fontWeight: 500 }}>{formatCurrency(lease?.heating_cost)}</span>
+                                <span style={{ fontWeight: 500 }}>{formatEUR(currentRent?.heating_cost)}</span>
                             </div>
-                            {lease?.other_costs > 0 && (
+                            {toAmount(currentRent?.other_costs) > 0 && (
                                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border-color)', fontSize: '0.88rem' }}>
                                     <span style={{ color: 'var(--text-secondary)' }}>Sonstige Kosten:</span>
-                                    <span style={{ fontWeight: 500 }}>{formatCurrency(lease?.other_costs)}</span>
+                                    <span style={{ fontWeight: 500 }}>{formatEUR(currentRent?.other_costs)}</span>
                                 </div>
                             )}
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0 4px', fontSize: '1.05rem', fontWeight: 700 }}>
                                 <span>Warmmiete Gesamt:</span>
-                                <span style={{ color: 'var(--primary-color)' }}>{formatCurrency(totalWarmRent)}</span>
+                                <span style={{ color: 'var(--primary-color)' }}>{formatEUR(totalWarmRent)}</span>
                             </div>
 
                             <div style={{ borderTop: '1px dotted var(--border-color)', marginTop: '8px', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
                                 <span>Mietzahlung fällig am:</span>
-                                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{lease?.payment_due_day || 3}. Werktag des Monats</span>
+                                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{currentRent?.payment_due_day || 3}. des Monats (Kalendertag)</span>
                             </div>
+
+                            {rentPeriods.supported === true && rentPeriods.periods.length > 0 && (
+                                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Miethistorie</div>
+                                    {[...rentPeriods.periods].reverse().map(p => {
+                                        const isFirst = p.id === firstPeriodId;
+                                        const isPlanned = monthStart(p.valid_from) > monthStart(today);
+                                        const isCurrent = currentPeriod && p.id === currentPeriod.id;
+                                        return (
+                                            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', padding: '8px 10px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', fontSize: '0.78rem' }}>
+                                                <div style={{ minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', fontWeight: 600, fontSize: '0.82rem' }}>
+                                                        {isFirst ? `ab Vertragsbeginn (${formatDateDE(lease.start_date)})` : `ab ${formatMonthDE(p.valid_from)}`}
+                                                        {isCurrent && <Badge variant="success">aktuell</Badge>}
+                                                        {isPlanned && <Badge variant="blue">geplant</Badge>}
+                                                    </div>
+                                                    <div style={{ color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                                        Kalt {formatEUR(p.cold_rent)} · NK {formatEUR(p.service_charge)} · Heizung {formatEUR(p.heating_cost)}
+                                                        {toAmount(p.other_costs) > 0 ? ` · Sonstiges ${formatEUR(p.other_costs)}` : ''} · Warm {formatEUR(sumRent(p))} · fällig am {p.payment_due_day}.
+                                                    </div>
+                                                </div>
+                                                {!isFirst && canEditLease && (
+                                                    <button
+                                                        onClick={() => handleDeleteRentPeriod(p)}
+                                                        disabled={isSaving}
+                                                        style={{ background: 'none', border: 'none', padding: '4px', color: 'var(--danger-color)', cursor: 'pointer' }}
+                                                        title="Mietänderung löschen"
+                                                    >
+                                                        <Trash2 size={14} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                            {rentPeriods.supported === false && (
+                                <div style={warnBoxStyle}>
+                                    Die Miethistorie („gültig ab") ist in der Datenbank noch nicht eingerichtet. Änderungen von Miete,
+                                    Nebenkosten oder Zahltag wirken derzeit rückwirkend auf alle Monate seit Vertragsbeginn.
+                                </div>
+                            )}
+                            {rentPeriods.supported === null && rentPeriods.error && (
+                                <div style={tileErrorStyle}>
+                                    <AlertCircle size={14} /> Miethistorie konnte nicht geladen werden: {rentPeriods.error.message}
+                                </div>
+                            )}
                         </div>
                     </Card>
 
                     {/* Tile 7: Dokumente & Cloud-Explorer */}
                     <Card
                         title="Dokumente & Verträge"
-                        headerActions={
+                        action={canEditDocuments ? (
                             <div>
                                 <input
                                     type="file"
@@ -1181,33 +1881,33 @@ const TenantDetail = () => {
                                     style={{ display: 'none' }}
                                     accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
                                     onChange={(e) => {
-                                        if (lease?.unit?.property?.cloud_connection) {
+                                        if (lease.unit?.property?.cloud_connection) {
                                             handleCloudUpload(e.target.files);
                                         } else {
                                             handleUploadDocument(e.target.files);
                                         }
                                     }}
                                 />
-                                <Button 
-                                    variant="ghost" 
-                                    size="sm" 
-                                    onClick={() => fileInputRef.current?.click()} 
-                                    disabled={uploading || loadingCloud} 
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={uploading || loadingCloud || (!!lease.unit?.property?.cloud_connection && (cloudFolderMissing || !tenantCloudPath))}
                                     style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
                                 >
                                     {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} Hochladen
                                 </Button>
                             </div>
-                        }
+                        ) : null}
                     >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {lease?.unit?.property?.cloud_connection ? (
+                            {lease.unit?.property?.cloud_connection ? (
                                 <>
                                     {/* Cloud folder path badge */}
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                                         <Cloud size={14} style={{ color: 'var(--primary-color)' }} />
                                         <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={tenantCloudPath}>
-                                            Cloud: {tenantCloudPath}
+                                            Cloud: {tenantCloudPath || '—'}
                                         </span>
                                     </div>
 
@@ -1222,7 +1922,16 @@ const TenantDetail = () => {
                                                 <AlertCircle size={16} /> Fehler beim Laden der Cloud-Dateien
                                             </div>
                                             <div>{cloudError}</div>
-                                            <Button size="xs" variant="secondary" onClick={() => loadCloudFiles(lease.unit.property.cloud_connection.provider, tenantCloudPath, lease.unit.property.id)} style={{ alignSelf: 'flex-start' }}>Erneut versuchen</Button>
+                                            {tenantCloudPath && (
+                                                <Button size="xs" variant="secondary" onClick={() => loadCloudFiles(lease.unit.property.cloud_connection.provider, tenantCloudPath)} style={{ alignSelf: 'flex-start' }}>Erneut versuchen</Button>
+                                            )}
+                                        </div>
+                                    ) : cloudFolderMissing ? (
+                                        <div style={{ ...warnBoxStyle, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                            <div>Der Cloud-Ordner für dieses Mietverhältnis existiert noch nicht.</div>
+                                            {canEditDocuments && (
+                                                <Button size="xs" variant="secondary" onClick={handleCreateCloudFolder} style={{ alignSelf: 'flex-start' }}>Cloud-Ordner anlegen</Button>
+                                            )}
                                         </div>
                                     ) : cloudFiles.length === 0 ? (
                                         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
@@ -1260,13 +1969,15 @@ const TenantDetail = () => {
                                                                 <Download size={15} />
                                                             </button>
                                                         )}
-                                                        <button
-                                                            onClick={() => handleCloudDelete(file)}
-                                                            style={{ background: 'none', border: 'none', padding: '6px', color: 'var(--danger-color)', cursor: 'pointer' }}
-                                                            title="Löschen"
-                                                        >
-                                                            <Trash2 size={15} />
-                                                        </button>
+                                                        {canEditDocuments && (
+                                                            <button
+                                                                onClick={() => handleCloudDelete(file)}
+                                                                style={{ background: 'none', border: 'none', padding: '6px', color: 'var(--danger-color)', cursor: 'pointer' }}
+                                                                title="Löschen"
+                                                            >
+                                                                <Trash2 size={15} />
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 </div>
                                             ))}
@@ -1275,10 +1986,20 @@ const TenantDetail = () => {
                                 </>
                             ) : (
                                 <>
-                                    <div style={{ fontSize: '0.75rem', color: 'var(--warning-color)', backgroundColor: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.15)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                                        <AlertCircle size={14} /> Keine Cloud-Verbindung eingerichtet. Dateien werden lokal gespeichert.
-                                    </div>
-                                    {documents.length === 0 ? (
+                                    {cloudError ? (
+                                        <div style={tileErrorStyle}>
+                                            <AlertCircle size={14} /> {cloudError}
+                                        </div>
+                                    ) : (
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--warning-color)', backgroundColor: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.15)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                                            <AlertCircle size={14} /> Keine Cloud-Verbindung eingerichtet. Dateien werden lokal gespeichert.
+                                        </div>
+                                    )}
+                                    {documentsError ? (
+                                        <div style={tileErrorStyle}>
+                                            <AlertCircle size={14} /> Dokumente konnten nicht geladen werden: {documentsError}
+                                        </div>
+                                    ) : documents.length === 0 ? (
                                         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                                             <FileText size={28} style={{ margin: '0 auto 8px', opacity: 0.4 }} />
                                             Keine Dokumente für diesen Mieter hinterlegt.
@@ -1299,7 +2020,7 @@ const TenantDetail = () => {
                                                             {doc.file_name}
                                                         </div>
                                                         <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                                                            {formatDate(doc.created_at)}
+                                                            {formatDateDE(doc.created_at)}
                                                         </div>
                                                     </div>
                                                     <div style={{ display: 'flex', gap: '4px' }}>
@@ -1310,13 +2031,15 @@ const TenantDetail = () => {
                                                         >
                                                             <Download size={15} />
                                                         </button>
-                                                        <button
-                                                            onClick={() => handleDeleteDocument(doc)}
-                                                            style={{ background: 'none', border: 'none', padding: '6px', color: 'var(--danger-color)', cursor: 'pointer' }}
-                                                            title="Löschen"
-                                                        >
-                                                            <Trash2 size={15} />
-                                                        </button>
+                                                        {canEditDocuments && (
+                                                            <button
+                                                                onClick={() => handleDeleteDocument(doc)}
+                                                                style={{ background: 'none', border: 'none', padding: '6px', color: 'var(--danger-color)', cursor: 'pointer' }}
+                                                                title="Löschen"
+                                                            >
+                                                                <Trash2 size={15} />
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 </div>
                                             ))}
@@ -1333,42 +2056,53 @@ const TenantDetail = () => {
                             <Button
                                 variant="outline"
                                 fullWidth
-                                onClick={() => navigate(`/properties?unitId=${lease?.unit_id}`)}
+                                onClick={() => navigate(`/properties?unitId=${lease.unit_id}`)}
                                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
                             >
                                 <Home size={16} /> Einheit in Immobilien anzeigen
                             </Button>
 
-                            {lease?.status === 'active' ? (
-                                <Button
-                                    variant="warning"
-                                    fullWidth
-                                    onClick={handleTerminateLease}
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                                >
-                                    <Lock size={16} /> Mietverhältnis beenden
-                                </Button>
-                            ) : (
-                                <Button
-                                    variant="success"
-                                    fullWidth
-                                    onClick={handleReactivateLease}
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                                >
-                                    <RefreshCw size={16} /> Mietverhältnis reaktivieren
-                                </Button>
-                            )}
+                            {canEditLease && (
+                                <>
+                                    {timeState !== 'ended' && (
+                                        <Button
+                                            variant="warning"
+                                            fullWidth
+                                            onClick={openTerminate}
+                                            disabled={isSaving}
+                                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                                        >
+                                            <Lock size={16} /> {lease.end_date ? 'Vertragsende ändern' : 'Mietverhältnis beenden'}
+                                        </Button>
+                                    )}
+                                    {(timeState === 'ended' || lease.end_date) && (
+                                        <Button
+                                            variant="success"
+                                            fullWidth
+                                            onClick={handleReactivateLease}
+                                            disabled={isSaving}
+                                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                                        >
+                                            <RefreshCw size={16} /> {timeState === 'ended' ? 'Mietverhältnis reaktivieren' : 'Kündigung aufheben'}
+                                        </Button>
+                                    )}
 
-                            <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '8px', paddingTop: '14px' }}>
-                                <Button
-                                    variant="danger"
-                                    fullWidth
-                                    onClick={handleDeleteLease}
-                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                                >
-                                    <Trash2 size={16} /> Mietverhältnis unwiderruflich löschen
-                                </Button>
-                            </div>
+                                    <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '8px', paddingTop: '14px' }}>
+                                        <Button
+                                            variant="danger"
+                                            fullWidth
+                                            onClick={handleDeleteLease}
+                                            disabled={isSaving}
+                                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                                        >
+                                            <Trash2 size={16} /> Mietverhältnis löschen
+                                        </Button>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                                            Nur möglich, solange keine Zahlungen und Forderungen erfasst sind. Sonst bitte das Mietverhältnis beenden.
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </Card>
 
@@ -1376,258 +2110,414 @@ const TenantDetail = () => {
             </div>
 
             {/* EDIT TENANT MODAL */}
-            {isEditTenantOpen && (
-                <Modal title="Mieter-Stammdaten bearbeiten" onClose={() => setIsEditTenantOpen(false)}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <Input
-                                label="Vorname"
-                                value={tenantForm.first_name}
-                                onChange={(e) => setTenantForm({ ...tenantForm, first_name: e.target.value })}
-                            />
-                            <Input
-                                label="Nachname"
-                                value={tenantForm.last_name}
-                                onChange={(e) => setTenantForm({ ...tenantForm, last_name: e.target.value })}
-                            />
-                        </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <Input
-                                label="Telefon"
-                                value={tenantForm.phone}
-                                onChange={(e) => setTenantForm({ ...tenantForm, phone: e.target.value })}
-                            />
-                            <Input
-                                label="E-Mail"
-                                type="email"
-                                value={tenantForm.email}
-                                onChange={(e) => setTenantForm({ ...tenantForm, email: e.target.value })}
-                            />
-                        </div>
+            <Modal isOpen={isEditTenantOpen} title="Mieter-Stammdaten bearbeiten" onClose={() => setIsEditTenantOpen(false)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                         <Input
-                            label="Anzahl der Personen"
+                            label="Vorname"
+                            value={tenantForm.first_name}
+                            onChange={(e) => setTenantForm({ ...tenantForm, first_name: e.target.value })}
+                        />
+                        <Input
+                            label="Nachname"
+                            value={tenantForm.last_name}
+                            onChange={(e) => setTenantForm({ ...tenantForm, last_name: e.target.value })}
+                        />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <Input
+                            label="Telefon"
+                            value={tenantForm.phone}
+                            onChange={(e) => setTenantForm({ ...tenantForm, phone: e.target.value })}
+                        />
+                        <Input
+                            label="E-Mail"
+                            type="email"
+                            value={tenantForm.email}
+                            onChange={(e) => setTenantForm({ ...tenantForm, email: e.target.value })}
+                        />
+                    </div>
+                    <Input
+                        label="Anzahl der Personen"
+                        type="number"
+                        min="1"
+                        value={tenantForm.occupants}
+                        onChange={(e) => setTenantForm({ ...tenantForm, occupants: e.target.value })}
+                    />
+
+                    <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '8px', paddingTop: '16px' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>Kontakt- & Rechnungsadresse (falls abweichend)</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', marginBottom: '12px' }}>
+                            <Input
+                                label="Straße"
+                                value={tenantForm.street}
+                                onChange={(e) => setTenantForm({ ...tenantForm, street: e.target.value })}
+                            />
+                            <Input
+                                label="Hausnummer"
+                                value={tenantForm.house_number}
+                                onChange={(e) => setTenantForm({ ...tenantForm, house_number: e.target.value })}
+                            />
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '16px' }}>
+                            <Input
+                                label="PLZ"
+                                value={tenantForm.postal_code}
+                                onChange={(e) => setTenantForm({ ...tenantForm, postal_code: e.target.value })}
+                            />
+                            <Input
+                                label="Stadt"
+                                value={tenantForm.city}
+                                onChange={(e) => setTenantForm({ ...tenantForm, city: e.target.value })}
+                            />
+                        </div>
+                    </div>
+
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setIsEditTenantOpen(false)} disabled={isSaving}>Abbrechen</Button>
+                        <Button onClick={handleSaveTenant} disabled={isSaving}>
+                            {isSaving ? 'Speichert...' : 'Speichern'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* EDIT LEASE MODAL (Vertragsdaten) */}
+            <Modal isOpen={isEditLeaseOpen} title="Mietvertrag bearbeiten" onClose={() => setIsEditLeaseOpen(false)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <Input
+                            label="Mietbeginn"
+                            type="date"
+                            value={leaseForm.start_date}
+                            onChange={(e) => setLeaseForm({ ...leaseForm, start_date: e.target.value })}
+                        />
+                        <Input
+                            label="Mietende (optional)"
+                            type="date"
+                            value={leaseForm.end_date}
+                            onChange={(e) => setLeaseForm({ ...leaseForm, end_date: e.target.value })}
+                        />
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Vertragsart</label>
+                            <select
+                                value={leaseForm.lease_type}
+                                onChange={(e) => setLeaseForm({ ...leaseForm, lease_type: e.target.value })}
+                                style={selectStyle}
+                            >
+                                <option value="normal">Normalmietvertrag</option>
+                                <option value="staffel">Staffelmietvertrag</option>
+                                <option value="index">Indexmietvertrag</option>
+                            </select>
+                        </div>
+                        <CurrencyInput
+                            label="Kaution (€)"
+                            allowDecimals
+                            value={leaseForm.deposit}
+                            onChange={(e) => setLeaseForm({ ...leaseForm, deposit: e.target.value })}
+                        />
+                    </div>
+
+                    <Input
+                        label="Letzte Mieterhöhung (wirksam ab)"
+                        type="date"
+                        value={leaseForm.last_rent_increase}
+                        onChange={(e) => setLeaseForm({ ...leaseForm, last_rent_increase: e.target.value })}
+                    />
+
+                    <div style={infoBoxStyle}>
+                        Miete, Nebenkosten und Zahltag ändern Sie über <strong>„Mietänderung"</strong> in der Kachel „Mietkosten & Fälligkeit" –
+                        dort mit Datum, ab dem die neuen Werte gelten.
+                    </div>
+
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setIsEditLeaseOpen(false)} disabled={isSaving}>Abbrechen</Button>
+                        <Button onClick={handleSaveLease} disabled={isSaving}>
+                            {isSaving ? 'Speichert...' : 'Speichern'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* RENT CHANGE MODAL (Mietänderung ab Datum) */}
+            <Modal isOpen={isRentChangeOpen} title="Mietänderung" onClose={() => setIsRentChangeOpen(false)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '8px 0' }}>
+                    {rentPeriods.supported === true ? (
+                        <>
+                            <div style={infoBoxStyle}>
+                                Die neuen Werte gelten ab dem gewählten Monat. Frühere Monate im Mietkonto bleiben unverändert.
+                                Das Mietkonto wird monatsweise geführt – maßgeblich ist der Monat des Datums.
+                            </div>
+                            <Input
+                                label="Gültig ab"
+                                type="date"
+                                value={rentForm.valid_from}
+                                onChange={(e) => setRentForm({ ...rentForm, valid_from: e.target.value })}
+                            />
+                            {rentFormTarget && (
+                                <div style={rentFormIsCorrection ? warnBoxStyle : { fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                    {rentFormIsCorrection
+                                        ? `Korrektur der Anfangsmiete: gilt ab Vertragsbeginn (${formatDateDE(lease.start_date)}) – alle Monate werden neu berechnet.`
+                                        : `Wirksam ab ${formatMonthDE(rentFormTarget)}${rentFormTarget < monthStart(today) ? ' (rückwirkend)' : ''}.`}
+                                </div>
+                            )}
+                        </>
+                    ) : rentPeriods.supported === false ? (
+                        <div style={dangerBoxStyle}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, marginBottom: '4px', color: 'var(--danger-color)' }}>
+                                <AlertTriangle size={16} /> Achtung: Änderungen wirken rückwirkend
+                            </div>
+                            Die Miethistorie („gültig ab") ist in der Datenbank noch nicht eingerichtet. Eine Änderung von Miete,
+                            Nebenkosten oder Zahltag wirkt rückwirkend auf alle Monate seit Vertragsbeginn
+                            ({formatDateDE(lease.start_date)}). Vor dem Speichern müssen Sie dies ausdrücklich bestätigen.
+                        </div>
+                    ) : (
+                        <div style={tileErrorStyle}>
+                            <AlertCircle size={14} /> Die Miethistorie konnte nicht geladen werden. Speichern ist erst nach erneutem Laden möglich.
+                        </div>
+                    )}
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <CurrencyInput
+                            label="Kaltmiete (€)"
+                            allowDecimals
+                            value={rentForm.cold_rent}
+                            onChange={(e) => setRentForm({ ...rentForm, cold_rent: e.target.value })}
+                        />
+                        <CurrencyInput
+                            label="Nebenkostenvorauszahlung (€)"
+                            allowDecimals
+                            value={rentForm.service_charge}
+                            onChange={(e) => setRentForm({ ...rentForm, service_charge: e.target.value })}
+                        />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <CurrencyInput
+                            label="Heizkostenvorauszahlung (€)"
+                            allowDecimals
+                            value={rentForm.heating_cost}
+                            onChange={(e) => setRentForm({ ...rentForm, heating_cost: e.target.value })}
+                        />
+                        <CurrencyInput
+                            label="Sonstige Nebenkosten (€)"
+                            allowDecimals
+                            value={rentForm.other_costs}
+                            onChange={(e) => setRentForm({ ...rentForm, other_costs: e.target.value })}
+                        />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'end' }}>
+                        <Input
+                            label="Zahltag (Kalendertag 1–28)"
                             type="number"
                             min="1"
-                            value={tenantForm.occupants}
-                            onChange={(e) => setTenantForm({ ...tenantForm, occupants: e.target.value })}
+                            max="28"
+                            value={rentForm.payment_due_day}
+                            onChange={(e) => setRentForm({ ...rentForm, payment_due_day: e.target.value })}
                         />
-
-                        <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '8px', paddingTop: '16px' }}>
-                            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>Kontakt- & Rechnungsadresse (falls abweichend)</div>
-                            <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', marginBottom: '12px' }}>
-                                <Input
-                                    label="Straße"
-                                    value={tenantForm.street}
-                                    onChange={(e) => setTenantForm({ ...tenantForm, street: e.target.value })}
-                                />
-                                <Input
-                                    label="Hausnummer"
-                                    value={tenantForm.house_number}
-                                    onChange={(e) => setTenantForm({ ...tenantForm, house_number: e.target.value })}
-                                />
-                            </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '16px' }}>
-                                <Input
-                                    label="PLZ"
-                                    value={tenantForm.postal_code}
-                                    onChange={(e) => setTenantForm({ ...tenantForm, postal_code: e.target.value })}
-                                />
-                                <Input
-                                    label="Stadt"
-                                    value={tenantForm.city}
-                                    onChange={(e) => setTenantForm({ ...tenantForm, city: e.target.value })}
-                                />
-                            </div>
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px' }}>
-                            <Button variant="ghost" onClick={() => setIsEditTenantOpen(false)} disabled={isSaving}>Abbrechen</Button>
-                            <Button onClick={handleSaveTenant} disabled={isSaving}>
-                                {isSaving ? 'Speichert...' : 'Speichern'}
-                            </Button>
+                        <div style={{ marginBottom: 'var(--spacing-md)', fontSize: '0.9rem' }}>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Neue Warmmiete</div>
+                            <div style={{ fontWeight: 700 }}>{formatEUR(sumRent(rentForm))}</div>
                         </div>
                     </div>
-                </Modal>
-            )}
 
-            {/* EDIT LEASE MODAL */}
-            {isEditLeaseOpen && (
-                <Modal title="Mietvertrag bearbeiten" onClose={() => setIsEditLeaseOpen(false)}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <Input
-                                label="Mietbeginn"
-                                type="date"
-                                value={leaseForm.start_date}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, start_date: e.target.value })}
+                    {rentPeriods.supported === true && rentFormIsIncrease && !rentFormIsCorrection && rentFormTarget && (
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.82rem', cursor: 'pointer' }}>
+                            <input
+                                type="checkbox"
+                                checked={!!rentForm.mark_increase}
+                                onChange={(e) => setRentForm({ ...rentForm, mark_increase: e.target.checked })}
+                                style={{ marginTop: '2px' }}
                             />
-                            <Input
-                                label="Mietende (optional)"
-                                type="date"
-                                value={leaseForm.end_date}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, end_date: e.target.value })}
-                            />
-                        </div>
+                            Als Mieterhöhung vermerken („Letzte Mieterhöhung" = {formatDateDE(rentFormTarget)})
+                        </label>
+                    )}
 
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Vertragsart</label>
-                                <select
-                                    value={leaseForm.lease_type}
-                                    onChange={(e) => setLeaseForm({ ...leaseForm, lease_type: e.target.value })}
-                                    style={{
-                                        width: '100%', padding: '9px 12px', borderRadius: 'var(--radius-md)',
-                                        border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
-                                        backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)'
-                                    }}
-                                >
-                                    <option value="normal">Normalmietvertrag</option>
-                                    <option value="staffel">Staffelmietvertrag</option>
-                                    <option value="index">Indexmietvertrag</option>
-                                </select>
-                            </div>
-                            <Input
-                                label="Kaution (€)"
-                                type="number"
-                                step="0.01"
-                                value={leaseForm.deposit}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, deposit: e.target.value })}
-                            />
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                            <Input
-                                label="Kaltmiete (€)"
-                                type="number"
-                                step="0.01"
-                                value={leaseForm.cold_rent}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, cold_rent: e.target.value })}
-                            />
-                            <Input
-                                label="Nebenkostenvorauszahlung (€)"
-                                type="number"
-                                step="0.01"
-                                value={leaseForm.service_charge}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, service_charge: e.target.value })}
-                            />
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <Input
-                                label="Heizkostenvorauszahlung (€)"
-                                type="number"
-                                step="0.01"
-                                value={leaseForm.heating_cost}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, heating_cost: e.target.value })}
-                            />
-                            <Input
-                                label="Sonstige Nebenkosten (€)"
-                                type="number"
-                                step="0.01"
-                                value={leaseForm.other_costs}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, other_costs: e.target.value })}
-                            />
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                            <Input
-                                label="Zahltag (Tag im Monat, z.B. 3)"
-                                type="number"
-                                min="1"
-                                max="28"
-                                value={leaseForm.payment_due_day}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, payment_due_day: e.target.value })}
-                            />
-                            <Input
-                                label="Letzte Mieterhöhung"
-                                type="date"
-                                value={leaseForm.last_rent_increase}
-                                onChange={(e) => setLeaseForm({ ...leaseForm, last_rent_increase: e.target.value })}
-                            />
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px' }}>
-                            <Button variant="ghost" onClick={() => setIsEditLeaseOpen(false)} disabled={isSaving}>Abbrechen</Button>
-                            <Button onClick={handleSaveLease} disabled={isSaving}>
-                                {isSaving ? 'Speichert...' : 'Speichern'}
-                            </Button>
-                        </div>
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setIsRentChangeOpen(false)} disabled={isSaving}>Abbrechen</Button>
+                        <Button onClick={handleSaveRentChange} disabled={isSaving || rentPeriods.supported === null}>
+                            {isSaving ? 'Speichert...' : 'Speichern'}
+                        </Button>
                     </div>
-                </Modal>
-            )}
+                </div>
+            </Modal>
+
+            {/* TERMINATE MODAL */}
+            <Modal isOpen={isTerminateOpen} title={lease.end_date ? 'Vertragsende ändern' : 'Mietverhältnis beenden'} onClose={() => setIsTerminateOpen(false)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '8px 0' }}>
+                    <Input
+                        label="Vertragsende (letzter Miettag)"
+                        type="date"
+                        min={lease.start_date || undefined}
+                        value={terminateForm.end_date}
+                        onChange={(e) => setTerminateForm({ end_date: e.target.value })}
+                    />
+                    <div style={infoBoxStyle}>
+                        Bis einschließlich zu diesem Datum bleibt das Mietverhältnis aktiv (z. B. während der Kündigungsfrist);
+                        danach gilt es als beendet. Sollmieten werden bis einschließlich des Monats des Vertragsendes geführt.
+                    </div>
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setIsTerminateOpen(false)} disabled={isSaving}>Abbrechen</Button>
+                        <Button variant="danger" onClick={handleTerminateLease} disabled={isSaving}>
+                            {isSaving ? 'Speichert...' : 'Vertragsende speichern'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* CLAIM PAYMENT MODAL */}
+            <Modal isOpen={!!paymentClaim} title="Zahlung auf Forderung erfassen" onClose={() => setPaymentClaim(null)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '8px 0' }}>
+                    <div style={infoBoxStyle}>
+                        Die Zahlung wird über das Forderungsmodul gebucht (Verrechnung auf Gebühren, Zinsen und Hauptforderung,
+                        Eintrag im Verlauf). Offen: <strong>{paymentClaim?.total_due === null || paymentClaim?.total_due === undefined ? '—' : formatEUR(paymentClaim.total_due)}</strong>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <CurrencyInput
+                            label="Betrag (€)"
+                            allowDecimals
+                            value={paymentForm.amount}
+                            onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
+                        />
+                        <Input
+                            label="Zahlungsdatum"
+                            type="date"
+                            value={paymentForm.date}
+                            onChange={(e) => setPaymentForm({ ...paymentForm, date: e.target.value })}
+                        />
+                    </div>
+                    <Input
+                        label="Notiz (optional)"
+                        value={paymentForm.note}
+                        onChange={(e) => setPaymentForm({ ...paymentForm, note: e.target.value })}
+                    />
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setPaymentClaim(null)} disabled={isSaving}>Abbrechen</Button>
+                        <Button onClick={handleRecordClaimPayment} disabled={isSaving}>
+                            {isSaving ? 'Bucht...' : 'Zahlung buchen'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* CLAIM WRITE-OFF MODAL */}
+            <Modal isOpen={!!writeOffClaim} title="Forderungsausfall buchen" onClose={() => setWriteOffClaim(null)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '8px 0' }}>
+                    <div style={warnBoxStyle}>
+                        Die Forderung wird mit dem Status <strong>„Storniert"</strong> und dem Grund „Forderungsausfall" abgeschlossen und im
+                        Verlauf protokolliert. Es wird keine Zahlung gebucht; die betroffenen Mietmonate bleiben im Mietkonto offen.
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Grund (Pflichtfeld)</label>
+                        <textarea
+                            value={writeOffForm.reason}
+                            onChange={(e) => setWriteOffForm({ reason: e.target.value })}
+                            placeholder="z. B. Mieter unbekannt verzogen, Insolvenz, Vollstreckung erfolglos"
+                            style={{
+                                width: '100%', height: '90px', padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                                border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
+                                backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontFamily: 'inherit', resize: 'vertical'
+                            }}
+                        />
+                    </div>
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setWriteOffClaim(null)} disabled={isSaving}>Abbrechen</Button>
+                        <Button variant="danger" onClick={handleWriteOffClaim} disabled={isSaving || !writeOffForm.reason.trim()}>
+                            {isSaving ? 'Speichert...' : 'Ausfall buchen'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
 
             {/* CREATE TICKET MODAL */}
-            {isTicketModalOpen && (
-                <Modal title="Support-Ticket erstellen" onClose={() => setIsTicketModalOpen(false)}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
-                        <Input
-                            label="Titel / Betreff"
-                            placeholder="z.B. Heizung im Wohnzimmer defekt"
-                            value={ticketForm.title}
-                            onChange={(e) => setTicketForm({ ...ticketForm, title: e.target.value })}
+            <Modal isOpen={isTicketModalOpen} title="Ticket erstellen" onClose={() => setIsTicketModalOpen(false)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
+                    <Input
+                        label="Titel / Betreff"
+                        placeholder="z.B. Heizung im Wohnzimmer defekt"
+                        value={ticketForm.title}
+                        onChange={(e) => setTicketForm({ ...ticketForm, title: e.target.value })}
+                    />
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Beschreibung</label>
+                        <textarea
+                            placeholder="Genaue Beschreibung des Problems..."
+                            value={ticketForm.description}
+                            onChange={(e) => setTicketForm({ ...ticketForm, description: e.target.value })}
+                            style={{
+                                width: '100%', height: '100px', padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                                border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
+                                backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontFamily: 'inherit',
+                                resize: 'vertical'
+                            }}
                         />
-
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Beschreibung</label>
-                            <textarea
-                                placeholder="Genaue Beschreibung des Problems..."
-                                value={ticketForm.description}
-                                onChange={(e) => setTicketForm({ ...ticketForm, description: e.target.value })}
-                                style={{
-                                    width: '100%', height: '100px', padding: '10px 12px', borderRadius: 'var(--radius-md)',
-                                    border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
-                                    backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontFamily: 'inherit',
-                                    resize: 'vertical'
-                                }}
-                            />
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Priorität</label>
-                                <select
-                                    value={ticketForm.priority}
-                                    onChange={(e) => setTicketForm({ ...ticketForm, priority: e.target.value })}
-                                    style={{
-                                        width: '100%', padding: '9px 12px', borderRadius: 'var(--radius-md)',
-                                        border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
-                                        backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)'
-                                    }}
-                                >
-                                    <option value="low">Niedrig</option>
-                                    <option value="medium">Mittel</option>
-                                    <option value="high">Hoch</option>
-                                </select>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Kategorie</label>
-                                <select
-                                    value={ticketForm.category}
-                                    onChange={(e) => setTicketForm({ ...ticketForm, category: e.target.value })}
-                                    style={{
-                                        width: '100%', padding: '9px 12px', borderRadius: 'var(--radius-md)',
-                                        border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem',
-                                        backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)'
-                                    }}
-                                >
-                                    <option value="repair">Reparatur</option>
-                                    <option value="billing">Nebenkosten/Abrechnung</option>
-                                    <option value="administrative">Verwaltung</option>
-                                    <option value="other">Sonstiges</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px' }}>
-                            <Button variant="ghost" onClick={() => setIsTicketModalOpen(false)} disabled={isSaving}>Abbrechen</Button>
-                            <Button onClick={handleCreateTicket} disabled={isSaving}>
-                                {isSaving ? 'Erstellt...' : 'Ticket erstellen'}
-                            </Button>
-                        </div>
                     </div>
-                </Modal>
-            )}
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Priorität</label>
+                        <select
+                            value={ticketForm.priority}
+                            onChange={(e) => setTicketForm({ ...ticketForm, priority: e.target.value })}
+                            style={selectStyle}
+                        >
+                            <option value="low">Niedrig</option>
+                            <option value="normal">Normal</option>
+                            <option value="high">Hoch</option>
+                            <option value="urgent">Dringend</option>
+                        </select>
+                    </div>
+
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        Das Ticket wird dem Mieter zugeordnet und ist für ihn im Mieterportal sichtbar.
+                    </div>
+
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setIsTicketModalOpen(false)} disabled={isSaving}>Abbrechen</Button>
+                        <Button onClick={handleCreateTicket} disabled={isSaving}>
+                            {isSaving ? 'Erstellt...' : 'Ticket erstellen'}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* RÜCKWIRKUNGS-WARNUNG (solange die Miethistorie in der DB fehlt) */}
+            <Modal isOpen={!!retroWarning} title={retroWarning?.title || 'Achtung'} onClose={() => setRetroWarning(null)}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', padding: '8px 0' }}>
+                    <div style={{ ...dangerBoxStyle, whiteSpace: 'pre-line' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, marginBottom: '6px', color: 'var(--danger-color)' }}>
+                            <AlertTriangle size={16} /> Diese Änderung wirkt rückwirkend auf alle Monate seit Vertragsbeginn
+                        </div>
+                        {retroWarning?.message}
+                    </div>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.85rem', cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={retroAccepted}
+                            onChange={(e) => setRetroAccepted(e.target.checked)}
+                            style={{ marginTop: '3px' }}
+                        />
+                        {RETRO_CONFIRM_LABEL}
+                    </label>
+                    <div style={modalFooterStyle}>
+                        <Button variant="ghost" onClick={() => setRetroWarning(null)} disabled={isSaving}>Abbrechen</Button>
+                        <Button
+                            variant="danger"
+                            disabled={!retroAccepted || isSaving}
+                            onClick={async () => {
+                                const confirmFn = retroWarning?.onConfirm;
+                                setRetroWarning(null);
+                                setRetroAccepted(false);
+                                if (confirmFn) await confirmFn();
+                            }}
+                        >
+                            Trotzdem rückwirkend speichern
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
 
         </div>
     );

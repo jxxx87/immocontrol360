@@ -1,10 +1,13 @@
-import React from 'react';
+import React, { useId } from 'react';
 
-const Input = ({ label, type = 'text', placeholder, value, onChange, ...props }) => {
+const Input = ({ label, type = 'text', placeholder, value, onChange, style, id, ...props }) => {
+    const generatedId = useId();
+    const inputId = id || generatedId;
+
     return (
         <div style={{ marginBottom: 'var(--spacing-md)' }}>
             {label && (
-                <label style={{
+                <label htmlFor={inputId} style={{
                     display: 'block',
                     marginBottom: '0.25rem',
                     fontWeight: 500,
@@ -14,7 +17,10 @@ const Input = ({ label, type = 'text', placeholder, value, onChange, ...props })
                     {label}
                 </label>
             )}
+            {/* Übrige Props zuerst, damit sie den zusammengeführten style nicht überschreiben */}
             <input
+                {...props}
+                id={inputId}
                 type={type}
                 placeholder={placeholder}
                 value={value}
@@ -24,9 +30,8 @@ const Input = ({ label, type = 'text', placeholder, value, onChange, ...props })
                     // managed by global CSS
                     fontSize: '0.875rem',
                     outline: 'none',
-                    ...props.style
+                    ...style
                 }}
-                {...props}
             />
         </div>
     );

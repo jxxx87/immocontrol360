@@ -263,6 +263,31 @@ export const getColumnsForPreset = (reportType, preset = 'compact') => {
         .map(c => c.key);
 };
 
+// Einheitliche Standard-Optionen für Schnell-Export (Dropdown) und Export-Dialog
+export const getDefaultExportOptions = (reportType) => {
+    const config = REPORT_CONFIGS[reportType];
+    const extraOptions = {};
+    (config?.extraOptions || []).forEach(o => { extraOptions[o.key] = o.default ?? false; });
+    return {
+        orientation: 'auto',
+        showSums: config?.sumsEnabled ?? false,
+        groupByProperty: false,
+        dsgvoAnonymize: false,
+        extraOptions,
+    };
+};
+
+// 'YYYY-MM-DD' als lokales Datum lesen (new Date('YYYY-MM-DD') wäre UTC-Mitternacht)
+const parseDateValue = (value) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value).trim());
+    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return new Date(value);
+};
+
+// Lokales Datum 'YYYY-MM-DD' (toISOString wäre UTC -> kurz nach Mitternacht der Vortag)
+const localDateStamp = (date = new Date()) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
 // Format helpers (German locale)
 export const formatValue = (value, format) => {
     if (value === null || value === undefined) return '–';
@@ -275,9 +300,11 @@ export const formatValue = (value, format) => {
             return `${Number(value * 100).toLocaleString('de-DE', { minimumFractionDigits: 1 })} %`;
         case 'decimal':
             return Number(value).toLocaleString('de-DE', { minimumFractionDigits: 2 });
-        case 'date':
+        case 'date': {
             if (!value) return '–';
-            return new Date(value).toLocaleDateString('de-DE');
+            const d = parseDateValue(value);
+            return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString('de-DE');
+        }
         default:
             return String(value);
     }
@@ -289,7 +316,7 @@ export const generateFilename = (reportType, portfolioName, propertyName = null)
     const label = config?.label || 'Report';
     const shortLabel = label.replace(/übersicht|report/gi, '').trim() || label;
     const objectName = propertyName || portfolioName || 'Export';
-    const clean = (s) => s.replace(/[^a-zA-Z0-9äöüÄÖÜß\-_\s]/g, '').replace(/\s+/g, '_').substring(0, 30);
-    const date = new Date().toISOString().split('T')[0];
+    const clean = (s) => String(s || '').replace(/[^a-zA-Z0-9äöüÄÖÜß\-_\s]/g, '').replace(/\s+/g, '_').substring(0, 30);
+    const date = localDateStamp();
     return `${clean(shortLabel)}_${clean(objectName)}_${date}.pdf`;
 };

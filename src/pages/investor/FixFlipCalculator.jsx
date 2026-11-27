@@ -1,78 +1,199 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
-import { Save, Info, ChevronLeft, ChevronRight, Calculator, FileText } from 'lucide-react';
+import { Save, Info, ChevronLeft, ChevronRight, Calculator, FileText, Trash2, Loader2 } from 'lucide-react';
 import { generateClientPdf } from '../../lib/pdfGenerator';
 import { usePdfTemplate } from '../../lib/usePdfTemplate';
 import { useNavigate } from 'react-router-dom';
 import { useViewMode } from '../../context/ViewModeContext';
 import { supabase } from '../../lib/supabase';
-
-const statesTaxRef = [
-    { name: 'Bayern', tax: 3.5 },
-    { name: 'Hamburg', tax: 4.5 },
-    { name: 'Baden-Württemberg', tax: 5.0 },
-    { name: 'Bremen', tax: 5.0 },
-    { name: 'Rheinland-Pfalz', tax: 5.0 },
-    { name: 'Sachsen-Anhalt', tax: 5.0 },
-    { name: 'Sachsen', tax: 5.5 },
-    { name: 'Schleswig-Holstein', tax: 5.5 },
-    { name: 'Berlin', tax: 6.0 },
-    { name: 'Hessen', tax: 6.0 },
-    { name: 'Mecklenburg-Vorpommern', tax: 6.0 },
-    { name: 'Brandenburg', tax: 6.5 },
-    { name: 'Nordrhein-Westfalen', tax: 6.5 },
-    { name: 'Saarland', tax: 6.5 },
-    { name: 'Niedersachsen', tax: 5.0 },
-    { name: 'Thüringen', tax: 5.0 }
-];
+import { translateError } from '../../lib/errorTranslator';
+import { TRANSFER_TAX_RATES, TRANSFER_TAX_RATES_AS_OF } from './transferTaxRates';
 
 const formatCurrency = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(val);
 const formatCurrency2 = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val);
 const formatPercent = (val) => new Intl.NumberFormat('de-DE', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val / 100);
 
-const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) => {
-    const navigate = useNavigate();
-    const [inputs, setInputs] = useState({
-        purchasePrice: 0,
-        size: 0,
-        notaryPercent: 2,
-        brokerPercent: 3.6,
-        taxPercent: 5,
-        financing: 0,
-        interestRate: 5.5,
-        duration: 8,
-        houseMoney: 0,
-        electricity: 0,
-        heating: 0,
-        renovation: 0,
-        kitchen: 0,
-        staging: 0,
-        misc: 0,
-        priceLowSqm: 3500,
-        priceHighSqm: 3900,
-        // Szenario: Verkauf als Kapitalanlage
-        coldRentIst: 0,
-        coldRentSoll: 0,
-        targetYield: 5,
-        name: 'Neuer Fix & Flip Deal',
-        address: ''
-    });
+const DEFAULT_INPUTS = {
+    purchasePrice: 0,
+    size: 0,
+    notaryPercent: 2,
+    brokerPercent: 3.6,
+    taxPercent: 5,
+    financing: 0,
+    interestRate: 5.5,
+    duration: 8,
+    houseMoney: 0,
+    electricity: 0,
+    heating: 0,
+    renovation: 0,
+    kitchen: 0,
+    staging: 0,
+    misc: 0,
+    priceLowSqm: 3500,
+    priceHighSqm: 3900,
+    // Szenario: Verkauf als Kapitalanlage
+    coldRentIst: 0,
+    coldRentSoll: 0,
+    targetYield: 5,
+    name: 'Neuer Fix & Flip Deal',
+    address: ''
+};
 
-    const [results, setResults] = useState(null);
-    const [negotiationTable, setNegotiationTable] = useState([]);
+const NUMERIC_FIELDS = Object.keys(DEFAULT_INPUTS).filter(k => typeof DEFAULT_INPUTS[k] === 'number');
+
+/**
+ * Geladene Deal-Daten bereinigen: Zahlenfelder als Zahl übernehmen (leere/ungültige
+ * Werte → Standardwert), damit z. B. ein leerer Kaufpreis ('') nicht als Text in die
+ * Summen eingeht.
+ */
+const sanitizeInitialData = (data) => {
+    if (!data) return {};
+    const out = { ...data };
+    for (const k of NUMERIC_FIELDS) {
+        if (k in out) {
+            const n = parseFloat(out[k]);
+            out[k] = Number.isFinite(n) ? Math.max(0, n) : DEFAULT_INPUTS[k];
+        }
+    }
+    if ('name' in out) out.name = out.name == null ? DEFAULT_INPUTS.name : String(out.name);
+    if ('address' in out) out.address = out.address == null ? '' : String(out.address);
+    return out;
+};
+
+/* ─── Berechnung (rein, ohne State) ─── */
+const computeFixFlip = (inputs) => {
+    const {
+        purchasePrice, size, notaryPercent, brokerPercent, taxPercent,
+        financing, interestRate, duration,
+        houseMoney, electricity, heating,
+        renovation, kitchen, staging, misc,
+        priceLowSqm, priceHighSqm
+    } = inputs;
+
+    // 1. Kaufnebenkosten (ohne Finanzierung)
+    const notary = purchasePrice * (notaryPercent / 100);
+    const broker = purchasePrice * (brokerPercent / 100);
+    const tax = purchasePrice * (taxPercent / 100);
+    const sideCostsTotal = notary + broker + tax;
+
+    // Gesamtsumme Ankauf (Kaufpreis + Nebenkosten, OHNE Finanzierung)
+    const acquisitionTotal = purchasePrice + sideCostsTotal;
+
+    // Finanzierungskosten (Zins auf Finanzierungsbetrag)
+    const financingCosts = (financing * (interestRate / 100) / 12) * duration;
+
+    // 2. Holding Costs
+    const holdingTotal = (houseMoney + electricity + heating) * duration;
+
+    // 3. Aufbereitung
+    const prepTotal = renovation + kitchen + staging + misc;
+
+    // 4. Gesamtinvestment (GIK)
+    const totalInvest = acquisitionTotal + financingCosts + holdingTotal + prepTotal;
+
+    // 5. Verkauf
+    const sellPriceLow = size * priceLowSqm;
+    const sellPriceHigh = size * priceHighSqm;
+
+    const profitLow = sellPriceLow - totalInvest;
+    const profitHigh = sellPriceHigh - totalInvest;
+
+    const marginLow = sellPriceLow > 0 ? (profitLow / sellPriceLow) * 100 : 0;
+    const marginHigh = sellPriceHigh > 0 ? (profitHigh / sellPriceHigh) * 100 : 0;
+
+    const breakEven = size > 0 ? totalInvest / size : 0;
+
+    // 6. Szenario: Verkauf als Kapitalanlage
+    const { coldRentIst, coldRentSoll, targetYield } = inputs;
+    const yieldDecimal = targetYield > 0 ? targetYield / 100 : 0;
+
+    const kapSellIst = yieldDecimal > 0 ? (coldRentIst * 12) / yieldDecimal : 0;
+    const kapSellSoll = yieldDecimal > 0 ? (coldRentSoll * 12) / yieldDecimal : 0;
+
+    const kapSqmIst = size > 0 ? kapSellIst / size : 0;
+    const kapSqmSoll = size > 0 ? kapSellSoll / size : 0;
+
+    const kapProfitIst = kapSellIst - totalInvest;
+    const kapProfitSoll = kapSellSoll - totalInvest;
+
+    const kapMarginIst = kapSellIst > 0 ? (kapProfitIst / kapSellIst) * 100 : 0;
+    const kapMarginSoll = kapSellSoll > 0 ? (kapProfitSoll / kapSellSoll) * 100 : 0;
+
+    const results = {
+        acquisitionTotal,
+        sideCostsTotal,
+        notary, broker, tax, financingCosts,
+        holdingTotal,
+        prepTotal,
+        totalInvest,
+        sellPriceLow, sellPriceHigh,
+        profitLow, profitHigh,
+        marginLow, marginHigh,
+        breakEven,
+        // Kapitalanlage
+        kapSellIst, kapSellSoll,
+        kapSqmIst, kapSqmSoll,
+        kapProfitIst, kapProfitSoll,
+        kapMarginIst, kapMarginSoll
+    };
+
+    // Ankaufs-Matrix (Finanzierungsbetrag bleibt unverändert; GIK wie im Hauptergebnis inkl. Finanzierungskosten)
+    const steps = [5, 10, 15, 20, 25, 30];
+    const table = steps.map(discount => {
+        const discountedPrice = purchasePrice * (1 - discount / 100);
+        const d_notary = discountedPrice * (notaryPercent / 100);
+        const d_broker = discountedPrice * (brokerPercent / 100);
+        const d_tax = discountedPrice * (taxPercent / 100);
+
+        // GIK inkl. Finanzierungskosten – identisch zur Berechnung von „Gesamtinvestment (GIK)"
+        const d_totalInvest = discountedPrice + d_notary + d_broker + d_tax + financingCosts + holdingTotal + prepTotal;
+        const d_profitLow = sellPriceLow - d_totalInvest;
+        const d_marginLow = sellPriceLow > 0 ? (d_profitLow / sellPriceLow) * 100 : 0;
+
+        const d_profitHigh = sellPriceHigh - d_totalInvest;
+        const d_marginHigh = sellPriceHigh > 0 ? (d_profitHigh / sellPriceHigh) * 100 : 0;
+
+        return {
+            discount,
+            gik: d_totalInvest,
+            profitLow: d_profitLow,
+            marginLow: d_marginLow,
+            profitHigh: d_profitHigh,
+            marginHigh: d_marginHigh
+        };
+    });
+    return { results, negotiationTable: table };
+};
+
+/* ─── Bewertung: monoton – mehr Marge und mehr Gewinn verschlechtern die Einstufung nie ─── */
+const getBadge = (margin, profit) => {
+    if (margin >= 20 && profit >= 50000) return <span style={{ backgroundColor: 'var(--success-color)', color: '#fff', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>EXZELLENT</span>;
+    if (margin >= 15 && profit >= 25000) return <span style={{ backgroundColor: 'var(--warning-color)', color: '#000', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>GUT</span>;
+    return <span style={{ backgroundColor: 'var(--danger-color)', color: '#fff', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>RISIKO</span>;
+};
+
+const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, dealId }) => {
+    const navigate = useNavigate();
+
+    // Geladene Deal-Daten nur übernehmen, wenn sich ihr INHALT ändert (neuer/anderer Deal) –
+    // nicht bei jedem Neu-Rendern des Elternteils mit einem neu erzeugten, gleichen Objekt.
+    const initialKey = JSON.stringify(initialData || null);
+    const [inputs, setInputs] = useState(() => ({ ...DEFAULT_INPUTS, ...sanitizeInitialData(initialData) }));
+    const [appliedKey, setAppliedKey] = useState(initialKey);
+    if (appliedKey !== initialKey) {
+        setAppliedKey(initialKey);
+        if (initialData) setInputs(prev => ({ ...prev, ...sanitizeInitialData(initialData) }));
+    }
+
     const [showTaxInfo, setShowTaxInfo] = useState(false);
     const [flipStep, setFlipStep] = useState(0);
+    const [openingRenovation, setOpeningRenovation] = useState(false);
+    const [deleting, setDeleting] = useState(false);
     const { isMobile } = useViewMode();
     const pdfTemplate = usePdfTemplate('deal_kalkulation');
     const flipStepLabels = ['Investition', 'Haltekosten', 'Aufbereitung', 'Verkauf', 'Ergebnis'];
     const flipStepCount = flipStepLabels.length;
-
-    useEffect(() => {
-        if (initialData) {
-            setInputs(prev => ({ ...prev, ...initialData }));
-        }
-    }, [initialData]);
 
     const handleChange = (field, value, isPercent = false) => {
         const val = parseFloat(value);
@@ -89,120 +210,67 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
     };
 
     // Calculation Logic
-    useEffect(() => {
-        calculate();
-    }, [inputs]);
+    const { results, negotiationTable } = useMemo(() => computeFixFlip(inputs), [inputs]);
 
-    const calculate = () => {
-        const {
-            purchasePrice, size, notaryPercent, brokerPercent, taxPercent,
-            financing, interestRate, duration,
-            houseMoney, electricity, heating,
-            renovation, kitchen, staging, misc,
-            priceLowSqm, priceHighSqm
-        } = inputs;
+    /* ─── Sprung in den Sanierungsrechner ───
+       Mit verknüpftem Deal: vorher speichern (keine Eingaben gehen verloren, die Sanierungssumme
+       wird in den aktuellen Stand zurückgeschrieben) und die vorhandene Kalkulation öffnen.
+       Ohne Deal-ID: Hinweis, dass ungespeicherte Eingaben verloren gehen und die Summe nicht
+       automatisch übernommen wird. */
+    const openRenovationCalculator = async () => {
+        if (openingRenovation) return;
+        const currentName = encodeURIComponent(inputs.name || 'Fix & Flip Deal');
 
-        // 1. Kaufnebenkosten (ohne Finanzierung)
-        const notary = purchasePrice * (notaryPercent / 100);
-        const broker = purchasePrice * (brokerPercent / 100);
-        const tax = purchasePrice * (taxPercent / 100);
-        const sideCostsTotal = notary + broker + tax;
+        if (!dealId) {
+            const proceed = window.confirm(
+                'Dieser Deal ist nicht mit dem Sanierungsrechner verknüpft.\n\n'
+                + 'Nicht gespeicherte Eingaben gehen beim Wechsel verloren, und die ermittelte Sanierungssumme '
+                + 'muss anschließend von Hand in das Feld „Sanierung/Renovierung" übertragen werden. '
+                + 'Sichern Sie Ihre Eingaben vorher über „Aktualisieren".\n\n'
+                + 'Trotzdem zum Sanierungsrechner wechseln?'
+            );
+            if (!proceed) return;
+            const ret = encodeURIComponent('/investor-portal?tab=deals');
+            navigate(`/renovation/calculator/new?dealName=${currentName}&returnTo=${ret}`);
+            return;
+        }
 
-        // Gesamtsumme Ankauf (Kaufpreis + Nebenkosten, OHNE Finanzierung)
-        const acquisitionTotal = purchasePrice + sideCostsTotal;
-
-        // Finanzierungskosten (Zins auf Finanzierungsbetrag)
-        const financingCosts = (financing * (interestRate / 100) / 12) * duration;
-
-        // 2. Holding Costs
-        const holdingTotal = (houseMoney + electricity + heating) * duration;
-
-        // 3. Aufbereitung
-        const prepTotal = renovation + kitchen + staging + misc;
-
-        // 4. Gesamtinvestment (GIK)
-        const totalInvest = acquisitionTotal + financingCosts + holdingTotal + prepTotal;
-
-        // 5. Verkauf
-        const sellPriceLow = size * priceLowSqm;
-        const sellPriceHigh = size * priceHighSqm;
-
-        const profitLow = sellPriceLow - totalInvest;
-        const profitHigh = sellPriceHigh - totalInvest;
-
-        const marginLow = sellPriceLow > 0 ? (profitLow / sellPriceLow) * 100 : 0;
-        const marginHigh = sellPriceHigh > 0 ? (profitHigh / sellPriceHigh) * 100 : 0;
-
-        const breakEven = size > 0 ? totalInvest / size : 0;
-
-        // 6. Szenario: Verkauf als Kapitalanlage
-        const { coldRentIst, coldRentSoll, targetYield } = inputs;
-        const yieldDecimal = targetYield > 0 ? targetYield / 100 : 0;
-
-        const kapSellIst = yieldDecimal > 0 ? (coldRentIst * 12) / yieldDecimal : 0;
-        const kapSellSoll = yieldDecimal > 0 ? (coldRentSoll * 12) / yieldDecimal : 0;
-
-        const kapSqmIst = size > 0 ? kapSellIst / size : 0;
-        const kapSqmSoll = size > 0 ? kapSellSoll / size : 0;
-
-        const kapProfitIst = kapSellIst - totalInvest;
-        const kapProfitSoll = kapSellSoll - totalInvest;
-
-        const kapMarginIst = kapSellIst > 0 ? (kapProfitIst / kapSellIst) * 100 : 0;
-        const kapMarginSoll = kapSellSoll > 0 ? (kapProfitSoll / kapSellSoll) * 100 : 0;
-
-        setResults({
-            acquisitionTotal,
-            sideCostsTotal,
-            notary, broker, tax, financingCosts,
-            holdingTotal,
-            prepTotal,
-            totalInvest,
-            sellPriceLow, sellPriceHigh,
-            profitLow, profitHigh,
-            marginLow, marginHigh,
-            breakEven,
-            // Kapitalanlage
-            kapSellIst, kapSellSoll,
-            kapSqmIst, kapSqmSoll,
-            kapProfitIst, kapProfitSoll,
-            kapMarginIst, kapMarginSoll
-        });
-
-        // Ankaufs-Matrix
-        const steps = [5, 10, 15, 20, 25, 30];
-        const table = steps.map(discount => {
-            const discountedPrice = purchasePrice * (1 - discount / 100);
-            const d_notary = discountedPrice * (notaryPercent / 100);
-            const d_broker = discountedPrice * (brokerPercent / 100);
-            const d_tax = discountedPrice * (taxPercent / 100);
-
-            // GIK ohne Finanzierung/Zins
-            const d_gik = discountedPrice + d_notary + d_broker + d_tax + holdingTotal + prepTotal;
-
-            const d_totalInvest = d_gik + financingCosts;
-            const d_profitLow = sellPriceLow - d_totalInvest;
-            const d_marginLow = sellPriceLow > 0 ? (d_profitLow / sellPriceLow) * 100 : 0;
-
-            const d_profitHigh = sellPriceHigh - d_totalInvest;
-            const d_marginHigh = sellPriceHigh > 0 ? (d_profitHigh / sellPriceHigh) * 100 : 0;
-
-            return {
-                discount,
-                gik: d_gik,
-                profitLow: d_profitLow,
-                marginLow: d_marginLow,
-                profitHigh: d_profitHigh,
-                marginHigh: d_marginHigh
-            };
-        });
-        setNegotiationTable(table);
+        setOpeningRenovation(true);
+        try {
+            if (onSave) {
+                const saved = await onSave(inputs, results, { skipNavigate: true });
+                if (saved === false) return;
+            }
+            const ret = encodeURIComponent(`/investor-portal?tab=audit&dealId=${dealId}`);
+            const { data, error } = await supabase
+                .from('renovation_calculations')
+                .select('id')
+                .contains('building_config', { dealId })
+                .limit(1);
+            if (error) throw error;
+            if (data && data.length > 0) {
+                navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
+            } else {
+                navigate(`/renovation/calculator/new?dealId=${dealId}&dealName=${currentName}&returnTo=${ret}`);
+            }
+        } catch (err) {
+            console.error('Open renovation calculator error:', err);
+            alert('Sanierungsrechner konnte nicht geöffnet werden: ' + translateError(err));
+        } finally {
+            setOpeningRenovation(false);
+        }
     };
 
-    const getBadge = (margin, profit) => {
-        if (margin >= 20 && profit >= 50000) return <span style={{ backgroundColor: 'var(--success-color)', color: '#fff', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>EXZELLENT</span>;
-        if ((margin >= 15 && margin < 20) || (profit >= 25000 && profit < 50000)) return <span style={{ backgroundColor: 'var(--warning-color)', color: '#000', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>GUT</span>;
-        return <span style={{ backgroundColor: 'var(--danger-color)', color: '#fff', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>RISIKO</span>;
+    const handleDelete = async () => {
+        if (!onDelete || deleting) return;
+        setDeleting(true);
+        try {
+            const deleted = await onDelete();
+            // Nur wenn das Elternteil das Löschen ausdrücklich bestätigt, zur Übersicht wechseln
+            if (deleted === true && onBack) onBack();
+        } finally {
+            setDeleting(false);
+        }
     };
 
     // Print as PDF
@@ -252,8 +320,6 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
         });
     };
 
-    if (!results) return null;
-
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-lg)' }}>
 
@@ -279,6 +345,11 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
                 <Button variant="secondary" icon={FileText} onClick={handlePrint}>
                     PDF
                 </Button>
+                {onDelete && (
+                    <Button variant="secondary" icon={deleting ? Loader2 : Trash2} onClick={handleDelete} disabled={deleting || isSaving} title="Deal löschen">
+                        Löschen
+                    </Button>
+                )}
                 <Button icon={Save} onClick={() => onSave(inputs, results)} disabled={isSaving}>
                     {isSaving ? 'Speichert...' : 'Aktualisieren'}
                 </Button>
@@ -330,11 +401,14 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
                                                 boxShadow: '0 4px 20px rgba(0,0,0,0.15)', fontSize: '0.75rem', marginBottom: '4px'
                                             }}>
                                                 <div style={{ fontWeight: 700, marginBottom: '6px', fontSize: '0.8rem' }}>Grunderwerbsteuer je Bundesland</div>
-                                                {statesTaxRef.map(s => (
+                                                {TRANSFER_TAX_RATES.map(s => (
                                                     <div key={s.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
-                                                        <span>{s.name}</span><span style={{ fontWeight: 600 }}>{s.tax} %</span>
+                                                        <span>{s.name}</span><span style={{ fontWeight: 600 }}>{s.tax.toLocaleString('de-DE', { minimumFractionDigits: 1 })} %</span>
                                                     </div>
                                                 ))}
+                                                <div style={{ marginTop: '6px', color: 'var(--text-secondary)', fontSize: '0.7rem' }}>
+                                                    Stand: {TRANSFER_TAX_RATES_AS_OF} – ohne Gewähr, aktuellen Satz des Bundeslandes prüfen.
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -391,31 +465,19 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
                                 label={
                                     <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                         Sanierung/Renovierung
-                                        <Calculator
-                                            size={15}
-                                            style={{ color: '#f97316', cursor: 'pointer', flexShrink: 0 }}
-                                            title="Sanierungsrechner öffnen"
-                                            onClick={async (e) => {
-                                                e.stopPropagation();
-                                                const currentName = encodeURIComponent(inputs.name || 'Fix & Flip Deal');
-                                                if (dealId) {
-                                                    const ret = encodeURIComponent(`/investor-portal?tab=audit&dealId=${dealId}`);
-                                                    const { data } = await supabase
-                                                        .from('renovation_calculations')
-                                                        .select('id')
-                                                        .contains('building_config', { dealId })
-                                                        .limit(1);
-                                                    if (data && data.length > 0) {
-                                                        navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
-                                                    } else {
-                                                        navigate(`/renovation/calculator/new?dealId=${dealId}&dealName=${currentName}&returnTo=${ret}`);
-                                                    }
-                                                } else {
-                                                    const ret = encodeURIComponent('/investor-portal?tab=audit');
-                                                    navigate(`/renovation/calculator/new?dealName=${currentName}&returnTo=${ret}`);
-                                                }
-                                            }}
-                                        />
+                                        {openingRenovation ? (
+                                            <Loader2 size={15} className="animate-spin" style={{ color: '#f97316', flexShrink: 0 }} />
+                                        ) : (
+                                            <Calculator
+                                                size={15}
+                                                style={{ color: '#f97316', cursor: 'pointer', flexShrink: 0 }}
+                                                title="Sanierungsrechner öffnen"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    openRenovationCalculator();
+                                                }}
+                                            />
+                                        )}
                                     </span>
                                 }
                                 value={inputs.renovation} onChange={v => handleChange('renovation', v)}
@@ -585,7 +647,7 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, isSaving, dealId }) =>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}>
                                 <th style={{ padding: '10px', textAlign: 'left' }}>Verhandlung</th>
-                                <th style={{ padding: '10px', textAlign: 'right' }}>GIK</th>
+                                <th style={{ padding: '10px', textAlign: 'right' }} title="Gesamtinvestment inkl. Finanzierungskosten (wie im Ergebnis)">GIK</th>
                                 <th style={{ padding: '10px', textAlign: 'right' }}>Gewinn (Low)</th>
                                 <th style={{ padding: '10px', textAlign: 'right' }}>Marge (Low)</th>
                                 <th style={{ padding: '10px', textAlign: 'right' }}>Gewinn (High)</th>
@@ -628,10 +690,7 @@ const CurrencyField = ({ label, value, onChange }) => {
     const [raw, setRaw] = useState(String(value));
     const inputRef = useRef(null);
 
-    useEffect(() => {
-        if (!editing) setRaw(String(value));
-    }, [value, editing]);
-
+    // Rohtext nur während der Eingabe; beim Fokussieren aus dem aktuellen Wert übernommen
     const displayValue = editing ? raw : new Intl.NumberFormat('de-DE').format(value);
 
     return (
@@ -642,7 +701,7 @@ const CurrencyField = ({ label, value, onChange }) => {
                 type={editing ? 'number' : 'text'}
                 value={displayValue}
                 min="0"
-                onFocus={e => {
+                onFocus={() => {
                     setEditing(true);
                     setRaw(String(value));
                     setTimeout(() => {

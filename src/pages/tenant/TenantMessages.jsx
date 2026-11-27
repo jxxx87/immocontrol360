@@ -20,43 +20,59 @@ const TenantMessages = () => {
         clearByType('ticket_comment');
     }, [clearByType]);
 
-    useEffect(() => {
-        const findInvestor = async () => {
-            // Find the investor user (role = 'investor')
-            // In a simple setup, there's typically one investor
-            try {
-                const { data, error } = await supabase
-                    .from('user_roles')
-                    .select('user_id')
-                    .eq('role', 'investor')
-                    .limit(1);
+    const userId = user?.id;
+    const propertyId = roleData?.property_id;
 
-                if (data && data.length > 0) {
-                    setInvestorUserId(data[0].user_id);
-                    setInvestorName('Hausverwaltung');
-                } else {
-                    // Fallback: check if there are any messages to/from this user
-                    // and use the other participant
-                    const { data: msgs } = await supabase
+    useEffect(() => {
+        if (!userId) return;
+        let cancelled = false;
+
+        // Vermieter deterministisch aus dem eigenen Objekt ableiten (properties.user_id –
+        // derselbe Nutzer, dem der Mieter in "Nachrichten" des Vermieters angezeigt wird).
+        // Früher: irgendein Konto mit Rolle 'investor' (limit 1) – falscher Empfänger.
+        const findLandlord = async () => {
+            try {
+                let landlordId = null;
+
+                if (propertyId) {
+                    const { data: property, error: propError } = await supabase
+                        .from('properties')
+                        .select('user_id')
+                        .eq('id', propertyId)
+                        .maybeSingle();
+                    if (propError) console.error('Error loading property owner:', propError);
+                    if (property?.user_id) landlordId = property.user_id;
+                }
+
+                if (!landlordId) {
+                    // Fallback: Gesprächspartner der jüngsten Nachricht
+                    const { data: msgs, error: msgError } = await supabase
                         .from('messages')
                         .select('sender_id, receiver_id')
-                        .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+                        .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+                        .order('created_at', { ascending: false })
                         .limit(1);
+                    if (msgError) console.error('Error loading messages:', msgError);
 
                     if (msgs && msgs.length > 0) {
-                        const otherId = msgs[0].sender_id === user.id ? msgs[0].receiver_id : msgs[0].sender_id;
-                        setInvestorUserId(otherId);
+                        landlordId = msgs[0].sender_id === userId ? msgs[0].receiver_id : msgs[0].sender_id;
                     }
                 }
+
+                if (!cancelled && landlordId && landlordId !== userId) {
+                    setInvestorUserId(landlordId);
+                    setInvestorName('Hausverwaltung');
+                }
             } catch (err) {
-                console.error('Error finding investor:', err);
+                console.error('Error finding landlord:', err);
             } finally {
-                setLoading(false);
+                if (!cancelled) setLoading(false);
             }
         };
 
-        if (user) findInvestor();
-    }, [user]);
+        findLandlord();
+        return () => { cancelled = true; };
+    }, [userId, propertyId]);
 
     if (loading) {
         return (

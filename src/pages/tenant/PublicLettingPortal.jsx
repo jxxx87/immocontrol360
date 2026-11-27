@@ -6,8 +6,38 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { 
   Building2, Users, FileText, Calendar, Check, AlertCircle, Info, Upload, 
-  MapPin, Coins, ArrowRight, ArrowLeft, Loader2, Heart 
+  MapPin, Coins, ArrowRight, ArrowLeft, Loader2, Heart
 } from 'lucide-react';
+
+const APPLICANT_BUCKET = 'applicant-documents';
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB (entspricht dem Limit des Buckets)
+const MIME_EXT = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' };
+const EXT_MIME = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const DOC_CONFIG = {
+  schufa: { label: 'Schufa-Auskunft', title: 'Schufa-Auskunft (PDF)*', accept: 'application/pdf', types: ['application/pdf'] },
+  income_proof: { label: 'Gehaltsnachweis', title: 'Gehaltsnachweise der letzten 3 Monate (PDF)*', accept: 'application/pdf', types: ['application/pdf'] },
+  id_copy: { label: 'Ausweiskopie', title: 'Ausweiskopie (Vorder- und Rückseite, PDF/Bild)*', accept: 'application/pdf,image/jpeg,image/png', types: ['application/pdf', 'image/jpeg', 'image/png'] },
+  previous_landlord: { label: 'Vorvermieterbescheinigung', title: 'Vorvermieterbescheinigung (PDF)*', accept: 'application/pdf', types: ['application/pdf'] }
+};
+const DOC_ORDER = ['schufa', 'income_proof', 'id_copy', 'previous_landlord'];
+
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+  !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+const isDuplicateUpload = (error) =>
+  !!error && (String(error.statusCode) === '409' || /exist|duplicate/i.test(error.message || ''));
+
+// MIME-Typ aus der Datei ableiten (Browser liefern ihn nicht immer)
+const detectMime = (file) => {
+  if (file?.type && MIME_EXT[file.type]) return file.type;
+  const ext = String(file?.name || '').split('.').pop().toLowerCase();
+  return EXT_MIME[ext] || null;
+};
+
+const getRequiredDocs = (info) => (Array.isArray(info?.required_documents) ? info.required_documents : []);
 
 const PublicLettingPortal = () => {
   const { token } = useParams();
@@ -23,6 +53,10 @@ const PublicLettingPortal = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [newApplicantId, setNewApplicantId] = useState(null);
+  // Upload-Pfad: 'secure' = <process_id>/<applicant_id>/... (neue Datenbank), 'legacy' = <applicant_id>/...
+  const [uploadMode, setUploadMode] = useState('secure');
+  const [failedDocs, setFailedDocs] = useState([]);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -89,7 +123,7 @@ const PublicLettingPortal = () => {
         } else {
           setProcessInfo(data);
         }
-      } catch (err) {
+      } catch {
         setError('Die Details konnten nicht geladen werden. Bitte wenden Sie sich an Ihren Vermieter.');
       } finally {
         setLoading(false);
@@ -102,7 +136,25 @@ const PublicLettingPortal = () => {
     setFormData(prev => ({ ...prev, [field]: val }));
   };
 
-  const handleFileChange = (docType, file) => {
+  // Datei prüfen (Typ und Größe), bei Fehler Auswahl zurücksetzen
+  const handleFileChange = (docType, e) => {
+    const file = e.target.files?.[0] || null;
+    if (!file) {
+      setFiles(prev => ({ ...prev, [docType]: null }));
+      return;
+    }
+    const config = DOC_CONFIG[docType];
+    const mime = detectMime(file);
+    if (!mime || (config && !config.types.includes(mime))) {
+      alert(`${config?.label || 'Datei'}: Dieser Dateityp wird nicht unterstützt. Erlaubt: ${config?.types.includes('image/jpeg') ? 'PDF, JPG oder PNG' : 'PDF'}.`);
+      e.target.value = '';
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      alert(`${config?.label || 'Datei'}: Die Datei ist größer als 10 MB.`);
+      e.target.value = '';
+      return;
+    }
     setFiles(prev => ({ ...prev, [docType]: file }));
   };
 
@@ -111,6 +163,7 @@ const PublicLettingPortal = () => {
       if (!formData.first_name.trim()) return 'Bitte geben Sie Ihren Vornamen ein.';
       if (!formData.last_name.trim()) return 'Bitte geben Sie Ihren Nachnamen ein.';
       if (!formData.email.trim()) return 'Bitte geben Sie Ihre E-Mail-Adresse ein.';
+      if (!EMAIL_RE.test(formData.email.trim())) return 'Bitte geben Sie eine gültige E-Mail-Adresse ein.';
       if (!formData.phone.trim()) return 'Bitte geben Sie Ihre Telefonnummer ein.';
     }
     if (step === 2 && formData.has_co_applicant) {
@@ -139,13 +192,58 @@ const PublicLettingPortal = () => {
     setStep(prev => prev - 1);
   };
 
+  // Unterlagen hochladen; liefert die Dokumenttypen, deren Upload fehlgeschlagen ist
+  const uploadDocuments = async (applicantId, mode, docs) => {
+    const failed = [];
+    const folder = mode === 'secure' ? `${processInfo.id}/${applicantId}` : `${applicantId}`;
+    for (const [docType, fileObj] of Object.entries(docs)) {
+      if (!fileObj) continue;
+      const mime = detectMime(fileObj);
+      const ext = MIME_EXT[mime];
+      if (!ext) {
+        failed.push(docType);
+        continue;
+      }
+      let { error: uploadErr } = await supabase.storage
+        .from(APPLICANT_BUCKET)
+        .upload(`${folder}/${docType}.${ext}`, fileObj, { contentType: mime });
+
+      // Datei existiert schon (z. B. erneuter Versuch): unter eindeutigem Namen ablegen
+      if (uploadErr && isDuplicateUpload(uploadErr)) {
+        ({ error: uploadErr } = await supabase.storage
+          .from(APPLICANT_BUCKET)
+          .upload(`${folder}/${docType}_${Date.now()}.${ext}`, fileObj, { contentType: mime }));
+      }
+
+      if (uploadErr) {
+        console.error(`Failed to upload document ${docType}:`, uploadErr);
+        failed.push(docType);
+      }
+    }
+    return failed;
+  };
+
+  // Übertragung in die Cloud des Vermieters anstoßen. Ein Fehler betrifft nur den Vermieter
+  // (die Unterlagen bleiben im geschützten Speicher und sind im Vermietungscockpit abrufbar).
+  const syncDocuments = async (applicantId) => {
+    try {
+      const { error: syncErr } = await supabase.functions.invoke('sync-applicant-files', {
+        body: { applicantId, applicant_id: applicantId, process_token: token }
+      });
+      if (syncErr) console.warn('Cloud sync of applicant documents failed:', syncErr);
+    } catch (syncErr) {
+      console.warn('Cloud sync of applicant documents failed:', syncErr);
+    }
+  };
+
   const handleSubmit = async () => {
+    if (isSubmitting) return;
+
     // Validate final step documents
-    const missingDocs = [];
-    if (processInfo.required_documents.includes('schufa') && !files.schufa) missingDocs.push('Schufa-Auskunft');
-    if (processInfo.required_documents.includes('income_proof') && !files.income_proof) missingDocs.push('Gehaltsnachweis');
-    if (processInfo.required_documents.includes('id_copy') && !files.id_copy) missingDocs.push('Ausweiskopie');
-    if (processInfo.required_documents.includes('previous_landlord') && !files.previous_landlord) missingDocs.push('Vorvermieterbescheinigung');
+    const requiredDocs = getRequiredDocs(processInfo);
+    const missingDocs = DOC_ORDER
+      .filter(docType => requiredDocs.includes(docType) && !files[docType])
+      .map(docType => DOC_CONFIG[docType].label);
 
     if (missingDocs.length > 0) {
       alert(`Bitte laden Sie die folgenden erforderlichen Dokumente hoch: ${missingDocs.join(', ')}`);
@@ -155,41 +253,43 @@ const PublicLettingPortal = () => {
     try {
       setIsSubmitting(true);
 
-      // 1. Insert applicant row
-      const applicantPayload = {
-        process_id: processInfo.id,
-        user_id: processInfo.user_id, // Landlord's user_id
-        status: 'applied',
-        
+      const trimOrNull = (v) => {
+        const s = typeof v === 'string' ? v.trim() : v;
+        return s === '' || s === undefined ? null : s;
+      };
+      const hasCo = !!formData.has_co_applicant;
+
+      // Felder der Selbstauskunft (user_id und status setzt die Datenbank selbst)
+      const application = {
         earliest_move_in: formData.earliest_move_in || null,
         salutation: formData.salutation,
-        first_name: formData.first_name,
-        last_name: formData.last_name,
+        first_name: formData.first_name.trim(),
+        last_name: formData.last_name.trim(),
         birth_date: formData.birth_date || null,
         marital_status: formData.marital_status,
-        phone: formData.phone,
-        email: formData.email,
-        introduction: formData.introduction,
+        phone: trimOrNull(formData.phone),
+        email: formData.email.trim().toLowerCase(),
+        introduction: trimOrNull(formData.introduction),
 
-        has_co_applicant: formData.has_co_applicant,
-        co_salutation: formData.has_co_applicant ? formData.co_salutation : null,
-        co_first_name: formData.has_co_applicant ? formData.co_first_name : null,
-        co_last_name: formData.has_co_applicant ? formData.co_last_name : null,
-        co_birth_date: (formData.has_co_applicant && formData.co_birth_date) ? formData.co_birth_date : null,
-        co_relationship: formData.has_co_applicant ? formData.co_relationship : null,
-        co_email: formData.has_co_applicant ? formData.co_email : null,
-        co_phone: formData.has_co_applicant ? formData.co_phone : null,
+        has_co_applicant: hasCo,
+        co_salutation: hasCo ? formData.co_salutation : null,
+        co_first_name: hasCo ? trimOrNull(formData.co_first_name) : null,
+        co_last_name: hasCo ? trimOrNull(formData.co_last_name) : null,
+        co_birth_date: (hasCo && formData.co_birth_date) ? formData.co_birth_date : null,
+        co_relationship: hasCo ? trimOrNull(formData.co_relationship) : null,
+        co_email: hasCo && formData.co_email ? formData.co_email.trim().toLowerCase() : null,
+        co_phone: hasCo ? trimOrNull(formData.co_phone) : null,
 
         additional_persons_count: parseInt(formData.additional_persons_count) || 0,
         is_employed: formData.is_employed,
         monthly_income: parseFloat(formData.monthly_income) || null,
-        co_is_employed: formData.has_co_applicant ? formData.co_is_employed : false,
-        co_monthly_income: (formData.has_co_applicant && formData.co_monthly_income) ? parseFloat(formData.co_monthly_income) : null,
+        co_is_employed: hasCo ? formData.co_is_employed : false,
+        co_monthly_income: (hasCo && formData.co_monthly_income) ? (parseFloat(formData.co_monthly_income) || null) : null,
 
-        street: formData.street,
-        house_number: formData.house_number,
-        postal_code: formData.postal_code,
-        city: formData.city,
+        street: trimOrNull(formData.street),
+        house_number: trimOrNull(formData.house_number),
+        postal_code: trimOrNull(formData.postal_code),
+        city: trimOrNull(formData.city),
 
         has_rent_arrears: formData.has_rent_arrears,
         has_eviction_lawsuits: formData.has_eviction_lawsuits,
@@ -198,52 +298,83 @@ const PublicLettingPortal = () => {
         has_pets: formData.has_pets,
       };
 
-      const { data: appData, error: appErr } = await supabase
-        .from('rental_applicants')
-        .insert([applicantPayload])
-        .select()
-        .single();
-
-      if (appErr) throw appErr;
-
-      const applicantId = appData.id;
-      setNewApplicantId(applicantId);
-
-      // 2. Upload documents to Supabase storage
-      for (const [docType, fileObj] of Object.entries(files)) {
-        if (!fileObj) continue;
-        const fileExt = fileObj.name.split('.').pop();
-        const storagePath = `${applicantId}/${docType}.${fileExt}`;
-        
-        const { error: uploadErr } = await supabase.storage
-          .from('applicant-documents')
-          .upload(storagePath, fileObj);
-
-        if (uploadErr) console.error(`Failed to upload document ${docType}:`, uploadErr);
-      }
-
-      // 3. Trigger edge function to sync files to landlord cloud
-      await supabase.functions.invoke('sync-applicant-files', {
-        body: { applicantId }
+      // 1. Bewerbung über die geprüfte Datenbank-Funktion anlegen
+      let applicantId = null;
+      let mode = 'secure';
+      const { data: rpcId, error: rpcErr, status: rpcStatus } = await supabase.rpc('submit_rental_application', {
+        p_token: token,
+        p_application: application
       });
 
-      // 4. Trigger email dispatch Edge Function
+      if (rpcErr && !isMissingRpc(rpcErr, rpcStatus)) throw rpcErr;
+
+      if (!rpcErr) {
+        applicantId = rpcId;
+      } else {
+        // Bisheriger Weg, solange die Datenbank-Funktion noch nicht eingespielt ist
+        mode = 'legacy';
+        const { data: appData, error: appErr } = await supabase
+          .from('rental_applicants')
+          .insert([{
+            process_id: processInfo.id,
+            user_id: processInfo.user_id, // Landlord's user_id (nur alte Datenbank-Version liefert sie)
+            status: 'applied',
+            ...application
+          }])
+          .select('id')
+          .single();
+
+        if (appErr) throw appErr;
+        applicantId = appData.id;
+      }
+
+      if (!applicantId) throw new Error('Die Bewerbung konnte nicht gespeichert werden.');
+      setNewApplicantId(applicantId);
+      setUploadMode(mode);
+
+      // 2. Unterlagen hochladen (Fehler werden gesammelt und dem Bewerber angezeigt)
+      const failed = await uploadDocuments(applicantId, mode, files);
+      setFailedDocs(failed);
+
+      // 3. Übertragung in die Cloud des Vermieters
+      await syncDocuments(applicantId);
+
+      // 4. Eingangsbestätigung (Empfänger ermittelt die Function aus der Datenbank)
       try {
-        await supabase.functions.invoke('send-letting-email', {
+        const { error: emailErr } = await supabase.functions.invoke('send-letting-email', {
           body: {
             action: 'application_received',
-            applicantId
+            applicantId,
+            applicant_id: applicantId,
+            process_token: token
           }
         });
+        if (emailErr) console.error('Failed to trigger confirmation email:', emailErr);
       } catch (emailErr) {
         console.error('Failed to trigger confirmation email:', emailErr);
       }
 
       setSubmitSuccess(true);
     } catch (err) {
-      alert('Fehler beim Übermitteln der Bewerbung: ' + err.message);
+      alert('Fehler beim Übermitteln der Bewerbung: ' + (err?.message || 'Unbekannter Fehler'));
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Fehlgeschlagene Unterlagen für dieselbe Bewerbung erneut hochladen
+  const handleRetryUpload = async () => {
+    if (isRetrying || !newApplicantId || failedDocs.length === 0) return;
+    try {
+      setIsRetrying(true);
+      const docs = {};
+      failedDocs.forEach(docType => { docs[docType] = files[docType]; });
+      const stillFailed = await uploadDocuments(newApplicantId, uploadMode, docs);
+      setFailedDocs(stillFailed);
+      if (stillFailed.length < failedDocs.length) await syncDocuments(newApplicantId);
+      if (stillFailed.length === 0) alert('Alle Unterlagen wurden übertragen.');
+    } finally {
+      setIsRetrying(false);
     }
   };
 
@@ -277,8 +408,32 @@ const PublicLettingPortal = () => {
           </div>
           <h2 style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '12px' }}>Bewerbung eingegangen!</h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', lineHeight: 1.6, marginBottom: '24px' }}>
-            Vielen Dank für Ihr Interesse an der Wohnung. Ihre Angaben und Unterlagen wurden sicher verschlüsselt an den Vermieter übertragen.
+            Vielen Dank für Ihr Interesse an der Wohnung. Ihre Angaben{failedDocs.length === 0 ? ' und Unterlagen' : ''} wurden an den Vermieter übermittelt.
           </p>
+
+          {failedDocs.length > 0 && (
+            <div style={{ textAlign: 'left', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', borderRadius: 'var(--radius-md)', padding: '14px 16px', marginBottom: '24px', fontSize: '0.85rem', lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 700, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <AlertCircle size={16} /> Folgende Unterlagen konnten nicht übertragen werden:
+              </div>
+              {failedDocs.map(docType => (
+                <div key={docType} style={{ marginBottom: '8px' }}>
+                  <div style={{ fontWeight: 600 }}>{DOC_CONFIG[docType]?.label || docType}</div>
+                  <input
+                    type="file"
+                    accept={DOC_CONFIG[docType]?.accept || 'application/pdf'}
+                    onChange={(e) => handleFileChange(docType, e)}
+                    style={{ fontSize: '0.8rem', marginTop: '4px' }}
+                  />
+                  {files[docType] && <span style={{ display: 'block', fontSize: '0.75rem', marginTop: '2px' }}>Ausgewählt: {files[docType].name}</span>}
+                </div>
+              ))}
+              <Button type="button" variant="secondary" onClick={handleRetryUpload} disabled={isRetrying} style={{ marginTop: '4px' }}>
+                {isRetrying ? 'Wird übertragen…' : 'Unterlagen erneut hochladen'}
+              </Button>
+            </div>
+          )}
+
           <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '24px' }}>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
               Sie können jetzt direkt online Ihren Wunsch-Besichtigungstermin auswählen:
@@ -307,15 +462,20 @@ const PublicLettingPortal = () => {
           <p style={{ fontSize: '0.9rem', color: 'rgba(255, 255, 255, 0.85)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <MapPin size={14} /> {processInfo.street} {processInfo.house_number}, {processInfo.zip} {processInfo.city}
           </p>
+          {processInfo.listing_description && (
+            <p style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.9)', marginTop: '12px', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              {processInfo.listing_description}
+            </p>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: '16px' }}>
             <div>
               <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.85)' }}>Kaltmiete</div>
-              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{processInfo.target_rent.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{Number(processInfo.target_rent || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
             </div>
             <div>
               <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.85)' }}>Nebenkosten</div>
-              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{(processInfo.service_charge_soll + processInfo.heating_cost_soll).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+              <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{(Number(processInfo.service_charge_soll || 0) + Number(processInfo.heating_cost_soll || 0)).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
             </div>
             <div>
               <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.85)' }}>Größe</div>
@@ -737,42 +897,33 @@ const PublicLettingPortal = () => {
               </h2>
               
               <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px' }}>
-                Der Vermieter fordert für dieses Objekt folgende Unterlagen an. Die Dateien werden direkt in die Cloud des Vermieters hochgeladen.
+                {getRequiredDocs(processInfo).length > 0
+                  ? 'Der Vermieter fordert für dieses Objekt folgende Unterlagen an (je Datei höchstens 10 MB). Die Dateien werden an den Vermieter übermittelt und sind nur für ihn abrufbar.'
+                  : 'Für dieses Objekt fordert der Vermieter aktuell keine Unterlagen an.'}
               </p>
 
+              {Array.isArray(processInfo.custom_requirements) && processInfo.custom_requirements.length > 0 && (
+                <div style={{ border: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)', padding: '12px 16px', borderRadius: 'var(--radius-md)', marginBottom: '16px', fontSize: '0.85rem' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '6px' }}>Weitere Anforderungen des Vermieters:</div>
+                  <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                    {processInfo.custom_requirements.map((req, idx) => <li key={idx}>{req}</li>)}
+                  </ul>
+                </div>
+              )}
+
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {processInfo.required_documents.includes('schufa') && (
-                  <div style={{ border: '1px dashed var(--border-color)', padding: '16px', borderRadius: 'var(--radius-md)' }}>
-                    <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '8px' }}>Schufa-Auskunft (PDF)*</label>
-                    <input type="file" accept="application/pdf" onChange={(e) => handleFileChange('schufa', e.target.files[0])} />
-                    {files.schufa && <span style={{ color: 'var(--success-color)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>✓ {files.schufa.name} geladen</span>}
+                {DOC_ORDER.filter(docType => getRequiredDocs(processInfo).includes(docType)).map(docType => (
+                  <div key={docType} style={{ border: '1px dashed var(--border-color)', padding: '16px', borderRadius: 'var(--radius-md)' }}>
+                    <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '8px' }}>{DOC_CONFIG[docType].title}</label>
+                    <input type="file" accept={DOC_CONFIG[docType].accept} onChange={(e) => handleFileChange(docType, e)} />
+                    {files[docType] && <span style={{ color: 'var(--success-color)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>✓ {files[docType].name} geladen</span>}
                   </div>
-                )}
-
-                {processInfo.required_documents.includes('income_proof') && (
-                  <div style={{ border: '1px dashed var(--border-color)', padding: '16px', borderRadius: 'var(--radius-md)' }}>
-                    <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '8px' }}>Gehaltsnachweise der letzten 3 Monate (PDF)*</label>
-                    <input type="file" accept="application/pdf" onChange={(e) => handleFileChange('income_proof', e.target.files[0])} />
-                    {files.income_proof && <span style={{ color: 'var(--success-color)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>✓ {files.income_proof.name} geladen</span>}
-                  </div>
-                )}
-
-                {processInfo.required_documents.includes('id_copy') && (
-                  <div style={{ border: '1px dashed var(--border-color)', padding: '16px', borderRadius: 'var(--radius-md)' }}>
-                    <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '8px' }}>Ausweiskopie (Vorder- und Rückseite, PDF/Bild)*</label>
-                    <input type="file" accept="application/pdf,image/*" onChange={(e) => handleFileChange('id_copy', e.target.files[0])} />
-                    {files.id_copy && <span style={{ color: 'var(--success-color)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>✓ {files.id_copy.name} geladen</span>}
-                  </div>
-                )}
-
-                {processInfo.required_documents.includes('previous_landlord') && (
-                  <div style={{ border: '1px dashed var(--border-color)', padding: '16px', borderRadius: 'var(--radius-md)' }}>
-                    <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '8px' }}>Vorvermieterbescheinigung (PDF)*</label>
-                    <input type="file" accept="application/pdf" onChange={(e) => handleFileChange('previous_landlord', e.target.files[0])} />
-                    {files.previous_landlord && <span style={{ color: 'var(--success-color)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>✓ {files.previous_landlord.name} geladen</span>}
-                  </div>
-                )}
+                ))}
               </div>
+
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '16px', lineHeight: 1.5 }}>
+                Mit dem Absenden werden Ihre Angaben und Unterlagen an den Vermieter dieses Objekts übermittelt. Informationen zur Verarbeitung Ihrer Daten erhalten Sie beim Vermieter.
+              </p>
             </div>
           )}
 
@@ -789,8 +940,8 @@ const PublicLettingPortal = () => {
                 Weiter <ArrowRight size={16} style={{ marginLeft: '6px' }} />
               </Button>
             ) : (
-              <Button type="button" variant="primary" onClick={handleSubmit} loading={isSubmitting}>
-                Bewerbung absenden
+              <Button type="button" variant="primary" onClick={handleSubmit} disabled={isSubmitting}>
+                {isSubmitting ? 'Wird übermittelt…' : 'Bewerbung absenden'}
               </Button>
             )}
           </div>

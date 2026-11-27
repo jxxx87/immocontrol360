@@ -10,6 +10,22 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
 
+// E-Mail-Anhänge: Grenzen für Anzahl, Gesamtgröße und Dateitypen
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_TOTAL = 10 * 1024 * 1024; // 10 MB
+const ALLOWED_ATTACHMENT_EXT = ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'txt', 'csv', 'doc', 'docx', 'xls', 'xlsx', 'odt', 'ods'];
+const CONTACT_PAGE_LIMIT = 1000; // Standard-Obergrenze der API je Abfrage
+
+const escapeHtml = (str) => String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+// Kontakt ist mit einem Mieter-Datensatz verknüpft (wird per Datenbank-Trigger synchronisiert)
+const isLinkedTenantContact = (contact) => !!contact && contact.contact_type === 'tenant' && !!contact.tenant_id;
+
 const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
     const [isOpen, setIsOpen] = useState(false);
     const menuRef = useRef(null);
@@ -118,6 +134,8 @@ const Contacts = () => {
     const navigate = useNavigate();
     const [contacts, setContacts] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
+    const [isSaving, setIsSaving] = useState(false);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterType, setFilterType] = useState('all');
@@ -149,6 +167,7 @@ const Contacts = () => {
     const fetchContacts = async () => {
         try {
             setLoading(true);
+            setLoadError(null);
             const { data, error } = await supabase
                 .from('contacts')
                 .select(`
@@ -171,6 +190,7 @@ const Contacts = () => {
             setContacts(data || []);
         } catch (error) {
             console.error('Error fetching contacts:', error);
+            setLoadError(translateError(error));
         } finally {
             setLoading(false);
         }
@@ -274,11 +294,20 @@ const Contacts = () => {
         setIsModalOpen(true);
     };
 
-    const handleDelete = async (id) => {
+    const handleDelete = async (contact) => {
+        // Mit einem Mieter verknüpfte Kontakte würden beim nächsten Mieter-Update automatisch neu angelegt
+        if (isLinkedTenantContact(contact)) {
+            alert('Dieser Kontakt ist mit einem Mieter verknüpft und wird automatisch aus den Mieterdaten gepflegt. Bitte verwalten Sie den Mieter unter „Mietverhältnisse“.');
+            return;
+        }
         if (!window.confirm('Möchten Sie diesen Kontakt wirklich löschen?')) return;
         try {
-            const { error } = await supabase.from('contacts').delete().eq('id', id);
+            const { data, error } = await supabase.from('contacts').delete().eq('id', contact.id).select('id');
             if (error) throw error;
+            if (!data || data.length === 0) {
+                alert('Der Kontakt konnte nicht gelöscht werden. Kontakte können nur vom Eigentümer gelöscht werden.');
+                return;
+            }
             fetchContacts();
         } catch (error) {
             alert(translateError(error));
@@ -286,26 +315,62 @@ const Contacts = () => {
     };
 
     const handleSave = async () => {
+        if (isSaving) return;
         if (!formData.name) return alert('Name ist erforderlich.');
         try {
-            const payload = {
-                user_id: user.id,
-                name: formData.name,
-                contact_type: formData.contact_type,
-                email: formData.email,
-                phone: formData.phone,
-                street: formData.street,
-                zip: formData.zip,
-                city: formData.city
-            };
+            setIsSaving(true);
 
-            if (editingContact) {
-                const { error } = await supabase
-                    .from('contacts')
-                    .update(payload)
-                    .eq('id', editingContact.id);
-                if (error) throw error;
+            if (editingContact && isLinkedTenantContact(editingContact)) {
+                // Verknüpfter Mieter-Kontakt: E-Mail/Telefon im Mieter-Datensatz pflegen. Der Datenbank-
+                // Trigger übernimmt sie in den Kontakt; Name und Anschrift bleiben unverändert (kein
+                // fehlerhafter Namens-Split, keine Überschreibung der Mieteranschrift).
+                const tenantChanges = {};
+                if ((formData.email || '') !== (editingContact.email || '')) tenantChanges.email = formData.email || null;
+                if ((formData.phone || '') !== (editingContact.phone || '')) tenantChanges.phone = formData.phone || null;
+
+                if (Object.keys(tenantChanges).length > 0) {
+                    const { data, error } = await supabase
+                        .from('tenants')
+                        .update(tenantChanges)
+                        .eq('id', editingContact.tenant_id)
+                        .select('id');
+                    if (error) throw error;
+                    if (!data || data.length === 0) {
+                        alert('Die Änderung konnte nicht gespeichert werden (keine Berechtigung für diesen Mieter).');
+                        return;
+                    }
+                }
+            } else if (editingContact) {
+                // Nur geänderte Felder senden; user_id (Eigentümer) bleibt unverändert
+                const fields = ['name', 'contact_type', 'email', 'phone', 'street', 'zip', 'city'];
+                const changes = {};
+                fields.forEach(f => {
+                    if ((formData[f] || '') !== (editingContact[f] || '')) changes[f] = formData[f];
+                });
+
+                if (Object.keys(changes).length > 0) {
+                    const { data, error } = await supabase
+                        .from('contacts')
+                        .update(changes)
+                        .eq('id', editingContact.id)
+                        .select('id');
+                    if (error) throw error;
+                    if (!data || data.length === 0) {
+                        alert('Die Änderung konnte nicht gespeichert werden. Kontakte können nur vom Eigentümer bearbeitet werden.');
+                        return;
+                    }
+                }
             } else {
+                const payload = {
+                    user_id: user.id,
+                    name: formData.name,
+                    contact_type: formData.contact_type,
+                    email: formData.email,
+                    phone: formData.phone,
+                    street: formData.street,
+                    zip: formData.zip,
+                    city: formData.city
+                };
                 const { error } = await supabase.from('contacts').insert([payload]);
                 if (error) throw error;
             }
@@ -314,17 +379,38 @@ const Contacts = () => {
             fetchContacts();
         } catch (error) {
             alert(translateError(error));
+        } finally {
+            setIsSaving(false);
         }
     };
 
     const handleFileChange = (e) => {
-        const files = Array.from(e.target.files);
+        const input = e.target;
+        const files = Array.from(input.files || []);
+        // Auswahl zurücksetzen, damit dieselbe Datei später erneut gewählt werden kann
+        input.value = '';
         if (!files.length) return;
+
+        if (attachments.length + files.length > MAX_ATTACHMENTS) {
+            alert(`Es können höchstens ${MAX_ATTACHMENTS} Anhänge versendet werden.`);
+            return;
+        }
+        const notAllowed = files.filter(f => !ALLOWED_ATTACHMENT_EXT.includes(String(f.name).split('.').pop().toLowerCase()));
+        if (notAllowed.length > 0) {
+            alert(`Dieser Dateityp wird als Anhang nicht unterstützt: ${notAllowed.map(f => f.name).join(', ')}\nErlaubt sind: ${ALLOWED_ATTACHMENT_EXT.join(', ')}`);
+            return;
+        }
+        const currentTotal = attachments.reduce((sum, a) => sum + (a.size || 0), 0);
+        const addedTotal = files.reduce((sum, f) => sum + f.size, 0);
+        if (currentTotal + addedTotal > MAX_ATTACHMENT_TOTAL) {
+            alert('Die Anhänge dürfen zusammen höchstens 10 MB groß sein.');
+            return;
+        }
 
         files.forEach(file => {
             const reader = new FileReader();
             reader.onload = () => {
-                const base64Content = reader.result.split(',')[1];
+                const base64Content = String(reader.result).split(',')[1];
                 setAttachments(prev => [
                     ...prev,
                     {
@@ -335,6 +421,9 @@ const Contacts = () => {
                         size: file.size
                     }
                 ]);
+            };
+            reader.onerror = () => {
+                alert(`Die Datei "${file.name}" konnte nicht gelesen werden.`);
             };
             reader.readAsDataURL(file);
         });
@@ -364,33 +453,36 @@ const Contacts = () => {
         if (messageChannel === 'portal') {
             // Run the tenant portal check and routing
             try {
-                // Find matching tenant by email or name
-                const { data: allTenants } = await supabase.from('tenants').select('id, first_name, last_name, email');
+                // Mieter bevorzugt über die Verknüpfung tenant_id bestimmen
                 let matchedTenant = null;
-
-                if (activeContactForMessage.email) {
-                    matchedTenant = (allTenants || []).find(t => t.email && t.email.toLowerCase() === activeContactForMessage.email.toLowerCase());
-                }
-                if (!matchedTenant && activeContactForMessage.name) {
-                    matchedTenant = (allTenants || []).find(t => {
-                        const fullName1 = `${t.last_name}, ${t.first_name}`.toLowerCase();
-                        const fullName2 = `${t.first_name} ${t.last_name}`.toLowerCase();
-                        const contactName = activeContactForMessage.name.toLowerCase();
-                        return contactName === fullName1 || contactName === fullName2 || contactName === t.last_name.toLowerCase();
-                    });
+                if (activeContactForMessage.tenant_id) {
+                    matchedTenant = { id: activeContactForMessage.tenant_id };
+                } else if (activeContactForMessage.email) {
+                    // Ohne Verknüpfung nur bei eindeutiger E-Mail-Adresse zuordnen
+                    const { data: emailMatches, error: tenantsErr } = await supabase
+                        .from('tenants')
+                        .select('id')
+                        .ilike('email', activeContactForMessage.email.trim().replace(/[\\%_]/g, '\\$&'));
+                    if (tenantsErr) throw tenantsErr;
+                    if ((emailMatches || []).length > 1) {
+                        alert('Zu dieser E-Mail-Adresse gibt es mehrere Mieter. Bitte öffnen Sie den gewünschten Mieter direkt unter „Mietverhältnisse“.');
+                        return;
+                    }
+                    matchedTenant = emailMatches?.[0] || null;
                 }
 
                 if (!matchedTenant) {
-                    alert('Kein passender Mieter in der Mieterdatenbank gefunden.');
+                    alert('Dieser Kontakt ist mit keinem Mieter verknüpft und konnte nicht eindeutig zugeordnet werden.');
                     return;
                 }
 
                 // Check if tenant has a user_role (= registered)
-                const { data: roles } = await supabase
+                const { data: roles, error: rolesErr } = await supabase
                     .from('user_roles')
                     .select('user_id')
                     .eq('tenant_id', matchedTenant.id)
                     .eq('role', 'tenant');
+                if (rolesErr) throw rolesErr;
 
                 if (roles && roles.length > 0) {
                     // Tenant is registered → navigate to messages with pre-selected convo
@@ -398,10 +490,11 @@ const Contacts = () => {
                     navigate('/investor-messages', { state: { preSelectUserId: roles[0].user_id } });
                 } else {
                     // Check if already invited but not yet registered
-                    const { data: invitations } = await supabase
+                    const { data: invitations, error: invitationsErr } = await supabase
                         .from('tenant_invitations')
                         .select('status')
                         .eq('tenant_id', matchedTenant.id);
+                    if (invitationsErr) throw invitationsErr;
 
                     const pending = invitations?.find(i => i.status === 'pending');
                     if (pending) {
@@ -447,7 +540,7 @@ const Contacts = () => {
                         html: `
                             <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
                                 <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-                                    <p>${emailContent.replace(/\n/g, '<br/>')}</p>
+                                    <p>${escapeHtml(emailContent).replace(/\n/g, '<br/>')}</p>
                                 </div>
                             </div>
                         `
@@ -468,7 +561,7 @@ const Contacts = () => {
         }
 
         if (messageChannel === 'epost') {
-            alert('Die E-Post-Schnittstelle wird in Kürze implementiert.');
+            alert('Der Briefversand per E-Post ist noch nicht verfügbar.');
         }
     };
 
@@ -616,8 +709,21 @@ const Contacts = () => {
                 )}
             </div>
 
+            {loadError && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', marginBottom: '16px', borderRadius: 'var(--radius-md)', backgroundColor: '#FEF2F2', border: '1px solid #FCA5A5', color: '#991B1B', fontSize: '0.85rem', flexWrap: 'wrap' }}>
+                    <AlertCircle size={18} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>Die Kontakte konnten nicht geladen werden: {loadError}</span>
+                    <Button variant="secondary" size="sm" onClick={fetchContacts}>Erneut laden</Button>
+                </div>
+            )}
+            {!loadError && contacts.length >= CONTACT_PAGE_LIMIT && (
+                <div style={{ padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', fontSize: '0.82rem' }}>
+                    Es werden höchstens {CONTACT_PAGE_LIMIT.toLocaleString('de-DE')} Kontakte angezeigt. Bitte nutzen Sie Suche und Filter, um weitere Kontakte zu finden.
+                </div>
+            )}
+
             {/* Contact Cards Grid */}
-            {filteredContacts.length === 0 ? (
+            {loadError ? null : filteredContacts.length === 0 ? (
                 <Card>
                     <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--text-secondary)' }}>
                         <User size={40} style={{ marginBottom: '12px', opacity: 0.3 }} />
@@ -688,7 +794,7 @@ const Contacts = () => {
                                     {/* Action Menu */}
                                     <ActionMenu
                                         onEdit={() => handleOpenEdit(contact)}
-                                        onDelete={() => handleDelete(contact.id)}
+                                        onDelete={() => handleDelete(contact)}
                                         onMessage={() => handleMessage(contact)}
                                     />
                                 </div>
@@ -767,10 +873,18 @@ const Contacts = () => {
                 footer={
                     <>
                         <Button variant="secondary" onClick={() => setIsModalOpen(false)}>Abbrechen</Button>
-                        <Button onClick={handleSave}>Speichern</Button>
+                        <Button onClick={handleSave} disabled={isSaving}>{isSaving ? 'Speichert…' : 'Speichern'}</Button>
                     </>
                 }
             >
+                {isLinkedTenantContact(editingContact) && (
+                    <div style={{ display: 'flex', gap: '8px', padding: '10px 12px', marginBottom: 'var(--spacing-md)', backgroundColor: 'rgba(16, 185, 129, 0.06)', border: '1px solid rgba(16, 185, 129, 0.25)', borderRadius: '8px', color: '#065f46', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                        <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                        <span>
+                            Dieser Kontakt ist mit einem Mieter verknüpft. Name, Anschrift und Typ werden aus den Mieterdaten übernommen und können unter „Mietverhältnisse“ geändert werden. E-Mail und Telefon werden hier direkt im Mieter-Datensatz gespeichert.
+                        </span>
+                    </div>
+                )}
                 <div style={{ marginBottom: 'var(--spacing-md)' }}>
                     <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>
                         Typ
@@ -785,6 +899,7 @@ const Contacts = () => {
                             backgroundColor: 'var(--surface-color)'
                         }}
                         value={formData.contact_type}
+                        disabled={isLinkedTenantContact(editingContact)}
                         onChange={(e) => setFormData({ ...formData, contact_type: e.target.value })}
                     >
                         <option value="other">Sonstiges</option>
@@ -798,6 +913,7 @@ const Contacts = () => {
                     label="Name / Firma"
                     placeholder="Muster GmbH"
                     value={formData.name}
+                    disabled={isLinkedTenantContact(editingContact)}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 />
 
@@ -821,6 +937,7 @@ const Contacts = () => {
                     label="Straße & Nr."
                     placeholder=""
                     value={formData.street}
+                    disabled={isLinkedTenantContact(editingContact)}
                     onChange={(e) => setFormData({ ...formData, street: e.target.value })}
                 />
 
@@ -829,12 +946,14 @@ const Contacts = () => {
                         label="PLZ"
                         placeholder=""
                         value={formData.zip}
+                        disabled={isLinkedTenantContact(editingContact)}
                         onChange={(e) => setFormData({ ...formData, zip: e.target.value })}
                     />
                     <Input
                         label="Ort"
                         placeholder=""
                         value={formData.city}
+                        disabled={isLinkedTenantContact(editingContact)}
                         onChange={(e) => setFormData({ ...formData, city: e.target.value })}
                     />
                 </div>
@@ -933,7 +1052,8 @@ const Contacts = () => {
 
                             <button
                                 type="button"
-                                onClick={() => setMessageChannel('epost')}
+                                disabled
+                                title="Noch nicht verfügbar"
                                 style={{
                                     display: 'flex',
                                     flexDirection: 'column',
@@ -941,16 +1061,17 @@ const Contacts = () => {
                                     justifyContent: 'center',
                                     padding: '12px 8px',
                                     borderRadius: '8px',
-                                    border: `2px solid ${messageChannel === 'epost' ? 'var(--primary-color)' : 'var(--border-color)'}`,
-                                    backgroundColor: messageChannel === 'epost' ? 'rgba(14,165,233,0.04)' : 'var(--surface-color)',
-                                    color: messageChannel === 'epost' ? 'var(--primary-color)' : 'var(--text-secondary)',
-                                    cursor: 'pointer',
+                                    border: '2px solid var(--border-color)',
+                                    backgroundColor: 'var(--surface-color)',
+                                    color: 'var(--text-secondary)',
+                                    cursor: 'not-allowed',
+                                    opacity: 0.4,
                                     transition: 'all 0.2s',
                                     gap: '6px'
                                 }}
                             >
                                 <FileText size={20} />
-                                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>E-Post (Brief)</span>
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>E-Post (Brief) – demnächst</span>
                             </button>
                         </div>
                     </div>

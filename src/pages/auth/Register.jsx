@@ -5,17 +5,29 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle } from 'lucide-react';
+
+// Erlaubte Tarife für die Testphase (wie in register-trial)
+const TRIAL_PLANS = {
+    starter: 'Starter',
+    professional: 'Professional',
+    business: 'Business',
+};
 
 const Register = () => {
     const location = useLocation();
     const queryParams = new URLSearchParams(location.search);
-    const plan = queryParams.get('plan');
+    const rawPlan = queryParams.get('plan');
+    // Unbekannte Tarif-Werte aus der URL → Standard der Marketing-Seite ('professional')
+    const plan = rawPlan
+        ? (TRIAL_PLANS[rawPlan.trim().toLowerCase()] ? rawPlan.trim().toLowerCase() : 'professional')
+        : null;
 
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
     const [error, setError] = useState('');
+    const [info, setInfo] = useState('');
     const [loading, setLoading] = useState(false);
     const { signUp } = useAuth();
     const navigate = useNavigate();
@@ -33,27 +45,44 @@ const Register = () => {
 
         try {
             setError('');
+            setInfo('');
             setLoading(true);
 
             if (plan) {
-                // SPECIAL FLOW: User comes from "Abo Starten" -> Auto-Confirm + Trial
-                // We use our Edge Function to handle everything in one go
-                console.log('Starting trial registration for plan:', plan);
+                // SPECIAL FLOW: User comes from "Abo Starten" -> Konto + Testphase in einem Schritt
+                const normalizedEmail = email.trim().toLowerCase();
 
                 const { data, error: fnError } = await supabase.functions.invoke('register-trial', {
-                    body: { email, password, plan }
+                    body: { email: normalizedEmail, password, plan }
                 });
 
                 if (fnError) throw new Error(fnError.message || 'Verbindungsfehler');
                 if (data && !data.success) throw new Error(data.error || 'Registrierung fehlgeschlagen');
 
+                if (data?.confirmation_required) {
+                    // Double-Opt-In aktiv: erst nach Klick auf den Bestätigungslink anmelden
+                    setInfo('Fast geschafft! Bitte bestätige deine E-Mail-Adresse über den Link, den wir dir geschickt haben. Danach kannst du dich anmelden.');
+                    return;
+                }
+
                 // Auto-Login immediately
                 const { error: signInError } = await supabase.auth.signInWithPassword({
-                    email,
+                    email: normalizedEmail,
                     password,
                 });
 
-                if (signInError) throw signInError;
+                if (signInError) {
+                    const m = (signInError.message || '').toLowerCase();
+                    if (m.includes('not confirmed')) {
+                        setInfo('Bitte bestätige zuerst deine E-Mail-Adresse über den Link in deinem Postfach. Danach kannst du dich anmelden.');
+                        return;
+                    }
+                    if (m.includes('invalid login credentials')) {
+                        // Neutral formuliert: verrät nicht, ob die Adresse bereits registriert ist
+                        throw new Error('Die Anmeldung mit diesen Zugangsdaten ist nicht möglich. Falls du bereits ein Konto hast, melde dich bitte über „Hier anmelden" an.');
+                    }
+                    throw signInError;
+                }
 
                 // Redirect to Dashboard (Trial active!)
                 navigate('/');
@@ -79,8 +108,24 @@ const Register = () => {
     return (
         <AuthLayout
             title={plan ? "10 Tage testen" : "Konto erstellen"}
-            subtitle={plan ? `Registriere dich für den ${plan} Plan` : "Starten Sie mit ImmoControlpro360"}
+            subtitle={plan ? `Registriere dich für den ${TRIAL_PLANS[plan]} Plan` : "Starten Sie mit ImmoControlpro360"}
         >
+            {info && (
+                <div style={{
+                    backgroundColor: '#D1FAE5',
+                    color: '#065F46',
+                    padding: '10px',
+                    borderRadius: 'var(--radius-md)',
+                    marginBottom: 'var(--spacing-md)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    fontSize: '0.875rem'
+                }}>
+                    <CheckCircle size={16} style={{ marginRight: '8px', flexShrink: 0 }} />
+                    {info}
+                </div>
+            )}
+
             {error && (
                 <div style={{
                     backgroundColor: 'var(--surface-color)',

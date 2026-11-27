@@ -48,7 +48,9 @@
 ## Schritt 2: Android App in Firebase registrieren
 
 1. Klicke "App hinzufügen" → Android
-2. Android-Paketname: `com.immocontrol.pro360`
+2. Android-Paketname: `com.ImmoControl.pro360` (genau so, mit Großbuchstaben – Paketnamen sind
+   case-sensitiv; Quelle: `appId` in `capacitor.config.json` bzw. `applicationId` in `android/app/build.gradle`.
+   Eine `google-services.json` für einen anders geschriebenen Namen passt nicht zur App.)
 3. SHA-1 ist optional (kann später hinzugefügt werden)
 4. Lade die **`google-services.json`** herunter
 5. Kopiere die Datei nach: `android/app/google-services.json`
@@ -70,25 +72,26 @@ Alternativ im Supabase Dashboard:
 1. Gehe zu **Edge Functions** → **Manage Secrets**
 2. Erstelle `FCM_SERVICE_ACCOUNT_KEY` mit dem Inhalt der JSON-Datei
 
-## Schritt 5: SQL Migration ausführen
+## Schritt 5: Datenbank-Trigger (Stand und Hinweise)
 
-Führe die Migration `20260215103500_push_notifications.sql` aus:
+Die Migrationen `20260215103500_push_notifications.sql` und `20260215110000_update_push_triggers.sql` sind im
+Projekt bereits eingespielt; neu aufsetzen nur über `supabase db push` (siehe `SOP_DEPLOYS.md`).
 
-```bash
-supabase db push
-```
+**Tatsächlicher Mechanismus (Live-Stand 27.11.2026):** Die Trigger `push_on_message`, `push_on_ticket`,
+`push_on_announcement`, `push_on_document` und `push_on_registration` rufen die Funktionen `trigger_push_on_*`
+auf; diese rufen die Hilfsfunktion `notify_push(...)`, die per `pg_net` (`net.http_post`) die Edge Function
+`send-push-notification` aufruft. Den dafür nötigen Schlüssel enthält heute die Live-Funktion `notify_push`
+selbst.
 
-Oder kopiere den Inhalt der Datei in den Supabase SQL Editor und führe ihn aus.
+**Nicht mehr so machen (früherer Weg dieser Anleitung):** den `service_role`-Schlüssel per
+`ALTER DATABASE … SET app.settings.service_role_key` als Datenbank-Einstellung hinterlegen – solche Einstellungen
+kann jede Datenbank-Rolle mit `current_setting()` lesen. Ebenso wenig gehört der Schlüssel in eine
+Migrationsdatei im Repo (in `20260215110000_update_push_triggers.sql` stand er früher im Klartext; dort steht jetzt
+ein Platzhalter).
 
-### App Settings für pg_net konfigurieren
-
-Im Supabase SQL Editor ausführen:
-
-```sql
--- Ersetze mit deinen echten Werten!
-ALTER DATABASE postgres SET app.settings.supabase_url = 'https://DEIN-PROJEKT.supabase.co';
-ALTER DATABASE postgres SET app.settings.service_role_key = 'DEIN-SERVICE-ROLE-KEY';
-```
+**Ziel:** Schlüssel nach der Rotation (Nutzer, Phase 0 des Komplett-Checks) im Supabase-Tresor (Vault) ablegen
+und in `notify_push` aus `vault.decrypted_secrets` lesen – oder statt des `service_role`-Schlüssels ein eigenes
+Shared Secret verwenden, das nur `send-push-notification` prüft. Diese Umstellung ist noch offen.
 
 ## Schritt 6: Edge Function deployen
 

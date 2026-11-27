@@ -1,23 +1,21 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
     ArrowLeft, ArrowRight, Calculator, ChevronDown, ChevronRight,
     Plus, Trash2, Loader2, Save, CheckCircle2, Building2,
-    Home, Building, Layers, TriangleIcon, Square, Minus,
-    Bath, DoorOpen, Maximize2, PanelTop, Info, FileText
+    Home, Building, Layers, Bath, PanelTop, Info, FileText, AlertTriangle
 } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
-import { generateCalcLines, recalcGP } from './calcEngine';
+import { generateCalcLines } from './calcEngine';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { generateClientPdf } from '../../lib/pdfGenerator';
 import { usePdfTemplate, fetchPdfTemplate } from '../../lib/usePdfTemplate';
-
-const fmt = (v) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 2 }).format(v || 0);
-const fmt0 = (v) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(v || 0);
+import { translateError } from '../../lib/errorTranslator';
+import { fmtEUR0 as fmt0, round2, safeInternalPath, assertWrite } from '../../components/renovation/renovationUtils';
 
 /* ─── Building type icons ───────── */
 const BUILDING_TYPES = [
@@ -37,6 +35,61 @@ const CURRENT_FLOOR_OPTIONS = ['Fliesen', 'Laminat/Vinyl/Parkett'];
 
 const STEP_LABELS = ['Gebäude', 'Räume & Ausstattung', 'Kalkulation'];
 
+const DEFAULT_RETURN = '/renovation?tab=calculator';
+
+/* ─── Strukturhilfen (außerhalb der Komponente) ───── */
+let idSeq = 0;
+const newId = (prefix) => `${prefix}_${Date.now()}_${idSeq++}`;
+
+const createDefaultWhg = (name) => ({
+    id: newId('whg'),
+    name,
+    rooms: [],
+    bathrooms: [],
+    balcony: false,
+    windows: [],
+});
+
+const floorLabel = (fi) => (fi === 0 ? 'Erdgeschoss' : `${fi}. OG`);
+
+// Etagenstruktur an Gebäudetyp/Etagenzahl anpassen. Vorhandene Etagen bleiben unverändert,
+// fehlende werden ergänzt: Wohnung = eine WHG, Einfamilienhaus = ein Wohnbereich je Etage
+// (damit dort Zimmer erfasst werden können), Mehrfamilienhaus = Wohnungen fügt der Nutzer hinzu.
+const buildFloorStructure = (prevFloors, type, count) => {
+    const fc = type === 'wohnung' ? 1 : Math.max(1, count);
+    return Array.from({ length: fc }, (_, fi) => {
+        const existing = prevFloors[fi];
+        if (existing) return existing;
+        const label = floorLabel(fi);
+        return {
+            id: newId(`floor_${fi}`),
+            label,
+            whgs: type === 'mfh' ? [] : [createDefaultWhg(type === 'efh' ? `Wohnbereich ${label}` : 'WHG 1')],
+        };
+    });
+};
+
+const whgHasContent = (w) => (w.rooms || []).length > 0 || (w.bathrooms || []).length > 0 || (w.windows || []).length > 0;
+
+// "Nur leere füllen": Abgleich über Gewerk + Untergewerk + Position; nur Zeilen ohne Menge
+// werden gefüllt (eigene Preise bleiben), neu hinzugekommene Positionen werden angehängt.
+const lineKey = (l) => `${l.trade}\u0001${l.subtrade}\u0001${l.position}`;
+const mergeEmptyLines = (existingLines, newLines) => {
+    const freshByKey = new Map(newLines.map(n => [lineKey(n), n]));
+    const existingKeys = new Set(existingLines.filter(l => !l.isCustom).map(lineKey));
+    const merged = existingLines.map(existing => {
+        if (existing.isCustom || (existing.qty || 0) > 0) return existing;
+        const fresh = freshByKey.get(lineKey(existing));
+        if (!fresh) return existing;
+        const qty = fresh.qty || 0;
+        const ep = (existing.ep || 0) > 0 ? existing.ep : (fresh.ep || 0);
+        // Aktiv-Status bei neuer Menge von der Engine übernehmen (berücksichtigt gewählte Alternativen)
+        return { ...existing, qty, ep, gp: round2(qty * ep), enabled: qty > 0 ? !!fresh.enabled : existing.enabled };
+    });
+    const additions = newLines.filter(n => !existingKeys.has(lineKey(n)));
+    return [...merged, ...additions];
+};
+
 const RenovationCalculatorDetail = () => {
     const { id } = useParams();
     const isNew = id === 'new';
@@ -47,11 +100,18 @@ const RenovationCalculatorDetail = () => {
     const [searchParams] = useSearchParams();
     const pdfTemplate = usePdfTemplate('sanierung_rechner');
 
+    // Rücksprungziel nur als interner Pfad (kein fremdes Ziel per präpariertem Link)
+    const returnTo = safeInternalPath(searchParams.get('returnTo'), null);
+
     const [step, setStep] = useState(0);
     const [loading, setLoading] = useState(!isNew);
+    const [loadError, setLoadError] = useState(null);
+    const [dataWarning, setDataWarning] = useState(null);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [calcId, setCalcId] = useState(isNew ? null : id);
+    const [dirty, setDirty] = useState(false);
+    const markDirty = () => setDirty(true);
 
     // ─── Step 0: Meta + Grunddaten ─────────
     const [name, setName] = useState('');
@@ -60,6 +120,7 @@ const RenovationCalculatorDetail = () => {
     const [unitId, setUnitId] = useState('');
     const [dealId, setDealId] = useState('');
     const [properties, setProperties] = useState([]);
+    const [extraProperties, setExtraProperties] = useState([]);
     const [units, setUnits] = useState([]);
     const [deals, setDeals] = useState([]);
 
@@ -67,7 +128,9 @@ const RenovationCalculatorDetail = () => {
     const [buildingType, setBuildingType] = useState('wohnung');
     const [floorHeight, setFloorHeight] = useState(2.5);
     const [unitCount, setUnitCount] = useState(1);
+    const [unitCountInput, setUnitCountInput] = useState('1');
     const [floorCount, setFloorCount] = useState(1);
+    const [floorCountInput, setFloorCountInput] = useState('1');
     const [roofType, setRoofType] = useState('satteldach');
     const [houseWidth, setHouseWidth] = useState(0);
     const [houseLength, setHouseLength] = useState(0);
@@ -75,9 +138,11 @@ const RenovationCalculatorDetail = () => {
     const [gaubenCount, setGaubenCount] = useState(0);
 
     // ─── Step 2: Floors & Rooms ─────────
-    const [floors, setFloors] = useState([]);
+    // Neue Kalkulation: Startstruktur für den Standardtyp "Wohnung"
+    const [floors, setFloors] = useState(() => (isNew ? buildFloorStructure([], 'wohnung', 1) : []));
 
     // ─── Step 3: Kalkulation ─────────
+    // workItems: Altbestand früherer Versionen (nur noch Fallback für die Summe, wird mitgespeichert)
     const [workItems, setWorkItems] = useState([]);
     const [calcLines, setCalcLines] = useState([]);
     const [expandedTrades, setExpandedTrades] = useState({});
@@ -93,15 +158,22 @@ const RenovationCalculatorDetail = () => {
         return floors.reduce((sum, f) => sum + f.whgs.length, 0);
     }, [floors]);
 
+    /* ─── Immobilien-Auswahl inkl. gespeicherter Immobilie aus anderem Portfolio ───── */
+    const propertyOptions = useMemo(
+        () => [...properties, ...extraProperties.filter(e => !properties.some(p => p.id === e.id))],
+        [properties, extraProperties]
+    );
+
     /* ─── Auto-select deal from URL param ?dealId=xxx ───── */
     useEffect(() => {
         if (!isNew || !user) return;
         const urlDealId = searchParams.get('dealId');
+        // searchParams.get() liefert bereits dekodierte Werte (kein zweites decodeURIComponent)
         const urlDealName = searchParams.get('dealName');
         // Immediately set name from URL (available before deals load)
         if (urlDealId && !dealId) {
             setDealId(urlDealId);
-            if (urlDealName) setName(decodeURIComponent(urlDealName));
+            if (urlDealName) setName(urlDealName);
         }
         // Once deals are loaded, set type and update name if not already set from URL
         if (urlDealId && deals.length > 0) {
@@ -113,38 +185,48 @@ const RenovationCalculatorDetail = () => {
         }
     }, [isNew, user, searchParams, deals]);
 
-    /* ─── Max WHG allowed ───── */
-    const maxWhg = buildingType === 'mfh' ? unitCount : 1;
+    /* ─── Max/Min WHG ───── */
+    // Mehrfamilienhaus: genau "Anzahl Einheiten"; Einfamilienhaus: ein Wohnbereich je Etage; Wohnung: eine WHG
+    const maxWhg = buildingType === 'mfh' ? unitCount : buildingType === 'efh' ? floors.length : 1;
+    const minWhg = buildingType === 'mfh' ? unitCount : 1;
+    const structureComplete = totalWhgCount >= minWhg;
     const isEfhMfh = buildingType === 'efh' || buildingType === 'mfh';
 
     /* ─── Load data ───── */
-    useEffect(() => {
-        if (!user) return;
-        loadProperties();
-        loadDeals();
-        if (!isNew) loadCalculation();
-    }, [user, id]);
-
     const loadProperties = async () => {
         let q = supabase.from('properties').select('id, street, house_number, city, zip, portfolio_id');
         if (selectedPortfolioID) q = q.eq('portfolio_id', selectedPortfolioID);
-        const { data } = await q;
+        const { data, error } = await q;
+        if (error) {
+            console.error('Error loading properties:', error);
+            setDataWarning('Immobilien konnten nicht geladen werden: ' + translateError(error));
+            return;
+        }
         setProperties(data || []);
     };
 
     const loadUnits = async (propId) => {
         if (!propId) { setUnits([]); return; }
-        const { data } = await supabase.from('units').select('id, unit_name').eq('property_id', propId);
+        const { data, error } = await supabase.from('units').select('id, unit_name').eq('property_id', propId);
+        if (error) {
+            console.error('Error loading units:', error);
+            setDataWarning('Einheiten konnten nicht geladen werden: ' + translateError(error));
+            return;
+        }
         setUnits(data || []);
     };
 
     const loadDeals = async () => {
-        const { data } = await supabase.from('deals').select('id, name, deal_type, deal_data').eq('user_id', user.id).order('updated_at', { ascending: false });
+        const { data, error } = await supabase.from('deals').select('id, name, deal_type, deal_data').eq('user_id', user.id).order('updated_at', { ascending: false });
+        if (error) {
+            console.error('Error loading deals:', error);
+            setDataWarning('Deals konnten nicht geladen werden: ' + translateError(error));
+            return;
+        }
         setDeals(data || []);
     };
 
     const loadCalculation = async () => {
-        setLoading(true);
         try {
             const { data, error } = await supabase
                 .from('renovation_calculations')
@@ -159,25 +241,63 @@ const RenovationCalculatorDetail = () => {
 
             // Load building config from JSON
             const cfg = data.building_config || {};
-            if (cfg.buildingType) setBuildingType(cfg.buildingType);
+            const type = cfg.buildingType || 'wohnung';
+            setBuildingType(type);
             if (cfg.floorHeight) setFloorHeight(cfg.floorHeight);
-            if (cfg.unitCount) setUnitCount(cfg.unitCount);
-            if (cfg.floorCount) setFloorCount(cfg.floorCount);
+            if (cfg.unitCount) { setUnitCount(cfg.unitCount); setUnitCountInput(String(cfg.unitCount)); }
+            if (cfg.floorCount) { setFloorCount(cfg.floorCount); setFloorCountInput(String(cfg.floorCount)); }
             if (cfg.roofType) setRoofType(cfg.roofType);
             if (cfg.houseWidth) setHouseWidth(cfg.houseWidth);
             if (cfg.houseLength) setHouseLength(cfg.houseLength);
             if (cfg.roofAngle) setRoofAngle(cfg.roofAngle);
             if (cfg.gaubenCount) setGaubenCount(cfg.gaubenCount);
-            if (cfg.floors) setFloors(cfg.floors);
+            // Ältere Datensätze ohne Etagen: Struktur aus Gebäudetyp/Etagenzahl aufbauen
+            setFloors(Array.isArray(cfg.floors) && cfg.floors.length > 0 ? cfg.floors : buildFloorStructure([], type, cfg.floorCount || 1));
             if (cfg.workItems) setWorkItems(cfg.workItems);
             if (cfg.calcLines) { setCalcLines(cfg.calcLines); setCalcGenerated(true); }
             if (cfg.dealId) setDealId(cfg.dealId);
+            setLoadError(null);
         } catch (err) {
             console.error(err);
+            // Formular NICHT mit Standardwerten anzeigen – sonst würde Speichern den Datensatz überschreiben
+            setLoadError(translateError(err));
         } finally {
             setLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (!user) return;
+        loadDeals();
+        if (!isNew) loadCalculation();
+    }, [user]);
+
+    // Objektliste folgt der Portfolio-Auswahl
+    useEffect(() => {
+        if (!user) return;
+        loadProperties();
+    }, [user, selectedPortfolioID]);
+
+    // Gespeicherte Immobilie immer in der Auswahl anbieten (z. B. aus anderem Portfolio)
+    useEffect(() => {
+        if (!propertyId || propertyOptions.some(p => p.id === propertyId)) return;
+        let cancelled = false;
+        supabase.from('properties').select('id, street, house_number, city, zip, portfolio_id').eq('id', propertyId).maybeSingle()
+            .then(({ data, error }) => {
+                if (cancelled) return;
+                if (error) { console.error('Error loading assigned property:', error); return; }
+                if (data) setExtraProperties(prev => (prev.some(p => p.id === data.id) ? prev : [...prev, data]));
+            });
+        return () => { cancelled = true; };
+    }, [propertyId, propertyOptions]);
+
+    // Warnung beim Schließen/Neuladen des Tabs mit ungespeicherten Eingaben
+    useEffect(() => {
+        if (!dirty) return;
+        const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+        window.addEventListener('beforeunload', handler);
+        return () => window.removeEventListener('beforeunload', handler);
+    }, [dirty]);
 
     /* ─── On deal selection: auto-set calc type + name, clear property ───── */
     const handleDealChange = (selectedId) => {
@@ -206,49 +326,66 @@ const RenovationCalculatorDetail = () => {
         // Mutual exclusivity: clear deal when property is selected
         if (selectedId) {
             setDealId('');
-            const prop = properties.find(p => p.id === selectedId);
+            const prop = propertyOptions.find(p => p.id === selectedId);
             if (prop) setName(`${prop.street} ${prop.house_number || ''}, ${prop.city}`.trim());
         } else if (!dealId) {
             setName('');
         }
     };
 
-    /* ─── Initialize floors when building config changes ───── */
-    useEffect(() => {
-        if (loading || !isNew) return;
-        const fc = buildingType === 'wohnung' ? 1 : floorCount;
+    /* ─── Gebäudetyp / Etagenzahl: Etagenstruktur anpassen (auch bei gespeicherten Kalkulationen) ───── */
+    // Liefert false, wenn der Nutzer das Entfernen befüllter Etagen ablehnt.
+    const applyStructure = (nextType, nextCount) => {
+        const fc = nextType === 'wohnung' ? 1 : Math.max(1, Math.min(6, nextCount));
+        const removed = floors.slice(fc);
+        const lostContent = removed.some(f => (f.whgs || []).some(whgHasContent));
+        if (lostContent && !window.confirm(
+            `Dadurch werden ${removed.length === 1 ? 'eine Etage' : `${removed.length} Etagen`} mit erfassten Räumen, Bädern bzw. Fenstern entfernt (${removed.map(f => f.label).join(', ')}). Fortfahren?`
+        )) return false;
+        setFloors(prev => buildFloorStructure(prev, nextType, fc));
+        setDirty(true);
+        return true;
+    };
 
-        // Only initialize if floors are empty or count changed
-        if (floors.length !== fc) {
-            const newFloors = Array.from({ length: fc }, (_, fi) => {
-                const existing = floors[fi];
-                if (existing) return existing;
-                return {
-                    id: `floor_${fi}`,
-                    label: fc === 1 ? 'Erdgeschoss' : fi === 0 ? 'Erdgeschoss' : `${fi}. OG`,
-                    whgs: buildingType === 'wohnung' ? [createDefaultWhg(0)] : [],
-                };
-            });
-            setFloors(newFloors);
+    const handleBuildingTypeChange = (nextType) => {
+        if (nextType === buildingType) return;
+        if (!applyStructure(nextType, floorCount)) return;
+        setBuildingType(nextType);
+        // Mehrfamilienhaus hat mindestens 2 Einheiten
+        if (nextType === 'mfh' && unitCount < 2) { setUnitCount(2); setUnitCountInput('2'); }
+    };
+
+    const commitFloorCount = () => {
+        const n = parseInt(floorCountInput, 10);
+        if (!Number.isFinite(n)) { setFloorCountInput(String(floorCount)); return; }
+        const clamped = Math.max(1, Math.min(6, n));
+        if (clamped === floorCount) { setFloorCountInput(String(floorCount)); return; }
+        if (applyStructure(buildingType, clamped)) {
+            setFloorCount(clamped);
+            setFloorCountInput(String(clamped));
+        } else {
+            setFloorCountInput(String(floorCount));
         }
-    }, [buildingType, floorCount, unitCount, loading]);
+    };
 
-    const createDefaultWhg = (index) => ({
-        id: `whg_${Date.now()}_${index}`,
-        name: `WHG ${index + 1}`,
-        rooms: [],
-        bathrooms: [],
-        balcony: false,
-        windows: [],
-    });
+    // Einheitenzahl erst beim Verlassen des Feldes auf den Mindestwert klemmen (freie Eingabe möglich)
+    const commitUnitCount = () => {
+        const n = parseInt(unitCountInput, 10);
+        const clamped = Number.isFinite(n) ? Math.max(2, n) : Math.max(2, unitCount);
+        setUnitCount(clamped);
+        setUnitCountInput(String(clamped));
+        if (clamped !== unitCount) setDirty(true);
+    };
 
     /* ─── Room/Bathroom/Window Management ───── */
     const updateFloor = (floorIdx, updater) => {
         setFloors(prev => prev.map((f, i) => i === floorIdx ? updater(f) : f));
+        setDirty(true);
     };
 
     const updateFloorLabel = (floorIdx, newLabel) => {
         setFloors(prev => prev.map((f, i) => i === floorIdx ? { ...f, label: newLabel } : f));
+        setDirty(true);
     };
 
     const addRoom = (floorIdx, whgIdx) => {
@@ -292,13 +429,17 @@ const RenovationCalculatorDetail = () => {
 
     const addWhg = (floorIdx) => {
         if (totalWhgCount >= maxWhg) return;
+        const floor = floors[floorIdx];
+        const whgName = buildingType === 'efh' ? `Wohnbereich ${floor?.label || floorLabel(floorIdx)}` : `WHG ${totalWhgCount + 1}`;
         updateFloor(floorIdx, f => ({
             ...f,
-            whgs: [...f.whgs, createDefaultWhg(totalWhgCount)],
+            whgs: [...f.whgs, createDefaultWhg(whgName)],
         }));
     };
 
     const removeWhg = (floorIdx, whgIdx) => {
+        const whg = floors[floorIdx]?.whgs?.[whgIdx];
+        if (whg && whgHasContent(whg) && !window.confirm(`„${whg.name}" mit allen erfassten Zimmern, Bädern und Fenstern entfernen?`)) return;
         updateFloor(floorIdx, f => ({
             ...f,
             whgs: f.whgs.filter((_, wi) => wi !== whgIdx),
@@ -372,16 +513,44 @@ const RenovationCalculatorDetail = () => {
     /* ─── Grand total from work items ───── */
     const grandTotal = useMemo(() => {
         if (calcLines.length > 0) {
-            return calcLines.filter(l => l.enabled).reduce((sum, l) => sum + (l.gp || 0), 0);
+            return round2(calcLines.filter(l => l.enabled).reduce((sum, l) => sum + (l.gp || 0), 0));
         }
-        return workItems.filter(w => w.enabled).reduce((sum, w) => sum + (Number(w.total) || 0), 0);
+        return round2(workItems.filter(w => w.enabled).reduce((sum, w) => sum + (Number(w.total) || 0), 0));
     }, [workItems, calcLines]);
+
+    /* ─── Verknüpften Deal aktualisieren ───── */
+    // Deal unmittelbar vorher frisch laden und nur den Sanierungswert ändern (keine veralteten
+    // deal_data aus dem Seitenaufruf zurückschreiben). total_investment enthält die Sanierung
+    // linear (Kaufpreis + Nebenkosten [+ Finanzierung/Haltekosten] + Sanierung) und wird um die
+    // Differenz angepasst, damit die Dealliste nicht bis zum nächsten Deal-Speichern alte Werte zeigt.
+    const updateLinkedDeal = async (totalCost) => {
+        const { data: fresh, error } = await supabase.from('deals')
+            .select('id, deal_type, deal_data, total_investment')
+            .eq('id', dealId).single();
+        if (error) throw error;
+        const key = fresh.deal_type === 'fix_flip' ? 'renovation' : fresh.deal_type === 'buy_hold' ? 'renovationCosts' : null;
+        if (!key) return;
+        const oldDealData = fresh.deal_data || {};
+        const oldRenovation = parseFloat(oldDealData[key]) || 0;
+        const payload = {
+            deal_data: { ...oldDealData, [key]: totalCost },
+            updated_at: new Date().toISOString(),
+        };
+        const oldTotal = Number(fresh.total_investment);
+        if (Number.isFinite(oldTotal) && oldTotal > 0) {
+            payload.total_investment = round2(oldTotal - oldRenovation + totalCost);
+        }
+        assertWrite(await supabase.from('deals').update(payload).eq('id', dealId).select('id'), 'Deal aktualisieren');
+    };
 
     /* ─── Save ───── */
     const handleSave = async () => {
+        if (saving || loadError) return;
         if (!name.trim()) { alert('Bitte Name der Kalkulation eingeben.'); return; }
         setSaving(true);
         try {
+            // Summe auf Cent gerundet speichern (keine Float-Reste in total_cost / deal_data)
+            const totalCost = round2(grandTotal);
             const buildingConfig = {
                 buildingType, floorHeight, unitCount, floorCount,
                 roofType, houseWidth, houseLength, roofAngle, gaubenCount,
@@ -389,18 +558,19 @@ const RenovationCalculatorDetail = () => {
             };
 
             if (calcId) {
-                await supabase.from('renovation_calculations').update({
+                // Fehler und "0 Zeilen geändert" (RLS/gelöscht) erkennen – sonst wäre die Eingabe still verloren
+                assertWrite(await supabase.from('renovation_calculations').update({
                     name: name.trim(), calc_type: calcType,
                     property_id: propertyId || null, unit_id: unitId || null,
                     building_config: buildingConfig,
-                    total_cost: grandTotal,
-                }).eq('id', calcId);
+                    total_cost: totalCost,
+                }).eq('id', calcId).select('id'), 'Kalkulation speichern');
             } else {
                 const { data, error } = await supabase.from('renovation_calculations').insert({
                     user_id: user.id, name: name.trim(), calc_type: calcType,
                     property_id: propertyId || null, unit_id: unitId || null,
                     building_config: buildingConfig,
-                    total_cost: grandTotal,
+                    total_cost: totalCost,
                 }).select().single();
                 if (error) throw error;
                 setCalcId(data.id);
@@ -409,26 +579,20 @@ const RenovationCalculatorDetail = () => {
                 const qs = currentParams.toString();
                 window.history.replaceState(null, '', `/renovation/calculator/${data.id}${qs ? '?' + qs : ''}`);
             }
+            setDirty(false);
 
             // Update deal if linked
             if (dealId) {
-                const deal = deals.find(d => d.id === dealId);
-                if (deal) {
-                    const dealData = { ...(deal.deal_data || {}) };
-                    if (deal.deal_type === 'buy_hold') {
-                        dealData.renovationCosts = grandTotal;
-                    } else if (deal.deal_type === 'fix_flip') {
-                        dealData.renovation = grandTotal;
-                    }
-                    await supabase.from('deals').update({
-                        deal_data: dealData,
-                        updated_at: new Date().toISOString(),
-                    }).eq('id', dealId);
+                try {
+                    await updateLinkedDeal(totalCost);
+                } catch (dealErr) {
+                    console.error('Error updating linked deal:', dealErr);
+                    alert('Die Kalkulation wurde gespeichert, aber der verknüpfte Deal konnte nicht aktualisiert werden: ' + translateError(dealErr) + '\nBitte erneut speichern.');
+                    return;
                 }
             }
 
             // Show success, then navigate back to the deal
-            const returnTo = searchParams.get('returnTo');
             if (returnTo) {
                 setSaveSuccess(true);
                 setTimeout(() => {
@@ -436,28 +600,51 @@ const RenovationCalculatorDetail = () => {
                     navigate(returnTo);
                 }, 800);
             } else {
-                navigate('/renovation?tab=calculator');
+                navigate(DEFAULT_RETURN);
             }
         } catch (err) {
-            alert('Fehler beim Speichern: ' + err.message);
+            alert('Fehler beim Speichern: ' + translateError(err));
         } finally {
             setSaving(false);
         }
     };
 
+    /* ─── Zurück (mit Rückfrage bei ungespeicherten Eingaben) ───── */
+    const handleBack = () => {
+        if (dirty && !window.confirm('Es gibt ungespeicherte Eingaben. Seite trotzdem verlassen? Die Änderungen gehen verloren.')) return;
+        navigate(returnTo || DEFAULT_RETURN);
+    };
+
+    /* ─── Schrittleiste: nach vorn nur mit derselben Bedingung wie "Weiter" ───── */
+    const canGoToStep = (i) => i <= 1 || structureComplete;
+
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '60px' }}><Loader2 className="animate-spin" size={28} /></div>;
+
+    if (loadError) {
+        return (
+            <div>
+                <button onClick={() => navigate(returnTo || DEFAULT_RETURN)} style={backBtnStyle}>
+                    <ArrowLeft size={16} /> {returnTo ? 'Zurück zum Deal' : 'Zurück zur Übersicht'}
+                </button>
+                <div style={{ maxWidth: '560px', margin: '20px auto', padding: '20px', borderRadius: 'var(--radius-lg)', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)', color: '#b91c1c' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, marginBottom: '8px' }}>
+                        <AlertTriangle size={18} /> Kalkulation konnte nicht geladen werden
+                    </div>
+                    <p style={{ fontSize: '0.88rem', marginBottom: '16px' }}>{loadError}</p>
+                    <Button size="sm" onClick={() => { setLoadError(null); setLoading(true); loadCalculation(); }}>Erneut laden</Button>
+                </div>
+            </div>
+        );
+    }
 
     /* ═══════════════════════════════════════
        RENDER
        ═══════════════════════════════════════ */
     return (
-        <div>
+        <div onChangeCapture={markDirty}>
             {/* Back */}
-            <button onClick={() => {
-                const returnTo = searchParams.get('returnTo');
-                navigate(returnTo || '/renovation?tab=calculator');
-            }} style={backBtnStyle}>
-                <ArrowLeft size={16} /> {searchParams.get('returnTo') ? 'Zurück zum Deal' : 'Zurück zur Übersicht'}
+            <button onClick={handleBack} style={backBtnStyle}>
+                <ArrowLeft size={16} /> {returnTo ? 'Zurück zum Deal' : 'Zurück zur Übersicht'}
             </button>
 
             {/* Header */}
@@ -468,27 +655,40 @@ const RenovationCalculatorDetail = () => {
                 </h1>
             </div>
 
+            {dataWarning && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', color: '#92400e', fontSize: '0.82rem' }}>
+                    <AlertTriangle size={15} /> <span style={{ flex: 1 }}>{dataWarning}</span>
+                    <button onClick={() => setDataWarning(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#92400e', fontSize: '0.8rem' }}>Ausblenden</button>
+                </div>
+            )}
+
             {/* Step indicators */}
             <div style={{ display: 'flex', gap: '4px', marginBottom: '24px' }}>
-                {STEP_LABELS.map((label, i) => (
-                    <button key={i} onClick={() => setStep(i)} style={{
-                        display: 'flex', alignItems: 'center', gap: '8px',
-                        padding: isMobile ? '8px 10px' : '8px 16px', borderRadius: 'var(--radius-md)',
-                        background: step === i ? '#0ea5e9' : 'var(--surface-color)',
-                        color: step === i ? '#fff' : 'var(--text-secondary)',
-                        border: step === i ? 'none' : '1px solid var(--border-color)',
-                        fontSize: isMobile ? '0.75rem' : '0.85rem', fontWeight: 600,
-                        cursor: 'pointer', transition: 'all 0.15s', flex: isMobile ? 1 : undefined,
-                    }}>
-                        <span style={{
-                            width: '22px', height: '22px', borderRadius: '50%',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: step === i ? 'rgba(255,255,255,0.25)' : 'var(--border-color)',
-                            fontSize: '0.75rem', fontWeight: 700, flexShrink: 0,
-                        }}>{i + 1}</span>
-                        {!isMobile ? label : label.split(' ')[0]}
-                    </button>
-                ))}
+                {STEP_LABELS.map((label, i) => {
+                    const allowed = canGoToStep(i);
+                    return (
+                        <button key={i} onClick={() => { if (allowed) setStep(i); }} disabled={!allowed}
+                            title={allowed ? undefined : 'Bitte zuerst alle Wohnungen/Wohnbereiche anlegen'}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '8px',
+                                padding: isMobile ? '8px 10px' : '8px 16px', borderRadius: 'var(--radius-md)',
+                                background: step === i ? '#0ea5e9' : 'var(--surface-color)',
+                                color: step === i ? '#fff' : 'var(--text-secondary)',
+                                border: step === i ? 'none' : '1px solid var(--border-color)',
+                                fontSize: isMobile ? '0.75rem' : '0.85rem', fontWeight: 600,
+                                cursor: allowed ? 'pointer' : 'not-allowed', opacity: allowed ? 1 : 0.5,
+                                transition: 'all 0.15s', flex: isMobile ? 1 : undefined,
+                            }}>
+                            <span style={{
+                                width: '22px', height: '22px', borderRadius: '50%',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                background: step === i ? 'rgba(255,255,255,0.25)' : 'var(--border-color)',
+                                fontSize: '0.75rem', fontWeight: 700, flexShrink: 0,
+                            }}>{i + 1}</span>
+                            {!isMobile ? label : label.split(' ')[0]}
+                        </button>
+                    );
+                })}
             </div>
 
             {/* ═══ STEP 1: BUILDING ═══ */}
@@ -507,6 +707,9 @@ const RenovationCalculatorDetail = () => {
                                     style={{ ...inputStyle, opacity: propertyId ? 0.5 : 1 }}
                                 >
                                     <option value="">— Kein Deal —</option>
+                                    {dealId && !deals.some(d => d.id === dealId) && (
+                                        <option value={dealId}>Verknüpfter Deal (nicht in Ihrer Liste)</option>
+                                    )}
                                     {deals.map(d => (
                                         <option key={d.id} value={d.id}>
                                             {d.name} ({d.deal_type === 'fix_flip' ? 'Fix & Flip' : 'Buy & Hold'})
@@ -524,7 +727,10 @@ const RenovationCalculatorDetail = () => {
                                     style={{ ...inputStyle, opacity: dealId ? 0.5 : 1 }}
                                 >
                                     <option value="">— Keine Immobilie —</option>
-                                    {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.zip} {p.city}</option>)}
+                                    {propertyId && !propertyOptions.some(p => p.id === propertyId) && (
+                                        <option value={propertyId}>Zugeordnete Immobilie (nicht verfügbar)</option>
+                                    )}
+                                    {propertyOptions.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.zip} {p.city}</option>)}
                                 </select>
                                 {dealId && <span style={hintStyle}>Deal ist ausgewählt – Immobilie nicht verfügbar</span>}
                             </div>
@@ -570,7 +776,7 @@ const RenovationCalculatorDetail = () => {
                         <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '16px' }}>Gebäudetyp</h3>
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
                             {BUILDING_TYPES.map(bt => (
-                                <button key={bt.key} onClick={() => setBuildingType(bt.key)} style={{
+                                <button key={bt.key} onClick={() => handleBuildingTypeChange(bt.key)} style={{
                                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
                                     padding: '20px 16px', borderRadius: 'var(--radius-lg)',
                                     border: buildingType === bt.key ? '2px solid #0ea5e9' : '1px solid var(--border-color)',
@@ -593,13 +799,21 @@ const RenovationCalculatorDetail = () => {
                             {buildingType === 'mfh' && (
                                 <div>
                                     <label style={labelStyle}>Anzahl Einheiten</label>
-                                    <input type="number" min="2" value={unitCount} onChange={e => setUnitCount(Math.max(2, Number(e.target.value)))} style={inputStyle} />
+                                    <input type="number" min="2" value={unitCountInput}
+                                        onChange={e => setUnitCountInput(e.target.value)}
+                                        onBlur={commitUnitCount}
+                                        onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                        style={inputStyle} />
                                 </div>
                             )}
                             {(buildingType === 'efh' || buildingType === 'mfh') && (
                                 <div>
                                     <label style={labelStyle}>Anzahl Etagen</label>
-                                    <input type="number" min="1" max="6" value={floorCount} onChange={e => setFloorCount(Math.max(1, Math.min(6, Number(e.target.value))))} style={inputStyle} />
+                                    <input type="number" min="1" max="6" value={floorCountInput}
+                                        onChange={e => setFloorCountInput(e.target.value)}
+                                        onBlur={commitFloorCount}
+                                        onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                        style={inputStyle} />
                                 </div>
                             )}
                         </div>
@@ -611,7 +825,7 @@ const RenovationCalculatorDetail = () => {
                             <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '16px' }}>Dach & Abmessungen</h3>
                             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '12px', marginBottom: '16px' }}>
                                 {ROOF_TYPES.map(rt => (
-                                    <button key={rt.key} onClick={() => setRoofType(rt.key)} style={{
+                                    <button key={rt.key} onClick={() => { setRoofType(rt.key); markDirty(); }} style={{
                                         padding: '12px', borderRadius: 'var(--radius-md)', textAlign: 'center',
                                         border: roofType === rt.key ? '2px solid #0ea5e9' : '1px solid var(--border-color)',
                                         background: roofType === rt.key ? 'rgba(14,165,233,0.08)' : 'var(--surface-color)',
@@ -681,7 +895,9 @@ const RenovationCalculatorDetail = () => {
                                     style={{ ...inputStyle, fontWeight: 700, fontSize: '0.95rem', maxWidth: '220px', padding: '6px 10px' }}
                                 />
                                 <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                    ({floor.whgs.length} {floor.whgs.length === 1 ? 'Wohnung' : 'Wohnungen'})
+                                    ({floor.whgs.length} {buildingType === 'efh'
+                                        ? (floor.whgs.length === 1 ? 'Wohnbereich' : 'Wohnbereiche')
+                                        : (floor.whgs.length === 1 ? 'Wohnung' : 'Wohnungen')})
                                 </span>
                             </div>
 
@@ -690,7 +906,7 @@ const RenovationCalculatorDetail = () => {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
                                         <Home size={16} color="#f59e0b" />
                                         <input value={whg.name} onChange={e => updateWhgField(fi, wi, 'name', e.target.value)} style={{ ...inputStyle, fontWeight: 700, maxWidth: '200px' }} />
-                                        <button onClick={() => removeWhg(fi, wi)} style={deleteBtnStyle}><Trash2 size={14} /></button>
+                                        <button onClick={() => removeWhg(fi, wi)} style={deleteBtnStyle} title="Entfernen"><Trash2 size={14} /></button>
                                         <div style={{ flex: 1 }} />
                                         <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', cursor: 'pointer' }}>
                                             <input type="checkbox" checked={whg.balcony} onChange={e => updateWhgField(fi, wi, 'balcony', e.target.checked)} />
@@ -818,7 +1034,7 @@ const RenovationCalculatorDetail = () => {
                                 </div>
                             ))}
 
-                            {/* Add WHG – only for MFH and only up to unitCount */}
+                            {/* Add WHG – MFH up to unitCount; Wohnung/EFH: leere Etage wieder befüllbar */}
                             {buildingType === 'mfh' && totalWhgCount < maxWhg && (
                                 <button onClick={() => addWhg(fi)} style={{ ...addBtnStyle, marginTop: '8px' }}>
                                     <Plus size={13} /> Wohnung hinzufügen ({totalWhgCount}/{maxWhg})
@@ -829,10 +1045,15 @@ const RenovationCalculatorDetail = () => {
                                     Maximale Anzahl Wohnungen erreicht ({maxWhg})
                                 </div>
                             )}
+                            {buildingType !== 'mfh' && floor.whgs.length === 0 && totalWhgCount < maxWhg && (
+                                <button onClick={() => addWhg(fi)} style={{ ...addBtnStyle, marginTop: '8px' }}>
+                                    <Plus size={13} /> {buildingType === 'efh' ? 'Wohnbereich hinzufügen' : 'Wohnung hinzufügen'}
+                                </button>
+                            )}
                         </Card>
                     ))}
 
-                    {totalWhgCount < maxWhg && (
+                    {!structureComplete && (
                         <div style={{
                             padding: '10px 16px', borderRadius: 'var(--radius-md)',
                             background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)',
@@ -840,7 +1061,11 @@ const RenovationCalculatorDetail = () => {
                             display: 'flex', alignItems: 'center', gap: '8px',
                         }}>
                             <Info size={16} />
-                            <span>Bitte alle <strong>{maxWhg}</strong> Wohnungen anlegen. Aktuell: <strong>{totalWhgCount}</strong> von {maxWhg}.</span>
+                            {buildingType === 'mfh' ? (
+                                <span>Bitte alle <strong>{minWhg}</strong> Wohnungen anlegen. Aktuell: <strong>{totalWhgCount}</strong> von {minWhg}.</span>
+                            ) : (
+                                <span>Bitte mindestens {buildingType === 'efh' ? 'einen Wohnbereich' : 'eine Wohnung'} anlegen.</span>
+                            )}
                         </div>
                     )}
 
@@ -848,7 +1073,7 @@ const RenovationCalculatorDetail = () => {
                         <Button variant="secondary" onClick={() => setStep(0)}>
                             <ArrowLeft size={15} style={{ marginRight: '4px' }} /> Zurück
                         </Button>
-                        <Button onClick={() => setStep(2)} disabled={totalWhgCount < maxWhg} style={{ opacity: totalWhgCount < maxWhg ? 0.5 : 1 }}>
+                        <Button onClick={() => setStep(2)} disabled={!structureComplete} style={{ opacity: structureComplete ? 1 : 0.5 }}>
                             Kalkulation <ArrowRight size={15} style={{ marginLeft: '4px' }} />
                         </Button>
                     </div>
@@ -862,11 +1087,13 @@ const RenovationCalculatorDetail = () => {
                     setLoadingCalc(true);
                     try {
                         // Load user trades from DB
-                        const { data: tData } = await supabase
+                        const { data: tData, error: tErr } = await supabase
                             .from('renovation_trades')
                             .select('*, subtrades:renovation_subtrades(*)')
                             .eq('user_id', user.id)
                             .order('sort_order');
+                        // Ohne erfolgreich geladene Stammdaten die vorhandene Kalkulation NICHT ersetzen
+                        if (tErr) throw tErr;
 
                         const userTrades = (tData || []).map(t => ({
                             ...t,
@@ -878,6 +1105,11 @@ const RenovationCalculatorDetail = () => {
                             })),
                         }));
 
+                        if (userTrades.length === 0) {
+                            alert('Es sind keine Gewerke/Preislisten hinterlegt. Bitte zuerst in den Einstellungen des Sanierungsmanagers den Standard-Katalog laden.');
+                            return;
+                        }
+
                         const newLines = generateCalcLines({
                             buildingType, floorHeight, unitCount, floorCount,
                             roofType, houseWidth, houseLength, roofAngle, gaubenCount,
@@ -887,13 +1119,9 @@ const RenovationCalculatorDetail = () => {
                         if (mode === 'all' || calcLines.length === 0) {
                             setCalcLines(newLines);
                         } else if (mode === 'empty') {
-                            // Only fill lines where qty is 0 or missing
-                            setCalcLines(prev => prev.map(existing => {
-                                if (existing.qty > 0) return existing;
-                                const fresh = newLines.find(n => n.position === existing.position && n.trade === existing.trade);
-                                return fresh ? { ...existing, qty: fresh.qty, ep: fresh.ep, gp: fresh.gp, enabled: fresh.enabled } : existing;
-                            }));
+                            setCalcLines(prev => mergeEmptyLines(prev, newLines));
                         }
+                        setDirty(true);
 
                         setCalcGenerated(true);
                         // Auto-expand all trades
@@ -901,7 +1129,7 @@ const RenovationCalculatorDetail = () => {
                         userTrades.forEach(t => { expanded[t.name] = true; });
                         setExpandedTrades(expanded);
                     } catch (err) {
-                        alert('Fehler beim Berechnen: ' + err.message);
+                        alert('Fehler beim Berechnen – die bisherige Kalkulation bleibt unverändert: ' + translateError(err));
                     } finally {
                         setLoadingCalc(false);
                         setShowRecalcDialog(false);
@@ -918,6 +1146,7 @@ const RenovationCalculatorDetail = () => {
                         }
                         return next;
                     });
+                    setDirty(true);
                 };
 
                 /* ─── Add custom position to a trade ───── */
@@ -942,6 +1171,13 @@ const RenovationCalculatorDetail = () => {
                         newLine,
                         ...prev.slice(insertAt),
                     ]);
+                    setDirty(true);
+                };
+
+                /* ─── Remove custom position ───── */
+                const removeCalcLine = (idx) => {
+                    setCalcLines(prev => prev.filter((_, i) => i !== idx));
+                    setDirty(true);
                 };
 
                 /* ─── Group calc lines by trade ───── */
@@ -962,6 +1198,47 @@ const RenovationCalculatorDetail = () => {
                 const enabledTotal = calcLines.filter(l => l.enabled).reduce((s, l) => s + (l.gp || 0), 0);
                 const tradeTotal = (tradeName) => calcLines.filter(l => l.trade === tradeName && l.enabled).reduce((s, l) => s + (l.gp || 0), 0);
 
+                /* ─── PDF-Export (Fehler abfangen, Vorlage notfalls Standard) ───── */
+                const exportPdf = async () => {
+                    const prop = propertyId ? propertyOptions.find(p => p.id === propertyId) : null;
+                    const needsTemplateFetch = !!prop?.portfolio_id;
+                    // Muss vor dem Druck noch die Vorlage geladen werden, das Fenster synchron im Klick
+                    // öffnen – nach einem await blockieren Browser das Pop-up sonst.
+                    const targetWindow = needsTemplateFetch ? window.open('', '_blank') : null;
+                    try {
+                        const pdfData = Object.entries(groupedByTrade).map(([tradeName, lines]) => ({
+                            gewerk: tradeName,
+                            summe: lines.filter(l => l.enabled).reduce((s, l) => s + (l.gp || 0), 0),
+                            positionen: lines.filter(l => l.enabled).map(l => `${l.position}: ${l.qty} ${l.unit || 'Stk'} × ${(l.ep || 0).toFixed(2)} € = ${(l.gp || 0).toFixed(2)} €`).join('\n'),
+                        }));
+                        // Resolve the correct PDF template based on the property's portfolio
+                        let tpl = pdfTemplate;
+                        if (needsTemplateFetch) {
+                            try {
+                                tpl = await fetchPdfTemplate(prop.portfolio_id, 'sanierung_rechner');
+                            } catch (tplErr) {
+                                console.error('PDF template could not be loaded, using default:', tplErr);
+                                tpl = pdfTemplate;
+                            }
+                        }
+                        const opened = await generateClientPdf({
+                            reportType: 'sanierung_rechner',
+                            data: pdfData,
+                            selectedColumns: ['gewerk', 'summe', 'positionen'],
+                            showSums: true,
+                            portfolioName: name || 'Kalkulation',
+                            template: tpl,
+                            subtitle: `Gesamt: ${enabledTotal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}`,
+                            targetWindow,
+                        });
+                        if (opened === false && targetWindow && !targetWindow.closed) targetWindow.close();
+                    } catch (err) {
+                        console.error('PDF export failed:', err);
+                        if (targetWindow && !targetWindow.closed) targetWindow.close();
+                        alert('PDF-Export fehlgeschlagen: ' + translateError(err));
+                    }
+                };
+
                 return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                         {/* Summary Card */}
@@ -975,7 +1252,7 @@ const RenovationCalculatorDetail = () => {
                                     { label: 'Etagen', value: buildingType === 'wohnung' ? '–' : floorCount },
                                     { label: 'Geschosshöhe', value: `${floorHeight} m` },
                                     { label: 'Einheiten', value: buildingType === 'mfh' ? unitCount : 1 },
-                                    { label: 'Wohnungen', value: allWhgCount },
+                                    { label: buildingType === 'efh' ? 'Wohnbereiche' : 'Wohnungen', value: allWhgCount },
                                     { label: 'Zimmer', value: allRoomsCount },
                                     { label: 'Bäder', value: allBathsCount },
                                     { label: 'Fenster', value: allWindowsCount },
@@ -1003,30 +1280,7 @@ const RenovationCalculatorDetail = () => {
                                     <Button variant="secondary" onClick={() => setShowRecalcDialog(true)} style={{ flex: 1 }}>
                                         <Calculator size={15} style={{ marginRight: '6px' }} /> Neu berechnen
                                     </Button>
-                                    <Button variant="secondary" onClick={async () => {
-                                        const pdfData = Object.entries(groupedByTrade).map(([tradeName, lines]) => ({
-                                            gewerk: tradeName,
-                                            summe: lines.filter(l => l.enabled).reduce((s, l) => s + (l.gp || 0), 0),
-                                            positionen: lines.filter(l => l.enabled).map(l => `${l.position}: ${l.qty} ${l.unit || 'Stk'} × ${(l.ep || 0).toFixed(2)} € = ${(l.gp || 0).toFixed(2)} €`).join('\n'),
-                                        }));
-                                        // Resolve the correct PDF template based on the property's portfolio
-                                        let tpl = pdfTemplate;
-                                        if (propertyId) {
-                                            const prop = properties.find(p => p.id === propertyId);
-                                            if (prop?.portfolio_id) {
-                                                tpl = await fetchPdfTemplate(prop.portfolio_id, 'sanierung_rechner');
-                                            }
-                                        }
-                                        generateClientPdf({
-                                            reportType: 'sanierung_rechner',
-                                            data: pdfData,
-                                            selectedColumns: ['gewerk', 'summe', 'positionen'],
-                                            showSums: true,
-                                            portfolioName: name || 'Kalkulation',
-                                            template: tpl,
-                                            subtitle: `Gesamt: ${enabledTotal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}`,
-                                        });
-                                    }}>
+                                    <Button variant="secondary" onClick={exportPdf}>
                                         <FileText size={15} style={{ marginRight: '6px' }} /> PDF Export
                                     </Button>
                                 </>
@@ -1039,6 +1293,7 @@ const RenovationCalculatorDetail = () => {
                                 <h4 style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: '8px', color: '#92400e' }}>Mengen neu berechnen?</h4>
                                 <p style={{ fontSize: '0.82rem', marginBottom: '12px', color: 'var(--text-secondary)' }}>
                                     Wählen Sie, ob alle Mengen überschrieben oder nur leere Felder gefüllt werden sollen.
+                                    „Nur leere füllen" ergänzt außerdem neu hinzugekommene Positionen und behält eigene Preise.
                                 </p>
                                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                                     <Button onClick={() => doGenerateCalc('all')} disabled={loadingCalc}>
@@ -1087,7 +1342,7 @@ const RenovationCalculatorDetail = () => {
                                                     {/* Column headers */}
                                                     {!isMobile && (
                                                         <div style={{
-                                                            display: 'grid', gridTemplateColumns: '28px 2fr 1fr 70px 80px 80px 90px',
+                                                            display: 'grid', gridTemplateColumns: '28px 2fr 1fr 70px 80px 80px 90px 24px',
                                                             gap: '6px', padding: '6px 4px', borderBottom: '1px solid var(--border-color)',
                                                             fontSize: '0.68rem', color: 'var(--text-secondary)', textTransform: 'uppercase',
                                                         }}>
@@ -1098,6 +1353,7 @@ const RenovationCalculatorDetail = () => {
                                                             <span>Einheit</span>
                                                             <span style={{ textAlign: 'right' }}>EP €</span>
                                                             <span style={{ textAlign: 'right' }}>GP €</span>
+                                                            <span></span>
                                                         </div>
                                                     )}
 
@@ -1107,8 +1363,8 @@ const RenovationCalculatorDetail = () => {
                                                             <div key={idx} style={{
                                                                 display: 'grid',
                                                                 gridTemplateColumns: isMobile
-                                                                    ? '24px 1fr 60px 55px 70px'
-                                                                    : '28px 2fr 1fr 70px 80px 80px 90px',
+                                                                    ? '24px 1fr 60px 55px 70px 24px'
+                                                                    : '28px 2fr 1fr 70px 80px 80px 90px 24px',
                                                                 gap: '6px', padding: '5px 4px', alignItems: 'center',
                                                                 borderBottom: '1px solid var(--border-color)',
                                                                 opacity: line.enabled ? 1 : 0.4,
@@ -1161,6 +1417,9 @@ const RenovationCalculatorDetail = () => {
                                                                 <span style={{ textAlign: 'right', fontWeight: 700, fontSize: '0.82rem', color: line.gp > 0 ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
                                                                     {fmt0(line.gp)}
                                                                 </span>
+                                                                {line.isCustom ? (
+                                                                    <button onClick={() => removeCalcLine(idx)} style={deleteBtnStyle} title="Eigene Position entfernen"><Trash2 size={12} /></button>
+                                                                ) : <span />}
                                                             </div>
                                                         );
                                                     })}
@@ -1183,10 +1442,15 @@ const RenovationCalculatorDetail = () => {
                         <div style={{
                             padding: '16px 20px', borderRadius: 'var(--radius-lg)',
                             background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
-                            color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            color: '#fff',
                         }}>
-                            <span style={{ fontSize: '1rem', fontWeight: 600 }}>Gesamtkosten (aktive Positionen)</span>
-                            <span style={{ fontSize: '1.4rem', fontWeight: 800 }}>{fmt0(grandTotal)}</span>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '1rem', fontWeight: 600 }}>Gesamtkosten (aktive Positionen)</span>
+                                <span style={{ fontSize: '1.4rem', fontWeight: 800 }}>{fmt0(grandTotal)}</span>
+                            </div>
+                            <div style={{ fontSize: '0.72rem', opacity: 0.85, marginTop: '4px' }}>
+                                Summe aus Menge × Einheitspreis ohne USt-Aufschlag – ob netto oder brutto, richtet sich nach den Preisen Ihrer Preisliste.
+                            </div>
                         </div>
 
                         {/* Deal info */}
@@ -1258,4 +1522,11 @@ const hintStyle = {
     display: 'block', fontSize: '0.7rem', color: '#f59e0b', marginTop: '4px', fontStyle: 'italic',
 };
 
-export default RenovationCalculatorDetail;
+// Beim Wechsel der Route-ID (z. B. Browser-Zurück zwischen zwei Kalkulationen) die Seite komplett
+// neu aufbauen, damit calcId und alle Eingaben zur angezeigten Kalkulation gehören.
+const RenovationCalculatorDetailPage = () => {
+    const { id } = useParams();
+    return <RenovationCalculatorDetail key={id} />;
+};
+
+export default RenovationCalculatorDetailPage;

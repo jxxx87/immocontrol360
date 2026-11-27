@@ -1,78 +1,57 @@
-# React + Vite
+# ImmoControl360 – Web-App (`immo-web`)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite, Supabase (Auth, Datenbank, Storage, Edge Functions), Capacitor (Android).
+Live unter **https://app.immocontrol360.de**. Die Marketing-Seite liegt im Nachbarordner `../immowebsite`.
 
-Currently, two official plugins are available:
+## Lokale Entwicklung
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+1. Abhängigkeiten sind in `node_modules` vorhanden (sonst einmalig `npm install`).
+2. Dev-Server starten:
+   ```bash
+   npm run dev
+   ```
+3. Im Browser `http://localhost:5173` öffnen. Änderungen in `src/` werden sofort neu geladen.
 
-## React Compiler
+Die Umgebungswerte (Supabase-URL, Anon-Key, OAuth-Client-IDs) stehen in `.env` bzw. `.env.production`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+PDFs (Rechnungen, Mahnungen, Nebenkosten, Vorlagen) werden **im Browser** erzeugt – ein separater
+PDF-Server ist nicht nötig. (Der frühere Ordner `server/` mit einem Puppeteer-Server wurde entfernt; er wurde
+von der App nie aufgerufen.)
 
-## Expanding the ESLint configuration
+## Datenbank-Änderungen
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-
-## Development (Local)
-
-1.  **Start the development server:**
-    ```bash
-    npm run dev
-    ```
-2.  **Open in Browser:**
-    The terminal will show a local URL (usually `http://localhost:5173`). Open this to see your changes instantly.
-3.  **Work on the App:**
-    Edit files in `src/`. The browser will automatically reload when you save changes.
-
-4.  **PDF Server (Required for Invoices):**
-    To generate perfect PDFs for invoices, you must run the local PDF server:
-    ```bash
-    cd server
-    node server.js
-    ```
-    Keep this terminal window open while using the app.
-
-## Database Updates
-This project uses Supabase for the database. When pulling code updates that involve database schema changes, you can apply migrations manually via the Supabase Dashboard, or use a direct connection script if the CLI fails.
-
-**IMPORTANT:** See `SOP_DEPLOYS.md` for detailed instructions on how AI agents should independently run SQL migrations (using `pg` via direct endpoint) and push to GitHub on Windows.
+Nur als datierte Migration in `supabase/migrations/<YYYYMMDDHHMMSS>_<name>.sql` (idempotent schreiben:
+`create or replace`, `drop … if exists`, `if not exists`). Einspielen über die offiziellen Supabase-Werkzeuge,
+die die Migration in die Historie eintragen:
 
 ```bash
-# Alternative: using CLI (if configured)
 npx supabase login
 npx supabase link --project-ref agsmqvvwfufenaiekuox
 npx supabase db push
 ```
 
-## Deployment to Hostinger (Live)
+oder über das Supabase-MCP-Werkzeug `apply_migration`. Keine Node-Skripte mit direkter `pg`-Verbindung
+(ohne Zertifikatsprüfung, an der Historie vorbei) mehr – Details in `SOP_DEPLOYS.md`. Alte lose SQL-Dateien
+liegen nur noch zum Nachschlagen in `archive/sql/` und dürfen **nicht** ausgeführt werden.
 
-Since you have connected your GitHub repository to Hostinger:
+## Live stellen (Deployment)
 
-1.  **Commit & Push your changes:**
-    When you are happy with your local changes, run these commands in the terminal:
-    ```bash
-    git add .
-    git commit -m "Describe your changes here"
-    git push origin master
-    ```
-2.  **Hostinger Updates Automatically:**
-    Hostinger will detect the new code on GitHub, build it, and update your website automatically (usually within a few minutes).
+**Nicht** `git push origin master` – das aktualisiert nur den Quellcode auf GitHub, aber nicht die Webseite.
 
----
+Live geht nur, was im Branch **`production`** liegt. Den befüllt ausschließlich das Skript:
 
-### Alternative: Manual Deployment (Fallback)
+```powershell
+.\deploy_all.ps1
+```
 
-If the automatic deployment fails, you can upload manually:
+Es baut `immowebsite` und `immo-web`, legt beide zusammen (Marketing-Seite in `/`, Web-App in `/app/`),
+schreibt die Quell-Commits beider Repos in die Commit-Nachricht und pusht das Ergebnis auf `production`.
+Hostinger stellt diesen Branch bereit. Bei einem Build- oder Git-Fehler bricht das Skript ab, ohne etwas zu
+veröffentlichen. Vorher am besten committen und `master` pushen, damit der Live-Stand einem Commit entspricht.
 
-1.  **Build the project:**
-    ```bash
-    npm run build
-    ```
-    This creates a `dist` folder.
-2.  **Upload to Hostinger:**
-    - Go to Hostinger File Manager (`public_html`).
-    - Upload the **contents** of the `dist` folder.
-3.  **Routing:**
-    - Ensure the `.htaccess` file is present (it is automatically copied to `dist/` during build).
+Ausführliche Anleitung (inkl. Hostinger-Einstellungen): `SOP_DEPLOYS.md`.
+
+## Android-App
+
+`npm run build`, dann `npx cap sync android` und `npx cap open android` (Android Studio). Paketname:
+`com.ImmoControl.pro360`. Push-Benachrichtigungen: `docs/PUSH_NOTIFICATIONS_SETUP.md`.

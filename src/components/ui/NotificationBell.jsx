@@ -4,8 +4,17 @@ import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../../context/NotificationContext';
 import {
     Bell, MessageSquare, Ticket, Megaphone, FileText, UserCheck,
-    MessageCircle, Check, BellOff, X, CheckCheck, Trash2
+    MessageCircle, BellOff, X, CheckCheck
 } from 'lucide-react';
+
+// Panel-Position nur bei echter Änderung neu setzen (vermeidet Re-Render bei jedem Scroll-Event)
+const sameStyle = (a, b) => {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    return keysA.length === keysB.length && keysA.every(k => a[k] === b[k]);
+};
+
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 
 const iconMap = {
     message: MessageSquare,
@@ -40,9 +49,10 @@ const NotificationBell = () => {
         const vw = window.innerWidth;
         const isMobile = vw < 768;
 
+        let next;
         if (isMobile) {
             // Full-width on mobile, centered
-            setPanelStyle({
+            next = {
                 position: 'fixed',
                 top: `${rect.bottom + 4}px`,
                 left: '8px',
@@ -50,7 +60,7 @@ const NotificationBell = () => {
                 width: 'auto',
                 maxHeight: `${window.innerHeight - rect.bottom - 20}px`,
                 zIndex: 99999,
-            });
+            };
         } else {
             // Desktop: align to right of bell, clamped to viewport
             const panelWidth = 380;
@@ -59,18 +69,21 @@ const NotificationBell = () => {
             if (rect.right - panelWidth < 8) {
                 right = vw - panelWidth - 8;
             }
-            setPanelStyle({
+            next = {
                 position: 'fixed',
                 top: `${rect.bottom + 8}px`,
                 right: `${Math.max(8, right)}px`,
                 width: `${panelWidth}px`,
                 maxHeight: `${Math.min(520, window.innerHeight - rect.bottom - 20)}px`,
                 zIndex: 99999,
-            });
+            };
         }
+        setPanelStyle(prev => (sameStyle(prev, next) ? prev : next));
     };
 
     useEffect(() => {
+        if (!isOpen) return undefined;
+
         const handleClickOutside = (e) => {
             if (bellRef.current && !bellRef.current.contains(e.target) &&
                 panelRef.current && !panelRef.current.contains(e.target)) {
@@ -78,30 +91,43 @@ const NotificationBell = () => {
             }
         };
 
-        if (isOpen) {
-            document.addEventListener('mousedown', handleClickOutside);
-            updatePanelPosition();
-            window.addEventListener('resize', updatePanelPosition);
-            window.addEventListener('scroll', updatePanelPosition, true);
-        }
+        // Scroll/Resize per requestAnimationFrame drosseln; Scrollen in der Liste selbst ignorieren
+        let frame = null;
+        const schedulePosition = (e) => {
+            if (e?.type === 'scroll' && panelRef.current && e.target instanceof Node && panelRef.current.contains(e.target)) return;
+            if (frame !== null) return;
+            frame = requestAnimationFrame(() => {
+                frame = null;
+                updatePanelPosition();
+            });
+        };
+
+        document.addEventListener('mousedown', handleClickOutside);
+        updatePanelPosition();
+        window.addEventListener('resize', schedulePosition);
+        window.addEventListener('scroll', schedulePosition, true);
 
         return () => {
+            if (frame !== null) cancelAnimationFrame(frame);
             document.removeEventListener('mousedown', handleClickOutside);
-            window.removeEventListener('resize', updatePanelPosition);
-            window.removeEventListener('scroll', updatePanelPosition, true);
+            window.removeEventListener('resize', schedulePosition);
+            window.removeEventListener('scroll', schedulePosition, true);
         };
     }, [isOpen]);
 
+    // Relative Zeitangabe; "Gestern" nach Kalendertag statt 24–48 Stunden
     const timeAgo = (date) => {
         if (!date) return '';
-        const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+        const then = new Date(date);
+        const now = new Date();
+        const seconds = Math.floor((now - then) / 1000);
         if (seconds < 60) return 'Gerade eben';
         if (seconds < 3600) return `vor ${Math.floor(seconds / 60)} Min.`;
-        if (seconds < 86400) return `vor ${Math.floor(seconds / 3600)} Std.`;
-        const days = Math.floor(seconds / 86400);
-        if (days === 1) return 'Gestern';
-        if (days < 7) return `vor ${days} Tagen`;
-        return new Date(date).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+        const dayDiff = Math.round((startOfDay(now) - startOfDay(then)) / 86400000);
+        if (dayDiff <= 0) return `vor ${Math.floor(seconds / 3600)} Std.`;
+        if (dayDiff === 1) return 'Gestern';
+        if (dayDiff < 7) return `vor ${dayDiff} Tagen`;
+        return then.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
     };
 
     const handleNotificationClick = (notif) => {

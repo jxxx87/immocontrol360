@@ -3,12 +3,15 @@
 // Renders grid, walls as merged surfaces, openings, 2D furniture, rooms, labels.
 
 import {
-    GRID_COLOR, GRID_COLOR_MAJOR, OUTER_WALL_COLOR, INNER_WALL_COLOR,
-    OPENING_COLOR, DOOR_ARC_COLOR, WINDOW_STROKE_COLOR, ROOM_LABEL_COLOR,
+    GRID_COLOR, GRID_COLOR_MAJOR, DOOR_ARC_COLOR, WINDOW_STROKE_COLOR, ROOM_LABEL_COLOR,
     FURNITURE_FILL, FURNITURE_STROKE, SELECTION_COLOR, SNAP_INDICATOR_COLOR,
-    DIMENSION_COLOR, mmToM, mm2ToM2,
+    WALL_THICKNESS, mmToM, mm2ToM2,
 } from './constants.js';
-import { getPoint, getWallPolygon, dist, polygonCentroid } from './geometryKernel.js';
+import {
+    getPoint, getWallPolygon, getWallFaceOffsets, dist, polygonInteriorPoint,
+    buildWallChains, getOpeningWallId, getOpeningCenterMm, getFurnitureCorners,
+    ensureCW, offsetPolygon,
+} from './geometryKernel.js';
 import { getFurnitureItem } from './furnitureCatalog.js';
 
 // ─── Viewport ───────────────────────────────────────────────────
@@ -32,7 +35,10 @@ export const screenToWorld = (vp, sx, sy) => ({
 });
 
 export const zoomAtPoint = (vp, sx, sy, delta) => {
-    const factor = delta > 0 ? 0.9 : 1.1;
+    // Schrittweite aus der Stärke des Rad-/Pinch-Ereignisses (Trackpads liefern
+    // viele kleine Deltas), je Ereignis auf ±10 % begrenzt; delta 0 zoomt nicht.
+    if (!Number.isFinite(delta) || delta === 0) return;
+    const factor = Math.min(1 / 0.9, Math.max(0.9, Math.exp(-delta * 0.02)));
     const newZoom = Math.max(vp.minZoom, Math.min(vp.maxZoom, vp.zoom * factor));
     const ratio = newZoom / vp.zoom;
     vp.offsetX = sx - (sx - vp.offsetX) * ratio;
@@ -52,15 +58,22 @@ export const zoomToFit = (vp, storey, canvasWidth, canvasHeight) => {
         if (pt.x > maxX) maxX = pt.x;
         if (pt.y > maxY) maxY = pt.y;
     }
-    // Include furniture
+    // Außenkante der Außenwände (Wanddicke liegt außerhalb der Punkte)
+    for (const p of storey.outerBoundary || []) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+    }
+    // Include furniture (Ursprung oben links, gedreht um diesen Punkt)
     if (storey.furniture) {
         for (const f of storey.furniture) {
-            const fw = (f.width_mm || 500) / 2;
-            const fh = (f.depth_mm || 500) / 2;
-            if (f.x - fw < minX) minX = f.x - fw;
-            if (f.y - fh < minY) minY = f.y - fh;
-            if (f.x + fw > maxX) maxX = f.x + fw;
-            if (f.y + fh > maxY) maxY = f.y + fh;
+            for (const c of getFurnitureCorners(f)) {
+                if (c.x < minX) minX = c.x;
+                if (c.y < minY) minY = c.y;
+                if (c.x > maxX) maxX = c.x;
+                if (c.y > maxY) maxY = c.y;
+            }
         }
     }
 
@@ -87,25 +100,11 @@ export const zoomToFit = (vp, storey, canvasWidth, canvasHeight) => {
 
 // ─── Helpers ────────────────────────────────────────────────────
 
-/**
- * Compute the miter (intersection) point of two wall edges at a junction.
- * Each edge is defined by a near point and a far point.
- * Returns the intersection point, or null if edges are parallel.
- */
-const computeMiterPoint = (near1, far1, near2, far2) => {
-    const d1x = near1.x - far1.x, d1y = near1.y - far1.y;
-    const d2x = near2.x - far2.x, d2y = near2.y - far2.y;
-    const cross = d1x * d2y - d1y * d2x;
-    if (Math.abs(cross) < 0.01) return null; // parallel
-    const dx = near2.x - near1.x, dy = near2.y - near1.y;
-    const t = (dx * d2y - dy * d2x) / cross;
-    const ix = near1.x + t * d1x;
-    const iy = near1.y + t * d1y;
-    // Limit miter extension to avoid extreme spikes
-    const miterDist = dist({ x: ix, y: iy }, near1);
-    if (miterDist > 500) return null; // too far, skip
-    return { x: ix, y: iy };
-};
+// |sin| des Schnittwinkels, unterhalb dessen zwei Linien als parallel gelten
+const PARALLEL_SIN = 1e-3;
+// Gehrungs-/Verlängerungspunkt höchstens 3 × Wanddicke von der Ecke entfernt,
+// sonst Fase – verhindert Spitzen bei fast parallelen Wänden
+const MITER_LIMIT_FACTOR = 3;
 
 /**
  * Compute intersection of two infinite lines.
@@ -115,21 +114,158 @@ const computeMiterPoint = (near1, far1, near2, far2) => {
 const lineLineIntersect = (a1, a2, b1, b2) => {
     const d1x = a2.x - a1.x, d1y = a2.y - a1.y;
     const d2x = b2.x - b1.x, d2y = b2.y - b1.y;
+    const len1 = Math.hypot(d1x, d1y), len2 = Math.hypot(d2x, d2y);
+    if (len1 < 1e-9 || len2 < 1e-9) return null;
     const cross = d1x * d2y - d1y * d2x;
-    if (Math.abs(cross) < 0.01) return null;
+    if (Math.abs(cross) / (len1 * len2) < PARALLEL_SIN) return null;
     const dx = b1.x - a1.x, dy = b1.y - a1.y;
     const t = (dx * d2y - dy * d2x) / cross;
     return { x: a1.x + t * d1x, y: a1.y + t * d1y };
 };
 
+/**
+ * Gehrungspunkt zweier Wandkanten (je naher und ferner Eckpunkt) an einer Ecke.
+ * Liefert null, wenn die Kanten parallel sind oder der Schnittpunkt weiter als
+ * maxDist von der Ecke entfernt läge – dann ist eine Fase zu zeichnen.
+ */
+const computeMiterPoint = (near1, far1, near2, far2, corner, maxDist) => {
+    const p = lineLineIntersect(far1, near1, far2, near2);
+    if (!p) return null;
+    if (corner && maxDist > 0 && dist(p, corner) > maxDist) return null;
+    return p;
+};
+
+/**
+ * ctx.roundRect mit Rückfallebene für ältere Browser/WebViews (Safari < 16,
+ * Firefox < 112, ältere Android-WebViews) und auf zulässige Werte geklemmten
+ * Radien (negative Radien würden einen RangeError werfen).
+ */
+const roundRectPath = (ctx, x, y, w, h, radii = 0) => {
+    if (w < 0) { x += w; w = -w; }
+    if (h < 0) { y += h; h = -h; }
+    const max = Math.min(w, h) / 2;
+    const clamp = (r) => Math.max(0, Math.min(max, Number(r) || 0));
+    const list = Array.isArray(radii) ? radii : [radii];
+    let tl, tr, br, bl;
+    if (list.length <= 1) { tl = tr = br = bl = clamp(list[0]); }
+    else if (list.length === 2) { tl = br = clamp(list[0]); tr = bl = clamp(list[1]); }
+    else if (list.length === 3) { tl = clamp(list[0]); tr = bl = clamp(list[1]); br = clamp(list[2]); }
+    else { tl = clamp(list[0]); tr = clamp(list[1]); br = clamp(list[2]); bl = clamp(list[3]); }
+
+    if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(x, y, w, h, [tl, tr, br, bl]);
+        return;
+    }
+    ctx.moveTo(x + tl, y);
+    ctx.lineTo(x + w - tr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, tr);
+    ctx.lineTo(x + w, y + h - br);
+    ctx.arcTo(x + w, y + h, x, y + h, br);
+    ctx.lineTo(x + bl, y + h);
+    ctx.arcTo(x, y + h, x, y, bl);
+    ctx.lineTo(x, y + tl);
+    ctx.arcTo(x, y, x + w, y, tl);
+    ctx.closePath();
+};
+
+/**
+ * Flüchtige Render-Daten (Bildschirm-Hitboxen) nicht aufzählbar am Objekt
+ * ablegen: der Editor kann sie lesen, JSON.stringify (Speichern, Undo-Kopien)
+ * übernimmt sie aber nicht.
+ */
+const setTransient = (obj, key, value) => {
+    try {
+        Object.defineProperty(obj, key, { value, writable: true, configurable: true, enumerable: false });
+    } catch {
+        // eingefrorenes Objekt – Hitbox entfällt
+    }
+};
+
+// Warnungen je Element nur einmal ausgeben (render läuft bei jeder Mausbewegung)
+const _warnedKeys = new Set();
+const warnOnce = (key, ...args) => {
+    if (_warnedKeys.has(key)) return;
+    if (_warnedKeys.size > 1000) _warnedKeys.clear();
+    _warnedKeys.add(key);
+    console.warn(...args);
+};
+
+/** Ein einzelnes Element zeichnen; ein Fehler darin bricht nicht den ganzen Frame ab. */
+const safeDraw = (key, fn) => {
+    try {
+        fn();
+    } catch (err) {
+        warnOnce(`err:${key}`, `[Grundriss] Element ${key} konnte nicht gezeichnet werden:`, err);
+    }
+};
+
+/** Fehlende Listen eines Geschosses (Altdaten, Import) durch leere ersetzen. */
+const withStoreyDefaults = (storey) => {
+    const s = storey || {};
+    if (Array.isArray(s.points) && Array.isArray(s.walls) && Array.isArray(s.openings)
+        && Array.isArray(s.furniture) && Array.isArray(s.rooms)) return s;
+    return {
+        ...s,
+        points: Array.isArray(s.points) ? s.points : [],
+        walls: Array.isArray(s.walls) ? s.walls : [],
+        openings: Array.isArray(s.openings) ? s.openings : [],
+        furniture: Array.isArray(s.furniture) ? s.furniture : [],
+        rooms: Array.isArray(s.rooms) ? s.rooms : [],
+    };
+};
+
+/** Rahmen um ein (ggf. gedrehtes) Möbelstück zeichnen (Hover/Auswahl/Rahmenauswahl). */
+const drawFurnitureHighlight = (ctx, vp, furn, fill, stroke) => {
+    const sp = getFurnitureCorners(furn).map(c => worldToScreen(vp, c.x, c.y));
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sp[0].x, sp[0].y);
+    for (let i = 1; i < sp.length; i++) ctx.lineTo(sp[i].x, sp[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+};
+
+/** Polygon (Weltkoordinaten) als Pfad anlegen. */
+const tracePolygon = (ctx, vp, pts) => {
+    const sp = pts.map(p => worldToScreen(vp, p.x, p.y));
+    ctx.moveTo(sp[0].x, sp[0].y);
+    for (let i = 1; i < sp.length; i++) ctx.lineTo(sp[i].x, sp[i].y);
+    ctx.closePath();
+};
+
 // ─── Main Render ────────────────────────────────────────────────
 
+/**
+ * Zeichnet ein Geschoss.
+ * Optionale Felder in `state`:
+ *  - pixelRatio: Verhältnis Canvas-Pixel zu Bildschirm-(CSS-)Pixel, z. B.
+ *    window.devicePixelRatio für scharfe Darstellung auf HiDPI-Displays oder ein
+ *    Faktor für Exporte. Viewport, Schriften und Linien bleiben in CSS-Pixeln.
+ *  - isPrinting: ohne Raster (Druck/Export).
+ *  - isExport: keine Bildschirm-Hitboxen schreiben (Export-Viewport).
+ */
 export const render = (ctx, canvas, vp, storey, state) => {
-    const w = canvas.width;
-    const h = canvas.height;
+    const pixelRatio = Number(state.pixelRatio) > 0 ? Number(state.pixelRatio) : 1;
+    const view = { w: canvas.width / pixelRatio, h: canvas.height / pixelRatio };
 
-    ctx.clearRect(0, 0, w, h);
     ctx.save();
+    try {
+        ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        ctx.clearRect(0, 0, view.w, view.h);
+        renderFrame(ctx, vp, withStoreyDefaults(storey), state, view);
+    } finally {
+        // Zustand auch bei einem Fehler mitten im Frame zurücksetzen
+        ctx.restore();
+    }
+};
+
+const renderFrame = (ctx, vp, storey, state, view) => {
+    const { w, h } = view;
+    const recordHitBoxes = !state.isExport;
+    const frame = { outerContours: [] };
 
     // Build set of selected IDs for fast lookup
     const selectedSet = new Set();
@@ -138,29 +274,33 @@ export const render = (ctx, canvas, vp, storey, state) => {
         for (const item of state.selectedIds) selectedSet.add(item.id);
     }
 
-    // Background
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0, 0, w, h);
+    // Background (auch für Öffnungs-Aussparungen wiederverwendet, damit eine
+    // hinterlegte Vorlage dort sichtbar bleibt)
+    const paintBackground = () => {
+        ctx.fillStyle = '#fafafa';
+        ctx.fillRect(0, 0, w, h);
 
-    // Background image (under grid)
-    if (state.bgImage && state.bgImageObj) {
-        const bg = state.bgImage;
-        const img = state.bgImageObj;
-        const opacity = bg.opacity !== undefined ? bg.opacity : 0.35;
-        const pxPerMm = bg.scale || 1; // image pixels per mm
-        // Each image pixel = 1/pxPerMm mm in world space
-        // Image world size in mm:
-        const imgWorldW = img.width / pxPerMm;
-        const imgWorldH = img.height / pxPerMm;
-        const ox = bg.offsetX || 0;
-        const oy = bg.offsetY || 0;
-        const screenTopLeft = worldToScreen(vp, ox, oy);
-        const screenBotRight = worldToScreen(vp, ox + imgWorldW, oy + imgWorldH);
-        ctx.globalAlpha = opacity;
-        ctx.drawImage(img, screenTopLeft.x, screenTopLeft.y,
-            screenBotRight.x - screenTopLeft.x, screenBotRight.y - screenTopLeft.y);
-        ctx.globalAlpha = 1.0;
-    }
+        // Background image (under grid)
+        if (state.bgImage && state.bgImageObj) {
+            const bg = state.bgImage;
+            const img = state.bgImageObj;
+            const opacity = bg.opacity !== undefined ? bg.opacity : 0.35;
+            const pxPerMm = bg.scale || 1; // image pixels per mm
+            // Each image pixel = 1/pxPerMm mm in world space
+            // Image world size in mm:
+            const imgWorldW = img.width / pxPerMm;
+            const imgWorldH = img.height / pxPerMm;
+            const ox = bg.offsetX || 0;
+            const oy = bg.offsetY || 0;
+            const screenTopLeft = worldToScreen(vp, ox, oy);
+            const screenBotRight = worldToScreen(vp, ox + imgWorldW, oy + imgWorldH);
+            ctx.globalAlpha = opacity;
+            ctx.drawImage(img, screenTopLeft.x, screenTopLeft.y,
+                screenBotRight.x - screenTopLeft.x, screenBotRight.y - screenTopLeft.y);
+            ctx.globalAlpha = 1.0;
+        }
+    };
+    paintBackground();
 
     // Grid (skip when background image is active or printing)
     if (!state.bgImage && !state.isPrinting) {
@@ -168,7 +308,12 @@ export const render = (ctx, canvas, vp, storey, state) => {
     }
 
     // ── Walls as merged closed surfaces ──
-    drawWallsMerged(ctx, vp, storey, state, selectedSet);
+    drawWallsMerged(ctx, vp, storey, state, selectedSet, frame);
+
+    // Openings (vor den Hervorhebungen, damit die Aussparung diese nicht überdeckt)
+    for (const opening of storey.openings) {
+        safeDraw(`opening:${opening.id}`, () => drawOpening(ctx, vp, opening, storey, selectedSet.has(opening.id), paintBackground));
+    }
 
     // Hover highlight for elements under cursor
     if (state.hoverId && !selectedSet.has(state.hoverId)) {
@@ -192,15 +337,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
         // Check if hovered element is furniture
         const hoveredFurn = storey.furniture.find(f => f.id === state.hoverId);
         if (hoveredFurn) {
-            const fw = (hoveredFurn.width_mm || 500) / 2;
-            const fh = (hoveredFurn.depth_mm || 500) / 2;
-            const p1 = worldToScreen(vp, hoveredFurn.x - fw, hoveredFurn.y - fh);
-            const p2 = worldToScreen(vp, hoveredFurn.x + fw, hoveredFurn.y + fh);
-            ctx.fillStyle = 'rgba(14, 165, 233, 0.12)';
-            ctx.strokeStyle = 'rgba(14, 165, 233, 0.5)';
-            ctx.lineWidth = 2;
-            ctx.fillRect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
-            ctx.strokeRect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
+            drawFurnitureHighlight(ctx, vp, hoveredFurn, 'rgba(14, 165, 233, 0.12)', 'rgba(14, 165, 233, 0.5)');
         }
     }
 
@@ -224,24 +361,13 @@ export const render = (ctx, canvas, vp, storey, state) => {
         }
         for (const furn of storey.furniture) {
             if (!selectedSet.has(furn.id)) continue;
-            const fw = (furn.width_mm || 500) / 2;
-            const fh = (furn.depth_mm || 500) / 2;
-            const fp1 = worldToScreen(vp, furn.x - fw, furn.y - fh);
-            const fp2 = worldToScreen(vp, furn.x + fw, furn.y + fh);
-            ctx.fillStyle = 'rgba(14, 165, 233, 0.15)';
-            ctx.strokeStyle = 'rgba(14, 165, 233, 0.6)';
-            ctx.lineWidth = 2;
-            ctx.fillRect(fp1.x, fp1.y, fp2.x - fp1.x, fp2.y - fp1.y);
-            ctx.strokeRect(fp1.x, fp1.y, fp2.x - fp1.x, fp2.y - fp1.y);
+            drawFurnitureHighlight(ctx, vp, furn, 'rgba(14, 165, 233, 0.15)', 'rgba(14, 165, 233, 0.6)');
         }
     }
 
-    // Openings
-    for (const opening of storey.openings) {
-        drawOpening(ctx, vp, opening, storey, selectedSet.has(opening.id));
-    }
-
     // Room fills (subtle background to show detected areas)
+    // Bewusst erst ab zwei Räumen: bei nur einem Raum wäre die ganze Grundfläche
+    // eingefärbt, ohne dass die Farbe etwas unterscheidet.
     if (storey.rooms.length > 1) {
         const roomColors = ['rgba(219,234,254,0.3)', 'rgba(220,252,231,0.3)', 'rgba(254,249,195,0.3)', 'rgba(252,231,243,0.3)'];
         for (let i = 0; i < storey.rooms.length; i++) {
@@ -260,27 +386,56 @@ export const render = (ctx, canvas, vp, storey, state) => {
     // Room labels
     for (const room of storey.rooms) {
         const isRoomSelected = selectedSet.has(room.id) || state.selectedRoomId === room.id;
-        drawRoomLabel(ctx, vp, room, isRoomSelected);
+        safeDraw(`room:${room.id}`, () => drawRoomLabel(ctx, vp, room, isRoomSelected, recordHitBoxes));
     }
 
     // Slabs
     for (const slab of (storey.slabs || [])) {
-        drawSlab(ctx, vp, slab, selectedSet.has(slab.id));
+        safeDraw(`slab:${slab.id}`, () => drawSlab(ctx, vp, slab, selectedSet.has(slab.id)));
     }
 
     // Roof overlay (2D)
     if (storey.roof && storey.outerBoundary) {
-        drawRoof2D(ctx, vp, storey);
+        safeDraw('roof', () => drawRoof2D(ctx, vp, storey));
     }
 
     // Furniture (2D top-down)
     for (const furn of storey.furniture) {
-        drawFurniture2D(ctx, vp, furn, selectedSet.has(furn.id));
+        safeDraw(`furniture:${furn.id}`, () => drawFurniture2D(ctx, vp, furn, selectedSet.has(furn.id)));
     }
 
     // Draw wall dimensions (lichte Maße: inner surface to inner surface)
     // Only for inner walls — outer walls use the outer dimension chains below
     if (state.showDimensions !== false) {
+        // Wie weit ragt der Körper einer an diesem Knoten (annähernd senkrecht)
+        // anschließenden Wand in die Wandachse hinein? Gemessen am tatsächlichen
+        // Wandpolygon, also abhängig davon, auf welcher Seite die Dicke liegt.
+        const clearOffsetAt = (wall, ptId, p1, ux, uy, wallLen, atStart) => {
+            let offset = 0;
+            for (const w2 of storey.walls) {
+                if (w2.id === wall.id) continue;
+                const atW2P1 = w2.p1 === ptId;
+                if (!atW2P1 && w2.p2 !== ptId) continue;
+                const w2p1 = getPoint(storey, w2.p1);
+                const w2p2 = getPoint(storey, w2.p2);
+                if (!w2p1 || !w2p2) continue;
+                const w2Len = dist(w2p1, w2p2);
+                if (w2Len < 1) continue;
+                const dot = Math.abs(ux * (w2p2.x - w2p1.x) + uy * (w2p2.y - w2p1.y)) / w2Len;
+                if (dot >= 0.3) continue; // nur (annähernd) senkrechte Anschlüsse
+                const poly = getWallPolygon(w2, storey);
+                if (!poly) continue;
+                // Eckpunkte des Nachbarn an diesem Knoten: [p1_left, p1_right] bzw. [p2_left, p2_right]
+                const corners = atW2P1 ? [poly[0], poly[3]] : [poly[1], poly[2]];
+                for (const c of corners) {
+                    const t = (c.x - p1.x) * ux + (c.y - p1.y) * uy;
+                    const into = atStart ? t : wallLen - t;
+                    if (into > offset) offset = into;
+                }
+            }
+            return Math.min(offset, wallLen);
+        };
+
         for (const wall of storey.walls) {
             if (wall.type === 'outer') continue; // outer walls have their own dimension chains
             const p1 = getPoint(storey, wall.p1);
@@ -289,54 +444,15 @@ export const render = (ctx, canvas, vp, storey, state) => {
             const wallLen = dist(p1, p2);
             if (wallLen < 200) continue;
 
-            // For "lichte Maße", subtract connected wall thickness at each endpoint
-            // Inner walls: use half-thickness (measure to inner face, not center line)
-            // Outer walls: innenbündig — thickness goes outward, so no subtraction needed
-            let offsetP1 = 0, offsetP2 = 0;
-
-            // Find perpendicular walls at p1
-            for (const w2 of storey.walls) {
-                if (w2.id === wall.id || w2.type === 'outer') continue; // skip self and outer walls
-                if (w2.p1 === wall.p1 || w2.p2 === wall.p1) {
-                    const w2p1 = getPoint(storey, w2.p1);
-                    const w2p2 = getPoint(storey, w2.p2);
-                    if (!w2p1 || !w2p2) continue;
-                    const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
-                    const d2x = w2p2.x - w2p1.x, d2y = w2p2.y - w2p1.y;
-                    const w2Len = dist(w2p1, w2p2);
-                    if (w2Len < 1) continue;
-                    const dot = Math.abs(d1x * d2x + d1y * d2y) / (wallLen * w2Len);
-                    if (dot < 0.3) { // roughly perpendicular
-                        offsetP1 = Math.max(offsetP1, w2.thickness_mm);
-                    }
-                }
-            }
-
-            // Find perpendicular walls at p2
-            for (const w2 of storey.walls) {
-                if (w2.id === wall.id || w2.type === 'outer') continue;
-                if (w2.p1 === wall.p2 || w2.p2 === wall.p2) {
-                    const w2p1 = getPoint(storey, w2.p1);
-                    const w2p2 = getPoint(storey, w2.p2);
-                    if (!w2p1 || !w2p2) continue;
-                    const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
-                    const d2x = w2p2.x - w2p1.x, d2y = w2p2.y - w2p1.y;
-                    const w2Len = dist(w2p1, w2p2);
-                    if (w2Len < 1) continue;
-                    const dot = Math.abs(d1x * d2x + d1y * d2y) / (wallLen * w2Len);
-                    if (dot < 0.3) {
-                        offsetP2 = Math.max(offsetP2, w2.thickness_mm);
-                    }
-                }
-            }
-
             // Compute shortened dimension points (offset inward from corners)
             const dx = (p2.x - p1.x) / wallLen;
             const dy = (p2.y - p1.y) / wallLen;
+            const offsetP1 = clearOffsetAt(wall, wall.p1, p1, dx, dy, wallLen, true);
+            const offsetP2 = clearOffsetAt(wall, wall.p2, p1, dx, dy, wallLen, false);
             const dimP1 = { x: p1.x + dx * offsetP1, y: p1.y + dy * offsetP1 };
             const dimP2 = { x: p2.x - dx * offsetP2, y: p2.y - dy * offsetP2 };
             const dimLen = dist(dimP1, dimP2);
-            if (dimLen < 100) continue;
+            if (dimLen < 100 || offsetP1 + offsetP2 >= wallLen) continue;
 
             const isSel = selectedSet.has(wall.id);
             drawWallDimension(ctx, vp, dimP1, dimP2, !isSel);
@@ -344,7 +460,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
 
         // Normgerechte Bemaßung: Außenmaßketten (DIN 1356)
         if (storey.outerBoundary && storey.outerBoundary.length >= 3) {
-            drawOuterDimensionChains(ctx, vp, storey);
+            safeDraw('dimensions', () => drawOuterDimensionChains(ctx, vp, storey, frame));
         }
     } // end showDimensions
 
@@ -420,7 +536,9 @@ export const render = (ctx, canvas, vp, storey, state) => {
                 }
             } else if (ann.type === 'area' && ann.points && ann.points.length >= 3) {
                 const screenPts = ann.points.map(p => worldToScreen(vp, p.x, p.y));
-                ctx.fillStyle = ann.fillColor || (ann.color + '33') || 'rgba(239,68,68,0.2)';
+                // Transparente Füllung: Alpha nur an 6-stellige Hex-Farben anhängen
+                ctx.fillStyle = ann.fillColor
+                    || (/^#[0-9a-f]{6}$/i.test(ann.color || '') ? ann.color + '33' : 'rgba(239,68,68,0.2)');
                 ctx.strokeStyle = ann.color || '#ef4444';
                 ctx.lineWidth = (ann.lineWidth || 2) * (isAnnSel ? 2 : 1);
                 ctx.setLineDash([]);
@@ -456,14 +574,14 @@ export const render = (ctx, canvas, vp, storey, state) => {
                 ctx.strokeStyle = isAnnSel ? '#0ea5e9' : (ann.color || '#ef4444');
                 ctx.lineWidth = isAnnSel ? 1.5 : 1;
                 ctx.beginPath();
-                ctx.roundRect(sc.x - 4, sc.y - 4, tw, th, 3);
+                roundRectPath(ctx, sc.x - 4, sc.y - 4, tw, th, 3);
                 ctx.fill();
                 ctx.stroke();
                 // Text
                 ctx.fillStyle = ann.color || '#ef4444';
                 ctx.fillText(text, sc.x, sc.y);
-                // Store hit box
-                ann._hitBox = { sx: sc.x - 4, sy: sc.y - 4, sw: tw, sh: th };
+                // Store hit box (flüchtig, wird nicht gespeichert; nicht im Export-Viewport)
+                if (recordHitBoxes) setTransient(ann, '_hitBox', { sx: sc.x - 4, sy: sc.y - 4, sw: tw, sh: th });
             }
         }
     }
@@ -475,7 +593,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
 
     // Tool overlays
     if (state.preview) {
-        drawPreview(ctx, vp, state, storey);
+        drawPreview(ctx, vp, state, storey, view);
     }
 
     // Snap indicator — enhanced with wall segment and measurements
@@ -598,7 +716,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
 
             // Draw measurement to left side — using adjusted distance
             if (distToP1 > 50) {
-                const label1 = (distToP1 / 1000).toFixed(2) + ' m';
+                const label1 = mmToM(distToP1) + ' m';
                 const mid1x = (sp.x + sMeasP1.x) / 2;
                 const mid1y = (sp.y + sMeasP1.y) / 2;
                 // Perpendicular offset
@@ -618,7 +736,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
 
             // Draw measurement to right side — using adjusted distance
             if (distToP2 > 50) {
-                const label2 = (distToP2 / 1000).toFixed(2) + ' m';
+                const label2 = mmToM(distToP2) + ' m';
                 const mid2x = (sp.x + sMeasP2.x) / 2;
                 const mid2y = (sp.y + sMeasP2.y) / 2;
                 const dx2 = sMeasP2.x - sp.x, dy2 = sMeasP2.y - sp.y;
@@ -728,15 +846,7 @@ export const render = (ctx, canvas, vp, storey, state) => {
             // Highlight preselected furniture
             for (const furn of storey.furniture) {
                 if (!pre.has(furn.id)) continue;
-                const fw = (furn.width_mm || 500) / 2;
-                const fh = (furn.depth_mm || 500) / 2;
-                const fp1 = worldToScreen(vp, furn.x - fw, furn.y - fh);
-                const fp2 = worldToScreen(vp, furn.x + fw, furn.y + fh);
-                ctx.fillStyle = 'rgba(14, 165, 233, 0.2)';
-                ctx.strokeStyle = 'rgba(14, 165, 233, 0.6)';
-                ctx.lineWidth = 2;
-                ctx.fillRect(fp1.x, fp1.y, fp2.x - fp1.x, fp2.y - fp1.y);
-                ctx.strokeRect(fp1.x, fp1.y, fp2.x - fp1.x, fp2.y - fp1.y);
+                drawFurnitureHighlight(ctx, vp, furn, 'rgba(14, 165, 233, 0.2)', 'rgba(14, 165, 233, 0.6)');
             }
         }
 
@@ -749,8 +859,6 @@ export const render = (ctx, canvas, vp, storey, state) => {
         ctx.strokeRect(mx, my, mw, mh);
         ctx.setLineDash([]);
     }
-
-    ctx.restore();
 };
 
 // ─── Grid ───────────────────────────────────────────────────────
@@ -808,247 +916,28 @@ const drawGrid = (ctx, vp, w, h) => {
 
 // ─── Walls (merged, closed surfaces) ────────────────────────────
 
-const drawWallsMerged = (ctx, vp, storey, state, selectedSet) => {
-    // Outer walls: draw as single merged polygon (no visible segments)
-    if (storey.outerClosed) {
-        const outerWalls = storey.walls.filter(w => w.type === 'outer');
-        if (outerWalls.length >= 3) {
-            // Innenbündig: raw wall points = inner edge, compute mitered outer boundary
-            const innerPts = buildOrderedOuterPoints(outerWalls, storey); // inner edge (drawn pts)
-
-            // Build ordered wall chain for miter computation
-            const orderedWalls = buildOrderedWallChain(outerWalls, storey);
-
-            // Compute proper mitered outer boundary
-            const outerPts = [];
-            if (orderedWalls.length >= 3) {
-                for (let i = 0; i < orderedWalls.length; i++) {
-                    const w1 = orderedWalls[i];
-                    const w2 = orderedWalls[(i + 1) % orderedWalls.length];
-                    const poly1 = getWallPolygon(w1, storey);
-                    const poly2 = getWallPolygon(w2, storey);
-                    if (!poly1 || !poly2) continue;
-
-                    // Find shared point between w1 and w2
-                    let sharedPtId = null;
-                    if (w1.p2 === w2.p1) sharedPtId = w1.p2;
-                    else if (w1.p2 === w2.p2) sharedPtId = w1.p2;
-                    else if (w1.p1 === w2.p1) sharedPtId = w1.p1;
-                    else if (w1.p1 === w2.p2) sharedPtId = w1.p1;
-                    if (!sharedPtId) continue;
-
-                    // Get outer edge direction of each wall
-                    const oc1Near = (sharedPtId === w1.p1) ? poly1[0] : poly1[1];
-                    const oc1Far = (sharedPtId === w1.p1) ? poly1[1] : poly1[0];
-                    const oc2Near = (sharedPtId === w2.p1) ? poly2[0] : poly2[1];
-                    const oc2Far = (sharedPtId === w2.p1) ? poly2[1] : poly2[0];
-
-                    // Compute miter intersection of the two outer edges
-                    const d1x = oc1Near.x - oc1Far.x, d1y = oc1Near.y - oc1Far.y;
-                    const d2x = oc2Near.x - oc2Far.x, d2y = oc2Near.y - oc2Far.y;
-                    const cross = d1x * d2y - d1y * d2x;
-
-                    if (Math.abs(cross) > 0.01) {
-                        const dx = oc2Near.x - oc1Near.x;
-                        const dy = oc2Near.y - oc1Near.y;
-                        const t = (dx * d2y - dy * d2x) / cross;
-                        outerPts.push({
-                            x: oc1Near.x + t * d1x,
-                            y: oc1Near.y + t * d1y,
-                        });
-                    } else {
-                        outerPts.push({ x: (oc1Near.x + oc2Near.x) / 2, y: (oc1Near.y + oc2Near.y) / 2 });
-                    }
-                }
-            }
-
-            if (outerPts.length >= 3 && innerPts.length >= 3) {
-                const outerScreen = outerPts.map(p => worldToScreen(vp, p.x, p.y));
-                const innerScreen = innerPts.map(p => worldToScreen(vp, p.x, p.y));
-
-                // Fill solid wall
-                ctx.fillStyle = '#dce1e8';
-                ctx.beginPath();
-                ctx.moveTo(outerScreen[0].x, outerScreen[0].y);
-                for (let i = 1; i < outerScreen.length; i++) ctx.lineTo(outerScreen[i].x, outerScreen[i].y);
-                ctx.closePath();
-                ctx.moveTo(innerScreen[0].x, innerScreen[0].y);
-                for (let i = innerScreen.length - 1; i >= 0; i--) ctx.lineTo(innerScreen[i].x, innerScreen[i].y);
-                ctx.closePath();
-                ctx.fill('evenodd');
-
-                // Outer stroke
-                ctx.strokeStyle = '#475569';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.moveTo(outerScreen[0].x, outerScreen[0].y);
-                for (let i = 1; i < outerScreen.length; i++) ctx.lineTo(outerScreen[i].x, outerScreen[i].y);
-                ctx.closePath();
-                ctx.stroke();
-
-                // Inner stroke (thicker, reference edge)
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(innerScreen[0].x, innerScreen[0].y);
-                for (let i = 1; i < innerScreen.length; i++) ctx.lineTo(innerScreen[i].x, innerScreen[i].y);
-                ctx.closePath();
-                ctx.stroke();
+const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
+    // Outer walls: jede zusammenhängende Kette wird als verschmolzene Fläche
+    // gezeichnet – geschlossene Ringe (nach dem Schließen) als Ring, offene
+    // Ketten (während des Zeichnens, weitere Baukörper, Restwände) als Band.
+    const outerWalls = storey.walls.filter(w => w.type === 'outer');
+    if (outerWalls.length > 0) {
+        const chains = buildWallChains(outerWalls); // einmal je Frame
+        for (const chain of chains) {
+            const drawn = storey.outerClosed && chain.closed && chain.walls.length >= 3
+                ? drawClosedOuterChain(ctx, vp, storey, chain, frame)
+                : drawOpenOuterChain(ctx, vp, storey, chain);
+            if (!drawn) {
+                // Rückfall: Wände einzeln zeichnen, damit nichts unsichtbar bleibt
+                for (const w of chain.walls) drawWallSolid(ctx, vp, w, storey, false);
             }
 
             // Selection highlight for ALL selected outer walls
-            for (const ow of outerWalls) {
+            for (const ow of chain.walls) {
                 if (selectedSet.has(ow.id)) {
                     drawWallSelectionHighlight(ctx, vp, ow, storey);
                 }
             }
-        }
-    } else {
-        // During drawing (not closed), render outer walls as merged shape (no internal gray lines)
-        const outerWalls = storey.walls.filter(w => w.type === 'outer');
-        if (outerWalls.length > 0) {
-            // Build ALL ordered wall chains (may be multiple disconnected groups)
-            const allChains = [];
-            const usedGlobal = new Set();
-            while (usedGlobal.size < outerWalls.length) {
-                // Find an unused wall to start a new chain
-                const startWall = outerWalls.find(w => !usedGlobal.has(w.id));
-                if (!startWall) break;
-
-                const chain = [startWall];
-                usedGlobal.add(startWall.id);
-                let currentEnd = startWall.p2;
-
-                // Follow chain forward
-                for (let i = 0; i < outerWalls.length; i++) {
-                    const next = outerWalls.find(w => !usedGlobal.has(w.id) && (w.p1 === currentEnd || w.p2 === currentEnd));
-                    if (!next) break;
-                    usedGlobal.add(next.id);
-                    chain.push(next);
-                    currentEnd = next.p1 === currentEnd ? next.p2 : next.p1;
-                }
-
-                // Also follow chain backward from start
-                let currentStart = startWall.p1;
-                for (let i = 0; i < outerWalls.length; i++) {
-                    const prev = outerWalls.find(w => !usedGlobal.has(w.id) && (w.p1 === currentStart || w.p2 === currentStart));
-                    if (!prev) break;
-                    usedGlobal.add(prev.id);
-                    chain.unshift(prev);
-                    currentStart = prev.p1 === currentStart ? prev.p2 : prev.p1;
-                }
-
-                allChains.push(chain);
-            }
-
-            // Render each chain
-            for (const orderedWalls of allChains) {
-                if (orderedWalls.length >= 1) {
-                    // Build inner boundary (drawn points, ordered)
-                    const innerPts = [];
-                    for (let i = 0; i < orderedWalls.length; i++) {
-                        const w = orderedWalls[i];
-                        const wp1 = getPoint(storey, w.p1);
-                        // Add start point of each wall
-                        if (i === 0 || !innerPts.some(p => Math.abs(p.x - wp1.x) < 1 && Math.abs(p.y - wp1.y) < 1)) {
-                            if (wp1) innerPts.push(wp1);
-                        }
-                    }
-                    // Add end point of last wall
-                    const lastW = orderedWalls[orderedWalls.length - 1];
-                    const lastEnd = getPoint(storey, lastW.p2);
-                    if (lastEnd && !innerPts.some(p => Math.abs(p.x - lastEnd.x) < 1 && Math.abs(p.y - lastEnd.y) < 1)) {
-                        innerPts.push(lastEnd);
-                    }
-
-                    // Build outer boundary with mitered corners
-                    const outerPts = [];
-                    // First wall: add far outer corner
-                    const firstPoly = getWallPolygon(orderedWalls[0], storey);
-                    if (firstPoly) outerPts.push(firstPoly[0]);
-
-                    // Miter corners between consecutive walls
-                    for (let i = 0; i < orderedWalls.length - 1; i++) {
-                        const w1 = orderedWalls[i], w2 = orderedWalls[i + 1];
-                        const poly1 = getWallPolygon(w1, storey);
-                        const poly2 = getWallPolygon(w2, storey);
-                        if (!poly1 || !poly2) continue;
-
-                        let sharedPtId = null;
-                        if (w1.p2 === w2.p1) sharedPtId = w1.p2;
-                        else if (w1.p2 === w2.p2) sharedPtId = w1.p2;
-                        else if (w1.p1 === w2.p1) sharedPtId = w1.p1;
-                        else if (w1.p1 === w2.p2) sharedPtId = w1.p1;
-                        if (!sharedPtId) { outerPts.push(poly1[1]); continue; }
-
-                        const oc1Near = (sharedPtId === w1.p1) ? poly1[0] : poly1[1];
-                        const oc1Far = (sharedPtId === w1.p1) ? poly1[1] : poly1[0];
-                        const oc2Near = (sharedPtId === w2.p1) ? poly2[0] : poly2[1];
-                        const oc2Far = (sharedPtId === w2.p1) ? poly2[1] : poly2[0];
-
-                        const d1x = oc1Near.x - oc1Far.x, d1y = oc1Near.y - oc1Far.y;
-                        const d2x = oc2Near.x - oc2Far.x, d2y = oc2Near.y - oc2Far.y;
-                        const cross = d1x * d2y - d1y * d2x;
-
-                        if (Math.abs(cross) > 0.01) {
-                            const dx = oc2Near.x - oc1Near.x, dy = oc2Near.y - oc1Near.y;
-                            const t = (dx * d2y - dy * d2x) / cross;
-                            outerPts.push({ x: oc1Near.x + t * d1x, y: oc1Near.y + t * d1y });
-                        } else {
-                            outerPts.push({ x: (oc1Near.x + oc2Near.x) / 2, y: (oc1Near.y + oc2Near.y) / 2 });
-                        }
-                    }
-
-                    // Last wall: add far outer corner
-                    const lastPoly = getWallPolygon(orderedWalls[orderedWalls.length - 1], storey);
-                    if (lastPoly) outerPts.push(lastPoly[1]);
-
-                    // Draw the merged shape as a single path (outer → inner reversed)
-                    if (outerPts.length >= 2 && innerPts.length >= 2) {
-                        const outerS = outerPts.map(p => worldToScreen(vp, p.x, p.y));
-                        const innerS = innerPts.map(p => worldToScreen(vp, p.x, p.y));
-
-                        // Fill
-                        ctx.fillStyle = '#dce1e8';
-                        ctx.beginPath();
-                        ctx.moveTo(outerS[0].x, outerS[0].y);
-                        for (let i = 1; i < outerS.length; i++) ctx.lineTo(outerS[i].x, outerS[i].y);
-                        for (let i = innerS.length - 1; i >= 0; i--) ctx.lineTo(innerS[i].x, innerS[i].y);
-                        ctx.closePath();
-                        ctx.fill();
-
-                        // Outer edge stroke only
-                        ctx.strokeStyle = '#475569';
-                        ctx.lineWidth = 1.5;
-                        ctx.beginPath();
-                        ctx.moveTo(outerS[0].x, outerS[0].y);
-                        for (let i = 1; i < outerS.length; i++) ctx.lineTo(outerS[i].x, outerS[i].y);
-                        ctx.stroke();
-
-                        // Inner edge stroke
-                        ctx.lineWidth = 2;
-                        ctx.beginPath();
-                        ctx.moveTo(innerS[0].x, innerS[0].y);
-                        for (let i = 1; i < innerS.length; i++) ctx.lineTo(innerS[i].x, innerS[i].y);
-                        ctx.stroke();
-
-                        // End caps (only at the open ends)
-                        ctx.lineWidth = 1.5;
-                        ctx.beginPath();
-                        ctx.moveTo(outerS[0].x, outerS[0].y);
-                        ctx.lineTo(innerS[0].x, innerS[0].y);
-                        ctx.moveTo(outerS[outerS.length - 1].x, outerS[outerS.length - 1].y);
-                        ctx.lineTo(innerS[innerS.length - 1].x, innerS[innerS.length - 1].y);
-                        ctx.stroke();
-                    }
-
-                    // Selection highlight for ALL selected outer walls in this chain
-                    for (const ow of orderedWalls) {
-                        if (selectedSet.has(ow.id)) {
-                            drawWallSelectionHighlight(ctx, vp, ow, storey);
-                        }
-                    }
-                }
-            } // end for each chain
         }
     }
 
@@ -1092,15 +981,18 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet) => {
                 const farRightIdx = endIdx === 0 ? 2 : 3;
 
                 for (const neighbor of neighbors) {
+                    // Verlängerung begrenzen (fast parallele Nachbarn würden sonst Spitzen erzeugen)
+                    const maxExt = MITER_LIMIT_FACTOR * Math.max(Number(wall.thickness_mm) || 0, Number(neighbor.thickness_mm) || 0);
+                    const withinLimit = (idx, p) => p && dist(poly[idx], p) <= maxExt;
                     if (neighbor.type === 'outer') {
                         // Inner→outer: extend to the wall center line
                         const owPt1 = getPoint(storey, neighbor.p1);
                         const owPt2 = getPoint(storey, neighbor.p2);
                         if (!owPt1 || !owPt2) continue;
                         const extLeft = lineLineIntersect(corners[nearLeftIdx], corners[farLeftIdx], owPt1, owPt2);
-                        if (extLeft) corners[nearLeftIdx] = extLeft;
+                        if (withinLimit(nearLeftIdx, extLeft)) corners[nearLeftIdx] = extLeft;
                         const extRight = lineLineIntersect(corners[nearRightIdx], corners[farRightIdx], owPt1, owPt2);
-                        if (extRight) corners[nearRightIdx] = extRight;
+                        if (withinLimit(nearRightIdx, extRight)) corners[nearRightIdx] = extRight;
                     } else {
                         // Inner→inner: extend to the neighbor's polygon edges
                         const nPoly = getWallPolygon(neighbor, storey);
@@ -1120,7 +1012,7 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet) => {
                                 if (d < bestDistL) { bestDistL = d; bestExtL = ext; }
                             }
                         }
-                        if (bestExtL) corners[nearLeftIdx] = bestExtL;
+                        if (withinLimit(nearLeftIdx, bestExtL)) corners[nearLeftIdx] = bestExtL;
                         // Extend our right side to neighbor's edges
                         let bestExtR = null, bestDistR = Infinity;
                         for (const [ea, eb] of nEdges) {
@@ -1130,7 +1022,7 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet) => {
                                 if (d < bestDistR) { bestDistR = d; bestExtR = ext; }
                             }
                         }
-                        if (bestExtR) corners[nearRightIdx] = bestExtR;
+                        if (withinLimit(nearRightIdx, bestExtR)) corners[nearRightIdx] = bestExtR;
                     }
                 }
             }
@@ -1227,30 +1119,147 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet) => {
 };
 
 
-/** Build ordered inner boundary points from the wall chain (p1→p2 links) */
-const buildOrderedOuterPoints = (outerWalls, storey) => {
-    if (outerWalls.length === 0) return [];
-    const ordered = buildOrderedWallChain(outerWalls, storey);
-    return ordered.map(w => getPoint(storey, w.p1)).filter(Boolean);
+/** Außen-Eckpunkt einer Außenwand an einem ihrer Knoten (poly[0]→poly[1] = Außenfläche). */
+const outerCornerAt = (wall, poly, nodeId) => (nodeId === wall.p1 ? poly[0] : poly[1]);
+
+/**
+ * Gehrungs- bzw. Fasenpunkte der Außenkante zwischen zwei Wänden am Knoten `shared`.
+ * Schiebt einen (Gehrung) oder zwei Punkte (Fase/Versatz) nach `out`.
+ */
+const pushOuterJoint = (out, storey, w1, poly1, far1Node, w2, poly2, far2Node, shared) => {
+    const near1 = outerCornerAt(w1, poly1, shared);
+    const far1 = outerCornerAt(w1, poly1, far1Node);
+    const near2 = outerCornerAt(w2, poly2, shared);
+    const far2 = outerCornerAt(w2, poly2, far2Node);
+    const corner = getPoint(storey, shared);
+    const limit = MITER_LIMIT_FACTOR * Math.max(Number(w1.thickness_mm) || 0, Number(w2.thickness_mm) || 0);
+    const miter = computeMiterPoint(near1, far1, near2, far2, corner, limit);
+    if (miter) {
+        out.push(miter);
+    } else {
+        out.push(near1);
+        if (dist(near1, near2) > 0.5) out.push(near2);
+    }
 };
 
-/** Build ordered wall chain (wall objects, preserving direction) */
-const buildOrderedWallChain = (outerWalls, storey) => {
-    if (outerWalls.length === 0) return [];
-    const used = new Set();
-    const ordered = [outerWalls[0]];
-    used.add(outerWalls[0].id);
-    let currentEnd = outerWalls[0].p2;
+/** Geschlossener Außenwand-Ring (Innenkante = Referenzlinie, Außenkante mit Gehrung). */
+const drawClosedOuterChain = (ctx, vp, storey, chain, frame) => {
+    const n = chain.walls.length;
+    const innerPts = chain.nodes.map(id => getPoint(storey, id));
+    if (innerPts.some(p => !p)) return false;
+    const polys = chain.walls.map(w => getWallPolygon(w, storey));
+    if (polys.some(p => !p)) return false;
 
-    for (let i = 0; i < outerWalls.length - 1; i++) {
-        const next = outerWalls.find(w => !used.has(w.id) && (w.p1 === currentEnd || w.p2 === currentEnd));
-        if (!next) break;
-        used.add(next.id);
-        ordered.push(next);
-        currentEnd = next.p1 === currentEnd ? next.p2 : next.p1;
+    // Außenkante: Gehrung an jedem Knoten zwischen Wand i und Wand i+1
+    const outerPts = [];
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        pushOuterJoint(
+            outerPts, storey,
+            chain.walls[i], polys[i], chain.nodes[i],
+            chain.walls[j], polys[j], chain.nodes[(j + 1) % n],
+            chain.nodes[j],
+        );
     }
+    if (outerPts.length < 3 || innerPts.length < 3) return false;
+    if (frame) frame.outerContours.push(outerPts);
 
-    return ordered;
+    const outerScreen = outerPts.map(p => worldToScreen(vp, p.x, p.y));
+    const innerScreen = innerPts.map(p => worldToScreen(vp, p.x, p.y));
+
+    // Fill solid wall
+    ctx.fillStyle = '#dce1e8';
+    ctx.beginPath();
+    ctx.moveTo(outerScreen[0].x, outerScreen[0].y);
+    for (let i = 1; i < outerScreen.length; i++) ctx.lineTo(outerScreen[i].x, outerScreen[i].y);
+    ctx.closePath();
+    ctx.moveTo(innerScreen[0].x, innerScreen[0].y);
+    for (let i = innerScreen.length - 1; i >= 0; i--) ctx.lineTo(innerScreen[i].x, innerScreen[i].y);
+    ctx.closePath();
+    ctx.fill('evenodd');
+
+    // Outer stroke
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(outerScreen[0].x, outerScreen[0].y);
+    for (let i = 1; i < outerScreen.length; i++) ctx.lineTo(outerScreen[i].x, outerScreen[i].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Inner stroke (thicker, reference edge)
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(innerScreen[0].x, innerScreen[0].y);
+    for (let i = 1; i < innerScreen.length; i++) ctx.lineTo(innerScreen[i].x, innerScreen[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    return true;
+};
+
+/** Offene Außenwand-Kette (während des Zeichnens) als Band mit Endkappen. */
+const drawOpenOuterChain = (ctx, vp, storey, chain) => {
+    const walls = chain.walls;
+    if (walls.length === 0) return true;
+    // Kettenknoten in Laufrichtung (bei einem nicht geschlossenen Umriss, der dennoch
+    // einen Ring bildet, Start- und Endknoten identisch)
+    const nodes = chain.closed ? [...chain.nodes, chain.nodes[0]] : chain.nodes;
+    const innerPts = nodes.map(id => getPoint(storey, id));
+    if (innerPts.some(p => !p)) return false;
+    const polys = walls.map(w => getWallPolygon(w, storey));
+    if (polys.some(p => !p)) return false;
+
+    // Build outer boundary with mitered corners
+    const outerPts = [outerCornerAt(walls[0], polys[0], nodes[0])];
+    for (let i = 0; i < walls.length - 1; i++) {
+        pushOuterJoint(
+            outerPts, storey,
+            walls[i], polys[i], nodes[i],
+            walls[i + 1], polys[i + 1], nodes[i + 2],
+            nodes[i + 1],
+        );
+    }
+    const last = walls.length - 1;
+    outerPts.push(outerCornerAt(walls[last], polys[last], nodes[last + 1]));
+
+    // Draw the merged shape as a single path (outer → inner reversed)
+    if (outerPts.length < 2 || innerPts.length < 2) return false;
+    const outerS = outerPts.map(p => worldToScreen(vp, p.x, p.y));
+    const innerS = innerPts.map(p => worldToScreen(vp, p.x, p.y));
+
+    // Fill
+    ctx.fillStyle = '#dce1e8';
+    ctx.beginPath();
+    ctx.moveTo(outerS[0].x, outerS[0].y);
+    for (let i = 1; i < outerS.length; i++) ctx.lineTo(outerS[i].x, outerS[i].y);
+    for (let i = innerS.length - 1; i >= 0; i--) ctx.lineTo(innerS[i].x, innerS[i].y);
+    ctx.closePath();
+    ctx.fill();
+
+    // Outer edge stroke only
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(outerS[0].x, outerS[0].y);
+    for (let i = 1; i < outerS.length; i++) ctx.lineTo(outerS[i].x, outerS[i].y);
+    ctx.stroke();
+
+    // Inner edge stroke
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(innerS[0].x, innerS[0].y);
+    for (let i = 1; i < innerS.length; i++) ctx.lineTo(innerS[i].x, innerS[i].y);
+    ctx.stroke();
+
+    // End caps (only at the open ends)
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(outerS[0].x, outerS[0].y);
+    ctx.lineTo(innerS[0].x, innerS[0].y);
+    ctx.moveTo(outerS[outerS.length - 1].x, outerS[outerS.length - 1].y);
+    ctx.lineTo(innerS[innerS.length - 1].x, innerS[innerS.length - 1].y);
+    ctx.stroke();
+    return true;
 };
 
 /** Draw a single wall segment as a solid filled shape */
@@ -1328,7 +1337,7 @@ const drawWallDimension = (ctx, vp, p1, p2, subtle = false) => {
     const s1 = worldToScreen(vp, p1.x, p1.y);
     const s2 = worldToScreen(vp, p2.x, p2.y);
     const length = dist(p1, p2);
-    const label = (length / 1000).toFixed(2) + ' m';
+    const label = mmToM(length) + ' m';
 
     const midX = (s1.x + s2.x) / 2;
     const midY = (s1.y + s2.y) / 2;
@@ -1388,7 +1397,7 @@ const drawDimensionLine = (ctx, vp, dimLine) => {
     ctx.setLineDash([]);
 
     const length = dist({ x: dimLine.x1, y: dimLine.y1 }, { x: dimLine.x2, y: dimLine.y2 });
-    const label = (length / 1000).toFixed(2) + ' m';
+    const label = mmToM(length) + ' m';
     const midX = (s1.x + s2.x) / 2;
     const midY = (s1.y + s2.y) / 2;
 
@@ -1404,9 +1413,15 @@ const drawDimensionLine = (ctx, vp, dimLine) => {
 
 // ─── Openings ───────────────────────────────────────────────────
 
-const drawOpening = (ctx, vp, opening, storey, selected) => {
-    const wall = storey.walls.find(w => w.id === opening.wall_id);
-    if (!wall) return;
+const drawOpening = (ctx, vp, opening, storey, selected, paintBackground) => {
+    const wall = storey.walls.find(w => w.id === getOpeningWallId(opening));
+    if (!wall) {
+        // Verwaiste Öffnung (z. B. aus einer früheren Wandteilung) – sichtbar melden
+        warnOnce(`orphan:${opening.id}`, '[Grundriss] Öffnung ohne zugehörige Wand wird nicht gezeichnet:', opening.id);
+        return;
+    }
+    const width = Number(opening.width_mm);
+    if (!(width > 0)) return;
     const pt1 = getPoint(storey, wall.p1);
     const pt2 = getPoint(storey, wall.p2);
     if (!pt1 || !pt2) return;
@@ -1418,12 +1433,13 @@ const drawOpening = (ctx, vp, opening, storey, selected) => {
 
     // Wall normal (perpendicular)
     const nx = -dy, ny = dx;
-    const thickness = wall.thickness_mm;
+    const thickness = Number(wall.thickness_mm) || 0;
 
-    // Opening center along wall
-    const cx = pt1.x + dx * opening.position_mm;
-    const cy = pt1.y + dy * opening.position_mm;
-    const halfW = opening.width_mm / 2;
+    // Opening center along wall (auf die Wandlänge begrenzt)
+    const center = getOpeningCenterMm(opening, wallLen);
+    const cx = pt1.x + dx * center;
+    const cy = pt1.y + dy * center;
+    const halfW = width / 2;
 
     // Opening start and end points (on the wall reference line)
     const sx = cx - dx * halfW;
@@ -1431,51 +1447,62 @@ const drawOpening = (ctx, vp, opening, storey, selected) => {
     const ex = cx + dx * halfW;
     const ey = cy + dy * halfW;
 
-    // Determine wall surface offsets from reference line
-    const poly = getWallPolygon(wall, storey);
-    let sideA = 0, sideB = 0;
-    if (poly && poly.length >= 4) {
-        if (wall.type === 'outer') {
-            sideA = 0; sideB = -thickness;
-        } else if (wall.ref_edge === 'left') {
-            sideA = 0; sideB = thickness;
-        } else {
-            sideA = -thickness; sideB = 0;
-        }
-    } else {
-        sideA = -thickness / 2; sideB = thickness / 2;
-    }
+    // Lage der beiden Wandflächen relativ zur Referenzlinie (sideA ≤ sideB),
+    // aus dem tatsächlichen Wandpolygon – unabhängig von Wandtyp und Zeichenrichtung
+    const faces = getWallFaceOffsets(wall, storey);
+    const sideA = faces ? faces.min : -thickness / 2;
+    const sideB = faces ? faces.max : thickness / 2;
+    const interiorSign = faces ? faces.interiorSign : 1;
 
-    // Clear the wall area (opening gap)
+    // Clear the wall area (opening gap): Hintergrund (inkl. Vorlage) neu malen
+    // statt deckend zu übermalen
     const margin = 2;
     const g1 = worldToScreen(vp, sx + nx * (sideA - margin), sy + ny * (sideA - margin));
     const g2 = worldToScreen(vp, ex + nx * (sideA - margin), ey + ny * (sideA - margin));
     const g3 = worldToScreen(vp, ex + nx * (sideB + margin), ey + ny * (sideB + margin));
     const g4 = worldToScreen(vp, sx + nx * (sideB + margin), sy + ny * (sideB + margin));
 
-    ctx.fillStyle = '#fafafa';
-    ctx.beginPath();
-    ctx.moveTo(g1.x, g1.y); ctx.lineTo(g2.x, g2.y);
-    ctx.lineTo(g3.x, g3.y); ctx.lineTo(g4.x, g4.y);
-    ctx.closePath();
-    ctx.fill();
+    ctx.save();
+    try {
+        ctx.beginPath();
+        ctx.moveTo(g1.x, g1.y); ctx.lineTo(g2.x, g2.y);
+        ctx.lineTo(g3.x, g3.y); ctx.lineTo(g4.x, g4.y);
+        ctx.closePath();
+        if (paintBackground) {
+            ctx.clip();
+            paintBackground();
+        } else {
+            ctx.fillStyle = '#fafafa';
+            ctx.fill();
+        }
+    } finally {
+        ctx.restore();
+    }
 
     if (opening.type === 'door') {
         // ── CAD Door: break lines + leaf from hinge + solid quarter-arc ──
         const swingLeft = opening.swing === 'left';
         const inward = opening.direction !== 'outward';
 
-        const hinge = swingLeft ? { x: sx, y: sy } : { x: ex, y: ey };
-        const free = swingLeft ? { x: ex, y: ey } : { x: sx, y: sy };
+        // Swing normal direction (+1 = +n). Bei Außenwänden zeigt „innen“ immer ins Gebäude.
+        const swingSign = inward ? interiorSign : -interiorSign;
+        const swingNx = nx * swingSign;
+        const swingNy = ny * swingSign;
+
+        // Scharnier auf der Wandfläche, zu der die Tür aufschlägt – das Türblatt
+        // läuft so nicht durch den Wandkörper
+        const hingeOffset = swingSign > 0 ? sideB : sideA;
+        const hinge = swingLeft
+            ? { x: sx + nx * hingeOffset, y: sy + ny * hingeOffset }
+            : { x: ex + nx * hingeOffset, y: ey + ny * hingeOffset };
+        const free = swingLeft
+            ? { x: ex + nx * hingeOffset, y: ey + ny * hingeOffset }
+            : { x: sx + nx * hingeOffset, y: sy + ny * hingeOffset };
         const hingeS = worldToScreen(vp, hinge.x, hinge.y);
 
-        // Swing normal direction
-        const swingNx = inward ? nx : -nx;
-        const swingNy = inward ? ny : -ny;
-
         // The door leaf endpoint (90° from wall direction, at hinge)
-        const leafEndX = hinge.x + swingNx * opening.width_mm;
-        const leafEndY = hinge.y + swingNy * opening.width_mm;
+        const leafEndX = hinge.x + swingNx * width;
+        const leafEndY = hinge.y + swingNy * width;
         const leafEndS = worldToScreen(vp, leafEndX, leafEndY);
 
         // Draw short wall break lines at opening edges (perpendicular ticks)
@@ -1499,7 +1526,7 @@ const drawOpening = (ctx, vp, opening, storey, selected) => {
         ctx.stroke();
 
         // Quarter-circle arc (from leaf end back to free end of opening)
-        const arcRadius = opening.width_mm * vp.zoom;
+        const arcRadius = width * vp.zoom;
         // Arc angle: from the leaf direction back to the wall direction
         const leafAngle = Math.atan2(leafEndY - hinge.y, leafEndX - hinge.x);
         const freeAngle = Math.atan2(free.y - hinge.y, free.x - hinge.x);
@@ -1512,7 +1539,7 @@ const drawOpening = (ctx, vp, opening, storey, selected) => {
         while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
         while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
         const counterClockwise = angleDiff < 0;
-        ctx.arc(hingeS.x, hingeS.y, arcRadius, leafAngle, freeAngle, counterClockwise);
+        if (arcRadius > 0) ctx.arc(hingeS.x, hingeS.y, arcRadius, leafAngle, freeAngle, counterClockwise);
         ctx.stroke();
 
     } else {
@@ -1575,17 +1602,25 @@ const drawOpening = (ctx, vp, opening, storey, selected) => {
 
 // ─── Rooms ──────────────────────────────────────────────────────
 
-const drawRoomLabel = (ctx, vp, room, isSelected) => {
-    const centroid = polygonCentroid(room.polygon);
+// Feste Schriftgrößen (die frühere „zoomabhängige“ Formel ergab im ganzen
+// Zoombereich 0,02–2,0 immer genau diese Werte)
+const ROOM_LABEL_FONT_PX = 10;
+const SLAB_LABEL_FONT_PX = 9;
+const DIMENSION_FONT_PX = 10;
+
+const drawRoomLabel = (ctx, vp, room, isSelected, recordHitBox = true) => {
+    if (!room.polygon || room.polygon.length < 3) return;
+    // Beschriftungspunkt garantiert im Raum (auch bei L-/U-förmigen Räumen)
+    const anchor = polygonInteriorPoint(room.polygon);
     // Apply user-defined offset (for dragging the label)
-    const labelX = centroid.x + (room.labelOffsetX || 0);
-    const labelY = centroid.y + (room.labelOffsetY || 0);
+    const labelX = anchor.x + (room.labelOffsetX || 0);
+    const labelY = anchor.y + (room.labelOffsetY || 0);
     const sc = worldToScreen(vp, labelX, labelY);
-    const fontSize = Math.max(10, Math.min(16, 12 / vp.zoom * 0.01));
+    const fontSize = ROOM_LABEL_FONT_PX;
 
     // Background pill for readability
-    const nameText = room.name;
-    const areaText = `${mm2ToM2(room.area_mm2)} m²`;
+    const nameText = room.name || '';
+    const areaText = `${mm2ToM2(room.area_mm2 || 0)} m²`;
     ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
     const nameW = ctx.measureText(nameText).width;
     ctx.font = `400 ${fontSize * 0.85}px Inter, system-ui, sans-serif`;
@@ -1625,8 +1660,8 @@ const drawRoomLabel = (ctx, vp, room, isSelected) => {
     ctx.font = `400 ${fontSize * 0.85}px Inter, system-ui, sans-serif`;
     ctx.fillText(areaText, sc.x, sc.y + fontSize * 0.55);
 
-    // Store the screen-space hit box for click detection
-    room._labelHitBox = { x: boxX, y: boxY, w: boxW, h: boxH };
+    // Store the screen-space hit box for click detection (flüchtig, wird nicht gespeichert)
+    if (recordHitBox) setTransient(room, '_labelHitBox', { x: boxX, y: boxY, w: boxW, h: boxH });
 };
 
 // ─── Slabs ──────────────────────────────────────────────────────
@@ -1648,26 +1683,29 @@ const drawSlab = (ctx, vp, slab, selected) => {
 
     // Diagonal hatch pattern
     ctx.save();
-    ctx.clip();
-    ctx.strokeStyle = selected ? 'rgba(59, 130, 246, 0.3)' : 'rgba(148, 163, 184, 0.2)';
-    ctx.lineWidth = 0.5;
-    // Get bounding box
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const pt of slab.polygon) {
-        const s = worldToScreen(vp, pt.x, pt.y);
-        if (s.x < minX) minX = s.x;
-        if (s.y < minY) minY = s.y;
-        if (s.x > maxX) maxX = s.x;
-        if (s.y > maxY) maxY = s.y;
+    try {
+        ctx.clip();
+        ctx.strokeStyle = selected ? 'rgba(59, 130, 246, 0.3)' : 'rgba(148, 163, 184, 0.2)';
+        ctx.lineWidth = 0.5;
+        // Get bounding box
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const pt of slab.polygon) {
+            const s = worldToScreen(vp, pt.x, pt.y);
+            if (s.x < minX) minX = s.x;
+            if (s.y < minY) minY = s.y;
+            if (s.x > maxX) maxX = s.x;
+            if (s.y > maxY) maxY = s.y;
+        }
+        const gap = 8;
+        for (let d = minX + minY - gap * 2; d < maxX + maxY + gap * 2; d += gap) {
+            ctx.beginPath();
+            ctx.moveTo(d - minY, minY);
+            ctx.lineTo(d - maxY, maxY);
+            ctx.stroke();
+        }
+    } finally {
+        ctx.restore();
     }
-    const gap = 8;
-    for (let d = minX + minY - gap * 2; d < maxX + maxY + gap * 2; d += gap) {
-        ctx.beginPath();
-        ctx.moveTo(d - minY, minY);
-        ctx.lineTo(d - maxY, maxY);
-        ctx.stroke();
-    }
-    ctx.restore();
 
     // Outline
     ctx.beginPath();
@@ -1684,16 +1722,17 @@ const drawSlab = (ctx, vp, slab, selected) => {
     ctx.setLineDash([]);
 
     // Label
-    const centroid = polygonCentroid(slab.polygon);
-    const sc = worldToScreen(vp, centroid.x, centroid.y);
-    const fontSize = Math.max(9, Math.min(14, 11 / vp.zoom * 0.01));
+    const anchor = polygonInteriorPoint(slab.polygon);
+    const sc = worldToScreen(vp, anchor.x, anchor.y);
+    const fontSize = SLAB_LABEL_FONT_PX;
     ctx.fillStyle = selected ? '#3b82f6' : '#64748b';
     ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(slab.name || 'Decke', sc.x, sc.y - fontSize * 0.5);
     ctx.font = `400 ${fontSize * 0.8}px Inter, system-ui, sans-serif`;
-    ctx.fillText(`${slab.thickness_mm / 10} cm · ${(slab.ref_height_mm / 1000).toFixed(2)} m`, sc.x, sc.y + fontSize * 0.5);
+    const thicknessCm = String((Number(slab.thickness_mm) || 0) / 10).replace('.', ',');
+    ctx.fillText(`${thicknessCm} cm · ${mmToM(Number(slab.ref_height_mm) || 0)} m`, sc.x, sc.y + fontSize * 0.5);
 
     // Corner handles when selected
     if (selected) {
@@ -1733,155 +1772,177 @@ const drawRoof2D = (ctx, vp, storey) => {
     if (!boundary || boundary.length < 3) return;
 
     ctx.save();
+    try {
+        // Compute bounding box
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of boundary) {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+        }
+        const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+        const bw = maxX - minX, bh = maxY - minY;
+        const overhang = Math.max(0, Number(roof.overhang_mm) || 0);
+        const pitched = roof.type === 'gable' || roof.type === 'hip';
 
-    // Compute bounding box
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of boundary) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-    }
-    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    const bw = maxX - minX, bh = maxY - minY;
-    const overhang = roof.overhang_mm || 0;
+        // Traufkontur: Außenkontur plus Überstand. Folgt bei L-/U-förmigen
+        // Grundrissen der Gebäudeform (früher: Rechteck um alles).
+        const bboxPoly = (inset) => [
+            { x: minX + inset, y: minY + inset }, { x: maxX - inset, y: minY + inset },
+            { x: maxX - inset, y: maxY - inset }, { x: minX + inset, y: maxY - inset },
+        ];
+        let eaves = boundary;
+        if (pitched && overhang > 0) {
+            const expanded = offsetPolygon(ensureCW(boundary), -overhang);
+            eaves = expanded.length >= 3 ? expanded : bboxPoly(-overhang);
+        }
 
-    // Draw overhang outline (expanded boundary)
-    if (overhang > 0 && (roof.type === 'gable' || roof.type === 'hip')) {
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        const oMinX = minX - overhang, oMinY = minY - overhang;
-        const oMaxX = maxX + overhang, oMaxY = maxY + overhang;
-        const os1 = worldToScreen(vp, oMinX, oMinY);
-        const os2 = worldToScreen(vp, oMaxX, oMinY);
-        const os3 = worldToScreen(vp, oMaxX, oMaxY);
-        const os4 = worldToScreen(vp, oMinX, oMaxY);
-        ctx.moveTo(os1.x, os1.y);
-        ctx.lineTo(os2.x, os2.y);
-        ctx.lineTo(os3.x, os3.y);
-        ctx.lineTo(os4.x, os4.y);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.setLineDash([]);
-    }
-
-    // Ridge line
-    if (roof.type === 'gable' || roof.type === 'hip') {
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([8, 4]);
-
-        // Ridge along longest axis
-        if (bw >= bh) {
-            // Horizontal ridge
-            const ridgeInset = roof.type === 'hip' ? bh * 0.3 : 0;
-            const r1 = worldToScreen(vp, minX + ridgeInset, cy);
-            const r2 = worldToScreen(vp, maxX - ridgeInset, cy);
+        // Draw overhang outline (expanded boundary)
+        if (pitched && overhang > 0) {
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([6, 4]);
             ctx.beginPath();
-            ctx.moveTo(r1.x, r1.y);
-            ctx.lineTo(r2.x, r2.y);
+            tracePolygon(ctx, vp, eaves);
             ctx.stroke();
+            ctx.setLineDash([]);
+        }
 
-            // Hip: draw diagonal lines from corners to ridge ends
-            if (roof.type === 'hip') {
-                ctx.strokeStyle = '#94a3b8';
-                ctx.lineWidth = 0.8;
-                const corners = [
-                    worldToScreen(vp, minX, minY), worldToScreen(vp, minX, maxY),
-                    worldToScreen(vp, maxX, minY), worldToScreen(vp, maxX, maxY),
-                ];
+        // Ridge line (nur innerhalb der Traufkontur sichtbar)
+        if (pitched) {
+            ctx.save();
+            try {
                 ctx.beginPath();
-                ctx.moveTo(corners[0].x, corners[0].y); ctx.lineTo(r1.x, r1.y);
-                ctx.moveTo(corners[1].x, corners[1].y); ctx.lineTo(r1.x, r1.y);
-                ctx.moveTo(corners[2].x, corners[2].y); ctx.lineTo(r2.x, r2.y);
-                ctx.moveTo(corners[3].x, corners[3].y); ctx.lineTo(r2.x, r2.y);
-                ctx.stroke();
-            }
-        } else {
-            // Vertical ridge
-            const ridgeInset = roof.type === 'hip' ? bw * 0.3 : 0;
-            const r1 = worldToScreen(vp, cx, minY + ridgeInset);
-            const r2 = worldToScreen(vp, cx, maxY - ridgeInset);
-            ctx.beginPath();
-            ctx.moveTo(r1.x, r1.y);
-            ctx.lineTo(r2.x, r2.y);
-            ctx.stroke();
+                tracePolygon(ctx, vp, eaves);
+                ctx.clip();
 
-            if (roof.type === 'hip') {
-                ctx.strokeStyle = '#94a3b8';
-                ctx.lineWidth = 0.8;
-                const corners = [
-                    worldToScreen(vp, minX, minY), worldToScreen(vp, maxX, minY),
-                    worldToScreen(vp, minX, maxY), worldToScreen(vp, maxX, maxY),
-                ];
-                ctx.beginPath();
-                ctx.moveTo(corners[0].x, corners[0].y); ctx.lineTo(r1.x, r1.y);
-                ctx.moveTo(corners[1].x, corners[1].y); ctx.lineTo(r1.x, r1.y);
-                ctx.moveTo(corners[2].x, corners[2].y); ctx.lineTo(r2.x, r2.y);
-                ctx.moveTo(corners[3].x, corners[3].y); ctx.lineTo(r2.x, r2.y);
-                ctx.stroke();
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([8, 4]);
+
+                // Halbe Spannweiten inkl. Überstand – wie in der 3D-Ansicht
+                const hw = bw / 2 + overhang, hd = bh / 2 + overhang;
+                const ox0 = minX - overhang, oy0 = minY - overhang;
+                const ox1 = maxX + overhang, oy1 = maxY + overhang;
+
+                // Ridge along longest axis
+                if (bw >= bh) {
+                    // Horizontal ridge. Walmdach: Firstlänge = lange minus kurze Halbspannweite (3D)
+                    const half = roof.type === 'hip' ? Math.max(0, hw - hd) : bw / 2;
+                    const r1 = worldToScreen(vp, cx - half, cy);
+                    const r2 = worldToScreen(vp, cx + half, cy);
+                    ctx.beginPath();
+                    ctx.moveTo(r1.x, r1.y);
+                    ctx.lineTo(r2.x, r2.y);
+                    ctx.stroke();
+
+                    // Hip: draw diagonal lines from corners to ridge ends
+                    if (roof.type === 'hip') {
+                        ctx.strokeStyle = '#94a3b8';
+                        ctx.lineWidth = 0.8;
+                        const corners = [
+                            worldToScreen(vp, ox0, oy0), worldToScreen(vp, ox0, oy1),
+                            worldToScreen(vp, ox1, oy0), worldToScreen(vp, ox1, oy1),
+                        ];
+                        ctx.beginPath();
+                        ctx.moveTo(corners[0].x, corners[0].y); ctx.lineTo(r1.x, r1.y);
+                        ctx.moveTo(corners[1].x, corners[1].y); ctx.lineTo(r1.x, r1.y);
+                        ctx.moveTo(corners[2].x, corners[2].y); ctx.lineTo(r2.x, r2.y);
+                        ctx.moveTo(corners[3].x, corners[3].y); ctx.lineTo(r2.x, r2.y);
+                        ctx.stroke();
+                    }
+                } else {
+                    // Vertical ridge
+                    const half = roof.type === 'hip' ? Math.max(0, hd - hw) : bh / 2;
+                    const r1 = worldToScreen(vp, cx, cy - half);
+                    const r2 = worldToScreen(vp, cx, cy + half);
+                    ctx.beginPath();
+                    ctx.moveTo(r1.x, r1.y);
+                    ctx.lineTo(r2.x, r2.y);
+                    ctx.stroke();
+
+                    if (roof.type === 'hip') {
+                        ctx.strokeStyle = '#94a3b8';
+                        ctx.lineWidth = 0.8;
+                        const corners = [
+                            worldToScreen(vp, ox0, oy0), worldToScreen(vp, ox1, oy0),
+                            worldToScreen(vp, ox0, oy1), worldToScreen(vp, ox1, oy1),
+                        ];
+                        ctx.beginPath();
+                        ctx.moveTo(corners[0].x, corners[0].y); ctx.lineTo(r1.x, r1.y);
+                        ctx.moveTo(corners[1].x, corners[1].y); ctx.lineTo(r1.x, r1.y);
+                        ctx.moveTo(corners[2].x, corners[2].y); ctx.lineTo(r2.x, r2.y);
+                        ctx.moveTo(corners[3].x, corners[3].y); ctx.lineTo(r2.x, r2.y);
+                        ctx.stroke();
+                    }
+                }
+                ctx.setLineDash([]);
+            } finally {
+                ctx.restore();
             }
         }
-        ctx.setLineDash([]);
+
+        // Flat roof: draw parapet outline (Attika-Linie 5 cm innerhalb der Außenkontur)
+        if (roof.type === 'flat') {
+            const inset = offsetPolygon(ensureCW(boundary), 50);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            tracePolygon(ctx, vp, inset.length >= 3 ? inset : bboxPoly(50));
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Roof type label
+        const sc = worldToScreen(vp, cx, roof.type === 'flat' ? cy : (minY + bh * 0.15));
+        const typeLabels = { gable: 'Satteldach', hip: 'Walmdach', flat: 'Flachdach' };
+        const pitchLabel = roof.pitch_deg ? ` ${roof.pitch_deg}°` : '';
+        ctx.fillStyle = '#64748b';
+        ctx.font = '500 10px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${typeLabels[roof.type] || 'Dach'}${pitchLabel}`, sc.x, sc.y);
+    } finally {
+        ctx.restore();
     }
-
-    // Flat roof: draw parapet outline
-    if (roof.type === 'flat') {
-        const par = roof.parapet_mm || 300;
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        const ps1 = worldToScreen(vp, minX + 50, minY + 50);
-        const ps2 = worldToScreen(vp, maxX - 50, minY + 50);
-        const ps3 = worldToScreen(vp, maxX - 50, maxY - 50);
-        const ps4 = worldToScreen(vp, minX + 50, maxY - 50);
-        ctx.moveTo(ps1.x, ps1.y);
-        ctx.lineTo(ps2.x, ps2.y);
-        ctx.lineTo(ps3.x, ps3.y);
-        ctx.lineTo(ps4.x, ps4.y);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.setLineDash([]);
-    }
-
-    // Roof type label
-    const sc = worldToScreen(vp, cx, roof.type === 'flat' ? cy : (minY + bh * 0.15));
-    const typeLabels = { gable: 'Satteldach', hip: 'Walmdach', flat: 'Flachdach' };
-    const pitchLabel = roof.pitch_deg ? ` ${roof.pitch_deg}°` : '';
-    ctx.fillStyle = '#64748b';
-    ctx.font = '500 10px Inter, system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(`${typeLabels[roof.type] || 'Dach'}${pitchLabel}`, sc.x, sc.y);
-
-    ctx.restore();
 };
 
 // ─── Normgerechte Bemaßung (DIN 1356) ──────────────────────────
+
+/** Sortierte Koordinaten, Werte innerhalb von `tol` mm zusammengefasst. */
+const mergeCoords = (values, tol = 1) => {
+    const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+    const out = [];
+    let group = [];
+    for (const v of sorted) {
+        if (group.length > 0 && v - group[0] > tol) {
+            out.push(group.reduce((s, x) => s + x, 0) / group.length);
+            group = [];
+        }
+        group.push(v);
+    }
+    if (group.length > 0) out.push(group.reduce((s, x) => s + x, 0) / group.length);
+    return out;
+};
 
 /**
  * Draw outer dimension chains around the building footprint.
  * Two chain levels:
  *   1st chain (close): individual outer wall segment lengths
  *   2nd chain (far):   total building dimension
+ * Gemessen wird an der Außenkante der Außenwände (Außenmaß), nicht an der
+ * Innenkante. Maße in Metern mit Dezimalkomma.
  */
-const drawOuterDimensionChains = (ctx, vp, storey) => {
-    const outerWalls = storey.walls.filter(w => w.type === 'outer');
-    if (outerWalls.length < 2) return;
-
-    // Collect all outer wall endpoint world coords (unique)
-    const ptSet = new Set();
-    const pts = [];
-    for (const w of outerWalls) {
-        for (const pid of [w.p1, w.p2]) {
-            if (ptSet.has(pid)) continue;
-            ptSet.add(pid);
-            const p = getPoint(storey, pid);
-            if (p) pts.push({ x: p.x, y: p.y });
-        }
+const drawOuterDimensionChains = (ctx, vp, storey, frame) => {
+    // Außenkante: bevorzugt die im Frame gezeichnete Kontur (je Wanddicke),
+    // sonst die gespeicherte outerBoundary
+    let pts = [];
+    if (frame && frame.outerContours.length > 0) {
+        for (const contour of frame.outerContours) pts.push(...contour);
+    } else if (storey.outerBoundary && storey.outerBoundary.length >= 3) {
+        pts = storey.outerBoundary;
     }
     if (pts.length < 2) return;
 
@@ -1897,13 +1958,6 @@ const drawOuterDimensionChains = (ctx, vp, storey) => {
     const chain1Offset = 600;  // mm offset for first dimension chain
     const chain2Offset = 1200; // mm offset for total dimension chain
     const tickLen = 3;         // px
-
-    // Collect outer wall segments as pairs
-    const segments = outerWalls.map(w => {
-        const p1 = getPoint(storey, w.p1);
-        const p2 = getPoint(storey, w.p2);
-        return p1 && p2 ? { p1, p2 } : null;
-    }).filter(Boolean);
 
     // Helper: draw a single dimension tick and label line
     const drawDimLine = (sx1, sy1, sx2, sy2, label) => {
@@ -1932,173 +1986,221 @@ const drawOuterDimensionChains = (ctx, vp, storey) => {
         if (label && len > 25) {
             const mx = (sx1 + sx2) / 2;
             const my = (sy1 + sy2) / 2;
-            const fontSize = Math.max(8, Math.min(11, 10));
+            const fontSize = DIMENSION_FONT_PX;
             ctx.save();
-            ctx.fillStyle = '#334155';
-            ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
+            try {
+                ctx.fillStyle = '#334155';
+                ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
 
-            // Draw text background for readability
-            const tw = ctx.measureText(label).width + 6;
-            ctx.fillStyle = '#fafafa';
-            ctx.fillRect(mx - tw / 2, my - fontSize / 2 - 1, tw, fontSize + 2);
-            ctx.fillStyle = '#334155';
-            ctx.fillText(label, mx, my);
-            ctx.restore();
+                // Draw text background for readability
+                const tw = ctx.measureText(label).width + 6;
+                ctx.fillStyle = '#fafafa';
+                ctx.fillRect(mx - tw / 2, my - fontSize / 2 - 1, tw, fontSize + 2);
+                ctx.fillStyle = '#334155';
+                ctx.fillText(label, mx, my);
+            } finally {
+                ctx.restore();
+            }
         }
     };
 
     ctx.save();
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 0.8;
-    ctx.setLineDash([]);
-
-    // --- Horizontal dimension chains (top and bottom) ---
-    // Collect X coordinates of all outer wall endpoints, sorted
-    const xCoords = [...new Set(pts.map(p => p.x))].sort((a, b) => a - b);
-    const yCoords = [...new Set(pts.map(p => p.y))].sort((a, b) => a - b);
-
-    // Top dimension chain (above building)
-    if (xCoords.length >= 2) {
-        const chainY = minY - chain1Offset;
-        const totalChainY = minY - chain2Offset;
-
-        // Extension lines from building to chain
-        for (const x of xCoords) {
-            const sx = worldToScreen(vp, x, minY);
-            const se = worldToScreen(vp, x, chainY - 100);
-            ctx.strokeStyle = '#94a3b8';
-            ctx.lineWidth = 0.5;
-            ctx.beginPath();
-            ctx.moveTo(sx.x, sx.y);
-            ctx.lineTo(se.x, se.y);
-            ctx.stroke();
-        }
-
-        // Detail chain: individual segments
+    try {
         ctx.strokeStyle = '#475569';
         ctx.lineWidth = 0.8;
-        for (let i = 0; i < xCoords.length - 1; i++) {
-            const s1 = worldToScreen(vp, xCoords[i], chainY);
-            const s2 = worldToScreen(vp, xCoords[i + 1], chainY);
-            const segLen = xCoords[i + 1] - xCoords[i];
-            const label = segLen >= 100 ? (segLen / 1000).toFixed(2) : '';
-            drawDimLine(s1.x, s1.y, s2.x, s2.y, label);
-        }
+        ctx.setLineDash([]);
 
-        // Total chain
-        if (xCoords.length > 2) {
-            const st1 = worldToScreen(vp, xCoords[0], totalChainY);
-            const st2 = worldToScreen(vp, xCoords[xCoords.length - 1], totalChainY);
-            const totalLen = xCoords[xCoords.length - 1] - xCoords[0];
+        // --- Horizontal dimension chains (top and bottom) ---
+        // X/Y-Koordinaten der Außenecken, sortiert, innerhalb 1 mm zusammengefasst
+        const xCoords = mergeCoords(pts.map(p => p.x));
+        const yCoords = mergeCoords(pts.map(p => p.y));
+
+        // Top dimension chain (above building)
+        if (xCoords.length >= 2) {
+            const chainY = minY - chain1Offset;
+            const totalChainY = minY - chain2Offset;
+
+            // Extension lines from building to chain
+            for (const x of xCoords) {
+                const sx = worldToScreen(vp, x, minY);
+                const se = worldToScreen(vp, x, chainY - 100);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(sx.x, sx.y);
+                ctx.lineTo(se.x, se.y);
+                ctx.stroke();
+            }
+
+            // Detail chain: individual segments
             ctx.strokeStyle = '#475569';
-            ctx.lineWidth = 1;
-            drawDimLine(st1.x, st1.y, st2.x, st2.y, (totalLen / 1000).toFixed(2));
-        }
-    }
+            ctx.lineWidth = 0.8;
+            for (let i = 0; i < xCoords.length - 1; i++) {
+                const s1 = worldToScreen(vp, xCoords[i], chainY);
+                const s2 = worldToScreen(vp, xCoords[i + 1], chainY);
+                const segLen = xCoords[i + 1] - xCoords[i];
+                const label = segLen >= 100 ? mmToM(segLen) : '';
+                drawDimLine(s1.x, s1.y, s2.x, s2.y, label);
+            }
 
-    // Left dimension chain (left of building)
-    if (yCoords.length >= 2) {
-        const chainX = minX - chain1Offset;
-        const totalChainX = minX - chain2Offset;
+            // Total chain
+            if (xCoords.length > 2) {
+                const st1 = worldToScreen(vp, xCoords[0], totalChainY);
+                const st2 = worldToScreen(vp, xCoords[xCoords.length - 1], totalChainY);
+                const totalLen = xCoords[xCoords.length - 1] - xCoords[0];
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 1;
+                drawDimLine(st1.x, st1.y, st2.x, st2.y, mmToM(totalLen));
+            }
 
-        // Extension lines
-        for (const y of yCoords) {
-            const sy = worldToScreen(vp, minX, y);
-            const se = worldToScreen(vp, chainX - 100, y);
-            ctx.strokeStyle = '#94a3b8';
-            ctx.lineWidth = 0.5;
-            ctx.beginPath();
-            ctx.moveTo(sy.x, sy.y);
-            ctx.lineTo(se.x, se.y);
-            ctx.stroke();
-        }
-
-        // Detail chain
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 0.8;
-        for (let i = 0; i < yCoords.length - 1; i++) {
-            const s1 = worldToScreen(vp, chainX, yCoords[i]);
-            const s2 = worldToScreen(vp, chainX, yCoords[i + 1]);
-            const segLen = yCoords[i + 1] - yCoords[i];
-            const label = segLen >= 100 ? (segLen / 1000).toFixed(2) : '';
-            drawDimLine(s1.x, s1.y, s2.x, s2.y, label);
+            // Einheit einmalig ausweisen
+            const cap = worldToScreen(vp, xCoords[0], totalChainY);
+            ctx.fillStyle = '#64748b';
+            ctx.font = '500 9px Inter, system-ui, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText('Maße in m', cap.x, cap.y - 8);
         }
 
-        // Total chain
-        if (yCoords.length > 2) {
-            const st1 = worldToScreen(vp, totalChainX, yCoords[0]);
-            const st2 = worldToScreen(vp, totalChainX, yCoords[yCoords.length - 1]);
-            const totalLen = yCoords[yCoords.length - 1] - yCoords[0];
+        // Left dimension chain (left of building)
+        if (yCoords.length >= 2) {
+            const chainX = minX - chain1Offset;
+            const totalChainX = minX - chain2Offset;
+
+            // Extension lines
+            for (const y of yCoords) {
+                const sy = worldToScreen(vp, minX, y);
+                const se = worldToScreen(vp, chainX - 100, y);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(sy.x, sy.y);
+                ctx.lineTo(se.x, se.y);
+                ctx.stroke();
+            }
+
+            // Detail chain
             ctx.strokeStyle = '#475569';
-            ctx.lineWidth = 1;
-            drawDimLine(st1.x, st1.y, st2.x, st2.y, (totalLen / 1000).toFixed(2));
-        }
-    }
+            ctx.lineWidth = 0.8;
+            for (let i = 0; i < yCoords.length - 1; i++) {
+                const s1 = worldToScreen(vp, chainX, yCoords[i]);
+                const s2 = worldToScreen(vp, chainX, yCoords[i + 1]);
+                const segLen = yCoords[i + 1] - yCoords[i];
+                const label = segLen >= 100 ? mmToM(segLen) : '';
+                drawDimLine(s1.x, s1.y, s2.x, s2.y, label);
+            }
 
-    ctx.restore();
+            // Total chain
+            if (yCoords.length > 2) {
+                const st1 = worldToScreen(vp, totalChainX, yCoords[0]);
+                const st2 = worldToScreen(vp, totalChainX, yCoords[yCoords.length - 1]);
+                const totalLen = yCoords[yCoords.length - 1] - yCoords[0];
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 1;
+                drawDimLine(st1.x, st1.y, st2.x, st2.y, mmToM(totalLen));
+            }
+        }
+    } finally {
+        ctx.restore();
+    }
 };
 
 // ─── 2D Furniture (realistic top-down view) ─────────────────────
 
-const drawFurniture2D = (ctx, vp, furn, selected) => {
-    ctx.save();
+// Symbole für ältere/importierte IDs, die nicht (mehr) im Katalog stehen
+const LEGACY_FURNITURE_SYMBOLS = {
+    einzelbett: 'bed', regal: 'cabinet', sideboard: 'cabinet', buerostuhl: 'chair',
+    toilette: 'toilet', waschbecken: 'sink', kueche: 'kitchen', kuechenzeile: 'kitchen',
+    kuechenblock: 'kitchen', waschmaschine: 'washer', trockner: 'washer',
+};
 
-    const s = worldToScreen(vp, furn.x, furn.y);
-    const sw = furn.width_mm * vp.zoom;
-    const sd = furn.depth_mm * vp.zoom;
+/**
+ * Symbol eines Möbelstücks: zuerst das `symbol`-Feld des Katalogs, dann bekannte
+ * Alt-IDs, zuletzt Wortmuster – spezifische Begriffe vor allgemeinen
+ * ('nachttisch'/'waschtisch' vor 'tisch', 'kuehlschrank' vor 'schrank').
+ */
+const resolveFurnitureSymbol = (catId, catItem) => {
+    if (catItem && catItem.symbol) return catItem.symbol;
+    if (LEGACY_FURNITURE_SYMBOLS[catId]) return LEGACY_FURNITURE_SYMBOLS[catId];
+    if (catId.startsWith('sofa') || catId.includes('sessel')) return 'sofa';
+    if (catId.startsWith('bett')) return 'bed';
+    if (catId.includes('doppelwaschtisch')) return 'doubleSink';
+    if (catId.includes('waschtisch') || catId.includes('waschbecken')) return 'sink';
+    if (catId.includes('nachttisch')) return 'cabinet';
+    if (catId.includes('kuehlschrank')) return 'fridge';
+    if (catId.includes('herd')) return 'stove';
+    if (catId.includes('kuech') || catId.includes('spuele')) return 'kitchen';
+    if (catId.includes('badewanne')) return 'bathtub';
+    if (catId.includes('dusche_eck')) return 'showerQuarter';
+    if (catId.includes('dusch')) return 'shower';
+    if (catId.includes('toilette') || catId === 'wc') return 'toilet';
+    if (catId.includes('bidet')) return 'bidet';
+    if (catId.includes('urinal')) return 'urinal';
+    if (catId.includes('waschmaschine') || catId.includes('trockner')) return 'washer';
+    if (catId.includes('tisch')) return 'table';
+    if (catId.includes('stuhl')) return 'chair';
+    if (catId.includes('schrank') || catId.includes('regal') || catId.includes('kommode') || catId.includes('board')) return 'cabinet';
+    return null;
+};
 
-    ctx.translate(s.x, s.y);
-    ctx.rotate((furn.rotation * Math.PI) / 180);
-
-    const catItem = getFurnitureItem(furn.catalog_id);
-    const catId = furn.catalog_id || '';
-
-    // Base fill
-    const baseColor = selected ? '#dbeafe' : (catItem?.color || FURNITURE_FILL);
-    const strokeColor = selected ? SELECTION_COLOR : FURNITURE_STROKE;
-    ctx.fillStyle = baseColor;
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = selected ? 2 : 1.2;
-
-    // Choose drawing based on furniture type
-    if (catId.startsWith('sofa') || catId === 'sessel') {
-        drawSofa(ctx, sw, sd, catId, baseColor, strokeColor);
-    } else if (catId.startsWith('bett') || catId === 'einzelbett') {
-        drawBed(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId.includes('tisch') || catId.includes('esstisch') || catId === 'schreibtisch' || catId === 'couchtisch') {
-        drawTable(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId.includes('stuhl') || catId === 'buerostuhl') {
-        drawChair(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId.includes('schrank') || catId === 'kleiderschrank' || catId === 'regal' || catId === 'sideboard' || catId === 'kommode' || catId === 'nachttisch') {
-        drawCabinet(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'badewanne' || catId === 'san_badewanne' || catId === 'san_badewanne_frei') {
-        drawBathtub(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'dusche' || catId === 'san_duschkabine' || catId === 'san_dusche_boden') {
-        drawShower(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'san_dusche_eck') {
-        drawShowerQuarter(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'toilette' || catId === 'wc' || catId === 'san_toilette' || catId === 'san_toilette_stand') {
-        drawToilet(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'san_bidet') {
-        drawBidet(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'san_urinal') {
-        drawUrinal(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'waschbecken' || catId === 'san_waschbecken' || catId === 'san_handwaschbecken') {
-        drawSink(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId === 'san_doppelwaschtisch') {
-        drawDoubleSink(ctx, sw, sd, baseColor, strokeColor);
-    } else if (catId.includes('kuech') || catId === 'kueche' || catId === 'kuechenzeile' || catId === 'herd' || catId === 'kuehlschrank' || catId === 'kuechenblock') {
-        drawKitchen(ctx, sw, sd, catId, baseColor, strokeColor);
-    } else if (catId === 'waschmaschine' || catId === 'trockner' || catId === 'san_waschmaschine' || catId === 'san_trockner') {
-        drawWasher(ctx, sw, sd, baseColor, strokeColor);
-    } else {
-        // Default: rounded rectangle with label
-        drawDefaultFurniture(ctx, sw, sd, furn, baseColor, strokeColor);
+/** Zeichnet das Symbol; false, wenn es kein passendes gibt. */
+const drawFurnitureSymbol = (ctx, symbol, w, d, catId, fill, stroke) => {
+    switch (symbol) {
+        case 'sofa': drawSofa(ctx, w, d, catId, fill, stroke); return true;
+        case 'bed': drawBed(ctx, w, d, fill, stroke); return true;
+        case 'table': drawTable(ctx, w, d, fill, stroke); return true;
+        case 'chair': drawChair(ctx, w, d, fill, stroke); return true;
+        case 'cabinet': drawCabinet(ctx, w, d, fill, stroke); return true;
+        case 'bathtub': drawBathtub(ctx, w, d, fill, stroke); return true;
+        case 'shower': drawShower(ctx, w, d, fill, stroke); return true;
+        case 'showerQuarter': drawShowerQuarter(ctx, w, d, fill, stroke); return true;
+        case 'toilet': drawToilet(ctx, w, d, fill, stroke); return true;
+        case 'bidet': drawBidet(ctx, w, d, fill, stroke); return true;
+        case 'urinal': drawUrinal(ctx, w, d, fill, stroke); return true;
+        case 'sink': drawSink(ctx, w, d, fill, stroke); return true;
+        case 'doubleSink': drawDoubleSink(ctx, w, d, fill, stroke); return true;
+        case 'kitchen': drawKitchen(ctx, w, d, 'kueche', fill, stroke); return true;
+        case 'fridge': drawKitchen(ctx, w, d, 'kuehlschrank', fill, stroke); return true;
+        case 'stove': drawKitchen(ctx, w, d, 'herd', fill, stroke); return true;
+        case 'washer': drawWasher(ctx, w, d, fill, stroke); return true;
+        default: return false;
     }
+};
 
-    ctx.restore();
+const drawFurniture2D = (ctx, vp, furn, selected) => {
+    const sw = Number(furn.width_mm) * vp.zoom;
+    const sd = Number(furn.depth_mm) * vp.zoom;
+    // Ungültige Maße (0, leer, negativ) nicht zeichnen – Tiefe 0 führte zu einer
+    // Endlosschleife im Schranksymbol; der Auswahlrahmen bleibt sichtbar
+    if (!Number.isFinite(sw) || !Number.isFinite(sd) || sw <= 0 || sd <= 0) return;
+
+    const s = worldToScreen(vp, Number(furn.x) || 0, Number(furn.y) || 0);
+    ctx.save();
+    try {
+        ctx.translate(s.x, s.y);
+        ctx.rotate(((Number(furn.rotation) || 0) * Math.PI) / 180);
+
+        const catItem = getFurnitureItem(furn.catalog_id);
+        const catId = furn.catalog_id || '';
+
+        // Base fill
+        const baseColor = selected ? '#dbeafe' : (catItem?.color || FURNITURE_FILL);
+        const strokeColor = selected ? SELECTION_COLOR : FURNITURE_STROKE;
+        ctx.fillStyle = baseColor;
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = selected ? 2 : 1.2;
+
+        // Choose drawing based on furniture type
+        const symbol = resolveFurnitureSymbol(catId, catItem);
+        if (!drawFurnitureSymbol(ctx, symbol, sw, sd, catId, baseColor, strokeColor)) {
+            // Default: rounded rectangle with label
+            drawDefaultFurniture(ctx, sw, sd, furn, catItem, baseColor, strokeColor);
+        }
+    } finally {
+        ctx.restore();
+    }
 };
 
 const drawSofa = (ctx, w, d, catId, fill, stroke) => {
@@ -2106,7 +2208,7 @@ const drawSofa = (ctx, w, d, catId, fill, stroke) => {
     // Backrest
     ctx.fillStyle = darkenColor(fill, 20);
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d * 0.25, [r, r, 0, 0]);
+    roundRectPath(ctx, 0, 0, w, d * 0.25, [r, r, 0, 0]);
     ctx.fill();
     ctx.strokeStyle = stroke;
     ctx.stroke();
@@ -2114,18 +2216,18 @@ const drawSofa = (ctx, w, d, catId, fill, stroke) => {
     // Seat cushion
     ctx.fillStyle = fill;
     ctx.beginPath();
-    ctx.roundRect(0, d * 0.25, w, d * 0.65, 0);
+    roundRectPath(ctx, 0, d * 0.25, w, d * 0.65, 0);
     ctx.fill();
     ctx.stroke();
 
     // Armrests
     ctx.fillStyle = darkenColor(fill, 15);
     ctx.beginPath();
-    ctx.roundRect(0, d * 0.2, w * 0.12, d * 0.7, [0, r, r, 0]);
+    roundRectPath(ctx, 0, d * 0.2, w * 0.12, d * 0.7, [0, r, r, 0]);
     ctx.fill();
     ctx.stroke();
     ctx.beginPath();
-    ctx.roundRect(w * 0.88, d * 0.2, w * 0.12, d * 0.7, [r, 0, 0, r]);
+    roundRectPath(ctx, w * 0.88, d * 0.2, w * 0.12, d * 0.7, [r, 0, 0, r]);
     ctx.fill();
     ctx.stroke();
 
@@ -2147,7 +2249,7 @@ const drawSofa = (ctx, w, d, catId, fill, stroke) => {
     ctx.strokeStyle = darkenColor(stroke, -20);
     ctx.lineWidth = 0.6;
     ctx.beginPath();
-    ctx.roundRect(w * 0.13, d * 0.85, w * 0.74, d * 0.12, [0, 0, r, r]);
+    roundRectPath(ctx, w * 0.13, d * 0.85, w * 0.74, d * 0.12, [0, 0, r, r]);
     ctx.stroke();
 };
 
@@ -2157,14 +2259,14 @@ const drawBed = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 3);
+    roundRectPath(ctx, 0, 0, w, d, 3);
     ctx.fill();
     ctx.stroke();
 
     // Headboard
     ctx.fillStyle = darkenColor(fill, 25);
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d * 0.08, [3, 3, 0, 0]);
+    roundRectPath(ctx, 0, 0, w, d * 0.08, [3, 3, 0, 0]);
     ctx.fill();
     ctx.stroke();
 
@@ -2176,16 +2278,16 @@ const drawBed = (ctx, w, d, fill, stroke) => {
     const py = d * 0.12;
     if (pillowCount === 2) {
         ctx.beginPath();
-        ctx.roundRect(w * 0.06, py, pillowW, pillowH, 4);
+        roundRectPath(ctx, w * 0.06, py, pillowW, pillowH, 4);
         ctx.fill();
         ctx.stroke();
         ctx.beginPath();
-        ctx.roundRect(w * 0.52, py, pillowW, pillowH, 4);
+        roundRectPath(ctx, w * 0.52, py, pillowW, pillowH, 4);
         ctx.fill();
         ctx.stroke();
     } else {
         ctx.beginPath();
-        ctx.roundRect(w * 0.2, py, pillowW, pillowH, 4);
+        roundRectPath(ctx, w * 0.2, py, pillowW, pillowH, 4);
         ctx.fill();
         ctx.stroke();
     }
@@ -2205,7 +2307,7 @@ const drawTable = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 3);
+    roundRectPath(ctx, 0, 0, w, d, 3);
     ctx.fill();
     ctx.stroke();
 
@@ -2247,9 +2349,9 @@ const drawCabinet = (ctx, w, d, fill, stroke) => {
     ctx.fill();
     ctx.stroke();
 
-    // Door lines
-    if (w > 20) {
-        const doors = Math.max(1, Math.round(w / (d * 1.5)));
+    // Door lines (Türenzahl begrenzt; ohne Tiefe keine Teilung – sonst Endlosschleife)
+    if (w > 20 && d >= 1) {
+        const doors = Math.min(12, Math.max(1, Math.round(w / (d * 1.5))));
         ctx.strokeStyle = darkenColor(stroke, -30);
         ctx.lineWidth = 0.7;
         for (let i = 1; i < doors; i++) {
@@ -2275,7 +2377,7 @@ const drawBathtub = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 6);
+    roundRectPath(ctx, 0, 0, w, d, 6);
     ctx.fill();
     ctx.stroke();
 
@@ -2284,7 +2386,7 @@ const drawBathtub = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = '#94a3b8';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.roundRect(w * 0.08, d * 0.08, w * 0.84, d * 0.84, 10);
+    roundRectPath(ctx, w * 0.08, d * 0.08, w * 0.84, d * 0.84, 10);
     ctx.fill();
     ctx.stroke();
 
@@ -2300,7 +2402,7 @@ const drawShower = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 2);
+    roundRectPath(ctx, 0, 0, w, d, 2);
     ctx.fill();
     ctx.stroke();
 
@@ -2341,7 +2443,7 @@ const drawToilet = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(w * 0.1, 0, w * 0.8, d * 0.3, [3, 3, 0, 0]);
+    roundRectPath(ctx, w * 0.1, 0, w * 0.8, d * 0.3, [3, 3, 0, 0]);
     ctx.fill();
     ctx.stroke();
 
@@ -2368,7 +2470,7 @@ const drawSink = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 2);
+    roundRectPath(ctx, 0, 0, w, d, 2);
     ctx.fill();
     ctx.stroke();
 
@@ -2474,7 +2576,7 @@ const drawBidet = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(w * 0.05, 0, w * 0.9, d * 0.35, [3, 3, 0, 0]);
+    roundRectPath(ctx, w * 0.05, 0, w * 0.9, d * 0.35, [3, 3, 0, 0]);
     ctx.fill();
     ctx.stroke();
 
@@ -2551,7 +2653,7 @@ const drawDoubleSink = (ctx, w, d, fill, stroke) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(0, 0, w, d, 2);
+    roundRectPath(ctx, 0, 0, w, d, 2);
     ctx.fill();
     ctx.stroke();
 
@@ -2635,14 +2737,14 @@ const drawShowerQuarter = (ctx, w, d, fill, stroke) => {
     ctx.fill();
 };
 
-const drawDefaultFurniture = (ctx, sw, sd, furn, fill, stroke) => {
+const drawDefaultFurniture = (ctx, sw, sd, furn, catItem, fill, stroke) => {
     // Very subtle outline instead of a bold bounding rectangle
     ctx.fillStyle = fill;
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 0.8;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.roundRect(0, 0, sw, sd, 3);
+    roundRectPath(ctx, 0, 0, sw, sd, 3);
     ctx.fill();
     ctx.stroke();
     ctx.setLineDash([]);
@@ -2654,14 +2756,14 @@ const drawDefaultFurniture = (ctx, sw, sd, furn, fill, stroke) => {
         ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const label = furn.catalog_id.replace(/_/g, ' ');
+        const label = catItem?.name || String(furn.catalog_id || 'Möbel').replace(/_/g, ' ');
         ctx.fillText(label, sw / 2, sd / 2);
     }
 };
 
-/** Darken/lighten a hex color */
+/** Darken/lighten a hex color (nur #rrggbb, andere Formate unverändert) */
 const darkenColor = (hex, amount) => {
-    if (!hex || hex.length < 7) return hex;
+    if (typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) return hex;
     try {
         let r = parseInt(hex.slice(1, 3), 16);
         let g = parseInt(hex.slice(3, 5), 16);
@@ -2714,8 +2816,20 @@ const drawCalibration = (ctx, vp, calibPoints) => {
 
 // ─── Preview (tool-specific) ────────────────────────────────────
 
-const drawPreview = (ctx, vp, state, storey) => {
+/** Wand mit genau diesen Endpunkten (Vorschau-Objekte enthalten nur Koordinaten). */
+const findWallByEndpoints = (storey, a, b) => {
+    if (!a || !b) return null;
+    const near = (p, q) => p && q && Math.abs(p.x - q.x) < 1 && Math.abs(p.y - q.y) < 1;
+    return storey.walls.find(w => {
+        const p1 = getPoint(storey, w.p1), p2 = getPoint(storey, w.p2);
+        return near(p1, a) && near(p2, b);
+    }) || null;
+};
+
+const drawPreview = (ctx, vp, state, storey, view) => {
     const { preview } = state;
+    const viewW = view ? view.w : ctx.canvas.width;
+    const viewH = view ? view.h : ctx.canvas.height;
 
     if (preview.type === 'wall_segment') {
         const s1 = worldToScreen(vp, preview.x1, preview.y1);
@@ -2742,7 +2856,10 @@ const drawPreview = (ctx, vp, state, storey) => {
             }
         } else {
             // Wall preview: draw as SOLID wall shape
-            const thickness = preview.wallType === 'outer' ? 365 : 115;
+            // Stärke und Seite aus dem Vorschau-Objekt (falls übergeben), sonst Standardwerte
+            const thickness = Number(preview.thickness) > 0
+                ? Number(preview.thickness)
+                : (preview.wallType === 'outer' ? WALL_THICKNESS.outerDefault : WALL_THICKNESS.innerNonloadDefault);
             const dx = preview.x2 - preview.x1;
             const dy = preview.y2 - preview.y1;
             const wallLen = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -2761,13 +2878,15 @@ const drawPreview = (ctx, vp, state, storey) => {
                     worldToScreen(vp, preview.x1, preview.y1),
                 ];
             } else {
-                // Inner wall: centered
-                const half = thickness / 2;
+                // Inner wall: einseitig ab Referenzkante (wie das Ergebnis), ohne Angabe mittig
+                let a = -thickness / 2, b = thickness / 2;
+                if (preview.refEdge === 'left') { a = 0; b = thickness; }
+                else if (preview.refEdge === 'right') { a = -thickness; b = 0; }
                 pts = [
-                    worldToScreen(vp, preview.x1 + nx * half, preview.y1 + ny * half),
-                    worldToScreen(vp, preview.x2 + nx * half, preview.y2 + ny * half),
-                    worldToScreen(vp, preview.x2 - nx * half, preview.y2 - ny * half),
-                    worldToScreen(vp, preview.x1 - nx * half, preview.y1 - ny * half),
+                    worldToScreen(vp, preview.x1 + nx * b, preview.y1 + ny * b),
+                    worldToScreen(vp, preview.x2 + nx * b, preview.y2 + ny * b),
+                    worldToScreen(vp, preview.x2 + nx * a, preview.y2 + ny * a),
+                    worldToScreen(vp, preview.x1 + nx * a, preview.y1 + ny * a),
                 ];
             }
 
@@ -2795,20 +2914,20 @@ const drawPreview = (ctx, vp, state, storey) => {
 
             // ── Corner miter preview (between last placed wall and current preview) ──
             if (preview.wallType === 'outer' && preview.prevX !== undefined) {
-                // Find the last placed wall ending at (x1,y1)
-                const outerWalls = storey.walls.filter(w => w.type === 'outer');
-                const lastWall = outerWalls.find(w => {
-                    const p2 = getPoint(storey, w.p2);
-                    const p1 = getPoint(storey, w.p1);
-                    return (p2 && Math.abs(p2.x - preview.x1) < 1 && Math.abs(p2.y - preview.y1) < 1) ||
-                        (p1 && Math.abs(p1.x - preview.x1) < 1 && Math.abs(p1.y - preview.y1) < 1);
-                });
+                // Find the last placed wall ending at (x1,y1) – die zuletzt gesetzte Wand,
+                // nicht die erste passende
+                const atStart = (p) => p && Math.abs(p.x - preview.x1) < 1 && Math.abs(p.y - preview.y1) < 1;
+                let lastWall = null;
+                for (let i = storey.walls.length - 1; i >= 0 && !lastWall; i--) {
+                    const w = storey.walls[i];
+                    if (w.type !== 'outer') continue;
+                    if (atStart(getPoint(storey, w.p2)) || atStart(getPoint(storey, w.p1))) lastWall = w;
+                }
                 if (lastWall) {
                     const lastPoly = getWallPolygon(lastWall, storey);
                     if (lastPoly) {
                         // Determine which end connects to preview start
-                        const lp2 = getPoint(storey, lastWall.p2);
-                        const isP2 = lp2 && Math.abs(lp2.x - preview.x1) < 1 && Math.abs(lp2.y - preview.y1) < 1;
+                        const isP2 = atStart(getPoint(storey, lastWall.p2));
 
                         const oc1Near = isP2 ? lastPoly[1] : lastPoly[0];
                         const oc1Far = isP2 ? lastPoly[0] : lastPoly[1];
@@ -2817,20 +2936,12 @@ const drawPreview = (ctx, vp, state, storey) => {
                         const oc2Near = { x: (preview.x1 - nx * thickness), y: (preview.y1 - ny * thickness) };
                         const oc2Far = { x: (preview.x2 - nx * thickness), y: (preview.y2 - ny * thickness) };
 
-                        // Compute miter point
-                        const d1x = oc1Near.x - oc1Far.x, d1y = oc1Near.y - oc1Far.y;
-                        const d2x = oc2Near.x - oc2Far.x, d2y = oc2Near.y - oc2Far.y;
-                        const cross = d1x * d2y - d1y * d2x;
+                        // Compute miter point (mit Begrenzung gegen Spitzen)
+                        const limit = MITER_LIMIT_FACTOR * Math.max(thickness, Number(lastWall.thickness_mm) || 0);
+                        const miter = computeMiterPoint(oc1Near, oc1Far, oc2Near, oc2Far,
+                            { x: preview.x1, y: preview.y1 }, limit);
 
-                        if (Math.abs(cross) > 0.01) {
-                            const ddx = oc2Near.x - oc1Near.x;
-                            const ddy = oc2Near.y - oc1Near.y;
-                            const t = (ddx * d2y - ddy * d2x) / cross;
-                            const miter = {
-                                x: oc1Near.x + t * d1x,
-                                y: oc1Near.y + t * d1y,
-                            };
-
+                        if (miter) {
                             const cPts = [
                                 worldToScreen(vp, oc1Near.x, oc1Near.y),
                                 worldToScreen(vp, miter.x, miter.y),
@@ -2864,54 +2975,55 @@ const drawPreview = (ctx, vp, state, storey) => {
             // ── Guide lines from existing wall endpoints ──
             const guideThreshold = 15; // mm tolerance for alignment (increased for easier use)
             const allPoints = storey.points;
-            const canvasW = ctx.canvas.width;
-            const canvasH = ctx.canvas.height;
             ctx.save();
-            ctx.strokeStyle = 'rgba(236, 72, 153, 0.7)'; // brighter pink
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([8, 4]);
-            let hGuideDrawn = false, vGuideDrawn = false;
-            for (const pt of allPoints) {
-                // Horizontal guide (same Y as preview endpoint)
-                if (!hGuideDrawn && Math.abs(pt.y - preview.y2) < guideThreshold && Math.abs(pt.x - preview.x2) > 50) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, s2.y);
-                    ctx.lineTo(canvasW, s2.y);
-                    ctx.stroke();
-                    // Diamond marker at aligned point
-                    const alignedPtScreen = worldToScreen(vp, pt.x, pt.y);
-                    ctx.fillStyle = 'rgba(236, 72, 153, 0.8)';
-                    ctx.beginPath();
-                    ctx.moveTo(alignedPtScreen.x, alignedPtScreen.y - 5);
-                    ctx.lineTo(alignedPtScreen.x + 5, alignedPtScreen.y);
-                    ctx.lineTo(alignedPtScreen.x, alignedPtScreen.y + 5);
-                    ctx.lineTo(alignedPtScreen.x - 5, alignedPtScreen.y);
-                    ctx.closePath();
-                    ctx.fill();
-                    hGuideDrawn = true;
+            try {
+                ctx.strokeStyle = 'rgba(236, 72, 153, 0.7)'; // brighter pink
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([8, 4]);
+                let hGuideDrawn = false, vGuideDrawn = false;
+                for (const pt of allPoints) {
+                    // Horizontal guide (same Y as preview endpoint)
+                    if (!hGuideDrawn && Math.abs(pt.y - preview.y2) < guideThreshold && Math.abs(pt.x - preview.x2) > 50) {
+                        ctx.beginPath();
+                        ctx.moveTo(0, s2.y);
+                        ctx.lineTo(viewW, s2.y);
+                        ctx.stroke();
+                        // Diamond marker at aligned point
+                        const alignedPtScreen = worldToScreen(vp, pt.x, pt.y);
+                        ctx.fillStyle = 'rgba(236, 72, 153, 0.8)';
+                        ctx.beginPath();
+                        ctx.moveTo(alignedPtScreen.x, alignedPtScreen.y - 5);
+                        ctx.lineTo(alignedPtScreen.x + 5, alignedPtScreen.y);
+                        ctx.lineTo(alignedPtScreen.x, alignedPtScreen.y + 5);
+                        ctx.lineTo(alignedPtScreen.x - 5, alignedPtScreen.y);
+                        ctx.closePath();
+                        ctx.fill();
+                        hGuideDrawn = true;
+                    }
                 }
-            }
-            for (const pt of allPoints) {
-                // Vertical guide (same X as preview endpoint)
-                if (!vGuideDrawn && Math.abs(pt.x - preview.x2) < guideThreshold && Math.abs(pt.y - preview.y2) > 50) {
-                    ctx.beginPath();
-                    ctx.moveTo(s2.x, 0);
-                    ctx.lineTo(s2.x, canvasH);
-                    ctx.stroke();
-                    // Diamond marker at aligned point
-                    const alignedPtScreen = worldToScreen(vp, pt.x, pt.y);
-                    ctx.fillStyle = 'rgba(236, 72, 153, 0.8)';
-                    ctx.beginPath();
-                    ctx.moveTo(alignedPtScreen.x, alignedPtScreen.y - 5);
-                    ctx.lineTo(alignedPtScreen.x + 5, alignedPtScreen.y);
-                    ctx.lineTo(alignedPtScreen.x, alignedPtScreen.y + 5);
-                    ctx.lineTo(alignedPtScreen.x - 5, alignedPtScreen.y);
-                    ctx.closePath();
-                    ctx.fill();
-                    vGuideDrawn = true;
+                for (const pt of allPoints) {
+                    // Vertical guide (same X as preview endpoint)
+                    if (!vGuideDrawn && Math.abs(pt.x - preview.x2) < guideThreshold && Math.abs(pt.y - preview.y2) > 50) {
+                        ctx.beginPath();
+                        ctx.moveTo(s2.x, 0);
+                        ctx.lineTo(s2.x, viewH);
+                        ctx.stroke();
+                        // Diamond marker at aligned point
+                        const alignedPtScreen = worldToScreen(vp, pt.x, pt.y);
+                        ctx.fillStyle = 'rgba(236, 72, 153, 0.8)';
+                        ctx.beginPath();
+                        ctx.moveTo(alignedPtScreen.x, alignedPtScreen.y - 5);
+                        ctx.lineTo(alignedPtScreen.x + 5, alignedPtScreen.y);
+                        ctx.lineTo(alignedPtScreen.x, alignedPtScreen.y + 5);
+                        ctx.lineTo(alignedPtScreen.x - 5, alignedPtScreen.y);
+                        ctx.closePath();
+                        ctx.fill();
+                        vGuideDrawn = true;
+                    }
                 }
+            } finally {
+                ctx.restore();
             }
-            ctx.restore();
         }
 
         // Length label (prominent)
@@ -2946,32 +3058,22 @@ const drawPreview = (ctx, vp, state, storey) => {
             const a1 = Math.atan2(prevS.y - s1.y, prevS.x - s1.x);
             const a2 = Math.atan2(s2.y - s1.y, s2.x - s1.x);
 
-            // Interior angle
-            let angle = a1 - a2;
-            while (angle < 0) angle += Math.PI * 2;
-            while (angle > Math.PI * 2) angle -= Math.PI * 2;
-            // Use the smaller angle
-            const degrees = Math.round(angle * 180 / Math.PI);
-            const displayDeg = degrees > 180 ? 360 - degrees : degrees;
+            // Kleinerer Winkel zwischen beiden Schenkeln, über ±180° hinweg korrekt
+            let diff = a2 - a1;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            const displayDeg = Math.round(Math.abs(diff) * 180 / Math.PI);
 
             // Draw arc
             const arcRadius = 25;
             ctx.strokeStyle = '#f59e0b';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            const startAngle = Math.min(a1, a2);
-            const endAngle = Math.max(a1, a2);
-            // Choose correct arc direction
-            if (endAngle - startAngle <= Math.PI) {
-                ctx.arc(s1.x, s1.y, arcRadius, startAngle, endAngle);
-            } else {
-                ctx.arc(s1.x, s1.y, arcRadius, endAngle, startAngle);
-            }
+            ctx.arc(s1.x, s1.y, arcRadius, a1, a1 + diff, diff < 0);
             ctx.stroke();
 
-            // Angle label
-            const midAngle = (a1 + a2) / 2;
-            // If angles wrap around, adjust
+            // Angle label (auf der Winkelhalbierenden des eingeschlossenen Winkels)
+            const midAngle = a1 + diff / 2;
             const ax = s1.x + Math.cos(midAngle) * (arcRadius + 15);
             const ay = s1.y + Math.sin(midAngle) * (arcRadius + 15);
             const angleText = displayDeg + '°';
@@ -2992,7 +3094,7 @@ const drawPreview = (ctx, vp, state, storey) => {
         // Draw closing wall as SOLID wall shape (same as other wall segments)
         if (preview.x1 !== undefined && preview.y1 !== undefined) {
             const s1 = worldToScreen(vp, preview.x1, preview.y1);
-            const thickness = 365; // outer wall default
+            const thickness = Number(preview.thickness) > 0 ? Number(preview.thickness) : WALL_THICKNESS.outerDefault;
             const cdx = preview.x - preview.x1;
             const cdy = preview.y - preview.y1;
             const cLen = Math.sqrt(cdx * cdx + cdy * cdy) || 1;
@@ -3089,50 +3191,36 @@ const drawPreview = (ctx, vp, state, storey) => {
     }
 
     if (preview.type === 'furniture_ghost') {
-        ctx.save();
-        const s = worldToScreen(vp, preview.x, preview.y);
-        const sw = preview.width * vp.zoom;
-        const sd = preview.depth * vp.zoom;
-        ctx.globalAlpha = 0.5;
-        ctx.translate(s.x, s.y);
-        ctx.rotate((preview.rotation || 0) * Math.PI / 180);
+        const sw = Number(preview.width) * vp.zoom;
+        const sd = Number(preview.depth) * vp.zoom;
+        if (Number.isFinite(sw) && Number.isFinite(sd) && sw > 0 && sd > 0) {
+            ctx.save();
+            try {
+                const s = worldToScreen(vp, preview.x, preview.y);
+                ctx.globalAlpha = 0.5;
+                ctx.translate(s.x, s.y);
+                ctx.rotate((preview.rotation || 0) * Math.PI / 180);
 
-        // Use actual furniture drawing if catalog mapped, else simple shape
-        const catId = preview.catalogId || '';
-        const baseColor = FURNITURE_FILL;
-        const strokeColor = FURNITURE_STROKE;
-        ctx.fillStyle = baseColor;
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = 1.5;
+                // Gleiche Symbolwahl wie beim platzierten Möbelstück
+                const catId = preview.catalogId || '';
+                const baseColor = FURNITURE_FILL;
+                const strokeColor = FURNITURE_STROKE;
+                ctx.fillStyle = baseColor;
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1.5;
 
-        if (catId.startsWith('sofa') || catId === 'sessel') {
-            drawSofa(ctx, sw, sd, catId, baseColor, strokeColor);
-        } else if (catId.startsWith('bett') || catId === 'einzelbett') {
-            drawBed(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId.includes('tisch') || catId === 'schreibtisch' || catId === 'couchtisch' || catId.includes('esstisch')) {
-            drawTable(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId.includes('stuhl') || catId === 'buerostuhl') {
-            drawChair(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId.includes('schrank') || catId === 'kleiderschrank' || catId === 'regal' || catId === 'sideboard' || catId === 'kommode' || catId === 'nachttisch') {
-            drawCabinet(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId === 'badewanne' || catId === 'san_badewanne' || catId === 'san_badewanne_frei') {
-            drawBathtub(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId === 'dusche' || catId === 'san_duschkabine' || catId === 'san_dusche_boden') {
-            drawShower(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId === 'toilette' || catId === 'wc' || catId === 'san_toilette' || catId === 'san_toilette_stand') {
-            drawToilet(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId === 'waschbecken' || catId === 'san_waschbecken' || catId === 'san_handwaschbecken') {
-            drawSink(ctx, sw, sd, baseColor, strokeColor);
-        } else if (catId.includes('kuech') || catId === 'kueche' || catId === 'herd' || catId === 'kuehlschrank') {
-            drawKitchen(ctx, sw, sd, catId, baseColor, strokeColor);
-        } else {
-            // Default: simple shape without bounding rectangle
-            ctx.beginPath();
-            ctx.roundRect(0, 0, sw, sd, 3);
-            ctx.fill();
-            ctx.stroke();
+                const symbol = resolveFurnitureSymbol(catId, getFurnitureItem(catId));
+                if (!drawFurnitureSymbol(ctx, symbol, sw, sd, catId, baseColor, strokeColor)) {
+                    // Default: simple shape without bounding rectangle
+                    ctx.beginPath();
+                    roundRectPath(ctx, 0, 0, sw, sd, 3);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            } finally {
+                ctx.restore();
+            }
         }
-        ctx.restore();
     }
 
     if (preview.type === 'opening_ghost') {
@@ -3141,21 +3229,30 @@ const drawPreview = (ctx, vp, state, storey) => {
         const isDoor = preview.openingType === 'door';
         const color = isDoor ? DOOR_ARC_COLOR : WINDOW_STROKE_COLOR;
 
-        // Draw wall break (white gap) — use correct wall surface offsets
-        if (preview.thickness) {
-            const dx = preview.x2 - preview.x1, dy = preview.y2 - preview.y1;
-            const len = Math.sqrt(dx * dx + dy * dy) || 1;
-            const nx = -dy / len, ny = dx / len;
-            // Determine offset sides matching drawOpening logic
-            let sideA = 0, sideB = 0;
+        const dx = preview.x2 - preview.x1, dy = preview.y2 - preview.y1;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = -dy / len, ny = dx / len;
+
+        // Wandflächen wie in drawOpening: aus der echten Wand, sonst aus den Vorschau-Angaben
+        const hostWall = findWallByEndpoints(storey, preview.wallP1, preview.wallP2);
+        const faces = hostWall ? getWallFaceOffsets(hostWall, storey) : null;
+        let sideA = 0, sideB = 0, interiorSign = 1;
+        if (faces) {
+            sideA = faces.min; sideB = faces.max; interiorSign = faces.interiorSign;
+        } else if (preview.thickness) {
             if (preview.wallType === 'outer') {
-                sideA = 0; sideB = -preview.thickness;
+                sideA = -preview.thickness; sideB = 0;
             } else if (preview.refEdge === 'left') {
                 sideA = 0; sideB = preview.thickness;
             } else {
                 sideA = -preview.thickness; sideB = 0;
             }
-            const margin = 2;
+        }
+        const hasBody = sideB - sideA > 0;
+
+        // Draw wall break (white gap) — use correct wall surface offsets
+        if (hasBody) {
+            const margin = 2; // Aussparung etwas breiter als die Wand
             const c1 = worldToScreen(vp, preview.x1 + nx * (sideA - margin), preview.y1 + ny * (sideA - margin));
             const c2 = worldToScreen(vp, preview.x2 + nx * (sideA - margin), preview.y2 + ny * (sideA - margin));
             const c3 = worldToScreen(vp, preview.x2 + nx * (sideB + margin), preview.y2 + ny * (sideB + margin));
@@ -3173,24 +3270,9 @@ const drawPreview = (ctx, vp, state, storey) => {
         }
 
         // Offset to wall center for correct visual placement
-        let ox1 = preview.x1, oy1 = preview.y1, ox2 = preview.x2, oy2 = preview.y2;
-        if (preview.thickness) {
-            const dx = preview.x2 - preview.x1, dy = preview.y2 - preview.y1;
-            const len = Math.sqrt(dx * dx + dy * dy) || 1;
-            const nx = -dy / len, ny = dx / len;
-            let centerOffset = 0;
-            if (preview.wallType === 'outer') {
-                centerOffset = -preview.thickness / 2;
-            } else if (preview.refEdge === 'left') {
-                centerOffset = preview.thickness / 2;
-            } else {
-                centerOffset = -preview.thickness / 2;
-            }
-            ox1 += nx * centerOffset; oy1 += ny * centerOffset;
-            ox2 += nx * centerOffset; oy2 += ny * centerOffset;
-        }
-        const sc1 = worldToScreen(vp, ox1, oy1);
-        const sc2 = worldToScreen(vp, ox2, oy2);
+        const centerOffset = hasBody ? (sideA + sideB) / 2 : 0;
+        const sc1 = worldToScreen(vp, preview.x1 + nx * centerOffset, preview.y1 + ny * centerOffset);
+        const sc2 = worldToScreen(vp, preview.x2 + nx * centerOffset, preview.y2 + ny * centerOffset);
 
         // Opening line/shape
         ctx.strokeStyle = color;
@@ -3202,27 +3284,46 @@ const drawPreview = (ctx, vp, state, storey) => {
         ctx.stroke();
 
         if (isDoor) {
-            // Door arc preview
-            const arcR = Math.sqrt((sc2.x - sc1.x) ** 2 + (sc2.y - sc1.y) ** 2);
-            const baseAngle = Math.atan2(sc2.y - sc1.y, sc2.x - sc1.x);
+            // Door arc preview: Anschlag/Aufschlag wie beim Platzieren (Standard links/innen)
+            const swingLeft = (preview.swing || 'left') === 'left';
+            const inward = preview.direction !== 'outward';
+            const swingSign = inward ? interiorSign : -interiorSign;
+            const hingeOffset = swingSign > 0 ? sideB : sideA;
+            const hingeW = swingLeft
+                ? { x: preview.x1 + nx * hingeOffset, y: preview.y1 + ny * hingeOffset }
+                : { x: preview.x2 + nx * hingeOffset, y: preview.y2 + ny * hingeOffset };
+            const freeW = swingLeft
+                ? { x: preview.x2 + nx * hingeOffset, y: preview.y2 + ny * hingeOffset }
+                : { x: preview.x1 + nx * hingeOffset, y: preview.y1 + ny * hingeOffset };
+            const leafW = { x: hingeW.x + nx * swingSign * len, y: hingeW.y + ny * swingSign * len };
+            const hs = worldToScreen(vp, hingeW.x, hingeW.y);
+            const fs = worldToScreen(vp, freeW.x, freeW.y);
+            const ls = worldToScreen(vp, leafW.x, leafW.y);
+            const arcR = Math.sqrt((ls.x - hs.x) ** 2 + (ls.y - hs.y) ** 2);
+            const leafAngle = Math.atan2(ls.y - hs.y, ls.x - hs.x);
+            const freeAngle = Math.atan2(fs.y - hs.y, fs.x - hs.x);
+            let angleDiff = freeAngle - leafAngle;
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
             ctx.setLineDash([4, 4]);
             ctx.beginPath();
-            ctx.arc(sc1.x, sc1.y, arcR, baseAngle, baseAngle - Math.PI / 2, true);
+            ctx.moveTo(hs.x, hs.y);
+            ctx.lineTo(ls.x, ls.y);
+            if (arcR > 0) ctx.arc(hs.x, hs.y, arcR, leafAngle, freeAngle, angleDiff < 0);
             ctx.stroke();
             ctx.setLineDash([]);
         } else {
-            // Window: cross lines
-            const mx = (sc1.x + sc2.x) / 2, my = (sc1.y + sc2.y) / 2;
-            const dx = sc2.x - sc1.x, dy = sc2.y - sc1.y;
-            const len = Math.sqrt(dx * dx + dy * dy) || 1;
-            const nx = -dy / len * 4, ny = dx / len * 4;
+            // Window: double line
+            const wdx = sc2.x - sc1.x, wdy = sc2.y - sc1.y;
+            const wlen = Math.sqrt(wdx * wdx + wdy * wdy) || 1;
+            const onx = -wdy / wlen * 4, ony = wdx / wlen * 4;
             ctx.lineWidth = 2;
             // Double line
             ctx.beginPath();
-            ctx.moveTo(sc1.x + nx, sc1.y + ny);
-            ctx.lineTo(sc2.x + nx, sc2.y + ny);
-            ctx.moveTo(sc1.x - nx, sc1.y - ny);
-            ctx.lineTo(sc2.x - nx, sc2.y - ny);
+            ctx.moveTo(sc1.x + onx, sc1.y + ony);
+            ctx.lineTo(sc2.x + onx, sc2.y + ony);
+            ctx.moveTo(sc1.x - onx, sc1.y - ony);
+            ctx.lineTo(sc2.x - onx, sc2.y - ony);
             ctx.stroke();
         }
         ctx.globalAlpha = 1;
@@ -3231,6 +3332,7 @@ const drawPreview = (ctx, vp, state, storey) => {
         if (preview.wallP1 && preview.wallP2 && preview.position_mm !== undefined) {
             const leftDist = preview.position_mm - preview.width_mm / 2;
             const rightDist = preview.wall_len - preview.position_mm - preview.width_mm / 2;
+            const fmtDist = (d) => (d >= 1000 ? mmToM(d) + ' m' : Math.round(d) + ' mm');
 
             const wp1s = worldToScreen(vp, preview.wallP1.x, preview.wallP1.y);
             const wp2s = worldToScreen(vp, preview.wallP2.x, preview.wallP2.y);
@@ -3248,8 +3350,7 @@ const drawPreview = (ctx, vp, state, storey) => {
             if (leftDist > 10) {
                 const lmx = (wp1s.x + s1.x) / 2 + wnx;
                 const lmy = (wp1s.y + s1.y) / 2 + wny;
-                const lText = leftDist >= 1000 ? (leftDist / 1000).toFixed(2) + ' m' : Math.round(leftDist) + ' mm';
-                ctx.fillText(lText, lmx, lmy);
+                ctx.fillText(fmtDist(leftDist), lmx, lmy);
                 // Dimension line
                 ctx.strokeStyle = '#0ea5e9';
                 ctx.lineWidth = 0.8;
@@ -3263,8 +3364,7 @@ const drawPreview = (ctx, vp, state, storey) => {
             if (rightDist > 10) {
                 const rmx = (s2.x + wp2s.x) / 2 + wnx;
                 const rmy = (s2.y + wp2s.y) / 2 + wny;
-                const rText = rightDist >= 1000 ? (rightDist / 1000).toFixed(2) + ' m' : Math.round(rightDist) + ' mm';
-                ctx.fillText(rText, rmx, rmy);
+                ctx.fillText(fmtDist(rightDist), rmx, rmy);
                 ctx.strokeStyle = '#0ea5e9';
                 ctx.lineWidth = 0.8;
                 ctx.beginPath();
@@ -3358,58 +3458,61 @@ const drawPreview = (ctx, vp, state, storey) => {
             ctx.fillStyle = 'rgba(34, 197, 94, 0.2)';
             ctx.fill();
         }
+    }
 
-        // ── Annotation previews ──────────────────────────────
-        if (preview.type === 'annotation_line') {
-            const color = preview.color || '#ef4444';
-            const lw = preview.lineWidth || 2;
-            ctx.strokeStyle = color;
-            ctx.lineWidth = lw;
-            ctx.setLineDash([6, 3]);
-            ctx.beginPath();
-            if (preview.points && preview.points.length > 0) {
-                const sp0 = worldToScreen(vp, preview.points[0].x, preview.points[0].y);
-                ctx.moveTo(sp0.x, sp0.y);
-                for (let i = 1; i < preview.points.length; i++) {
-                    const sp = worldToScreen(vp, preview.points[i].x, preview.points[i].y);
-                    ctx.lineTo(sp.x, sp.y);
-                }
+    // ── Annotation previews ──────────────────────────────
+    // (standen früher innerhalb des Decken-Blocks und wurden daher nie gezeichnet)
+    if (preview.type === 'annotation_line') {
+        const color = preview.color || '#ef4444';
+        const lw = preview.lineWidth || 2;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lw;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        if (preview.points && preview.points.length > 0) {
+            const sp0 = worldToScreen(vp, preview.points[0].x, preview.points[0].y);
+            ctx.moveTo(sp0.x, sp0.y);
+            for (let i = 1; i < preview.points.length; i++) {
+                const sp = worldToScreen(vp, preview.points[i].x, preview.points[i].y);
+                ctx.lineTo(sp.x, sp.y);
+            }
+            if (preview.x2 !== undefined && preview.y2 !== undefined) {
                 const spEnd = worldToScreen(vp, preview.x2, preview.y2);
                 ctx.lineTo(spEnd.x, spEnd.y);
-                if (preview.closed) {
-                    ctx.lineTo(sp0.x, sp0.y);
-                }
-                ctx.stroke();
-                ctx.setLineDash([]);
-
-                // Draw dots on committed points
-                for (const pt of preview.points) {
-                    const sh = worldToScreen(vp, pt.x, pt.y);
-                    ctx.fillStyle = color;
-                    ctx.beginPath();
-                    ctx.arc(sh.x, sh.y, 4, 0, Math.PI * 2);
-                    ctx.fill();
-                }
             }
-        }
-
-        if (preview.type === 'annotation_circle') {
-            const sc = worldToScreen(vp, preview.cx, preview.cy);
-            const edgePt = worldToScreen(vp, preview.cx + preview.radius, preview.cy);
-            const screenRadius = Math.abs(edgePt.x - sc.x);
-            ctx.strokeStyle = preview.color || '#ef4444';
-            ctx.lineWidth = preview.lineWidth || 2;
-            ctx.setLineDash([6, 3]);
-            ctx.beginPath();
-            ctx.arc(sc.x, sc.y, screenRadius, 0, Math.PI * 2);
+            if (preview.closed) {
+                ctx.lineTo(sp0.x, sp0.y);
+            }
             ctx.stroke();
             ctx.setLineDash([]);
-            // Center dot
-            ctx.fillStyle = preview.color || '#ef4444';
-            ctx.beginPath();
-            ctx.arc(sc.x, sc.y, 4, 0, Math.PI * 2);
-            ctx.fill();
+
+            // Draw dots on committed points
+            for (const pt of preview.points) {
+                const sh = worldToScreen(vp, pt.x, pt.y);
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(sh.x, sh.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
+        ctx.setLineDash([]);
+    }
+
+    if (preview.type === 'annotation_circle') {
+        const sc = worldToScreen(vp, preview.cx, preview.cy);
+        const edgePt = worldToScreen(vp, preview.cx + (Number(preview.radius) || 0), preview.cy);
+        const screenRadius = Math.abs(edgePt.x - sc.x);
+        ctx.strokeStyle = preview.color || '#ef4444';
+        ctx.lineWidth = preview.lineWidth || 2;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, screenRadius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Center dot
+        ctx.fillStyle = preview.color || '#ef4444';
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, 4, 0, Math.PI * 2);
+        ctx.fill();
     }
 };
-

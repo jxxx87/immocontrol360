@@ -1,58 +1,98 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { translateError } from '../../lib/errorTranslator';
 import {
-    Plus, X, Upload, Image, Clock, AlertCircle,
+    FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
+    prepareUploadBody, extractStoragePath
+} from '../../lib/storageFiles';
+import {
+    Plus, X, Upload, Clock, AlertCircle,
     CheckCircle2, TicketCheck, ChevronRight, Loader
 } from 'lucide-react';
+
+const TICKET_BUCKET = 'tickets';
+const MANAGER_COMMENT_PREFIX = '💬';
+
+const statusConfig = {
+    received: { label: 'Eingegangen', color: '#F59E0B', bg: '#FEF3C7', icon: Clock, step: 1 },
+    in_progress: { label: 'In Bearbeitung', color: '#3B82F6', bg: '#DBEAFE', icon: AlertCircle, step: 2 },
+    completed: { label: 'Abgeschlossen', color: '#10B981', bg: '#D1FAE5', icon: CheckCircle2, step: 3 }
+};
+
+const priorityConfig = {
+    low: { label: 'Niedrig', color: '#6B7280' },
+    normal: { label: 'Normal', color: '#3B82F6' },
+    high: { label: 'Hoch', color: '#F59E0B' },
+    urgent: { label: 'Dringend', color: '#DC2626' }
+};
+
+const formatDate = (d) => new Date(d).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+const ErrorNote = ({ message }) => (
+    <div role="alert" style={{
+        padding: '10px 14px', borderRadius: 'var(--radius-md)',
+        border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+        color: '#B91C1C', fontSize: '0.82rem', whiteSpace: 'pre-wrap'
+    }}>
+        {message}
+    </div>
+);
 
 const TenantTickets = () => {
     const { user, roleData } = useAuth();
     const [tickets, setTickets] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(true); // nur beim ersten Laden
+    const [loadError, setLoadError] = useState(null);
     const [showCreate, setShowCreate] = useState(false);
-    const [selectedTicket, setSelectedTicket] = useState(null);
+    // Nur die ID merken; das Ticket wird aus der aktuellen Liste abgeleitet (sonst
+    // zeigt das Detailfenster nach einem Statuswechsel den alten Stand)
+    const [selectedTicketId, setSelectedTicketId] = useState(null);
     const [form, setForm] = useState({ title: '', description: '', priority: 'normal' });
-    const [uploadFiles, setUploadFiles] = useState([]);
+    const [uploadFiles, setUploadFiles] = useState([]); // [{ file, previewUrl }]
     const [creating, setCreating] = useState(false);
+    const [createError, setCreateError] = useState(null);
     const fileInputRef = useRef(null);
+    const previewUrlsRef = useRef([]);
 
-    const statusConfig = {
-        received: { label: 'Eingegangen', color: '#F59E0B', bg: '#FEF3C7', icon: Clock, step: 1 },
-        in_progress: { label: 'In Bearbeitung', color: '#3B82F6', bg: '#DBEAFE', icon: AlertCircle, step: 2 },
-        completed: { label: 'Abgeschlossen', color: '#10B981', bg: '#D1FAE5', icon: CheckCircle2, step: 3 }
-    };
+    const userId = user?.id;
+    const selectedTicket = selectedTicketId ? tickets.find(t => t.id === selectedTicketId) || null : null;
 
-    const priorityConfig = {
-        low: { label: 'Niedrig', color: '#6B7280' },
-        normal: { label: 'Normal', color: '#3B82F6' },
-        high: { label: 'Hoch', color: '#F59E0B' },
-        urgent: { label: 'Dringend', color: '#DC2626' }
-    };
+    // Vorschau-URLs beim Verlassen der Seite freigeben
+    useEffect(() => () => {
+        previewUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+        previewUrlsRef.current = [];
+    }, []);
 
     // ── FETCH TICKETS ───────────────────────────────────────────────
-    const fetchTickets = async () => {
-        if (!user) return;
-        setLoading(true);
+    // Folgeabrufe (Realtime) laufen im Hintergrund, ohne die Seite durch den
+    // Lade-Zustand zu ersetzen – offene Fenster und Eingaben bleiben erhalten.
+    const fetchTickets = useCallback(async () => {
+        if (!userId) return;
 
         const { data, error } = await supabase
             .from('tickets')
             .select('*')
-            .eq('tenant_user_id', user.id)
+            .eq('tenant_user_id', userId)
             .order('created_at', { ascending: false });
 
-        if (error) console.error('Error:', error);
-        setTickets(data || []);
+        if (error) {
+            console.error('Error:', error);
+            setLoadError(`Tickets konnten nicht geladen werden: ${translateError(error)}`);
+        } else {
+            setLoadError(null);
+            setTickets(data || []);
+        }
         setLoading(false);
-    };
+    }, [userId]);
 
     useEffect(() => {
         fetchTickets();
-    }, [user]);
+    }, [fetchTickets]);
 
     // ── REALTIME UPDATES ────────────────────────────────────────────
     useEffect(() => {
-        if (!user) return;
+        if (!userId) return;
 
         const channel = supabase
             .channel('tenant-tickets')
@@ -60,61 +100,129 @@ const TenantTickets = () => {
                 event: '*',
                 schema: 'public',
                 table: 'tickets',
-                filter: `tenant_user_id=eq.${user.id}`
+                filter: `tenant_user_id=eq.${userId}`
             }, () => {
                 fetchTickets();
             })
             .subscribe();
 
         return () => supabase.removeChannel(channel);
-    }, [user]);
+    }, [userId, fetchTickets]);
+
+    // ── PHOTO SELECTION ─────────────────────────────────────────────
+    const addFiles = (fileList) => {
+        const files = Array.from(fileList || []);
+        if (files.length === 0) return;
+        const errors = [];
+        const accepted = [];
+        files.forEach(file => {
+            const validationError = validateUploadFile(file, FILE_RULES.ticketImages);
+            if (validationError) {
+                errors.push(validationError);
+            } else {
+                accepted.push(file);
+            }
+        });
+
+        const free = FILE_RULES.ticketImages.maxFiles - uploadFiles.length;
+        if (accepted.length > free) {
+            errors.push(`Es sind höchstens ${FILE_RULES.ticketImages.maxFiles} Fotos je Ticket möglich.`);
+            accepted.splice(Math.max(free, 0));
+        }
+
+        const items = accepted.map(file => {
+            const previewUrl = URL.createObjectURL(file);
+            previewUrlsRef.current.push(previewUrl);
+            return { file, previewUrl };
+        });
+        setUploadFiles(prev => [...prev, ...items]);
+        setCreateError(errors.length > 0 ? errors.join('\n') : null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    const releasePreview = (url) => {
+        URL.revokeObjectURL(url);
+        previewUrlsRef.current = previewUrlsRef.current.filter(u => u !== url);
+    };
+
+    const removeFile = (idx) => {
+        const item = uploadFiles[idx];
+        if (item) releasePreview(item.previewUrl);
+        setUploadFiles(prev => prev.filter((_, i) => i !== idx));
+    };
+
+    const clearFiles = () => {
+        uploadFiles.forEach(item => releasePreview(item.previewUrl));
+        setUploadFiles([]);
+    };
+
+    const removeUploadedPhotos = async (paths) => {
+        if (paths.length === 0) return;
+        const { error } = await supabase.storage.from(TICKET_BUCKET).remove(paths);
+        if (error) console.error('Cleanup error:', error);
+    };
 
     // ── CREATE TICKET ───────────────────────────────────────────────
     const handleCreate = async () => {
         if (!form.title.trim() || creating) return;
+
+        const propertyId = roleData?.property_id;
+        const unitId = roleData?.unit_id;
+        if (!userId || !propertyId || !unitId) {
+            setCreateError('Ihr Konto ist keiner Wohnung zugeordnet. Bitte wenden Sie sich an Ihre Hausverwaltung.');
+            return;
+        }
+
         setCreating(true);
+        setCreateError(null);
+        const uploadedPaths = [];
 
         try {
             // Upload images
-            const imageUrls = [];
-            for (const file of uploadFiles) {
-                const timestamp = Date.now();
-                const filePath = `${roleData?.property_id || 'unknown'}/${roleData?.unit_id || 'unknown'}/${timestamp}_${file.name}`;
+            // Pfad: <objekt>/<einheit>/<eigene user-id>/<zufalls-id>.<endung>
+            for (const { file } of uploadFiles) {
+                const filePath = `${propertyId}/${unitId}/${userId}/${buildStorageObjectName(file)}`;
+                const { body, contentType } = prepareUploadBody(file);
                 const { error: uploadError } = await supabase.storage
-                    .from('tickets')
-                    .upload(filePath, file);
+                    .from(TICKET_BUCKET)
+                    .upload(filePath, body, { contentType });
 
-                if (!uploadError) {
-                    // Store file path, not public URL (bucket is private)
-                    imageUrls.push(filePath);
+                if (uploadError) {
+                    console.error('Upload error:', uploadError);
+                    await removeUploadedPhotos(uploadedPaths);
+                    setCreateError(`Das Foto „${file.name}“ konnte nicht hochgeladen werden: ${translateError(uploadError)}\nDas Ticket wurde noch nicht erstellt.`);
+                    return;
                 }
+                // Store file path, not public URL (bucket is private)
+                uploadedPaths.push(filePath);
             }
 
             const { error } = await supabase.from('tickets').insert({
-                unit_id: roleData?.unit_id,
-                property_id: roleData?.property_id,
-                tenant_user_id: user.id,
+                unit_id: unitId,
+                property_id: propertyId,
+                tenant_user_id: userId,
                 title: form.title.trim(),
                 description: form.description.trim() || null,
                 priority: form.priority,
-                images: imageUrls
+                images: uploadedPaths
             });
 
-            if (error) throw error;
+            if (error) {
+                await removeUploadedPhotos(uploadedPaths);
+                throw error;
+            }
 
             setForm({ title: '', description: '', priority: 'normal' });
-            setUploadFiles([]);
+            clearFiles();
             setShowCreate(false);
             fetchTickets();
         } catch (err) {
             console.error('Error creating ticket:', err);
-            alert('Fehler beim Erstellen des Tickets');
+            setCreateError(`Fehler beim Erstellen des Tickets: ${translateError(err)}`);
         } finally {
             setCreating(false);
         }
     };
-
-    const formatDate = (d) => new Date(d).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
     if (loading) {
         return (
@@ -135,13 +243,19 @@ const TenantTickets = () => {
                     </p>
                 </div>
                 <button
-                    onClick={() => setShowCreate(true)}
+                    onClick={() => { setCreateError(null); setShowCreate(true); }}
                     className="btn btn-primary btn-md"
                     style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
                 >
                     <Plus size={18} /> Neues Ticket
                 </button>
             </div>
+
+            {loadError && (
+                <div style={{ marginBottom: '16px' }}>
+                    <ErrorNote message={loadError} />
+                </div>
+            )}
 
             {/* Ticket List */}
             {tickets.length === 0 ? (
@@ -166,7 +280,7 @@ const TenantTickets = () => {
                         return (
                             <div
                                 key={ticket.id}
-                                onClick={() => setSelectedTicket(ticket)}
+                                onClick={() => setSelectedTicketId(ticket.id)}
                                 style={{
                                     backgroundColor: 'var(--surface-color)',
                                     borderRadius: 'var(--radius-lg)',
@@ -321,30 +435,30 @@ const TenantTickets = () => {
                             {/* Photo Upload */}
                             <div>
                                 <label style={{ fontSize: '0.82rem', fontWeight: 500, marginBottom: '8px', display: 'block' }}>
-                                    Fotos
+                                    Fotos <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}>(max. {FILE_RULES.ticketImages.maxFiles}, je bis 10 MB)</span>
                                 </label>
                                 <input
                                     type="file"
                                     ref={fileInputRef}
-                                    accept="image/*"
+                                    accept={`image/*,${acceptAttribute(FILE_RULES.ticketImages)}`}
                                     multiple
                                     style={{ display: 'none' }}
-                                    onChange={(e) => setUploadFiles(prev => [...prev, ...Array.from(e.target.files)])}
+                                    onChange={(e) => addFiles(e.target.files)}
                                 />
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                                    {uploadFiles.map((file, idx) => (
-                                        <div key={idx} style={{
+                                    {uploadFiles.map((item, idx) => (
+                                        <div key={item.previewUrl} style={{
                                             position: 'relative', width: '70px', height: '70px',
                                             borderRadius: '8px', overflow: 'hidden',
                                             border: '1px solid var(--border-color)'
                                         }}>
                                             <img
-                                                src={URL.createObjectURL(file)}
+                                                src={item.previewUrl}
                                                 alt=""
                                                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                                             />
                                             <button
-                                                onClick={() => setUploadFiles(prev => prev.filter((_, i) => i !== idx))}
+                                                onClick={() => removeFile(idx)}
                                                 style={{
                                                     position: 'absolute', top: '2px', right: '2px',
                                                     width: '18px', height: '18px', borderRadius: '50%',
@@ -357,23 +471,27 @@ const TenantTickets = () => {
                                             </button>
                                         </div>
                                     ))}
-                                    <button
-                                        onClick={() => fileInputRef.current?.click()}
-                                        style={{
-                                            width: '70px', height: '70px',
-                                            borderRadius: '8px',
-                                            border: '2px dashed var(--border-color)',
-                                            display: 'flex', flexDirection: 'column',
-                                            alignItems: 'center', justifyContent: 'center',
-                                            cursor: 'pointer', backgroundColor: 'var(--background-color)',
-                                            color: 'var(--text-secondary)', gap: '2px'
-                                        }}
-                                    >
-                                        <Upload size={18} />
-                                        <span style={{ fontSize: '0.6rem' }}>Foto</span>
-                                    </button>
+                                    {uploadFiles.length < FILE_RULES.ticketImages.maxFiles && (
+                                        <button
+                                            onClick={() => fileInputRef.current?.click()}
+                                            style={{
+                                                width: '70px', height: '70px',
+                                                borderRadius: '8px',
+                                                border: '2px dashed var(--border-color)',
+                                                display: 'flex', flexDirection: 'column',
+                                                alignItems: 'center', justifyContent: 'center',
+                                                cursor: 'pointer', backgroundColor: 'var(--background-color)',
+                                                color: 'var(--text-secondary)', gap: '2px'
+                                            }}
+                                        >
+                                            <Upload size={18} />
+                                            <span style={{ fontSize: '0.6rem' }}>Foto</span>
+                                        </button>
+                                    )}
                                 </div>
                             </div>
+
+                            {createError && <ErrorNote message={createError} />}
                         </div>
 
                         <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '24px' }}>
@@ -399,145 +517,236 @@ const TenantTickets = () => {
 
             {/* ── TICKET DETAIL MODAL ────────────────────────────────────── */}
             {selectedTicket && (
-                <div style={{
-                    position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
-                }} onClick={() => setSelectedTicket(null)}>
-                    <div
-                        style={{
-                            backgroundColor: 'var(--surface-color)',
-                            borderRadius: 'var(--radius-lg)',
-                            width: '100%', maxWidth: '600px', maxHeight: '85vh',
-                            display: 'flex', flexDirection: 'column',
-                            boxShadow: 'var(--shadow-lg)',
-                            overflow: 'hidden',
-                            margin: '0 10px'
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {/* Fixed Header */}
-                        <div style={{ padding: '20px 24px 12px', flexShrink: 0, borderBottom: '1px solid var(--border-color)' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                <div>
-                                    <h2 style={{ fontSize: '1.1rem', fontWeight: 700 }}>{selectedTicket.title}</h2>
-                                    <span style={{
-                                        display: 'inline-flex', alignItems: 'center', gap: '4px',
-                                        padding: '3px 10px', borderRadius: '12px', marginTop: '8px',
-                                        fontSize: '0.75rem', fontWeight: 500,
-                                        backgroundColor: statusConfig[selectedTicket.status]?.bg,
-                                        color: statusConfig[selectedTicket.status]?.color
-                                    }}>
-                                        {React.createElement(statusConfig[selectedTicket.status]?.icon || Clock, { size: 12 })}
-                                        {statusConfig[selectedTicket.status]?.label}
-                                    </span>
-                                </div>
-                                <button onClick={() => setSelectedTicket(null)} style={{ color: 'var(--text-secondary)', cursor: 'pointer', background: 'none', border: 'none' }}>
-                                    <X size={20} />
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Scrollable Content */}
-                        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
-                            {/* Progress Bar */}
-                            <div style={{ marginBottom: '20px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                    {Object.values(statusConfig).map((s, i) => (
-                                        <div key={i} style={{
-                                            fontSize: '0.72rem', color: s.step <= statusConfig[selectedTicket.status]?.step ? s.color : 'var(--text-secondary)',
-                                            fontWeight: s.step === statusConfig[selectedTicket.status]?.step ? 600 : 400,
-                                            textAlign: i === 0 ? 'left' : i === 2 ? 'right' : 'center',
-                                            flex: 1
-                                        }}>
-                                            {s.label}
-                                        </div>
-                                    ))}
-                                </div>
-                                <div style={{ display: 'flex', gap: '4px' }}>
-                                    {[1, 2, 3].map(step => (
-                                        <div key={step} style={{
-                                            flex: 1, height: '6px',
-                                            borderRadius: '3px',
-                                            backgroundColor: step <= statusConfig[selectedTicket.status]?.step
-                                                ? statusConfig[selectedTicket.status].color
-                                                : '#E5E7EB',
-                                            transition: 'all 0.4s'
-                                        }} />
-                                    ))}
-                                </div>
-                            </div>
-
-                            {selectedTicket.description && (
-                                <div style={{ marginBottom: '16px' }}>
-                                    <h4 style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '6px', color: 'var(--text-secondary)' }}>
-                                        Beschreibung
-                                    </h4>
-                                    <p style={{ fontSize: '0.88rem', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
-                                        {selectedTicket.description}
-                                    </p>
-                                </div>
-                            )}
-
-                            {selectedTicket.images?.length > 0 && (
-                                <div style={{ marginBottom: '16px' }}>
-                                    <h4 style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '10px', color: 'var(--text-secondary)' }}>
-                                        Fotos
-                                    </h4>
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                                        {selectedTicket.images.map((path, idx) => (
-                                            <SignedTicketImage key={idx} path={path} idx={idx} />
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* ── VERLAUF (timeline only, no input) ── */}
-                            <TicketVerlauf ticket={selectedTicket} userId={user.id} hideInput />
-
-                            <div style={{
-                                fontSize: '0.75rem', color: 'var(--text-secondary)',
-                                borderTop: '1px solid var(--border-color)',
-                                paddingTop: '14px', marginTop: '10px'
-                            }}>
-                                Erstellt am {formatDate(selectedTicket.created_at)} •
-                                Priorität: {priorityConfig[selectedTicket.priority]?.label || 'Normal'}
-                            </div>
-                        </div>
-
-                        {/* Fixed Comment Input Footer */}
-                        <TicketCommentInput ticket={selectedTicket} userId={user.id} />
-                    </div>
-                </div>
+                <TenantTicketDetail
+                    key={selectedTicket.id}
+                    ticket={selectedTicket}
+                    userId={userId}
+                    onClose={() => setSelectedTicketId(null)}
+                />
             )}
         </div>
     );
 };
 
+// ── TICKET DETAIL MODAL ─────────────────────────────────────────────
+const TenantTicketDetail = ({ ticket, userId, onClose }) => {
+    const { comments, loading: loadingComments, error: commentsError, appendComment } = useTicketComments(ticket.id);
+    const currentStatus = statusConfig[ticket.status] || statusConfig.received;
+
+    return (
+        <div style={{
+            position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
+        }} onClick={onClose}>
+            <div
+                style={{
+                    backgroundColor: 'var(--surface-color)',
+                    borderRadius: 'var(--radius-lg)',
+                    width: '100%', maxWidth: '600px', maxHeight: '85vh',
+                    display: 'flex', flexDirection: 'column',
+                    boxShadow: 'var(--shadow-lg)',
+                    overflow: 'hidden',
+                    margin: '0 10px'
+                }}
+                onClick={(e) => e.stopPropagation()}
+            >
+                {/* Fixed Header */}
+                <div style={{ padding: '20px 24px 12px', flexShrink: 0, borderBottom: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div>
+                            <h2 style={{ fontSize: '1.1rem', fontWeight: 700 }}>{ticket.title}</h2>
+                            <span style={{
+                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                padding: '3px 10px', borderRadius: '12px', marginTop: '8px',
+                                fontSize: '0.75rem', fontWeight: 500,
+                                backgroundColor: currentStatus.bg,
+                                color: currentStatus.color
+                            }}>
+                                {React.createElement(currentStatus.icon || Clock, { size: 12 })}
+                                {currentStatus.label}
+                            </span>
+                        </div>
+                        <button onClick={onClose} style={{ color: 'var(--text-secondary)', cursor: 'pointer', background: 'none', border: 'none' }}>
+                            <X size={20} />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Scrollable Content */}
+                <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
+                    {/* Progress Bar */}
+                    <div style={{ marginBottom: '20px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                            {Object.values(statusConfig).map((s, i) => (
+                                <div key={i} style={{
+                                    fontSize: '0.72rem', color: s.step <= currentStatus.step ? s.color : 'var(--text-secondary)',
+                                    fontWeight: s.step === currentStatus.step ? 600 : 400,
+                                    textAlign: i === 0 ? 'left' : i === 2 ? 'right' : 'center',
+                                    flex: 1
+                                }}>
+                                    {s.label}
+                                </div>
+                            ))}
+                        </div>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                            {[1, 2, 3].map(step => (
+                                <div key={step} style={{
+                                    flex: 1, height: '6px',
+                                    borderRadius: '3px',
+                                    backgroundColor: step <= currentStatus.step
+                                        ? currentStatus.color
+                                        : '#E5E7EB',
+                                    transition: 'all 0.4s'
+                                }} />
+                            ))}
+                        </div>
+                    </div>
+
+                    {ticket.description && (
+                        <div style={{ marginBottom: '16px' }}>
+                            <h4 style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '6px', color: 'var(--text-secondary)' }}>
+                                Beschreibung
+                            </h4>
+                            <p style={{ fontSize: '0.88rem', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                                {ticket.description}
+                            </p>
+                        </div>
+                    )}
+
+                    {ticket.images?.length > 0 && (
+                        <div style={{ marginBottom: '16px' }}>
+                            <h4 style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '10px', color: 'var(--text-secondary)' }}>
+                                Fotos
+                            </h4>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                {ticket.images.map((path, idx) => (
+                                    <SignedTicketImage key={`${path}-${idx}`} path={path} idx={idx} />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* ── VERLAUF (timeline only, no input) ── */}
+                    <TicketVerlauf
+                        ticket={ticket}
+                        userId={userId}
+                        comments={comments}
+                        loadingComments={loadingComments}
+                        commentsError={commentsError}
+                    />
+
+                    <div style={{
+                        fontSize: '0.75rem', color: 'var(--text-secondary)',
+                        borderTop: '1px solid var(--border-color)',
+                        paddingTop: '14px', marginTop: '10px'
+                    }}>
+                        Erstellt am {formatDate(ticket.created_at)} •
+                        Priorität: {priorityConfig[ticket.priority]?.label || 'Normal'}
+                    </div>
+                </div>
+
+                {/* Fixed Comment Input Footer */}
+                <TicketCommentInput ticket={ticket} userId={userId} comments={comments} onSent={appendComment} />
+            </div>
+        </div>
+    );
+};
+
+// Kommentare (messages mit ticket_id) eines Tickets inkl. Realtime-Aktualisierung
+const useTicketComments = (ticketId) => {
+    const [comments, setComments] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+            const { data, error: loadError } = await supabase
+                .from('messages')
+                .select('*')
+                .eq('ticket_id', ticketId)
+                .order('created_at', { ascending: true });
+            if (cancelled) return;
+            if (loadError) {
+                console.error('Error loading comments:', loadError);
+                setError(`Verlauf konnte nicht geladen werden: ${translateError(loadError)}`);
+            } else {
+                setError(null);
+                setComments(prev => {
+                    // Bereits per Realtime/optimistisch angehängte Einträge behalten
+                    const loaded = data || [];
+                    const extra = prev.filter(p => !loaded.some(l => l.id === p.id));
+                    return [...loaded, ...extra];
+                });
+            }
+            setLoading(false);
+        };
+        load();
+        return () => { cancelled = true; };
+    }, [ticketId]);
+
+    const appendComment = useCallback((msg) => {
+        if (!msg) return;
+        setComments(prev => (prev.some(c => c.id === msg.id) ? prev : [...prev, msg]));
+    }, []);
+
+    // Realtime subscription for new comments
+    useEffect(() => {
+        let aborted = false;
+        let channel = null;
+
+        const timer = setTimeout(() => {
+            if (aborted) return;
+            channel = supabase
+                .channel('tenant-ticket-comments-' + ticketId + '-' + Date.now())
+                .on('postgres_changes', {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'messages',
+                    filter: `ticket_id=eq.${ticketId}`
+                }, (payload) => {
+                    appendComment(payload.new);
+                })
+                .subscribe();
+        }, 150);
+
+        return () => {
+            aborted = true;
+            clearTimeout(timer);
+            if (channel) supabase.removeChannel(channel);
+        };
+    }, [ticketId, appendComment]);
+
+    return { comments, loading, error, appendComment };
+};
+
 // Component to display ticket images from private bucket with signed URLs
 const SignedTicketImage = ({ path, idx }) => {
     const [url, setUrl] = useState(null);
+    const [failed, setFailed] = useState(false);
 
     useEffect(() => {
+        let cancelled = false;
         const fetchUrl = async () => {
-            // Legacy: if path is a full URL, extract the file path
-            let filePath = path;
-            if (path.startsWith('http')) {
-                const marker = '/object/public/tickets/';
-                const idx = path.indexOf(marker);
-                if (idx !== -1) {
-                    filePath = path.substring(idx + marker.length);
-                } else {
-                    // Can't parse URL, skip
-                    setUrl(null);
-                    return;
-                }
+            // Legacy: vollständige Storage-URL -> Pfad; fremde Adressen werden nicht angezeigt
+            const filePath = extractStoragePath(path, TICKET_BUCKET);
+            if (!filePath) {
+                setFailed(true);
+                return;
             }
-            const { data } = await supabase.storage
-                .from('tickets')
+            const { data, error } = await supabase.storage
+                .from(TICKET_BUCKET)
                 .createSignedUrl(filePath, 3600);
-            if (data?.signedUrl) setUrl(data.signedUrl);
+            if (cancelled) return;
+            if (data?.signedUrl) {
+                setUrl(data.signedUrl);
+            } else {
+                if (error) console.error('Error signing ticket image:', error);
+                setFailed(true);
+            }
         };
         fetchUrl();
+        return () => { cancelled = true; };
     }, [path]);
 
     if (!url) {
@@ -547,9 +756,9 @@ const SignedTicketImage = ({ path, idx }) => {
                 backgroundColor: 'var(--background-color)', display: 'flex',
                 alignItems: 'center', justifyContent: 'center',
                 border: '1px solid var(--border-color)',
-                fontSize: '0.7rem', color: 'var(--text-secondary)'
+                fontSize: '0.7rem', color: 'var(--text-secondary)', textAlign: 'center', padding: '4px'
             }}>
-                Laden...
+                {failed ? 'Foto nicht verfügbar' : 'Laden...'}
             </div>
         );
     }
@@ -564,130 +773,23 @@ const SignedTicketImage = ({ path, idx }) => {
                 borderRadius: '8px', cursor: 'pointer',
                 border: '1px solid var(--border-color)'
             }}
-            onClick={() => window.open(url, '_blank')}
+            onClick={() => window.open(url, '_blank', 'noopener')}
         />
     );
 };
 
 // ── TICKET VERLAUF (Timeline + Comments) for Tenant ─────────────────
-const TicketVerlauf = ({ ticket, userId, hideInput = false }) => {
-    const [comments, setComments] = useState([]);
-    const [loadingComments, setLoadingComments] = useState(true);
-    const [newComment, setNewComment] = useState('');
-    const [sending, setSending] = useState(false);
+// Reine Anzeige; gesendet wird über TicketCommentInput (eine Sendelogik).
+const TicketVerlauf = ({ ticket, userId, comments, loadingComments, commentsError }) => {
     const verlaufEndRef = useRef(null);
-
-    const fetchComments = async () => {
-        setLoadingComments(true);
-        const { data, error } = await supabase
-            .from('messages')
-            .select('*')
-            .eq('ticket_id', ticket.id)
-            .order('created_at', { ascending: true });
-        if (!error) setComments(data || []);
-        setLoadingComments(false);
-    };
-
-    useEffect(() => { fetchComments(); }, [ticket.id]);
-
-    // Realtime subscription for new comments
-    useEffect(() => {
-        let aborted = false;
-        let channel = null;
-
-        const timer = setTimeout(() => {
-            if (aborted) return;
-            channel = supabase
-                .channel('tenant-ticket-comments-' + ticket.id + '-' + Date.now())
-                .on('postgres_changes', {
-                    event: 'INSERT',
-                    schema: 'public',
-                    table: 'messages',
-                    filter: `ticket_id=eq.${ticket.id}`
-                }, (payload) => {
-                    const msg = payload.new;
-                    setComments(prev => {
-                        if (prev.find(c => c.id === msg.id)) return prev;
-                        return [...prev, msg];
-                    });
-                })
-                .subscribe();
-        }, 150);
-
-        return () => {
-            aborted = true;
-            clearTimeout(timer);
-            if (channel) supabase.removeChannel(channel);
-        };
-    }, [ticket.id]);
 
     // Auto-scroll to latest comment
     useEffect(() => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
             verlaufEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }, 100);
+        return () => clearTimeout(timer);
     }, [comments, loadingComments]);
-
-    const handleSendComment = async () => {
-        if (!newComment.trim() || sending) return;
-        setSending(true);
-
-        try {
-            // Find the investor by looking at existing messages
-            let receiverId = null;
-
-            // Method 1: Check existing ticket comments for the other party
-            if (comments.length > 0) {
-                const otherMsg = comments.find(m => m.sender_id !== userId);
-                if (otherMsg) receiverId = otherMsg.sender_id;
-            }
-
-            // Method 2: Check any messages sent to this user
-            if (!receiverId) {
-                const { data: msgs } = await supabase
-                    .from('messages')
-                    .select('sender_id, receiver_id')
-                    .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
-                    .limit(5);
-
-                if (msgs && msgs.length > 0) {
-                    const otherMsg = msgs.find(m => m.sender_id !== userId);
-                    if (otherMsg) {
-                        receiverId = otherMsg.sender_id;
-                    } else {
-                        receiverId = msgs[0].receiver_id;
-                    }
-                }
-            }
-
-            if (!receiverId) {
-                console.error('Kein Verwalter gefunden');
-                setSending(false);
-                return;
-            }
-
-            const { data: inserted, error } = await supabase
-                .from('messages')
-                .insert({
-                    sender_id: userId,
-                    receiver_id: receiverId,
-                    text: newComment.trim(),
-                    ticket_id: ticket.id,
-                    is_system: false
-                })
-                .select()
-                .single();
-
-            if (!error && inserted) {
-                setComments(prev => [...prev, inserted]);
-            }
-        } catch (err) {
-            console.error('Error sending comment:', err);
-        }
-
-        setNewComment('');
-        setSending(false);
-    };
 
     const formatDateTime = (d) => new Date(d).toLocaleString('de-DE', {
         day: '2-digit', month: '2-digit', year: 'numeric',
@@ -702,6 +804,12 @@ const TicketVerlauf = ({ ticket, userId, hideInput = false }) => {
             }}>
                 💬 Verlauf
             </h4>
+
+            {commentsError && (
+                <div style={{ marginBottom: '8px' }}>
+                    <ErrorNote message={commentsError} />
+                </div>
+            )}
 
             <div style={{
                 maxHeight: '220px', overflowY: 'auto',
@@ -725,26 +833,32 @@ const TicketVerlauf = ({ ticket, userId, hideInput = false }) => {
                     <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem', padding: '8px' }}>Laden...</div>
                 ) : (
                     comments.map((msg) => {
-                        const isSystem = msg.is_system;
                         const isMine = msg.sender_id === userId;
+                        // System-Hinweise kommen nur von der Verwaltung, nie vom Mieter selbst
+                        const isSystem = !!msg.is_system && !isMine;
+                        const text = msg.text || '';
+                        const isManagerComment = !isMine && text.startsWith(MANAGER_COMMENT_PREFIX);
 
                         let bgColor, borderColor, dotColor, textColor, label;
-                        if (isSystem) {
+                        if (isSystem && !isManagerComment) {
                             bgColor = '#EFF6FF'; borderColor = '#BFDBFE'; dotColor = '#3B82F6'; textColor = '#1E40AF';
-                            label = msg.text.startsWith('💬') ? '🔧 Verwalter-Kommentar' : '📋 Statusänderung';
+                            label = '📋 Statusänderung';
                         } else if (isMine) {
                             bgColor = '#F9FAFB'; borderColor = '#E5E7EB'; dotColor = '#6B7280'; textColor = '#374151';
                             label = '👤 Mein Kommentar';
                         } else {
                             bgColor = '#FFF7ED'; borderColor = '#FED7AA'; dotColor = '#F97316'; textColor = '#C2410C';
-                            label = '🔧 Verwalter';
+                            label = isManagerComment ? '🔧 Verwalter-Kommentar' : '🔧 Verwalter';
                         }
 
-                        // For system ticket comments, extract the actual comment text
-                        let displayText = msg.text;
-                        if (isSystem && msg.text.startsWith('💬')) {
-                            const lines = msg.text.split('\n');
-                            displayText = lines.length > 1 ? lines.slice(1).join('\n') : msg.text;
+                        // Verwalter-Kommentare beginnen mit einer Kopfzeile ("💬 Kommentar zu Ticket ...")
+                        let displayText = text;
+                        if (isManagerComment) {
+                            const lines = text.split('\n');
+                            displayText = lines.length > 1 ? lines.slice(1).join('\n') : text;
+                        }
+                        if (!displayText && msg.attachment_url) {
+                            displayText = '📎 Anhang (im Chat unter „Nachrichten“ ansehen)';
                         }
 
                         return (
@@ -777,145 +891,130 @@ const TicketVerlauf = ({ ticket, userId, hideInput = false }) => {
                 )}
                 <div ref={verlaufEndRef} />
             </div>
-
-            {/* Tenant comment input */}
-            {!hideInput && (
-                <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                    <input
-                        value={newComment}
-                        onChange={(e) => setNewComment(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                handleSendComment();
-                            }
-                        }}
-                        placeholder="Antwort zum Ticket..."
-                        style={{
-                            flex: 1, padding: '8px 12px', borderRadius: '8px',
-                            border: '1px solid var(--border-color)', outline: 'none',
-                            fontSize: '0.82rem', fontFamily: 'inherit', backgroundColor: 'var(--background-color)'
-                        }}
-                    />
-                    <button
-                        onClick={handleSendComment}
-                        disabled={!newComment.trim() || sending}
-                        style={{
-                            padding: '8px 14px', borderRadius: '8px',
-                            backgroundColor: newComment.trim() ? 'var(--primary-color)' : '#E5E7EB',
-                            color: 'white', border: 'none', fontWeight: 600,
-                            fontSize: '0.8rem', cursor: newComment.trim() ? 'pointer' : 'default',
-                            transition: 'all 0.2s'
-                        }}
-                    >
-                        {sending ? '...' : 'Senden'}
-                    </button>
-                </div>
-            )}
         </div>
     );
 };
 
+// Empfänger eines Ticket-Kommentars ermitteln:
+// 1. Eigentümer des Objekts (properties.user_id – auch ohne bisherige Nachrichten)
+// 2. Verwalter, der in diesem Ticket zuletzt geschrieben hat
+// 3. Gesprächspartner der jüngsten eigenen Unterhaltung
+const resolveTicketRecipient = async (ticket, userId, comments) => {
+    if (ticket.property_id) {
+        const { data: property, error } = await supabase
+            .from('properties')
+            .select('user_id')
+            .eq('id', ticket.property_id)
+            .maybeSingle();
+        if (error) console.error('Error loading property owner:', error);
+        if (property?.user_id && property.user_id !== userId) return property.user_id;
+    }
+
+    const lastOther = [...comments].reverse().find(m => m.sender_id !== userId);
+    if (lastOther) return lastOther.sender_id;
+
+    const { data: msgs, error: msgError } = await supabase
+        .from('messages')
+        .select('sender_id, receiver_id')
+        .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+    if (msgError) console.error('Error loading messages:', msgError);
+    if (msgs && msgs.length > 0) {
+        const other = msgs[0].sender_id === userId ? msgs[0].receiver_id : msgs[0].sender_id;
+        if (other && other !== userId) return other;
+    }
+    return null;
+};
+
 // ── STANDALONE COMMENT INPUT (for fixed footer in modal) ────────────
-const TicketCommentInput = ({ ticket, userId }) => {
+const TicketCommentInput = ({ ticket, userId, comments, onSent }) => {
     const [newComment, setNewComment] = useState('');
     const [sending, setSending] = useState(false);
+    const [sendError, setSendError] = useState(null);
 
     const handleSendComment = async () => {
-        if (!newComment.trim() || sending) return;
+        const text = newComment.trim();
+        if (!text || sending) return;
         setSending(true);
+        setSendError(null);
 
         try {
-            // Find the investor by looking at existing messages
-            let receiverId = null;
-
-            const { data: ticketMsgs } = await supabase
-                .from('messages')
-                .select('sender_id, receiver_id')
-                .eq('ticket_id', ticket.id)
-                .limit(10);
-
-            if (ticketMsgs && ticketMsgs.length > 0) {
-                const otherMsg = ticketMsgs.find(m => m.sender_id !== userId);
-                if (otherMsg) receiverId = otherMsg.sender_id;
-            }
+            const receiverId = await resolveTicketRecipient(ticket, userId, comments);
 
             if (!receiverId) {
-                const { data: msgs } = await supabase
-                    .from('messages')
-                    .select('sender_id, receiver_id')
-                    .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
-                    .limit(5);
-
-                if (msgs && msgs.length > 0) {
-                    const otherMsg = msgs.find(m => m.sender_id !== userId);
-                    if (otherMsg) {
-                        receiverId = otherMsg.sender_id;
-                    } else {
-                        receiverId = msgs[0].receiver_id;
-                    }
-                }
-            }
-
-            if (!receiverId) {
-                console.error('Kein Verwalter gefunden');
-                setSending(false);
+                setSendError('Ihr Verwalter konnte nicht ermittelt werden. Der Kommentar wurde nicht gesendet – bitte versuchen Sie es später erneut.');
                 return;
             }
 
-            await supabase
+            const { data: inserted, error } = await supabase
                 .from('messages')
                 .insert({
                     sender_id: userId,
                     receiver_id: receiverId,
-                    text: newComment.trim(),
+                    text,
                     ticket_id: ticket.id,
                     is_system: false
-                });
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+
+            onSent?.(inserted);
+            // Nur leeren, wenn während des Sendens nichts Neues getippt wurde
+            setNewComment(current => (current.trim() === text ? '' : current));
         } catch (err) {
             console.error('Error sending comment:', err);
+            setSendError(`Der Kommentar konnte nicht gesendet werden: ${translateError(err)}`);
+        } finally {
+            setSending(false);
         }
-
-        setNewComment('');
-        setSending(false);
     };
 
     return (
         <div style={{
-            display: 'flex', gap: '8px', padding: '12px 24px',
+            padding: '12px 24px',
             borderTop: '1px solid var(--border-color)',
             backgroundColor: 'var(--surface-color)',
             flexShrink: 0
         }}>
-            <input
-                value={newComment}
-                onChange={(e) => setNewComment(e.target.value)}
-                onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendComment();
-                    }
-                }}
-                placeholder="Antwort zum Ticket..."
-                style={{
-                    flex: 1, padding: '8px 12px', borderRadius: '8px',
-                    border: '1px solid var(--border-color)', outline: 'none',
-                    fontSize: '0.82rem', fontFamily: 'inherit', backgroundColor: 'var(--background-color)'
-                }}
-            />
-            <button
-                onClick={handleSendComment}
-                disabled={!newComment.trim() || sending}
-                style={{
-                    padding: '8px 14px', borderRadius: '8px',
-                    backgroundColor: newComment.trim() ? 'var(--primary-color)' : '#E5E7EB',
-                    color: 'white', border: 'none', fontWeight: 600,
-                    fontSize: '0.8rem', cursor: newComment.trim() ? 'pointer' : 'default',
-                    transition: 'all 0.2s'
-                }}
-            >
-                {sending ? '...' : 'Senden'}
-            </button>
+            {sendError && (
+                <div style={{ marginBottom: '8px' }}>
+                    <ErrorNote message={sendError} />
+                </div>
+            )}
+            <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSendComment();
+                        }
+                    }}
+                    placeholder="Antwort zum Ticket..."
+                    style={{
+                        flex: 1, padding: '8px 12px', borderRadius: '8px',
+                        border: '1px solid var(--border-color)', outline: 'none',
+                        fontSize: '0.82rem', fontFamily: 'inherit', backgroundColor: 'var(--background-color)'
+                    }}
+                />
+                <button
+                    onClick={handleSendComment}
+                    disabled={!newComment.trim() || sending}
+                    style={{
+                        padding: '8px 14px', borderRadius: '8px',
+                        backgroundColor: newComment.trim() ? 'var(--primary-color)' : '#E5E7EB',
+                        color: 'white', border: 'none', fontWeight: 600,
+                        fontSize: '0.8rem', cursor: newComment.trim() ? 'pointer' : 'default',
+                        transition: 'all 0.2s'
+                    }}
+                >
+                    {sending ? '...' : 'Senden'}
+                </button>
+            </div>
         </div>
     );
 };

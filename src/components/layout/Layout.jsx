@@ -9,7 +9,7 @@ import Button from '../ui/Button';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { Mail } from 'lucide-react';
+import { Mail, ShieldAlert, X } from 'lucide-react';
 
 const Layout = () => {
     const { isMobile } = useViewMode();
@@ -19,7 +19,8 @@ const Layout = () => {
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
     const [onboardingLocked, setOnboardingLocked] = useState(false);
     const [onboardingChecked, setOnboardingChecked] = useState(false);
-    
+    const [dismissedNoticeKey, setDismissedNoticeKey] = useState(null);
+
     // Invite popup state
     const [showInvitePopup, setShowInvitePopup] = useState(false);
     const [inviteCount, setInviteCount] = useState(0);
@@ -38,13 +39,17 @@ const Layout = () => {
                 return;
             }
             try {
-                const { data } = await supabase
+                const { data, error } = await supabase
                     .from('profiles')
                     .select('onboarding_complete')
                     .eq('id', user.id)
                     .maybeSingle();
 
-                if (!data || !data.onboarding_complete) {
+                // Nur bei erfolgreicher Antwort sperren – ein Netz-/Rechtefehler darf
+                // ein abgeschlossenes Onboarding nicht erneut erzwingen.
+                if (error) {
+                    console.error('Onboarding check error:', error);
+                } else if (!data || !data.onboarding_complete) {
                     setOnboardingLocked(true);
                     navigate('/settings', { replace: true });
                 }
@@ -54,23 +59,35 @@ const Layout = () => {
                 setOnboardingChecked(true);
             }
         };
-        
+
         const checkInvitations = async () => {
-            if (!user) return;
-            const alreadyShown = sessionStorage.getItem('invitePopupShown');
+            if (!user || userRole !== 'investor') return;
+            // Pro Nutzer merken, damit ein anderer Login im selben Tab seine Einladungen sieht
+            const shownKey = `invitePopupShown:${user.id}`;
+            let alreadyShown = false;
+            try { alreadyShown = !!sessionStorage.getItem(shownKey); } catch { /* ignore */ }
             if (alreadyShown) return;
 
             try {
-                const { count } = await supabase
-                    .from('portfolio_shares')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('shared_with_email', user.email)
-                    .eq('status', 'pending');
-                    
+                let count = 0;
+                const { data, error } = await supabase.rpc('get_pending_invitations');
+                if (error) {
+                    // Fallback: direkte Zählung (RLS liefert nur an mich gerichtete Freigaben)
+                    const { count: fallbackCount, error: countError } = await supabase
+                        .from('portfolio_shares')
+                        .select('id', { count: 'exact', head: true })
+                        .ilike('shared_with_email', user.email || '')
+                        .eq('status', 'pending');
+                    if (countError) throw countError;
+                    count = fallbackCount || 0;
+                } else {
+                    count = (data || []).length;
+                }
+
                 if (count > 0) {
                     setInviteCount(count);
                     setShowInvitePopup(true);
-                    sessionStorage.setItem('invitePopupShown', 'true');
+                    try { sessionStorage.setItem(shownKey, 'true'); } catch { /* ignore */ }
                 }
             } catch (e) {
                 console.error('Error checking invitations:', e);
@@ -79,6 +96,8 @@ const Layout = () => {
 
         checkOnboarding();
         checkInvitations();
+        // navigate ist stabil genug; die Prüfung soll nur bei Nutzer-/Rollenwechsel laufen
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user, userRole]);
 
     // If locked and user tries to navigate away from settings, push them back
@@ -86,9 +105,17 @@ const Layout = () => {
         if (onboardingLocked && location.pathname !== '/settings') {
             navigate('/settings', { replace: true });
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.pathname, onboardingLocked]);
 
     const lockedStyle = onboardingLocked ? { pointerEvents: 'none', opacity: 0.5, userSelect: 'none' } : {};
+
+    // Für Investoren erst rendern, wenn die Onboarding-Prüfung durch ist (kein Flackern)
+    const showOutlet = onboardingChecked || userRole !== 'investor';
+
+    // Hinweis nach Umleitung durch einen Routen-Guard (fehlende Berechtigung)
+    const accessNotice = location.state?.accessNotice;
+    const showAccessNotice = !!accessNotice && dismissedNoticeKey !== location.key;
 
     return (
         <div style={{ display: 'flex', minHeight: '100vh', position: 'relative' }}>
@@ -117,7 +144,32 @@ const Layout = () => {
                     maxWidth: '100vw',
                     boxSizing: 'border-box'
                 }}>
-                    <Outlet context={{ onboardingLocked, unlockOnboarding: () => setOnboardingLocked(false) }} />
+                    {showAccessNotice && (
+                        <div style={{
+                            display: 'flex', alignItems: 'flex-start', gap: '10px',
+                            padding: '12px 14px', marginBottom: 'var(--spacing-md)',
+                            backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 'var(--radius-md)',
+                            color: '#92400E', fontSize: '0.9rem'
+                        }}>
+                            <ShieldAlert size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                            <div style={{ flex: 1 }}>{accessNotice}</div>
+                            <button
+                                type="button"
+                                onClick={() => setDismissedNoticeKey(location.key)}
+                                title="Hinweis schließen"
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#92400E', padding: 0 }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                    )}
+                    {showOutlet ? (
+                        <Outlet context={{ onboardingLocked, unlockOnboarding: () => setOnboardingLocked(false) }} />
+                    ) : (
+                        <div style={{ display: 'flex', justifyContent: 'center', padding: '60px', color: 'var(--text-secondary)' }}>
+                            Lade...
+                        </div>
+                    )}
                 </main>
             </div>
 

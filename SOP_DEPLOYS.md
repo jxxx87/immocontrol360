@@ -1,69 +1,107 @@
 # Standard Operating Procedure (SOP): Supabase & GitHub Deployment
 
-## 1. Supabase SQL Migration (Direct Execution)
-Wenn das offizielle MCP-Tool `execute_sql` wegen unzureichender Berechtigungen (z.B. `PGRST202` oder `Permission Denied`) fehlschlägt, MUSS die SQL-Migration direkt über einen Node.js-Client (`pg`) auf der remote Supabase-Datenbank ausgeführt werden.
+> Stand: Komplett-Check 2026-11-27. Ersetzt die frühere Fassung, die Migrationen per Node-Skript mit direkter
+> `pg`-Verbindung (Superuser-Passwort, `ssl: { rejectUnauthorized: false }`) vorsah. Dieser Weg ist abgeschafft:
+> Das Zertifikat wurde nicht geprüft (Passwort im fremden WLAN abgreifbar) und die Änderungen landeten nicht in
+> der Migrationshistorie. Die zugehörigen Skripte (`apply_sql.cjs`, `apply_migration.cjs` usw.) wurden gelöscht.
 
-**Vorgehen:**
-1. SQL-Skript erstellen (z.B. `migration.sql`).
-2. Sicherstellen, dass das Paket `pg` installiert ist (`npm install pg` oder `npm install pg dotenv`).
-3. Ein Node-Skript (z.B. `apply_sql.cjs`) verwenden, das sich direkt mit der Datenbank verbindet:
-   ```javascript
-   const { Client } = require('pg');
-   const fs = require('fs');
-   require('dotenv').config();
+## 1. Supabase-Datenbank: Migrationen
 
-   async function run() {
-       const password = process.env.SUPABASE_DB_PASSWORD;
-       const projectId = "agsmqvvwfufenaiekuox"; // Projekt ID
-       const sql = fs.readFileSync('migration.sql', 'utf8');
-       
-       // WICHTIG: Direkter Endpoint (db.[project_id].supabase.co) ohne Pooler umgeht Region-Raten!
-       const connectionString = `postgres://postgres:${password}@db.${projectId}.supabase.co:5432/postgres`;
-       
-       const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
-       await client.connect();
-       await client.query(sql);
-       await client.end();
-   }
-   run();
+**Regel:** Jede Schema-, Funktions- oder Policy-Änderung ist eine datierte Datei in
+`supabase/migrations/<YYYYMMDDHHMMSS>_<name>.sql` – idempotent geschrieben (`create or replace`,
+`drop policy if exists`, `if not exists`). Lose SQL-Dateien im Projekt gibt es nicht mehr
+(alte Stände nur zum Nachschlagen in `archive/sql/`, **nicht ausführen**).
+
+**Einspielen – nur über die offiziellen Supabase-Werkzeuge (tragen die Migration in die Historie ein):**
+
+1. **Supabase-MCP** (für KI-Agenten): Werkzeug `apply_migration` mit dem Projekt `agsmqvvwfufenaiekuox`,
+   Name = Dateiname ohne Zeitstempel, Inhalt = Datei. Reine Lese-Abfragen gehen über `execute_sql`.
+2. **Supabase-CLI** (Terminal im Ordner `immo-web`):
+   ```bash
+   npx supabase login
+   npx supabase link --project-ref agsmqvvwfufenaiekuox
+   npx supabase db push
    ```
-4. Führe das Skript über das Terminal aus (`node apply_sql.cjs`).
+   Die CLI fragt das DB-Passwort ab bzw. liest es aus der Umgebungsvariable `SUPABASE_DB_PASSWORD`
+   (nie in eine Datei im Repo schreiben).
 
-## 2. GitHub & Hostinger Deployment (Kombiniertes Pre-Built-Deployment)
-Da Hostinger in Standard-Hosting-Tarifen nur eine einzige Git-Verbindung pro Website (für das Verzeichnis `/public_html`) zulässt, nutzen wir ein kombiniertes Deployment. Beide Webseiten werden lokal gebaut, in eine Verzeichnisstruktur zusammengeführt (Landingpage im Root `/`, Web-App im Unterordner `/app/`) und auf den Branch **`production`** hochgeladen. 
+**Achtung – MCP und CLI nicht ungeprüft mischen:** `apply_migration` trägt die Migration mit dem Zeitpunkt der
+Ausführung als Version ein, **nicht** mit dem Zeitstempel aus dem Dateinamen (Beispiel: am 27.11.2026 um
+15:55:57 eingespielt → Version `20261127155557`, egal wie die Datei heißt). Danach die lokale Datei auf die
+tatsächliche Version umbenennen (ablesen mit
+`select version, name from supabase_migrations.schema_migrations order by version desc limit 5;`).
+Sonst hält `supabase db push` die Datei für nicht eingespielt und bricht wegen der unbekannten Remote-Version ab.
+Ebenso fehlen live die Einträge für `20260601151000`, `20260601170000` und `20260601180000` (von Hand eingespielt):
+vor dem ersten `db push` mit `npx supabase migration repair --status applied <version>` nachtragen.
 
-Hostinger zieht sich diesen Branch und stellt ihn eins zu eins bereit. Da die Subdomain `app.immocontrol360.de` in Hostinger auf das Unterverzeichnis `/public_html/app` verweist, funktioniert die Trennung perfekt über diese eine Git-Verbindung!
+**Wenn `apply_migration` mit fehlenden Rechten scheitert** (z. B. `Permission Denied`): abbrechen und den Nutzer
+fragen. **Kein** Ausweichen auf eine selbst gebaute `pg`-Verbindung, kein `rejectUnauthorized: false`, kein
+Passwort-Literal in Skripten.
+
+**Vor jeder Migration:** Live-Stand lesen (`execute_sql` auf `pg_policies`/`pg_proc`), damit die Migration
+nicht einen neueren Stand zurückdreht. Viele Live-Objekte stammen aus früher von Hand eingespielten Dateien.
+
+## 2. GitHub & Hostinger Deployment (kombiniertes Pre-Built-Deployment)
+
+Hostinger lässt in Standard-Tarifen nur eine Git-Verbindung pro Website (Verzeichnis `/public_html`) zu. Deshalb
+werden beide Seiten lokal gebaut, zusammengeführt (Marketing-Seite im Root `/`, Web-App im Unterordner `/app/`)
+und auf den Branch **`production`** geschoben. Die Subdomain `app.immocontrol360.de` zeigt in Hostinger auf
+`/public_html/app`.
+
+**`git push origin master` geht NICHT live** – das ist nur die Quellcode-Sicherung.
 
 ---
 
 ### A. Deployment ausführen
-Um die Live-Umgebung (Marketingpage + Web-App) zu aktualisieren:
-1. Öffne ein PowerShell-Terminal im Ordner `immo-web`.
-2. Führe das kombinierte Deployment-Skript aus:
+
+1. PowerShell öffnen (Ordner egal – das Skript arbeitet relativ zu seinem eigenen Ort).
+2. Am besten vorher committen und `master` (bzw. `landing-master` in `immowebsite`) pushen.
+3. Ausführen:
    ```powershell
-   .\deploy_all.ps1
+   .\deploy_all.ps1          # im Ordner immo-web
    ```
-3. Das Skript baut beide Projekte nacheinander, erstellt die richtige Ordnerstruktur, fügt eine Dummy-`package.json` hinzu und schiebt das fertige Ergebnis per Force-Push auf den Branch **`production`** auf GitHub.
+4. Das Skript
+   - baut beide Projekte und bricht bei einem Build-Fehler ab (prüft Exit-Codes und dass beide
+     `dist\index.html` neu erzeugt wurden),
+   - holt den Branch `production` in einen Arbeitsordner unter `%TEMP%` (nicht im OneDrive-Ordner),
+   - ersetzt den Inhalt durch das neue Build und eine Dummy-`package.json` für Hostinger,
+   - committet mit den **Quell-Commits beider Repos** in der Commit-Nachricht (inkl. Hinweis
+     „nicht committete Änderungen", falls aus einem unsauberen Arbeitsstand gebaut wurde),
+   - pusht **ohne `--force`** (die Historie von `production` bleibt erhalten, ein Rollback ist möglich),
+   - räumt den Arbeitsordner immer auf und meldet Erfolg erst nach erfolgreichem Push.
+5. Wird der Push mit „rejected" abgelehnt, hat jemand `production` inzwischen geändert – Skript einfach erneut
+   starten. Schlägt das Klonen fehl (Netz, Anmeldung), bricht das Skript ab; es legt nie ein leeres Repository an.
+
+**Welcher Quellstand ist live?** `git log origin/production -1` zeigt in der Commit-Nachricht die Quell-Commits.
+
+**Rollback:** In einem Klon von `production` den gewünschten früheren Deploy-Commit per `git revert` (oder
+Inhalt des alten Commits als neuer Commit) wiederherstellen und normal pushen.
 
 ---
 
-### B. Hostinger Git-Konfiguration (Einmalig)
-Nimm in deinem Hostinger-Panel unter **Erweitert -> Git** (oder über den Button "Weitere Einstellungen" bei der letzten Bereitstellung) folgende Einstellungen vor:
+### B. Hostinger Git-Konfiguration (einmalig)
+
+Im Hostinger-Panel unter **Erweitert -> Git** (oder „Weitere Einstellungen" bei der letzten Bereitstellung):
 
 * **Repository-URL:** `https://github.com/jxxx87/immocontrol360.git`
 * **Zweig (Branch):** **`production`**
 * **Installationsverzeichnis:** `/public_html` (oder leer lassen)
 * **Framework-Voreinstellung:** **`Other`**
-* **Build-Befehl:** `npm run build` *(Hostinger führt hierbei die Dummy-package.json aus, was sofort erfolgreich abschließt)*
+* **Build-Befehl:** `npm run build` *(Hostinger führt die Dummy-package.json aus, die sofort erfolgreich endet)*
 * **Ausgabeverzeichnis:** **`.`** (ein einzelner Punkt, damit der gesamte Inhalt übernommen wird)
 * **Startbefehl:** (leer lassen)
 
-Klicke auf **Speichern und erneut bereitstellen**. Danach läuft das Deployment innerhalb von Sekunden ohne Fehler durch und beide Seiten sind live!
+Mit **Speichern und erneut bereitstellen** abschließen. Offen: ob Hostinger bei jedem Push auf `production`
+automatisch neu bereitstellt oder ob im Panel „erneut bereitstellen" geklickt werden muss.
 
-
-
+**Hinweis Webserver-Regeln:** `public/.htaccess` der App (landet in `/app`) setzt Sicherheits-Header, Cache-Regeln
+(`index.html` immer neu prüfen, gehashte Dateien unter `/assets/` ein Jahr cachen), liefert fehlende Assets als
+echtes 404 und leitet `immocontrol360.de/app/...` auf `app.immocontrol360.de` um. Header aus der `.htaccess` der
+Marketing-Seite (Root) gelten bei Apache auch für den Unterordner `/app` – dort keine Regeln setzen, die die App
+brechen (z. B. eine CSP nur für die Marketing-Seite).
 
 ## 3. RLS Policies Pitfall: `auth.users`
+
 **WICHTIG:** In Supabase haben Nutzer (Rolle `authenticated`) **keinen Zugriff** auf die Tabelle `auth.users`!
 Ein `SELECT email FROM auth.users WHERE id = auth.uid()` innerhalb einer RLS-Policy führt zu einem `Permission Denied` Fehler. Dieser Fehler blockiert die gesamte Query (z.B. werden Portfolios nicht mehr geladen und der Nutzer landet beim Onboarding).
 
@@ -75,4 +113,4 @@ shared_with_email = (SELECT email FROM auth.users WHERE id = auth.uid())
 -- RICHTIG:
 shared_with_email = (auth.jwt() ->> 'email')
 ```
-*(Hinweis: In `SECURITY DEFINER` RPC-Funktionen darf `auth.users` abgefragt werden, da diese mit höheren Rechten laufen.)*
+*(Hinweis: In `SECURITY DEFINER` RPC-Funktionen darf `auth.users` abgefragt werden, da diese mit höheren Rechten laufen. Solche Funktionen immer mit `set search_path = public, pg_temp` anlegen.)*

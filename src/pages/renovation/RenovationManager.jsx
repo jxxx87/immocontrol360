@@ -1,17 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
     HardHat, Plus, Search, Building2, Calendar, Trash2, Archive,
-    CheckCircle2, Clock, AlertTriangle, Loader2, MoreVertical,
-    Settings as SettingsIcon, ClipboardList, FolderKanban, ArrowRight, Calculator, PenTool
+    CheckCircle2, Clock, AlertTriangle, Loader2,
+    Settings as SettingsIcon, ClipboardList, FolderKanban, Calculator, PenTool
 } from 'lucide-react';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
-import Modal from '../../components/ui/Modal';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useViewMode } from '../../context/ViewModeContext';
+import { translateError } from '../../lib/errorTranslator';
+import { fmtEUR, fmtEUR0, formatDateDE, assertWrite } from '../../components/renovation/renovationUtils';
 import RenovationSettings from './RenovationSettings';
 import RenovationTasks from './RenovationTasks';
 import RenovationCalculator from './RenovationCalculator';
@@ -26,7 +27,7 @@ const STATUS_MAP = {
     archived: { label: 'Archiviert', color: '#9ca3af', bg: '#f3f4f6', icon: Archive },
 };
 
-const fmt = (v) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(v || 0);
+const TAB_KEYS = ['projects', 'calculator', 'floorplan', 'tasks', 'settings'];
 
 const RenovationManager = () => {
     const { user } = useAuth();
@@ -35,37 +36,43 @@ const RenovationManager = () => {
     const navigate = useNavigate();
     const location = useLocation();
 
-    // Tab state
+    // Tab direkt aus der URL ableiten (Browser-Zurück und Links wechseln den Tab mit)
     const queryTab = new URLSearchParams(location.search).get('tab');
-    const [activeTab, setActiveTab] = useState(queryTab || 'projects');
+    const activeTab = TAB_KEYS.includes(queryTab) ? queryTab : 'projects';
 
     // Data
     const [projects, setProjects] = useState([]);
-    const [properties, setProperties] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState('all');
+    const [openTasksByProject, setOpenTasksByProject] = useState({});
     const [openTaskCount, setOpenTaskCount] = useState(0);
+    const requestRef = useRef(0);
 
-    useEffect(() => {
-        if (user) fetchData();
-    }, [user, selectedPortfolioID]);
+    // Offene Aufgaben je Projekt (Badge + Export). Sichtbarkeit entscheidet die RLS –
+    // dieselbe Regel wie in der Aufgabenliste.
+    const fetchOpenTasks = async () => {
+        const { data, error } = await supabase.from('renovation_tasks').select('project_id').eq('is_completed', false);
+        if (error) { console.error('Error loading open renovation tasks:', error); return; }
+        const byProject = {};
+        (data || []).forEach(t => { byProject[t.project_id] = (byProject[t.project_id] || 0) + 1; });
+        setOpenTasksByProject(byProject);
+        setOpenTaskCount((data || []).length);
+    };
 
     const fetchData = async () => {
-        setLoading(true);
+        const reqId = ++requestRef.current;
         try {
-            // Fetch properties for display
-            let propQuery = supabase.from('properties').select('id, street, house_number, city, zip');
-            if (selectedPortfolioID) propQuery = propQuery.eq('portfolio_id', selectedPortfolioID);
-            const { data: props } = await propQuery;
-            setProperties(props || []);
-
-            // Fetch projects with aggregated data
-            const { data: projs, error } = await supabase
+            // Projekte des gewählten Portfolios (ohne Auswahl: alle sichtbaren Projekte)
+            const propertyEmbed = selectedPortfolioID
+                ? 'property:properties!inner(street, house_number, city, portfolio_id)'
+                : 'property:properties(street, house_number, city, portfolio_id)';
+            let query = supabase
                 .from('renovation_projects')
                 .select(`
                     *,
-                    property:properties(street, house_number, city),
+                    ${propertyEmbed},
                     unit:units(unit_name),
                     trades:renovation_project_trades(
                         id, status, name,
@@ -75,21 +82,27 @@ const RenovationManager = () => {
                         ),
                         milestones:renovation_milestones(is_completed, is_completion_trigger)
                     )
-                `)
-                .order('created_at', { ascending: false });
+                `);
+            if (selectedPortfolioID) query = query.eq('property.portfolio_id', selectedPortfolioID);
+            const { data: projs, error } = await query.order('created_at', { ascending: false });
 
+            if (reqId !== requestRef.current) return; // veraltete Antwort (Portfolio inzwischen gewechselt)
             if (error) throw error;
             setProjects(projs || []);
+            setLoadError(null);
 
-            // Fetch open task count for badge
-            const { count } = await supabase.from('renovation_tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_completed', false);
-            setOpenTaskCount(count || 0);
+            await fetchOpenTasks();
         } catch (err) {
             console.error('Error fetching renovation data:', err);
+            if (reqId === requestRef.current) setLoadError(translateError(err));
         } finally {
-            setLoading(false);
+            if (reqId === requestRef.current) setLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (user) fetchData();
+    }, [user, selectedPortfolioID]);
 
     /* ─── Computed project stats ──────────── */
     const enrichedProjects = useMemo(() => {
@@ -105,11 +118,10 @@ const RenovationManager = () => {
                     if (m.is_completed) completedMilestones++;
                 });
             });
-            const budgetInklPuffer = budgetSoll;
             const progress = totalMilestones > 0 ? Math.round((completedMilestones / totalMilestones) * 100) : 0;
             const propertyLabel = p.property ? `${p.property.street} ${p.property.house_number || ''}, ${p.property.city}` : '—';
             const unitLabel = p.unit?.unit_name || null;
-            return { ...p, budgetSoll, budgetInklPuffer, istBezahlt, progress, propertyLabel, unitLabel, totalMilestones, completedMilestones };
+            return { ...p, budgetSoll, istBezahlt, progress, propertyLabel, unitLabel, totalMilestones, completedMilestones };
         });
     }, [projects]);
 
@@ -124,32 +136,54 @@ const RenovationManager = () => {
         });
     }, [enrichedProjects, statusFilter, searchTerm]);
 
+    /* ─── Export-Zeile (offene_aufgaben = echte offene Aufgaben des Projekts) ──────────── */
+    const toExportRow = (p) => ({
+        projekt: p.name || '–',
+        objekt: p.propertyLabel || '–',
+        budget_soll: p.budgetSoll || 0,
+        ist_bezahlt: p.istBezahlt || 0,
+        fortschritt: p.progress ? p.progress / 100 : 0,
+        ziel_enddatum: p.target_end_date || '',
+        offene_aufgaben: openTasksByProject[p.id] || 0,
+    });
+
     /* ─── Delete ──────────── */
-    const handleDelete = async (id) => {
-        if (!window.confirm('Projekt endgültig löschen? Alle Gewerke, Rechnungen und Aufgaben werden gelöscht.')) return;
-        const { error } = await supabase.from('renovation_projects').delete().eq('id', id);
-        if (!error) fetchData();
+    const handleDelete = async (p) => {
+        const transferred = Number(p.gik_transferred_amount || 0);
+        let msg = `Projekt „${p.name}" endgültig löschen?\n\nAlle Gewerke, Untergewerke, Rechnungen, Meilensteine und Aufgaben dieses Projekts werden mitgelöscht.`;
+        if (p.istBezahlt > 0) msg += `\nErfasste Rechnungen: ${fmtEUR(p.istBezahlt)}.`;
+        if (transferred !== 0) {
+            msg += `\n\nAchtung: Die bereits in die Gesamtinvestitionskosten (GIK) der Immobilie übernommenen ${fmtEUR(transferred)} werden dabei NICHT zurückgebucht.`;
+        } else if (p.status === 'completed' || p.status === 'archived') {
+            msg += '\n\nHinweis: Falls beim Abschluss Kosten in die Gesamtinvestitionskosten (GIK) der Immobilie übernommen wurden, werden diese NICHT zurückgebucht.';
+        }
+        if (!window.confirm(msg)) return;
+        try {
+            assertWrite(await supabase.from('renovation_projects').delete().eq('id', p.id).select('id'), 'Projekt löschen');
+            fetchData();
+        } catch (err) {
+            alert('Fehler beim Löschen des Projekts: ' + translateError(err));
+        }
     };
 
     /* ─── Tab Navigation ──────────── */
     const tabs = [
         { key: 'projects', label: 'Projekte', icon: FolderKanban },
         { key: 'calculator', label: 'Sanierungsrechner', icon: Calculator },
-        { 
-            key: 'floorplan', 
+        {
+            key: 'floorplan',
             label: (
                 <span>
                     Grundrisseditor <span style={{ color: '#ef4444', marginLeft: '2px', fontSize: '0.78rem', fontWeight: 600 }}>(Testphase)</span>
                 </span>
-            ), 
-            icon: PenTool 
+            ),
+            icon: PenTool
         },
         { key: 'tasks', label: 'Aufgaben', icon: ClipboardList },
         { key: 'settings', label: 'Einstellungen', icon: SettingsIcon },
     ];
 
     const handleTabChange = (key) => {
-        setActiveTab(key);
         navigate(`/renovation?tab=${key}`, { replace: true });
     };
 
@@ -171,18 +205,12 @@ const RenovationManager = () => {
                 </div>
                 {activeTab === 'projects' && (
                     <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        {/* Export: gefilterte Liste (Suche + Status), offene Aufgaben = echte Aufgaben */}
                         <ExportDropdown
                             reportType="sanierung"
-                            data={enrichedProjects.map(p => ({
-                                projekt: p.name || '–',
-                                objekt: p.propertyLabel || '–',
-                                budget_soll: p.budgetSoll || 0,
-                                ist_bezahlt: p.istBezahlt || 0,
-                                fortschritt: p.progress ? p.progress / 100 : 0,
-                                ziel_enddatum: p.target_end_date || '',
-                                offene_aufgaben: p.totalMilestones - p.completedMilestones,
-                            }))}
-                            totalRows={enrichedProjects.length}
+                            data={filtered.map(toExportRow)}
+                            allData={enrichedProjects.map(toExportRow)}
+                            totalRows={filtered.length}
                         />
                         <Button icon={Plus} onClick={() => navigate('/renovation/new')}>
                             {isMobile ? 'Neu' : 'Neues Projekt'}
@@ -258,20 +286,33 @@ const RenovationManager = () => {
                         </select>
                     </div>
 
+                    {/* Ladefehler */}
+                    {loadError && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', marginBottom: '12px', borderRadius: 'var(--radius-md)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', color: '#b91c1c', fontSize: '0.85rem', flexWrap: 'wrap' }}>
+                            <AlertTriangle size={16} />
+                            <span style={{ flex: 1 }}>Projekte konnten nicht geladen werden: {loadError}</span>
+                            <Button size="sm" variant="secondary" onClick={fetchData}>Erneut laden</Button>
+                        </div>
+                    )}
+
                     {/* Project Cards */}
                     {filtered.length === 0 ? (
-                        <Card>
-                            <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                                <HardHat size={40} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
-                                <p style={{ fontWeight: 600 }}>Keine Projekte gefunden</p>
-                                <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>Erstelle dein erstes Sanierungsprojekt.</p>
-                            </div>
-                        </Card>
+                        !loadError && (
+                            <Card>
+                                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                                    <HardHat size={40} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
+                                    <p style={{ fontWeight: 600 }}>Keine Projekte gefunden</p>
+                                    <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>
+                                        {projects.length > 0 ? 'Für die gewählten Filter gibt es keine Treffer.' : 'Erstelle dein erstes Sanierungsprojekt.'}
+                                    </p>
+                                </div>
+                            </Card>
+                        )
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             {filtered.map(p => {
                                 const st = STATUS_MAP[p.status] || STATUS_MAP.planned;
-                                const overBudget = p.istBezahlt > p.budgetInklPuffer && p.budgetInklPuffer > 0;
+                                const overBudget = p.istBezahlt > p.budgetSoll && p.budgetSoll > 0;
                                 return (
                                     <div
                                         key={p.id}
@@ -300,7 +341,7 @@ const RenovationManager = () => {
                                                     </span>
                                                     {p.target_end_date && (
                                                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                            <Calendar size={13} /> {new Date(p.target_end_date).toLocaleDateString('de-DE')}
+                                                            <Calendar size={13} /> {formatDateDE(p.target_end_date)}
                                                         </span>
                                                     )}
                                                 </div>
@@ -310,18 +351,18 @@ const RenovationManager = () => {
                                             <div style={{ display: 'flex', gap: isMobile ? '12px' : '24px', alignItems: 'center', flexWrap: 'wrap' }}>
                                                 <div style={{ textAlign: 'right' }}>
                                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Budget (Soll)</div>
-                                                    <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>{fmt(p.budgetInklPuffer)}</div>
+                                                    <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>{fmtEUR0(p.budgetSoll)}</div>
                                                 </div>
                                                 <div style={{ textAlign: 'right' }}>
                                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Ist bezahlt</div>
-                                                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: overBudget ? '#dc2626' : 'var(--text-primary)' }}>{fmt(p.istBezahlt)}</div>
+                                                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: overBudget ? '#dc2626' : 'var(--text-primary)' }}>{fmtEUR(p.istBezahlt)}</div>
                                                 </div>
                                                 <div style={{ textAlign: 'center', minWidth: '50px' }}>
                                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Fortschritt</div>
                                                     <div style={{ fontSize: '0.95rem', fontWeight: 700, color: p.progress === 100 ? '#16a34a' : '#0ea5e9' }}>{p.progress}%</div>
                                                 </div>
                                                 <button
-                                                    onClick={e => { e.stopPropagation(); handleDelete(p.id); }}
+                                                    onClick={e => { e.stopPropagation(); handleDelete(p); }}
                                                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '6px' }}
                                                     title="Löschen"
                                                 >
@@ -342,10 +383,7 @@ const RenovationManager = () => {
                 </>
             )}
 
-            {activeTab === 'tasks' && <RenovationTasks onTaskChange={async () => {
-                const { count } = await supabase.from('renovation_tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_completed', false);
-                setOpenTaskCount(count || 0);
-            }} />}
+            {activeTab === 'tasks' && <RenovationTasks onTaskChange={fetchOpenTasks} />}
             {activeTab === 'calculator' && <RenovationCalculator />}
             {activeTab === 'floorplan' && <FloorPlanLibrary />}
             {activeTab === 'settings' && <RenovationSettings onSaved={fetchData} />}

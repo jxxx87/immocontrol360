@@ -1,66 +1,78 @@
 # Test-Anleitung: Trial & Checkout Flow
 
-Diese Anleitung führt dich durch den Test des neuen Registrierungs- und Trial-Prozesses.
+Diese Anleitung führt durch den manuellen Test von Registrierung, Testphase und Stripe-Checkout.
+Automatisierte Tests gibt es dafür noch nicht.
+
+> Stand der Angaben: Komplett-Check 2026-11-27, mit dem Code abgeglichen (Fundstellen jeweils angegeben).
+> Ändert sich dort etwas, diese Anleitung mit anpassen.
 
 ## 1. Vorbereitung
 
-- [ ] **App neustarten**: Stoppe `npm run dev` im Terminal von `immo-web` (Strg+C) und starte es neu.
-- [ ] **Check**: Die App sollte unter `http://localhost:5173` erreichbar sein.
-- [ ] **Marketing-Seite**: `immowebsite` sollte unter `http://localhost:5174` laufen.
+- [ ] **App starten**: `npm run dev` im Ordner `immo-web` → `http://localhost:5173`.
+- [ ] **Marketing-Seite**: `npm run dev` im Ordner `immowebsite` → `http://localhost:5174`.
+- [ ] Die Edge Functions laufen in Supabase (nicht lokal). Getestet wird also gegen das echte Projekt – nur
+      Test-Konten mit Wegwerf-Adressen verwenden und anschließend wieder löschen.
 
 ## 2. Registrierung (Neuer User)
 
-1. Öffne `http://localhost:5174/abo-starten?plan=professional` im Browser.
-2. Gib eine **neue** E-Mail-Adresse und Passwort ein. (z.B. `test1@example.com`).
-3. Klicke auf "Jetzt Testphase starten".
-4. **Erwartetes Verhalten**:
-    - Du wirst in Sekundenbruchteilen weitergeleitet.
-    - Die Seite `http://localhost:5173/` (Dashboard) öffnet sich.
-    - Du bist automatisch eingeloggt.
+1. `http://localhost:5174/abo-starten?plan=professional` öffnen.
+2. **Neue** E-Mail-Adresse und Passwort eingeben (z. B. `test1@example.com`).
+3. „Jetzt Testphase starten" klicken.
+4. **Erwartet**:
+    - Weiterleitung zur App (Dashboard), automatisch eingeloggt.
+    - Ist für die Edge Function `register-trial` das Secret `REGISTER_TRIAL_CONFIRM_EMAIL=true` gesetzt, ist das
+      Konto erst nach Klick auf den Link in der Bestätigungs-E-Mail nutzbar.
 
-## 3. In der App (Trial Prüfung)
+Die Testphase vergibt die Edge Function `register-trial` (Konstante `TRIAL_DAYS = 10` in
+`supabase/functions/register-trial/index.ts`). `start-trial` ist abgeschaltet.
 
-1. Schau oben in die Kopfleiste (Topbar).
-2. **Erwartetes Verhalten**:
-    - Du siehst einen Button mit einem Kronen-Icon und dem Text "10 Tage Testphase".
-3. Klicke auf diesen Button.
-4. **Erwartetes Verhalten**:
-    - Das Paywall-Modal öffnet sich.
-    - Du siehst die Pläne (Starter, Professional, Business).
-    - Du kannst das Modal schließen (X oben rechts), da der Trial noch läuft.
+## 3. In der App (Trial prüfen)
 
-## 4. Limit Test (Einheiten)
+1. Kopfleiste (Topbar) ansehen.
+2. **Erwartet**: Button mit Kronen-Icon und den verbleibenden Tagen („10 Tage · Upgrade" direkt nach der
+   Registrierung, `src/components/layout/Topbar.jsx`).
+3. Button klicken → Paywall-Modal mit den Plänen (Starter, Professional, Business); lässt sich schließen,
+   solange die Testphase läuft.
 
-1. Gehe auf "Immobilien" in der Sidebar.
-2. Lege eine neue Immobilie an (Dummy Daten).
-3. Klicke auf "Neue Einheit".
-4. Versuche, **mehr als 250 Einheiten** anzulegen (okay, das ist schwer zu testen manuell...).
-    - Alternativ: Wir können das Limit temporär im Code senken (z.B. auf 1 in `SubscriptionContext.jsx`), wenn du das testen willst.
+## 4. Limit-Test (Einheiten)
+
+In der Testphase gelten die Business-Grenzen: **250 Einheiten** (`src/context/SubscriptionContext.jsx`,
+Einheiten-Prüfung: `isTrialActive() ? { maxUnits: 250 } : getPlanFeatures()`). Nach der Testphase gilt das
+Limit des gebuchten Plans (`getPlanFeatures`: Starter 5, Professional 50, Business 250).
+
+Manuell kaum erreichbar – zum Testen das Limit vorübergehend im Code senken und danach zurücksetzen
+(nicht so deployen).
 
 ## 5. Feature Lock (Sidebar)
 
-1. In der Sidebar gibt es "Mieterportal" und "Investorportal".
-2. **Im Trial**: Diese sollten **offen** sein (kein Schloss).
-3. **Test-Szenario "Abgelaufen / Starter"**:
-    - Um das zu testen, müssen wir einen User mit Plan "Starter" simulieren.
-    - Das geht am einfachsten direkt in der Supabase Datenbank:
-      - Tabelle `subscriptions` suchen.
-      - Bei deinem User `plan` auf `starter` ändern und `status` auf `active`.
-    - Lade die App neu (F5).
-    - **Erwartung**: "Mieterportal" hat jetzt ein Schloss-Icon. Wenn du klickst, kommt die Paywall.
+1. In der Sidebar gibt es „Mieterportal" und „Investorportal".
+2. **Im Trial**: offen (kein Schloss) – in der Testphase ist alles freigeschaltet (`hasFeature`).
+3. **Szenario „Starter"**: In der Tabelle `subscriptions` beim Test-Nutzer `plan = 'starter'` und
+   `status = 'active'` setzen (Supabase-Dashboard), App neu laden.
+   **Erwartet**: „Mieterportal" mit Schloss-Icon; Klick öffnet die Paywall.
 
-## 6. Stripe Checkout (Vorsicht: Price IDs müssen stimmen!)
+## 6. Stripe-Checkout
 
-1. Klicke im Paywall Modal auf "Wählen".
-2. **Erwartung**: Du wirst zu Stripe weitergeleitet.
-    - **Fehlerfall**: Wenn du einen Fehler siehst, liegt es daran, dass die Price IDs in `create-checkout-session/index.ts` nicht mit deinem Stripe Account übereinstimmen. Das müssen wir noch fixen.
+1. Im Paywall-Modal auf „Wählen" klicken.
+2. **Erwartet**: Weiterleitung zu Stripe.
+
+**Wichtig – Price IDs:** Die Preis-IDs sind fest im Code hinterlegt und müssen an **zwei** Stellen gleich sein:
+`supabase/functions/create-checkout-session/index.ts` (`PRICE_IDS`) und
+`supabase/functions/stripe-webhook/index.ts` (`PRICE_TO_PLAN`). Eine Price ID gehört immer zu **einem** Stripe-Modus:
+Mit einem Test-Schlüssel (`sk_test_…`) funktionieren nur Test-Preise, mit dem Live-Schlüssel nur Live-Preise.
+Erscheint beim Klick ein Fehler, passen Price IDs und Modus des hinterlegten Function-Secrets
+`STRIPE_SECRET_KEY` nicht zusammen.
+
+**Offen (nicht im Code lösbar):** Abgleich der Price IDs mit dem Stripe-Konto (Test- und Live-Modus) ist noch
+nicht dokumentiert; der Stripe-Secret-Key liegt dem Projekt nicht vor. Sobald er da ist: im Stripe-Dashboard
+unter *Produkte* die IDs beider Modi prüfen und hier festhalten.
 
 ## 7. Webhook & Success
 
-1. Nach erfolgreicher Zahlung in Stripe (Testmodus-Karte: 4242 4242...) wirst du auf `/billing/success` geleitet.
-2. Die App gratuliert dir.
-3. Nach 3 Sekunden landest du im Dashboard.
-4. Der Plan sollte jetzt aktualisiert sein (z.B. kein "Testphase" mehr).
+1. Nach erfolgreicher Zahlung (Stripe-Testkarte `4242 4242 4242 4242`, beliebiges künftiges Datum, beliebige
+   Prüfziffer – nur im Testmodus) Weiterleitung auf `/billing/success`.
+2. Die App bestätigt den Abschluss und leitet nach kurzer Zeit ins Dashboard.
+3. Der Plan ist aktualisiert (kein „Testphase"-Hinweis mehr) – das setzt die Edge Function `stripe-webhook`.
 
 ---
 

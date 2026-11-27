@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useEditor, EditorContent } from '@tiptap/react';
 import { Node, Extension } from '@tiptap/core';
@@ -11,7 +11,9 @@ import { TextAlign } from '@tiptap/extension-text-align';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
 import { Selection, TextSelection } from '@tiptap/pm/state';
-import { DOMParser } from '@tiptap/pm/model';
+// ProseMirror-Parser bewusst umbenannt: der Name "DOMParser" verdeckte sonst den
+// Browser-DOMParser (new DOMParser() warf dadurch immer und die Platzhalter wurden nie ersetzt).
+import { DOMParser as PMDOMParser } from '@tiptap/pm/model';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
@@ -26,20 +28,22 @@ import {
     Save, RotateCcw, FileText, ChevronLeft, ChevronRight, 
     HelpCircle, Image as ImageIcon, Plus, Trash2, Folder, Loader2,
     ArrowLeft, ArrowRight, Minus, Strikethrough, Sliders, Eye, EyeOff,
-    ArrowUp, ArrowDown, Layers
+    ArrowUp, ArrowDown, Layers, AlertTriangle, Info
 } from 'lucide-react';
 
 // Deutsche Variablen für globale Verwendung
 const GLOBAL_VARIABLES = [
     { id: 'mieter_name', label: 'Mieter Name', icon: '👤', description: 'Der vollständige Name des Hauptmieters.' },
-    { id: 'mieter_anrede', label: 'Sehr geehrte/r ...', icon: '✉️', description: 'Die Briefanrede (z.B. "Sehr geehrte Frau Müller" oder "Sehr geehrter Herr Schmidt"), die automatisch anhand des Geschlechts des Mieters generiert wird.' },
+    { id: 'mieter_anrede', label: 'Briefanrede', icon: '✉️', description: 'Die vollständige Briefanrede inklusive Name (z.B. "Sehr geehrte/r Max Mustermann"). Bitte KEIN zusätzliches "Sehr geehrte/r" davor schreiben – die Variable enthält die Anrede bereits.' },
     { id: 'mieter_adresse', label: 'Mieter Adresse', icon: '🏠', description: 'Die vollständige Anschrift des Mieters für das Adressfeld.' },
     { id: 'objekt_name', label: 'Objektname', icon: '🏢', description: 'Der Name des Gebäudes oder Objekts.' },
     { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪', description: 'Die Bezeichnung der Wohneinheit (z.B. "EG links" oder "Wohnung Nr. 5").' },
     { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍', description: 'Die vollständige Adresse des Objekts.' },
     { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters (wird als Absender oder in der Grußformel genutzt).' },
-    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die hinterlegte IBAN und BIC des Vermieters für Zahlungsaufforderungen.' },
-    { id: 'rechnungsdatum', label: 'Briefdatum', icon: '📅', description: 'Das Datum des Schreibens (wird in der Datumszeile "Ort, den ..." ausgegeben).' }
+    { id: 'vermieter_adresse', label: 'Vermieter Anschrift', icon: '📮', description: 'Die Anschrift des Vermieters aus dem gewählten Portfolio (Straße, PLZ, Ort).' },
+    { id: 'vermieter_kontakt', label: 'Vermieter Kontakt', icon: '☎️', description: 'E-Mail-Adresse und Telefonnummer des Vermieters aus dem gewählten Portfolio.' },
+    { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die im Portfolio hinterlegte Bank, IBAN und BIC des Vermieters für Zahlungsaufforderungen.' },
+    { id: 'rechnungsdatum', label: 'Briefdatum', icon: '📅', description: 'Das Datum des Schreibens (heutiges Datum).' }
 ];
 
 // Deutsche Variablen für das Mahnwesen
@@ -78,14 +82,17 @@ const INVOICE_VARIABLES = [
     { id: 'rechnungsnummer', label: 'Rechnungsnummer', icon: '🔢', description: 'Die fortlaufende, eindeutige Rechnungsnummer.' },
     { id: 'rechnungsdatum', label: 'Rechnungsdatum', icon: '📆', description: 'Das Datum, an dem die Rechnung ausgestellt wurde.' },
     { id: 'netto_betrag', label: 'Netto-Betrag', icon: '💰', description: 'Der Rechnungsbetrag vor Steuern.' },
-    { id: 'mwst_betrag', label: 'MwSt-Betrag (7%)', icon: '💸', description: 'Der berechnete Umsatzsteuerbetrag (7% für Beherbergung).' },
+    { id: 'mwst_betrag', label: 'MwSt-Betrag', icon: '💸', description: 'Der berechnete Umsatzsteuerbetrag laut Rechnung (Steuersatz je Position aus den Rechnungsdaten).' },
     { id: 'brutto_betrag', label: 'Gesamtbetrag (Brutto)', icon: '💵', description: 'Der Endbetrag inklusive Umsatzsteuer.' },
     { id: 'original_rechnungsnummer', label: 'Ref-Rechnungsnummer', icon: '📎', description: 'Bei einer Stornierung oder Korrektur die Nummer der Originalrechnung.' },
     { id: 'positions_tabelle', label: 'Rechnungspositionen-Tabelle', icon: '📊', description: 'Eine Tabelle mit allen Rechnungspositionen wie Übernachtungskosten, Reinigung und Zusatzleistungen.' },
     { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters.' },
+    { id: 'vermieter_adresse', label: 'Vermieter Anschrift', icon: '📮', description: 'Die vollständige Anschrift des leistenden Unternehmers (Pflichtangabe nach § 14 Abs. 4 UStG).' },
+    { id: 'vermieter_kontakt', label: 'Vermieter Kontakt', icon: '☎️', description: 'E-Mail-Adresse und Telefonnummer des Vermieters.' },
     { id: 'vermieter_bankverbindung', label: 'Vermieter Bankverbindung', icon: '💳', description: 'Die IBAN und BIC des Vermieters für die Überweisung.' },
     { id: 'vermieter_steuernummer', label: 'Vermieter Steuernummer', icon: '📝', description: 'Die Steuernummer des Vermieters für steuerliche Zwecke.' },
     { id: 'vermieter_ust_id', label: 'Vermieter USt-IdNr.', icon: '🆔', description: 'Die Umsatzsteuer-Identifikationsnummer des Vermieters.' },
+    { id: 'vermieter_steuer_angabe', label: 'Steuernummer / USt-IdNr.', icon: '🧾', description: 'Steuernummer und/oder USt-IdNr. des Vermieters (Pflichtangabe nach § 14 Abs. 4 Nr. 2 UStG); fehlt beides, wird es markiert.' },
     { id: 'objekt_adresse', label: 'Objekt-Adresse', icon: '📍', description: 'Die Adresse des Objekts (z.B. im Absender der Fewo-Rechnung).' }
 ];
 
@@ -102,7 +109,24 @@ const RENT_INCREASE_VARIABLES = [
 // Deutsche Variablen für sonstige Bescheinigungen
 const CERTIFICATE_VARIABLES = [
     ...GLOBAL_VARIABLES,
-    { id: 'einzug_datum', label: 'Einzugsdatum', icon: '📅', description: 'Das Einzugsdatum des Mieters laut Wohnungsgeberbestätigung.' }
+    { id: 'einzug_datum', label: 'Einzugsdatum', icon: '📅', description: 'Das Einzugsdatum des Mieters (Mietbeginn laut Mietvertrag).' }
+];
+
+// Deutsche Variablen für Verträge (zusätzlich Miete und Kaution aus dem Mietvertrag)
+const CONTRACT_VARIABLES = [
+    ...CERTIFICATE_VARIABLES,
+    { id: 'aktuelle_miete', label: 'Nettokaltmiete', icon: '💵', description: 'Die im Mietvertrag hinterlegte monatliche Nettokaltmiete.' },
+    { id: 'kaution_betrag', label: 'Kaution', icon: '🔐', description: 'Die im Mietvertrag hinterlegte Kaution.' }
+];
+
+// Variablen, die in keiner Palette stehen, aber in Vorlagen vorkommen können
+const EXTRA_VARIABLES = [
+    { id: 'mieter_nachname', label: 'Mieter Nachname' },
+    { id: 'vermieter_email', label: 'Vermieter E-Mail' },
+    { id: 'vermieter_telefon', label: 'Vermieter Telefon' },
+    { id: 'rechnungs_datum', label: 'Rechnungsdatum' },
+    { id: 'erstellungsdatum', label: 'Erstellungsdatum' },
+    { id: 'storno_nummer', label: 'Storno-Nummer' }
 ];
 
 const DEFAULT_TEMPLATES = {
@@ -110,43 +134,43 @@ const DEFAULT_TEMPLATES = {
         name: 'Zahlungserinnerung',
         category: 'Mahnwesen',
         subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_1: {
         name: 'Mahnung (Stufe 1)',
         category: 'Mahnwesen',
         subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_2: {
         name: 'Abmahnung (Stufe 2)',
         category: 'Mahnwesen',
         subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete is nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     dunning_final: {
         name: 'Letzte Zahlungsaufforderung',
         category: 'Mahnwesen',
         subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Mietbeginn">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete is nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Mietbeginn">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     utility_costs: {
         name: 'Nebenkostenabrechnung',
         category: 'Nebenkosten',
         subject: 'Betriebskostenabrechnung für das Abrechnungsjahr',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Umlagetabelle">Umlagetabelle</span></p><p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt (Seite 2) entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Betriebskostenabrechnung: Berechnungsblatt</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der Betriebskosten, die Umlageschlüssel und die Berechnungsschritte für Ihren Nutzungszeitraum:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Detaillierte Umlagetabelle">Detaillierte Umlagetabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Umlagetabelle">Umlagetabelle</span></p><p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt (Seite 2) entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Betriebskostenabrechnung: Berechnungsblatt</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der Betriebskosten, die Umlageschlüssel und die Berechnungsschritte für Ihren Nutzungszeitraum:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Detaillierte Umlagetabelle">Detaillierte Umlagetabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     fewo_invoice: {
         name: 'Fewo-Rechnung',
         category: 'FEWO-Rechnungen',
         subject: 'Rechnung über erbrachte Leistungen für Ihren Aufenthalt',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong></div></div><div class="letter-subject">Rechnung Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen in Rechnung zu stellen:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Bitte überweisen Sie den fälligen Gesamtbetrag innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong><br><span data-type="mention" data-id="vermieter_steuer_angabe" data-label="Steuernummer / USt-IdNr.">Steuernummer / USt-IdNr.</span></div></div><div class="letter-subject">Rechnung Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen in Rechnung zu stellen:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Bitte überweisen Sie den fälligen Gesamtbetrag innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     fewo_credit_note: {
         name: 'Fewo-Gutschrift',
         category: 'FEWO-Rechnungen',
         subject: 'Gutschrift zu Ihrem Aufenthalt',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong></div></div><div class="letter-subject">Gutschrift Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>vereinbarungsgemäß erhalten Sie nachfolgend die Gutschrift für Ihren Aufenthalt bzw. Ihre Buchung:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Der Gutschriftbetrag wird Ihrem Konto in den nächsten Tagen gutgeschrieben oder vereinbarungsgemäß verrechnet.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong><br><span data-type="mention" data-id="vermieter_steuer_angabe" data-label="Steuernummer / USt-IdNr.">Steuernummer / USt-IdNr.</span></div></div><div class="letter-subject">Gutschrift Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span> zur Rechnung Nr. <span data-type="mention" data-id="original_rechnungsnummer" data-label="Ref-Rechnungsnummer">Ref-Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>vereinbarungsgemäß erhalten Sie nachfolgend die Gutschrift für Ihren Aufenthalt bzw. Ihre Buchung:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Der Gutschriftbetrag wird Ihrem Konto in den nächsten Tagen gutgeschrieben oder vereinbarungsgemäß verrechnet.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     lease_residential: {
         name: 'Mietvertrag Wohnraum',
@@ -158,7 +182,7 @@ const DEFAULT_TEMPLATES = {
         name: 'Mietvertrag Gewerbe',
         category: 'Verträge',
         subject: 'Mietvertrag für Gewerberäume',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietvertrag für Gewerberäume</h2><p>Zwischen dem Vermieter: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>und dem Mieter: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> wird folgender Gewerbemietvertrag geschlossen:</p><p><b>§ 1 Mietobjekt & Nutzungszweck</b><br>Vermietet werden die Gewerberäume in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>. Die Räume dürfen ausschließlich als ________________ genutzt werden.</p><p><b>§ 2 Mietzeit</b><br>Das Mietverhältnis beginnt am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong> und läuft fest bis zum ____________. Es verlängert sich um jeweils 1 Jahr, wenn es nicht 6 Monate vor Ablauf gekündigt wird.</p><p><b>§ 3 Miete & Wertsicherung (Indexierung)</b><br>Die monatliche Nettomiete beträgt ________________ EUR zzgl. USt. Die Mietpreisbildung wird indexiert. Ändert sich die Miete, wenn der Verbraucherpreisindex für Deutschland sich um mehr als 5% gegenüber dem Stand bei Vertragsabschluss ändert.</p><p><b>§ 4 Betriebskosten</b><br>Der Mieter trägt alle Betriebskosten im Sinne des § 2 BetrKV sowie sämtliche auf das Gebäude und Grundstück entfallenden Sach- und Haftpflichtversicherungen sowie die Grundsteuer.</p><p><b>§ 5 Umbau & Instandhaltung</b><br>Bauliche Veränderungen durch den Mieter bedürfen der vorherigen schriftlichen Zustimmung des Vermieters. Der Mieter haftet für alle Schäden.</p><p><br>Ort, Datum: ___________________________<br><br><br>Unterschriften:<br><br>______________________ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ______________________<br>Vermieter &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mieter</p></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietvertrag für Gewerberäume</h2><p>Zwischen dem Vermieter: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>und dem Mieter: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> wird folgender Gewerbemietvertrag geschlossen:</p><p><b>§ 1 Mietobjekt & Nutzungszweck</b><br>Vermietet werden die Gewerberäume in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>. Die Räume dürfen ausschließlich als ________________ genutzt werden.</p><p><b>§ 2 Mietzeit</b><br>Das Mietverhältnis beginnt am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong> und läuft fest bis zum ____________. Es verlängert sich um jeweils 1 Jahr, wenn es nicht 6 Monate vor Ablauf gekündigt wird.</p><p><b>§ 3 Miete & Wertsicherung (Indexierung)</b><br>Die monatliche Nettomiete beträgt ________________ EUR zzgl. gesetzlicher USt. Wertsicherung (Indexierung): ______________________________________________ (bitte vollständig ausformulieren – Bezugsindex mit Basisjahr, Schwellenwert, Art und Zeitpunkt der Anpassung – und vor Vertragsschluss rechtlich prüfen lassen).</p><p><b>§ 4 Betriebskosten</b><br>Der Mieter trägt alle Betriebskosten im Sinne des § 2 BetrKV sowie sämtliche auf das Gebäude und Grundstück entfallenden Sach- und Haftpflichtversicherungen sowie die Grundsteuer.</p><p><b>§ 5 Umbau & Instandhaltung</b><br>Bauliche Veränderungen durch den Mieter bedürfen der vorherigen schriftlichen Zustimmung des Vermieters. Der Mieter haftet für alle Schäden.</p><p><br>Ort, Datum: ___________________________<br><br><br>Unterschriften:<br><br>______________________ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ______________________<br>Vermieter &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mieter</p></div></div>`
     },
     lease_garage: {
         name: 'Mietvertrag Garagen & Stellplätze',
@@ -169,8 +193,8 @@ const DEFAULT_TEMPLATES = {
     rent_increase: {
         name: 'Mieterhöhungsschreiben',
         category: 'Mieterhöhung',
-        subject: 'Mieterhöhung für Ihr Mietobjekt gemäß § 558 BGB',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mieterhöhung für Ihr Mietobjekt gemäß § 558 BGB</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>gemäß § 558 BGB möchte ich Sie um Ihre Zustimmung zu einer Anpassung der Nettokaltmiete für die von Ihnen bewohnte Wohnung im Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) bitten.</p><p>Ihre aktuelle Nettokaltmiete beträgt derzeit monatlich <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong>. Dieser Betrag liegt unterhalb der ortsüblichen Vergleichsmiete für vergleichbaren Wohnraum in unserer Region, welche derzeit laut geltendem Mietspiegel ca. 7,46 € bis 9,05 €/m² entspricht.</p><p>Da die Miete seit mindestens 15 Monaten unverändert geblieben ist und die Erhöhung innerhalb der letzten 3 Jahre die gesetzliche Kappungsgrenze von 20% nicht überschreitet, sind die gesetzlichen Voraussetzungen für eine Anpassung erfüllt.</p><p>Wir passen die Nettokaltmiete hiermit um einen Erhöhungsbetrag von <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> an, woraus sich ab dem <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> eine neue Nettokaltmiete von monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> ergibt.</p><p>Der neue Gesamtbetrag (Nettokaltmiete zzgl. Nebenkostenvorauszahlungen) ist ab dem Wirksamkeitsdatum zu entrichten. Wir bitten Sie höflich, die beiliegende Zustimmungserklärung unterschrieben bis zum <strong><span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span></strong> an uns zurückzusenden. Bitte beachten Sie, dass Sie gesetzlich ein zweimonatiges Sonderkündigungsrecht nach § 561 BGB besitzen.</p><p>Für Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>E-Mail: info@immocontrol.de</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
+        subject: 'Mieterhöhungsverlangen – Bitte um Zustimmung nach § 558 BGB',
+        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mieterhöhungsverlangen – Bitte um Zustimmung nach § 558 BGB</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>für die von Ihnen gemietete Wohnung im Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) bitte ich Sie hiermit gemäß § 558 BGB um Ihre Zustimmung zur Erhöhung der Nettokaltmiete bis zur ortsüblichen Vergleichsmiete.</p><p>Ihre derzeitige Nettokaltmiete beträgt monatlich <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong>. Ich bitte Sie, einer Erhöhung um <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> auf monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> mit Wirkung ab dem <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> zuzustimmen.</p><p><strong>Begründung (§ 558a BGB):</strong> ______________________________________________ (bitte ergänzen, z.B. Mietspiegel mit genauer Bezeichnung und Einordnung der Wohnung, Sachverständigengutachten oder Benennung von drei Vergleichswohnungen).</p><p>Bitte senden Sie mir die beiliegende Zustimmungserklärung bis zum <strong><span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span></strong> unterschrieben zurück. Auf Ihr Sonderkündigungsrecht nach § 561 BGB weise ich hin.</p><p>Für Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
     },
     rent_increase_consent: {
         name: 'Zustimmungserklärung',
@@ -182,7 +206,7 @@ const DEFAULT_TEMPLATES = {
         name: 'Wohnungsgeberbestätigung',
         category: 'Bescheinigungen',
         subject: 'Wohnungsgeberbestätigung nach § 19 BMG',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Wohnungsgeberbestätigung nach § 19 Bundesmeldegesetz (BMG)</h2><p>Hiermit wird der <strong>Einzug</strong> der nachfolgenden Personen in die unten bezeichnete Wohnung bestätigt:</p><p><b>Eingezogene Personen:</b><br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong></p><p><b>Einzugsdatum:</b><br><strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong></p><p><b>Anschrift der Wohnung:</b><br><strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>)</p><p><b>Name und Anschrift des Wohnungsgebers (Eigentümer / Vermieter):</b><br><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p style="font-size: 9px; color: #475569; margin-top: 15px;">Hinweis: Die Ausstellung dieser Bestätigung entspricht der gesetzlichen Auskunftspflicht des Wohnungsgebers gem. § 19 BMG. Unrichtige Angaben können als Ordnungswidrigkeit geahndet werden.</p><p><br>Ort, Datum: ___________________________<br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers</p></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Wohnungsgeberbestätigung nach § 19 Bundesmeldegesetz (BMG)</h2><p>Hiermit wird der <strong>Einzug</strong> der nachfolgenden Personen in die unten bezeichnete Wohnung bestätigt:</p><p><b>Eingezogene Personen:</b><br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong></p><p><b>Einzugsdatum:</b><br><strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong></p><p><b>Anschrift der Wohnung:</b><br><strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>)</p><p><b>Name und Anschrift des Wohnungsgebers (Eigentümer / Vermieter):</b><br><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></p><p style="font-size: 9px; color: #475569; margin-top: 15px;">Hinweis: Die Ausstellung dieser Bestätigung entspricht der gesetzlichen Auskunftspflicht des Wohnungsgebers gem. § 19 BMG. Unrichtige Angaben können als Ordnungswidrigkeit geahndet werden.</p><p><br>Ort, Datum: ___________________________<br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers</p></div></div>`
     },
     rent_clearance_certificate: {
         name: 'Mietschuldenfreiheitsbescheinigung',
@@ -200,39 +224,1198 @@ const DEFAULT_TEMPLATES = {
         name: 'Kündigungsbestätigung',
         category: 'Bescheinigungen',
         subject: 'Bestätigung Ihrer Wohnungskündigung',
-        content_html: `<div class="letter-page"><div class="letter-body"><p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Das Mietverhältnis endet vertragsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werden wir uns rechtzeitig mit Ihnen in Verbindung setzen, um einen gemeinsamen Termin abzustimmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div></div>`
+        content_html: `<div class="letter-page"><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Das Mietverhältnis endet vertragsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werden wir uns rechtzeitig mit Ihnen in Verbindung setzen, um einen gemeinsamen Termin abzustimmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div></div>`
     }
 };
 
-const SYSTEM_TEMPLATES = [
-    { id: 'payment_reminder', label: 'Zahlungserinnerung', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
-    { id: 'dunning_1', label: 'Mahnung (Stufe 1)', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
-    { id: 'dunning_2', label: 'Abmahnung (Stufe 2)', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
-    { id: 'dunning_final', label: 'Letzte Zahlungsaufforderung', hasSubject: true, variables: DUNNING_VARIABLES, group: 'Mahnwesen' },
-    { id: 'utility_costs', label: 'Nebenkostenabrechnung', hasSubject: true, variables: UTILITY_VARIABLES, group: 'Nebenkosten' },
-    { id: 'fewo_invoice', label: 'Fewo-Rechnung', hasSubject: true, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
-    { id: 'fewo_credit_note', label: 'Fewo-Gutschrift', hasSubject: true, variables: INVOICE_VARIABLES, group: 'FEWO-Rechnungen' },
-    { id: 'lease_residential', label: 'Mietvertrag Wohnraum', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
-    { id: 'lease_commercial', label: 'Mietvertrag Gewerbe', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
-    { id: 'lease_garage', label: 'Mietvertrag Garagen & Stellplätze', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Verträge' },
-    { id: 'rent_increase', label: 'Mieterhöhungsschreiben', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
-    { id: 'rent_increase_consent', label: 'Zustimmungserklärung', hasSubject: true, variables: RENT_INCREASE_VARIABLES, group: 'Mieterhöhung' },
-    { id: 'landlord_confirmation', label: 'Wohnungsgeberbestätigung', hasSubject: true, variables: CERTIFICATE_VARIABLES, group: 'Bescheinigungen' },
-    { id: 'rent_clearance_certificate', label: 'Mietschuldenfreiheitsbescheinigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
-    { id: 'rental_guarantee', label: 'Mietbürgschaft', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' },
-    { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, variables: GLOBAL_VARIABLES, group: 'Bescheinigungen' }
-];
-
-// Ordnet eigenen (Custom-)Vorlagen die zur Kategorie passende Variablen-Palette zu
+// Ordnet Vorlagen (System und eigene) die zur Kategorie passende Variablen-Palette zu.
+// Einzige Quelle der Zuordnung (vorher zusätzlich je Systemvorlage, teils abweichend).
 const VARIABLES_BY_CATEGORY = {
     'Mahnwesen': DUNNING_VARIABLES,
     'Nebenkosten': UTILITY_VARIABLES,
     'FEWO-Rechnungen': INVOICE_VARIABLES,
     'Mieterhöhung': RENT_INCREASE_VARIABLES,
     'Bescheinigungen': CERTIFICATE_VARIABLES,
-    'Verträge': CERTIFICATE_VARIABLES,
+    'Verträge': CONTRACT_VARIABLES,
 };
 const getVariablesForCategory = (category) => VARIABLES_BY_CATEGORY[category] || GLOBAL_VARIABLES;
+
+const SYSTEM_TEMPLATE_LIST = [
+    { id: 'payment_reminder', label: 'Zahlungserinnerung', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'dunning_1', label: 'Mahnung (Stufe 1)', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'dunning_2', label: 'Abmahnung (Stufe 2)', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'dunning_final', label: 'Letzte Zahlungsaufforderung', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'utility_costs', label: 'Nebenkostenabrechnung', hasSubject: true, group: 'Nebenkosten' },
+    { id: 'fewo_invoice', label: 'Fewo-Rechnung', hasSubject: true, group: 'FEWO-Rechnungen' },
+    { id: 'fewo_credit_note', label: 'Fewo-Gutschrift', hasSubject: true, group: 'FEWO-Rechnungen' },
+    { id: 'lease_residential', label: 'Mietvertrag Wohnraum', hasSubject: true, group: 'Verträge' },
+    { id: 'lease_commercial', label: 'Mietvertrag Gewerbe', hasSubject: true, group: 'Verträge' },
+    { id: 'lease_garage', label: 'Mietvertrag Garagen & Stellplätze', hasSubject: true, group: 'Verträge' },
+    { id: 'rent_increase', label: 'Mieterhöhungsschreiben', hasSubject: true, group: 'Mieterhöhung' },
+    { id: 'rent_increase_consent', label: 'Zustimmungserklärung', hasSubject: true, group: 'Mieterhöhung' },
+    { id: 'landlord_confirmation', label: 'Wohnungsgeberbestätigung', hasSubject: true, group: 'Bescheinigungen' },
+    { id: 'rent_clearance_certificate', label: 'Mietschuldenfreiheitsbescheinigung', hasSubject: true, group: 'Bescheinigungen' },
+    { id: 'rental_guarantee', label: 'Mietbürgschaft', hasSubject: true, group: 'Bescheinigungen' },
+    { id: 'termination_receipt', label: 'Kündigungsbestätigung', hasSubject: true, group: 'Bescheinigungen' }
+];
+const SYSTEM_TEMPLATES = SYSTEM_TEMPLATE_LIST.map(t => ({ ...t, variables: getVariablesForCategory(t.group) }));
+
+// =============================================================================
+// Platzhalter (Variablen): neutral speichern – an EINER Stelle auflösen
+// -----------------------------------------------------------------------------
+// - Gespeichert wird ein Platzhalter nur noch neutral als
+//   <span class="variable-chip" data-type="mention" data-id="…" data-label="…">Label</span>
+//   (keine Beispielwerte, keine Zeilenumbrüche, keine verschachtelten Tabellen). Damit greifen
+//   auch die Ersetzer in Mahnungen, Rechnungen und Nebenkostenabrechnungen zuverlässig.
+// - Editor-Anzeige (NodeView), Live-Vorschau und Druckfenster nutzen dieselben Werte
+//   (buildVariableValues) und denselben Renderer (renderVariableInto / resolveTemplateHtml).
+// - Werte werden ausschließlich als Text eingesetzt (Textknoten, Zeilenumbruch als <br>).
+//   HTML sind nur die intern erzeugten Beispieltabellen.
+// - Fehlende Angaben werden NIE mit Musterwerten gefüllt, sondern sichtbar rot markiert.
+// =============================================================================
+const PAGINATION_META = 'immoTemplatePagination';
+const EMPTY_MANUAL_VALUES = Object.freeze({});
+const TEMPLATE_LOAD_META = 'immoTemplateLoad';
+const VARIABLE_DRAG_MIME = 'application/x-immo-variable';
+
+const TABLE_VARIABLE_IDS = new Set(['forderungs_tabelle', 'forderungs_detail_tabelle', 'nebenkosten_tabelle', 'nebenkosten_detail_tabelle', 'positions_tabelle']);
+const MULTILINE_VARIABLE_IDS = new Set(['mieter_adresse', 'gast_adresse', 'vermieter_bankverbindung', 'vermieter_kontakt', 'vermieter_steuer_angabe']);
+
+const VARIABLE_LABELS = (() => {
+    const map = {};
+    [GLOBAL_VARIABLES, DUNNING_VARIABLES, UTILITY_VARIABLES, INVOICE_VARIABLES, RENT_INCREASE_VARIABLES, CERTIFICATE_VARIABLES, CONTRACT_VARIABLES, EXTRA_VARIABLES]
+        .forEach(list => list.forEach(v => { if (!map[v.id]) map[v.id] = v.label; }));
+    return map;
+})();
+const isKnownVariableId = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(VARIABLE_LABELS, id);
+const variableLabel = (id, label) => label || VARIABLE_LABELS[id] || id || 'Platzhalter';
+
+// Beispielwerte NUR für die reine Vorlagen-Vorschau (ohne Mieter). Sie werden in Vorschau und
+// Druck gelb markiert. Vermieter-, Bank- und Kontaktdaten gehören bewusst NICHT dazu – sie
+// kommen ausschließlich aus dem gewählten Portfolio (sonst: rote Markierung „fehlt“).
+const EXAMPLE_VALUES = {
+    mieter_name: 'Max Mustermann',
+    mieter_nachname: 'Mustermann',
+    mieter_anrede: 'Sehr geehrter Herr Mustermann',
+    mieter_adresse: 'Musterweg 12\n12345 Musterstadt',
+    gast_name: 'Dr. Sabine Sommer',
+    gast_adresse: 'Lindenallee 7\n50667 Köln',
+    objekt_name: 'Wohnpark Sonnenseite',
+    einheit_name: 'Wohnung EG links',
+    objekt_adresse: 'Musterstraße 42, 12345 Musterstadt',
+    offener_betrag: '908,70 €',
+    verzugstage: '14',
+    mahnstufe: '2',
+    zinsbetrag: '3,70 €',
+    abrechnungsjahr: '2025',
+    abrechnungszeitraum: '01.01.2025 - 31.12.2025',
+    nutzungszeitraum: '01.01.2025 - 31.12.2025',
+    gesamtkosten_mieter: '550,00 €',
+    vorauszahlungs_betrag: '400,00 €',
+    saldo_betrag: '150,00 €',
+    saldo_art: 'Nachzahlung',
+    kaution_betrag: '1.950,00 €',
+    buchungszeitraum: '15.05.2026 - 22.05.2026',
+    gaeste_anzahl: '2',
+    rechnungsnummer: 'RE-2026-0412',
+    netto_betrag: '560,75 €',
+    mwst_betrag: '39,25 €',
+    brutto_betrag: '600,00 €',
+    original_rechnungsnummer: 'RE-2026-0399',
+    storno_nummer: 'ST-2026-0001',
+    aktuelle_miete: '650,00 €',
+    neue_miete: '715,00 €',
+    erhoehungs_betrag: '65,00 €',
+    erhoehungs_datum: '01.08.2026',
+    zustimmungs_frist: '31.07.2026',
+    einzug_datum: '01.06.2026'
+};
+
+// Whitespace zwischen Tags entfernen: der Editor arbeitet mit white-space: pre-wrap, dort
+// würden Einrückungen in Tabellen sonst als leere Tabellenzellen/-zeilen erscheinen.
+const compactHtml = (html) => String(html).replace(/>\s+</g, '><').trim();
+
+const EXAMPLE_TABLES_RAW = {
+    forderungs_tabelle: `
+        <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+          <thead>
+            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+              <th style="padding: 8px; border: 1px solid #cbd5e1;">Fälligkeit</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1;">Bezeichnung</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Soll-Betrag</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ist-Betrag</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundmiete + NK-Vorauszahlung Mai 2026</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">850,00 €</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+            </tr>
+            <tr style="font-weight: bold; background-color: #f1f5f9;">
+              <td colspan="4" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamtrückstand:</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">855,00 €</td>
+            </tr>
+          </tbody>
+        </table>`,
+    
+    forderungs_detail_tabelle: `
+        <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+          <thead>
+            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+              <th style="padding: 6px; border: 1px solid #cbd5e1;">Datum / Zeitraum</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1;">Posten</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Soll</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Haben</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinssatz</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinsen</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">01.05.2026 - 31.05.2026</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Miete Mai 2026</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,12% p.a.</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">3,70 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">853,70 €</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">12.05.2026</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
+            </tr>
+            <tr style="font-weight: bold; background-color: #f1f5f9;">
+              <td colspan="6" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme inkl. Zinsen:</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">858,70 €</td>
+            </tr>
+          </tbody>
+        </table>`,
+    
+    nebenkosten_tabelle: `
+        <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
+          <thead>
+            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+              <th style="padding: 8px; border: 1px solid #cbd5e1;">Kostenart</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1;">Gesamtkosten</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
+              <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundsteuer</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">1.200,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Müllabfuhr & Straßenreinigung</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">800,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">100,00 €</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Heizkosten (Schätzung)</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">2.400,00 €</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohnfläche (m²)</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">300,00 €</td>
+            </tr>
+            <tr style="font-weight: bold; background-color: #f1f5f9;">
+              <td colspan="3" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">550,00 €</td>
+            </tr>
+          </tbody>
+        </table>`,
+    
+    nebenkosten_detail_tabelle: `
+        <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
+          <thead>
+            <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
+              <th style="padding: 6px; border: 1px solid #cbd5e1;">Betriebskostenart</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtkosten</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
+              <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Abwasser</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">600,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Personenmonate</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">75,00 €</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Frischwasser</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">900,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Wassermesser (m³)</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">125,00 €</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Allgemeinstrom</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">350,00 €</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">45,00 €</td>
+            </tr>
+            <tr style="font-weight: bold; background-color: #f1f5f9;">
+              <td colspan="3" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
+              <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">245,00 €</td>
+            </tr>
+          </tbody>
+        </table>`,
+    
+    positions_tabelle: `
+        <table class="invoice-table">
+          <thead>
+            <tr>
+              <th style="width: 5%; text-align: center;">Pos</th>
+              <th style="width: 55%;">Beschreibung</th>
+              <th style="width: 10%; text-align: right;">Menge</th>
+              <th style="width: 15%; text-align: right;">Einzel</th>
+              <th style="width: 15%; text-align: right;">MwSt</th>
+              <th style="width: 15%; text-align: right;">Gesamt</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="text-align: center; padding: 8px 0; vertical-align: top;">1</td>
+              <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Übernachtungskosten FEWO (7 Nächte)</td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">1</td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">420,56 €</td>
+              <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+              <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">450,00 €</td>
+            </tr>
+            <tr style="background-color: #f8fafc;">
+              <td style="text-align: center; padding: 8px 0; vertical-align: top;">2</td>
+              <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Endreinigung Pauschal</td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">74,77 €</td>
+              <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+              <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">80,00 €</td>
+            </tr>
+            <tr>
+              <td style="text-align: center; padding: 8px 0; vertical-align: top;">3</td>
+              <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Kurbeitrag (Gästetax) Erwachsen</td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
+              <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">65,42 €</td>
+              <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
+              <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">70,00 €</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="totals" style="display: flex; justify-content: flex-end; margin-bottom: 20mm;">
+          <div class="totals-box" style="width: 80mm;">
+            <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+              <span>Summe Netto</span>
+              <span>560,75 €</span>
+            </div>
+            <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+              <span>zzgl. 7% MwSt</span>
+              <span>39,25 €</span>
+            </div>
+            <div class="t-row final" style="display: flex; justify-content: space-between; margin-bottom: 4px; border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt;">
+              <span>Gesamtbetrag</span>
+              <span>600,00 €</span>
+            </div>
+          </div>
+        </div>`
+};
+const EXAMPLE_TABLES = Object.fromEntries(Object.entries(EXAMPLE_TABLES_RAW).map(([id, html]) => [id, compactHtml(html)]));
+
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[c]));
+
+const isBlank = (value) => value === null || value === undefined || String(value).trim() === '';
+const joinParts = (parts, separator) => parts
+    .map(part => (part === null || part === undefined ? '' : String(part).trim()))
+    .filter(Boolean)
+    .join(separator);
+const textValue = (text, extra = {}) => (isBlank(text) ? null : { text: String(text).trim(), ...extra });
+
+const formatDateValue = (value) => {
+    if (isBlank(value)) return null;
+    const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+    if (iso) return `${iso[3]}.${iso[2]}.${iso[1]}`;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('de-DE');
+};
+
+const formatEuroValue = (value) => {
+    if (isBlank(value)) return null;
+    const num = typeof value === 'number' ? value : parseFloat(String(value).replace(',', '.'));
+    return Number.isFinite(num) && num > 0
+        ? num.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+        : null;
+};
+
+const getDateStrings = () => {
+    const now = new Date();
+    return {
+        today: now.toLocaleDateString('de-DE'),
+        inTwoWeeks: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('de-DE')
+    };
+};
+
+// Liefert je Variable: { text } (wird als Text eingesetzt), { html } (nur interne Tabellen)
+// oder null (= Angabe fehlt → rote Markierung). example = Beispielwert, manual = vom Nutzer eingetragen.
+const buildVariableValues = ({ tenant, portfolio, manualValues, group, dates }) => {
+    const values = {};
+    const p = portfolio || null;
+
+    // Briefdatum: das heutige Datum (echter Wert, kein Beispiel)
+    ['rechnungsdatum', 'rechnungs_datum', 'erstellungsdatum'].forEach(id => { values[id] = textValue(dates.today); });
+
+    // Vermieter: ausschließlich aus dem gewählten Portfolio – keine Musterwerte
+    values.vermieter_name = textValue(p ? (p.company_name || p.name) : null);
+    values.vermieter_adresse = textValue(p ? joinParts([joinParts([p.street, p.house_number], ' '), joinParts([p.zip, p.city], ' ')], ', ') : null);
+    values.vermieter_bankverbindung = p && !isBlank(p.iban)
+        ? textValue(joinParts([p.bank_name, `IBAN: ${String(p.iban).trim()}`, isBlank(p.bic) ? '' : `BIC: ${String(p.bic).trim()}`], '\n'))
+        : null;
+    values.vermieter_email = textValue(p?.email);
+    values.vermieter_telefon = textValue(p?.phone);
+    values.vermieter_kontakt = textValue(joinParts([
+        isBlank(p?.email) ? '' : `E-Mail: ${String(p.email).trim()}`,
+        isBlank(p?.phone) ? '' : `Tel.: ${String(p.phone).trim()}`
+    ], '\n'));
+    values.vermieter_steuernummer = textValue(p?.tax_number);
+    values.vermieter_ust_id = textValue(p?.vat_id);
+    values.vermieter_steuer_angabe = textValue(joinParts([
+        isBlank(p?.tax_number) ? '' : `Steuernummer: ${String(p.tax_number).trim()}`,
+        isBlank(p?.vat_id) ? '' : `USt-IdNr.: ${String(p.vat_id).trim()}`
+    ], '\n'));
+
+    if (!tenant) {
+        // Reine Vorlagen-Vorschau: Beispieldaten für Mieter/Vorgang, deutlich als Beispiel markiert
+        Object.entries(EXAMPLE_VALUES).forEach(([id, text]) => { values[id] = { text, example: true }; });
+        values.zahlungsfrist_datum = { text: dates.inTwoWeeks, example: true };
+        Object.entries(EXAMPLE_TABLES).forEach(([id, html]) => { values[id] = { html, example: true }; });
+        return values;
+    }
+
+    // Echtdaten ("Dokument erstellen" beim Mieter): nur echte Mieter-/Vertragsdaten.
+    // Alles andere (neue Miete, Fristen, Beträge, Tabellen …) bleibt leer und wird markiert.
+    const t = tenant;
+    const firstName = String(t.first_name || '').trim();
+    const lastName = String(t.last_name || '').trim();
+    const fullName = joinParts([firstName, lastName], ' ');
+    values.mieter_name = textValue(fullName);
+    values.mieter_nachname = textValue(lastName);
+    let salutation = 'Sehr geehrte Damen und Herren';
+    if (fullName) {
+        if (t.gender === 'female' && lastName) salutation = `Sehr geehrte Frau ${lastName}`;
+        else if (t.gender === 'male' && lastName) salutation = `Sehr geehrter Herr ${lastName}`;
+        else salutation = `Sehr geehrte/r ${fullName}`;
+    }
+    values.mieter_anrede = { text: salutation };
+    values.mieter_adresse = textValue(joinParts([
+        joinParts([t.street, t.house_number], ' '),
+        joinParts([t.zip, t.city], ' ')
+    ], '\n'));
+
+    // Objektadresse: eigene Felder (falls übergeben), sonst die Adressfelder (= Objektadresse)
+    const hasObjectFields = ['objekt_strasse', 'objekt_hausnummer', 'objekt_plz', 'objekt_ort']
+        .some(key => Object.prototype.hasOwnProperty.call(t, key));
+    const objectStreet = hasObjectFields ? joinParts([t.objekt_strasse, t.objekt_hausnummer], ' ') : joinParts([t.street, t.house_number], ' ');
+    const objectCity = hasObjectFields ? joinParts([t.objekt_plz, t.objekt_ort], ' ') : joinParts([t.zip, t.city], ' ');
+    values.objekt_adresse = textValue(joinParts([objectStreet, objectCity], ', '));
+    values.objekt_name = textValue(t.objekt_name);
+    values.einheit_name = textValue(t.einheit_name);
+    values.aktuelle_miete = textValue(formatEuroValue(t.cold_rent));
+    values.kaution_betrag = textValue(formatEuroValue(t.deposit));
+    const startDate = formatDateValue(t.einzug_datum || t.start_date || t.move_in || t.lease_start);
+    values.einzug_datum = textValue(startDate);
+    // In Mahnschreiben steht der Platzhalter für den Mietbeginn
+    if (group === 'Mahnwesen') values.nutzungszeitraum = textValue(startDate);
+
+    // Vom Nutzer für dieses Dokument eingetragene Angaben (werden nicht in der Vorlage gespeichert)
+    Object.entries(manualValues || {}).forEach(([id, text]) => {
+        if (!isBlank(text) && !TABLE_VARIABLE_IDS.has(id)) values[id] = { text: String(text), manual: true };
+    });
+    return values;
+};
+
+const lookupVariable = (values, id) => (values && Object.prototype.hasOwnProperty.call(values, id) ? values[id] : null);
+
+const appendTextWithBreaks = (doc, parent, text) => {
+    String(text).split(/\r?\n/).forEach((line, idx) => {
+        if (idx > 0) parent.appendChild(doc.createElement('br'));
+        parent.appendChild(doc.createTextNode(line));
+    });
+};
+
+// Füllt "target" mit dem Wert eines Platzhalters. Einzige Stelle, an der Werte eingesetzt werden.
+const renderVariableInto = (doc, target, entry, label, { markExamples = false } = {}) => {
+    while (target.firstChild) target.removeChild(target.firstChild);
+    if (!entry) {
+        const marker = doc.createElement('span');
+        marker.className = 'tpl-missing';
+        marker.textContent = `[${label} fehlt]`;
+        target.appendChild(marker);
+        return;
+    }
+    if (typeof entry.html === 'string') {
+        // nur intern erzeugtes HTML (Beispieltabellen), nie Nutzer- oder Mieterdaten
+        target.innerHTML = entry.html;
+        return;
+    }
+    let host = target;
+    if (markExamples && entry.example) {
+        host = doc.createElement('span');
+        host.className = 'tpl-example';
+        target.appendChild(host);
+    }
+    appendTextWithBreaks(doc, host, entry.text);
+};
+
+const forEachTextNode = (root, callback) => {
+    const doc = root.ownerDocument || root;
+    const walker = doc.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(callback);
+};
+
+const createNeutralChip = (doc, id) => {
+    const chip = doc.createElement('span');
+    const label = variableLabel(id);
+    chip.className = 'variable-chip';
+    chip.setAttribute('data-type', 'mention');
+    chip.setAttribute('data-id', id);
+    chip.setAttribute('data-label', label);
+    chip.textContent = label;
+    return chip;
+};
+
+// Die Variable "mieter_anrede" enthält die vollständige Anrede. Ein davor geschriebenes
+// "Sehr geehrte/r " führte zu "Sehr geehrte/r Sehr geehrte/r …" – wird hier entfernt.
+const SALUTATION_BEFORE_CHIP_RE = /Sehr geehrte(?:\/r|\(r\))?\s*$/i;
+const SALUTATION_BEFORE_BRACE_RE = /Sehr geehrte(?:\/r|\(r\))?\s*(?=\{mieter_anrede\})/gi;
+const stripDuplicateSalutations = (root) => {
+    let changed = false;
+    root.querySelectorAll('span[data-type="mention"][data-id="mieter_anrede"]').forEach(chip => {
+        const prev = chip.previousSibling;
+        if (prev && prev.nodeType === 3 && SALUTATION_BEFORE_CHIP_RE.test(prev.nodeValue)) {
+            prev.nodeValue = prev.nodeValue.replace(SALUTATION_BEFORE_CHIP_RE, '');
+            changed = true;
+        }
+    });
+    forEachTextNode(root, (node) => {
+        if (!node.nodeValue || node.nodeValue.indexOf('{mieter_anrede}') === -1) return;
+        const next = node.nodeValue.replace(SALUTATION_BEFORE_BRACE_RE, '');
+        if (next !== node.nodeValue) { node.nodeValue = next; changed = true; }
+    });
+    return changed;
+};
+
+// Block-Werte (Tabellen) dürfen nicht in einem <p> stehen (der HTML-Parser würde den Absatz
+// aufbrechen und leere Absätze erzeugen). Steht der Platzhalter allein im Absatz, ersetzt der
+// Block den Absatz; sonst wird der Absatz um den Block herum geteilt.
+const placeBlockElement = (marker, block) => {
+    const paragraph = marker.closest ? marker.closest('p') : null;
+    if (!paragraph || !paragraph.parentNode) {
+        marker.replaceWith(block);
+        return;
+    }
+    const restText = (paragraph.textContent || '').replace(marker.textContent || '', '').trim();
+    if (restText === '' && !paragraph.querySelector('img')) {
+        paragraph.replaceWith(block);
+        return;
+    }
+    let top = marker;
+    while (top.parentNode !== paragraph) top = top.parentNode;
+    const after = paragraph.cloneNode(false);
+    let next = top.nextSibling;
+    while (next) {
+        const following = next.nextSibling;
+        after.appendChild(next);
+        next = following;
+    }
+    marker.remove();
+    paragraph.after(block);
+    if ((after.textContent || '').trim() !== '' || after.querySelector('img')) block.after(after);
+    if ((paragraph.textContent || '').trim() === '' && !paragraph.querySelector('img')) paragraph.remove();
+};
+
+const createBlockElement = (doc, entry) => {
+    const block = doc.createElement('div');
+    block.className = entry.example ? 'tpl-block tpl-example-block' : 'tpl-block';
+    block.innerHTML = entry.html;
+    return block;
+};
+
+// Aktive Inhalte (Skripte, Event-Handler, javascript:-URLs, eingebettete Objekte) entfernen.
+const BLOCKED_TAGS = new Set([
+    'SCRIPT', 'IFRAME', 'FRAME', 'FRAMESET', 'OBJECT', 'EMBED', 'APPLET', 'LINK', 'META', 'BASE', 'STYLE',
+    'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'OPTION', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'MATH'
+]);
+const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'srcset', 'data', 'lowsrc', 'dynsrc', 'ping', 'cite', 'longdesc']);
+const SAFE_DATA_IMAGE_RE = /^data:image\/(png|jpe?g|gif|webp);/i;
+const isSafeUrlValue = (value, attrName) => {
+    // eslint-disable-next-line no-control-regex
+    const normalized = String(value || '').replace(/[\u0000- ]+/g, '').toLowerCase();
+    if (normalized.startsWith('javascript:') || normalized.startsWith('vbscript:')) return false;
+    if (normalized.startsWith('data:')) return attrName === 'src' && SAFE_DATA_IMAGE_RE.test(normalized);
+    return true;
+};
+const sanitizeDom = (root) => {
+    Array.from(root.querySelectorAll('*')).forEach(el => {
+        if (BLOCKED_TAGS.has(String(el.nodeName).toUpperCase())) {
+            el.remove();
+            return;
+        }
+        Array.from(el.attributes).forEach(attr => {
+            const name = attr.name.toLowerCase();
+            if (name.startsWith('on') || name === 'srcdoc' || name === 'formaction') {
+                el.removeAttribute(attr.name);
+            } else if (URL_ATTRS.has(name) && !isSafeUrlValue(attr.value, name)) {
+                el.removeAttribute(attr.name);
+            } else if (name === 'style' && /expression\s*\(|javascript:|behavior\s*:|url\s*\(|@import/i.test(attr.value)) {
+                el.removeAttribute(attr.name);
+            }
+        });
+    });
+};
+
+const parseHtmlDocument = (html) => new window.DOMParser().parseFromString(
+    `<!DOCTYPE html><html><head></head><body>${html}</body></html>`, 'text/html'
+);
+
+const BRACE_PLACEHOLDER_RE = /\{([a-z0-9_]+)\}/g;
+
+// Löst alle Platzhalter (Chips und {kennung}) auf. Ergebnis: bereinigtes HTML, Liste fehlender
+// Angaben und ob Beispielwerte enthalten sind. Wird von Live-Vorschau UND Druckfenster genutzt.
+const resolveTemplateHtml = (contentHtml, values) => {
+    const result = { html: '', missing: [], hasExamples: false, error: null };
+    if (!contentHtml) return result;
+    try {
+        const doc = parseHtmlDocument(contentHtml);
+        const body = doc.body;
+        const missing = new Map();
+        const noteEntry = (id, label, entry) => {
+            if (!entry) missing.set(id || label, label);
+            else if (entry.example) result.hasExamples = true;
+        };
+
+        stripDuplicateSalutations(body);
+
+        Array.from(body.querySelectorAll('span[data-type="mention"]')).forEach(chip => {
+            if (!chip.isConnected) return;
+            const id = chip.getAttribute('data-id') || '';
+            const label = variableLabel(id, chip.getAttribute('data-label'));
+            const entry = lookupVariable(values, id);
+            noteEntry(id, label, entry);
+            if (entry && typeof entry.html === 'string') {
+                placeBlockElement(chip, createBlockElement(doc, entry));
+            } else {
+                const span = doc.createElement('span');
+                span.className = 'tpl-var';
+                renderVariableInto(doc, span, entry, label, { markExamples: true });
+                chip.replaceWith(span);
+            }
+        });
+
+        // Text-Platzhalter in geschweiften Klammern, z.B. {mieter_name}
+        const blocks = [];
+        forEachTextNode(body, (node) => {
+            const text = node.nodeValue;
+            if (!text || text.indexOf('{') === -1 || !node.parentNode) return;
+            const fragment = doc.createDocumentFragment();
+            let last = 0;
+            let replaced = false;
+            let match;
+            BRACE_PLACEHOLDER_RE.lastIndex = 0;
+            while ((match = BRACE_PLACEHOLDER_RE.exec(text)) !== null) {
+                const id = match[1];
+                if (!isKnownVariableId(id)) continue;
+                replaced = true;
+                if (match.index > last) fragment.appendChild(doc.createTextNode(text.slice(last, match.index)));
+                const label = variableLabel(id);
+                const entry = lookupVariable(values, id);
+                noteEntry(id, label, entry);
+                const span = doc.createElement('span');
+                span.className = 'tpl-var';
+                if (entry && typeof entry.html === 'string') blocks.push({ marker: span, entry });
+                else renderVariableInto(doc, span, entry, label, { markExamples: true });
+                fragment.appendChild(span);
+                last = match.index + match[0].length;
+            }
+            if (!replaced) return;
+            if (last < text.length) fragment.appendChild(doc.createTextNode(text.slice(last)));
+            node.parentNode.replaceChild(fragment, node);
+        });
+        blocks.forEach(({ marker, entry }) => placeBlockElement(marker, createBlockElement(doc, entry)));
+
+        sanitizeDom(body);
+        result.html = body.innerHTML;
+        result.missing = Array.from(missing.values());
+    } catch (err) {
+        console.error('Platzhalter konnten nicht aufgelöst werden:', err);
+        result.error = err?.message || String(err);
+        result.html = '<div class="letter-page"><div class="letter-body"><p>Die Vorschau konnte nicht erzeugt werden.</p></div></div>';
+    }
+    return result;
+};
+
+// Bereinigt bereits gespeicherte Vorlagen beim Laden (gleiche Regeln wie die SQL-Bereinigung
+// _fixwork/sql/101200_templates_cleanup.sql). Rückgabe: neues HTML + Liste der Änderungen.
+// Beispielwerte, die frühere Editor-Versionen in die Platzhalter geschrieben und mitgespeichert haben
+const LEGACY_EXAMPLE_TEXTS = new Set([
+    'Max Mustermann', 'Mustermann', 'Sehr geehrter Herr Mustermann', 'Dr. Sabine Sommer',
+    'Wohnpark Sonnenseite', 'Wohnung EG links', 'Musterstraße 42, 12345 Musterstadt',
+    'ImmoControlpro Vermieter GmbH', 'info@vermieter.de', '0123 4567890', '123/456/78901', 'DE123456789',
+    '908,70 €', '17.06.2026', '14', '2', '3,70 €', '2025', '01.01.2025 - 31.12.2025', '550,00 €', '400,00 €',
+    '150,00 €', 'Nachzahlung', '1.950,00 €', '15.05.2026 - 22.05.2026', 'RE-2026-0412', '03.06.2026',
+    '560,75 €', '39,25 €', '600,00 €', 'RE-2026-0399', 'ST-2026-0001', '650,00 €', '715,00 €', '65,00 €',
+    '01.08.2026', '31.07.2026', '01.06.2026'
+]);
+const FOREIGN_CONTACT_RE = /(?:E-Mail:\s*)?info@immocontrol\.de/g;
+const ORT_DEN_BEFORE_DATE_RE = /Ort,\s*den\s*$/;
+const normalizeStoredTemplateHtml = (html) => {
+    const changes = [];
+    if (typeof html !== 'string' || !html || typeof window === 'undefined' || !window.DOMParser) {
+        return { html: html || '', changes };
+    }
+    try {
+        const doc = parseHtmlDocument(html);
+        const body = doc.body;
+
+        let exampleValuesRemoved = false;
+        body.querySelectorAll('span[data-type="mention"]').forEach(chip => {
+            const label = variableLabel(chip.getAttribute('data-id'), chip.getAttribute('data-label'));
+            const text = chip.textContent || '';
+            const hasExampleContent = chip.children.length > 0 || /\n/.test(text) || LEGACY_EXAMPLE_TEXTS.has(text.trim());
+            if (hasExampleContent && text !== label) {
+                chip.textContent = label;
+                exampleValuesRemoved = true;
+            }
+        });
+        if (exampleValuesRemoved) changes.push('mitgespeicherte Beispielwerte aus den Platzhaltern entfernt');
+
+        if (stripDuplicateSalutations(body)) changes.push('doppelte Anrede („Sehr geehrte/r“ vor der Variable „Briefanrede“) entfernt');
+
+        let ortRemoved = false;
+        body.querySelectorAll('span[data-type="mention"][data-id="rechnungsdatum"]').forEach(chip => {
+            const prev = chip.previousSibling;
+            if (prev && prev.nodeType === 3 && ORT_DEN_BEFORE_DATE_RE.test(prev.nodeValue)) {
+                prev.nodeValue = prev.nodeValue.replace(ORT_DEN_BEFORE_DATE_RE, '');
+                ortRemoved = true;
+            }
+        });
+        if (ortRemoved) changes.push('Platzhaltertext „Ort, den“ vor dem Briefdatum entfernt');
+
+        let foreignMailReplaced = false;
+        forEachTextNode(body, (node) => {
+            const text = node.nodeValue;
+            if (!text || text.indexOf('info@immocontrol.de') === -1 || !node.parentNode) return;
+            const fragment = doc.createDocumentFragment();
+            let last = 0;
+            let match;
+            FOREIGN_CONTACT_RE.lastIndex = 0;
+            while ((match = FOREIGN_CONTACT_RE.exec(text)) !== null) {
+                if (match.index > last) fragment.appendChild(doc.createTextNode(text.slice(last, match.index)));
+                fragment.appendChild(createNeutralChip(doc, 'vermieter_kontakt'));
+                last = match.index + match[0].length;
+            }
+            if (last < text.length) fragment.appendChild(doc.createTextNode(text.slice(last)));
+            node.parentNode.replaceChild(fragment, node);
+            foreignMailReplaced = true;
+        });
+        if (foreignMailReplaced) changes.push('fest eingetragene fremde E-Mail-Adresse durch den Platzhalter „Vermieter Kontakt“ ersetzt');
+
+        let typoFixed = false;
+        forEachTextNode(body, (node) => {
+            if (node.nodeValue && node.nodeValue.indexOf('Die Miete is nach') !== -1) {
+                node.nodeValue = node.nodeValue.split('Die Miete is nach').join('Die Miete ist nach');
+                typoFixed = true;
+            }
+        });
+        if (typoFixed) changes.push('Tippfehler „Die Miete is nach“ korrigiert');
+
+        return { html: changes.length > 0 ? body.innerHTML : html, changes };
+    } catch (err) {
+        console.error('Vorlage konnte nicht bereinigt werden:', err);
+        return { html, changes: [] };
+    }
+};
+
+// Absatz-/Überschriften-Formatierung der Vorlagen (z.B. Schriftgröße, Abstände) im Schema
+// behalten – nur unbedenkliche Eigenschaften (text-align verwaltet TextAlign).
+const ALLOWED_BLOCK_STYLE_PROPS = new Set(['font-size', 'font-weight', 'font-style', 'margin-top', 'margin-bottom', 'padding-top', 'padding-bottom', 'border-top', 'border-bottom', 'color', 'line-height']);
+const sanitizeBlockStyle = (styleStr) => {
+    if (!styleStr) return null;
+    const kept = [];
+    String(styleStr).split(';').forEach(rule => {
+        const idx = rule.indexOf(':');
+        if (idx < 0) return;
+        const prop = rule.slice(0, idx).trim().toLowerCase();
+        const value = rule.slice(idx + 1).trim();
+        if (!value || !ALLOWED_BLOCK_STYLE_PROPS.has(prop)) return;
+        if (/url\s*\(|expression|javascript:|[<>{}"]/i.test(value)) return;
+        kept.push(`${prop}: ${value}`);
+    });
+    return kept.length > 0 ? kept.join('; ') : null;
+};
+
+const BlockStyle = Extension.create({
+    name: 'blockStyle',
+    addGlobalAttributes() {
+        return [{
+            types: ['paragraph', 'heading'],
+            attributes: {
+                blockStyle: {
+                    default: null,
+                    parseHTML: element => sanitizeBlockStyle(element.getAttribute('style')),
+                    renderHTML: attributes => (attributes.blockStyle ? { style: attributes.blockStyle } : {})
+                }
+            }
+        }];
+    }
+});
+
+// Eingefügter Fremd-Text (z.B. aus Word) behält nur die Ausrichtung, keine Inline-Formatierung.
+const stripPastedBlockStyles = (html) => {
+    if (!html || typeof window === 'undefined' || !window.DOMParser) return html;
+    try {
+        const doc = parseHtmlDocument(html);
+        doc.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6').forEach(el => {
+            const align = el.style && el.style.textAlign;
+            if (align) el.setAttribute('style', `text-align: ${align}`);
+            else el.removeAttribute('style');
+        });
+        return doc.body.innerHTML;
+    } catch {
+        return html;
+    }
+};
+
+// Bilder: nur Rasterformate (kein SVG), große Bilder vor dem Einbetten verkleinern.
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_IMAGE_INPUT_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_EMBED_CHARS = 1.5 * 1024 * 1024;
+const MAX_IMAGE_EDGE_PX = 1600;
+
+const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => resolve(event.target.result);
+    reader.onerror = () => reject(new Error('Die Datei konnte nicht gelesen werden.'));
+    reader.readAsDataURL(file);
+});
+
+const downscaleImageDataUrl = (dataUrl, mimeType) => new Promise((resolve) => {
+    // Hinweis: "Image" ist hier die TipTap-Erweiterung, daher createElement('img')
+    const img = document.createElement('img');
+    img.onload = () => {
+        const scale = Math.min(1, MAX_IMAGE_EDGE_PX / (img.naturalWidth || 1), MAX_IMAGE_EDGE_PX / (img.naturalHeight || 1));
+        if (scale >= 1 && dataUrl.length <= 400 * 1024) { resolve(dataUrl); return; }
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+            canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+            canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+            const outType = mimeType === 'image/jpeg' || mimeType === 'image/webp' ? mimeType : 'image/png';
+            const out = canvas.toDataURL(outType, 0.85);
+            resolve(out && out.length < dataUrl.length ? out : dataUrl);
+        } catch {
+            resolve(dataUrl);
+        }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+});
+
+const prepareImageForEmbedding = async (file) => {
+    if (!file) return null;
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+        alert('Bitte ein Bild im Format PNG, JPEG, WebP oder GIF verwenden.');
+        return null;
+    }
+    if (file.size > MAX_IMAGE_INPUT_BYTES) {
+        alert('Das Bild darf maximal 2 MB groß sein.');
+        return null;
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    const prepared = await downscaleImageDataUrl(dataUrl, file.type);
+    if (!SAFE_DATA_IMAGE_RE.test(prepared)) return null;
+    if (prepared.length > MAX_IMAGE_EMBED_CHARS) {
+        alert('Das Bild ist auch nach dem Verkleinern noch zu groß. Bitte ein kleineres Bild verwenden.');
+        return null;
+    }
+    return prepared;
+};
+
+// ── Gemeinsame Inhalts-Stile (Editor, Live-Vorschau UND Druckfenster) ────────────────────
+// Eine Quelle für Listen, Tabellen und Markierungen – verhindert neue Abweichungen zwischen
+// Editor und Druck (das Druckfenster lädt index.css nicht).
+const LETTER_CONTENT_CSS = `
+    .letter-page ul, .letter-page ol { padding-left: 1.5em; margin: 0 0 1em 0; }
+    .letter-page ul { list-style-type: disc; }
+    .letter-page ol { list-style-type: decimal; }
+    .letter-page li > p { margin-bottom: 0.25em !important; min-height: 0 !important; }
+    .letter-page img.editor-image { max-width: 100%; }
+    .letter-page table:not(.invoice-table) { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: transparent !important; border: 1px solid #cbd5e1 !important; }
+    .letter-page table:not(.invoice-table) th { background-color: #f1f5f9 !important; color: #0f172a !important; font-weight: bold; border: 1px solid #cbd5e1 !important; padding: 8px 12px !important; }
+    .letter-page table:not(.invoice-table) td { border: 1px solid #cbd5e1 !important; padding: 8px 12px !important; color: #334155 !important; background-color: transparent !important; }
+    .letter-page .invoice-table { width: 100%; border-collapse: collapse; margin-bottom: 8mm; background-color: transparent !important; border: none !important; }
+    .letter-page .invoice-table th { border-bottom: 2px solid #000 !important; border-top: none !important; border-left: none !important; border-right: none !important; text-align: left; padding: 8px 0 !important; font-weight: 700; background-color: transparent !important; color: #000000 !important; }
+    .letter-page .invoice-table td { border-bottom: 1px solid #ddd !important; border-top: none !important; border-left: none !important; border-right: none !important; padding: 8px 0 !important; color: #000000 !important; background-color: transparent !important; }
+    .letter-page .totals { display: flex; justify-content: flex-end; margin-bottom: 20mm; }
+    .letter-page .totals-box { width: 80mm; }
+    .letter-page .t-row { display: flex; justify-content: space-between; margin-bottom: 4px; color: #000000; }
+    .letter-page .t-row.final { border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt; color: #000000; }
+    .letter-page .tpl-block { margin: 0 0 1em 0; }
+    .letter-page .tpl-example-block { outline: 1px dashed #ca8a04; outline-offset: 2px; }
+    .letter-page .tpl-missing { color: #b91c1c !important; background-color: #fee2e2 !important; font-weight: 600; border-radius: 2px; }
+    .letter-page .tpl-example { background-color: #fef9c3; border-bottom: 1px dotted #ca8a04; }
+`;
+
+// Seiten-Stile des Druckfensters (A4, DIN 5008)
+const PRINT_PAGE_CSS = `
+    @page {
+        size: A4;
+        margin: 0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif;
+        color: #000000;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+    @media print {
+        .no-print { display: none !important; }
+        /* Keine feste Höhe/overflow auf html/body: sonst schneiden manche Browser nach Seite 1 ab.
+           Die Seitenbegrenzung leisten .letter-page und die page-break-Regeln. */
+        html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #ffffff;
+        }
+        .letter-page {
+            box-shadow: none !important;
+            border: none !important;
+            margin: 0 !important;
+            padding: 20mm 20mm 35mm 25mm !important;
+            width: 210mm !important;
+            height: 297mm !important;
+            overflow: hidden !important;
+            page-break-after: always !important;
+            page-break-inside: avoid !important;
+        }
+        .letter-page:last-child,
+        .letter-page:last-of-type {
+            page-break-after: avoid !important;
+        }
+        /* Der Editor (TipTap TrailingNode) hängt hinter der letzten Seite einen leeren Absatz an;
+           ohne diese Regel entstünde im Druck ein zusätzliches leeres Blatt. */
+        .preview-content > p:empty {
+            display: none !important;
+        }
+    }
+    @media screen {
+        body {
+            padding: 30px 20px;
+            background: #f1f5f9;
+        }
+        .letter-page {
+            margin: 0 auto 30px;
+            border-radius: 4px;
+        }
+    }
+    .tpl-toolbar { text-align: center; padding: 12px 0 20px; max-width: 210mm; margin: 0 auto; }
+    .tpl-toolbar button { padding: 10px 28px; font-size: 14px; font-weight: 600; background: #0ea5e9; color: white; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    .tpl-toolbar p { margin-top: 8px; font-size: 12px; color: #64748b; }
+    .tpl-notice { margin-top: 10px; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.45; text-align: left; }
+    .tpl-notice[hidden] { display: none !important; }
+    .tpl-notice-info { background: #fef9c3; border: 1px solid #fde047; color: #713f12; }
+    .tpl-notice-warning { background: #fee2e2; border: 1px solid #fca5a5; color: #7f1d1d; }
+
+    /* DIN 5008 A4 Page Style */
+    .letter-page {
+        width: 210mm;
+        height: 297mm;
+        min-height: 297mm;
+        max-height: 297mm;
+        padding: 20mm 20mm 35mm 25mm;
+        background: #ffffff !important;
+        color: #000000 !important;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        border: 1px solid #cbd5e1;
+        font-size: 11pt;
+        line-height: 1.5;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        text-align: left;
+        overflow: hidden;
+        box-sizing: border-box;
+    }
+
+    .letter-page > p {
+        min-height: 1.2em;
+        margin-bottom: 1em;
+    }
+    /* Leerzeilen: gleiche Höhe wie gefüllte Absätze */
+    .letter-page p:empty,
+    .letter-page p:has(> br:only-child),
+    .letter-body p:empty,
+    .letter-body p:has(> br:only-child) {
+        min-height: 1.6em;
+        margin-bottom: 1em !important;
+    }
+
+    .letter-sender {
+        font-size: 8pt;
+        color: #555555;
+        border-bottom: 1px solid #cccccc;
+        padding-bottom: 2mm;
+        margin-bottom: 5mm;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .letter-sender:has(+ hr),
+    .letter-sender:has(+ .editor-hr) {
+        border-bottom: none !important;
+        padding-bottom: 0 !important;
+        margin-bottom: 3mm !important;
+    }
+
+    .editor-hr,
+    .letter-page hr {
+        border: none;
+        border-top: 1px solid #cccccc;
+        margin: 2mm 0 5mm 0;
+        width: 100%;
+        display: block;
+        height: 0;
+    }
+
+    .letter-header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 10mm;
+    }
+
+    .letter-recipient {
+        width: 85mm;
+        font-size: 10pt;
+        line-height: 1.4;
+        color: #111111;
+        text-align: left;
+    }
+
+    .letter-date {
+        font-size: 10pt;
+        color: #333333;
+        text-align: right;
+    }
+
+    .letter-subject {
+        font-size: 13pt;
+        font-weight: bold;
+        margin-bottom: 4mm;
+        color: #000000;
+        text-align: left;
+    }
+
+    .letter-object {
+        font-size: 10pt;
+        color: #444444;
+        margin-bottom: 8mm;
+        padding-bottom: 2mm;
+        border-bottom: 1px dotted #e2e8f0;
+        text-align: left;
+    }
+
+    .letter-body {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        flex-grow: 1;
+        flex-shrink: 1;
+        min-height: 0;
+        overflow: hidden;
+        margin-bottom: 12mm;
+        font-size: 11pt;
+        line-height: 1.6;
+        text-align: left;
+    }
+
+    .letter-body p {
+        margin-bottom: 1em !important;
+        min-height: 1.6em;
+    }
+
+    .letter-footer {
+        position: absolute !important;
+        bottom: 10mm !important;
+        left: 25mm !important;
+        right: 20mm !important;
+        height: 18mm !important;
+        margin-top: 0 !important;
+        display: flex !important;
+        justify-content: space-between !important;
+        border-top: 1px solid #dddddd !important;
+        padding-top: 3mm !important;
+        font-size: 8pt !important;
+        color: #666666 !important;
+        line-height: 1.4 !important;
+        text-align: left !important;
+        box-sizing: border-box !important;
+        background-color: #ffffff !important;
+    }
+
+    .footer-col {
+        width: 30%;
+    }
+
+    /* Der Editor (ProseMirror) zeigt manuelle Zeilenumbrüche (literale \\n) via
+       white-space:pre-wrap an. Das Druckfenster nutzt sonst white-space:normal und
+       zieht sie auf eine Zeile zusammen. Hier für die DIN-5008-Textfelder angleichen –
+       Tabellen bewusst ausgenommen. */
+    .letter-sender,
+    .letter-recipient,
+    .letter-date,
+    .letter-subject,
+    .letter-object,
+    .letter-footer,
+    .footer-col {
+        white-space: pre-wrap;
+    }
+`;
+
+const createPrintNonce = () => {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+};
+
+// Druckfenster: eigenes Dokument (Blob-URL) mit Content-Security-Policy. Fremdes Skript kann
+// dort nicht laufen (nur das Skript mit Einmal-Nonce), das Fenster erhält keinen Zugriff auf
+// die App (opener wird getrennt). Der Druck startet erst nach Schrift und Bildern.
+const openPrintWindow = ({ bodyHtml, title, notices = [] }) => {
+    const nonce = createPrintNonce();
+    const noticeHtml = notices
+        .filter(n => n && n.text)
+        .map(n => `<div class="tpl-notice tpl-notice-${n.type === 'warning' ? 'warning' : 'info'}">${escapeHtml(n.text)}</div>`)
+        .join('');
+    const csp = [
+        "default-src 'none'",
+        `script-src 'nonce-${nonce}'`,
+        "style-src 'unsafe-inline' https://fonts.googleapis.com",
+        'font-src https://fonts.gstatic.com data:',
+        'img-src data: blob: https:',
+        "base-uri 'none'",
+        "form-action 'none'",
+        "object-src 'none'",
+        "frame-src 'none'",
+        "connect-src 'none'"
+    ].join('; ');
+    const html = `<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${csp}">
+    <meta name="referrer" content="no-referrer">
+    <title>${escapeHtml(title)}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" referrerpolicy="no-referrer">
+    <style>${PRINT_PAGE_CSS}${LETTER_CONTENT_CSS}</style>
+</head>
+<body>
+    <div class="no-print tpl-toolbar">
+        <button id="tpl-print-btn" type="button">🖨️ Als PDF drucken / speichern</button>
+        <p>Drücke Strg+P oder klicke den Button. Wähle "Als PDF speichern" im Druckdialog.</p>
+        ${noticeHtml}
+        <div id="tpl-overflow-warning" class="tpl-notice tpl-notice-warning" hidden></div>
+    </div>
+    <div class="preview-content">${bodyHtml}</div>
+    <script nonce="${nonce}">
+    (function () {
+        var btn = document.getElementById('tpl-print-btn');
+        if (btn) btn.addEventListener('click', function () { window.print(); });
+        function whenLoaded() {
+            return new Promise(function (resolve) {
+                if (document.readyState === 'complete') resolve();
+                else window.addEventListener('load', function () { resolve(); }, { once: true });
+            });
+        }
+        function fontsReady() {
+            return (document.fonts && document.fonts.ready) ? document.fonts.ready.catch(function () {}) : Promise.resolve();
+        }
+        function checkOverflow() {
+            var pages = document.querySelectorAll('.preview-content > .letter-page');
+            var hit = [];
+            Array.prototype.forEach.call(pages, function (page, idx) {
+                var body = page.querySelector('.letter-body');
+                if (body && body.scrollHeight > body.clientHeight + 1) hit.push(idx + 1);
+            });
+            var box = document.getElementById('tpl-overflow-warning');
+            if (box && hit.length) {
+                box.textContent = 'Achtung: Auf Seite ' + hit.join(', ') + ' ist der Inhalt länger als der Textbereich und würde im Druck abgeschnitten. Bitte die Vorlage im Editor kürzen oder auf eine weitere Seite verteilen. Der Druckdialog wurde deshalb nicht automatisch geöffnet.';
+                box.hidden = false;
+            }
+            return hit.length;
+        }
+        var limit = new Promise(function (resolve) { setTimeout(resolve, 5000); });
+        Promise.race([whenLoaded().then(fontsReady), limit]).then(function () {
+            if (!checkOverflow()) setTimeout(function () { window.print(); }, 50);
+        });
+    })();
+    </script>
+</body>
+</html>`;
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    const win = window.open(url, '_blank');
+    if (!win) {
+        URL.revokeObjectURL(url);
+        alert('Das Vorschaufenster wurde vom Browser blockiert. Bitte Pop-ups für diese Seite erlauben und erneut versuchen.');
+        return false;
+    }
+    try { win.opener = null; } catch { /* Fenster bereits getrennt */ }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return true;
+};
+
+const collectUsedVariables = (doc) => {
+    const used = new Map();
+    if (!doc) return used;
+    doc.descendants((node) => {
+        if (node.type.name === 'mention' && node.attrs.id && !used.has(node.attrs.id)) {
+            used.set(node.attrs.id, variableLabel(node.attrs.id, node.attrs.label));
+        } else if (node.isText && node.text && node.text.indexOf('{') !== -1) {
+            BRACE_PLACEHOLDER_RE.lastIndex = 0;
+            let match;
+            while ((match = BRACE_PLACEHOLDER_RE.exec(node.text)) !== null) {
+                if (isKnownVariableId(match[1]) && !used.has(match[1])) used.set(match[1], variableLabel(match[1]));
+            }
+        }
+    });
+    return used;
+};
+
+const TEMPLATE_HINTS = {
+    rent_increase: 'Mieterhöhung: Bitte neue Miete, Erhöhungsbetrag, Wirksamkeitsdatum und Zustimmungsfrist selbst eintragen, die Begründung nach § 558a BGB ergänzen und Wartefrist sowie Kappungsgrenze (§ 558 BGB) vor dem Versand prüfen.',
+    rent_increase_consent: 'Bitte die Werte der Mieterhöhung selbst eintragen – sie werden nicht automatisch berechnet.',
+    rent_clearance_certificate: 'Bitte vor dem Ausstellen den aktuellen Mietkontostand des Mieters prüfen. Die Bescheinigung bestätigt Schuldenfreiheit; es wird kein Saldo automatisch geprüft.'
+};
 
 const LetterNavigation = Extension.create({
     name: 'letterNavigation',
@@ -511,24 +1694,26 @@ const FooterCol = createLayoutNode('footerCol', 'footer-col', 'inline*');
 
 export const DocumentTemplates = () => {
     const { user } = useAuth();
+    const userId = user?.id || null;
     const { portfolios } = usePortfolio();
-    
-    const [selectedPortfolioId, setSelectedPortfolioId] = useState('global');
-
-    const activePortfolio = (portfolios || []).find(p => p.id === selectedPortfolioId);
-    const selectedPortfolioName = activePortfolio?.name || 'ImmoControlpro360 Vermietung';
-    const selectedPortfolioCompany = activePortfolio?.company_name || '';
-    const selectedPortfolioAddress = activePortfolio 
-        ? `${activePortfolio.street || ''} ${activePortfolio.house_number || ''}, ${activePortfolio.zip || ''} ${activePortfolio.city || ''}`.trim() 
-        : 'Musterstraße 12, 12345 Musterstadt';
-    const selectedPortfolioEmail = activePortfolio?.email || 'kontakt@immocontrol360.de';
-    const selectedPortfolioPhone = activePortfolio?.phone || '+49 (0) 1234 56789';
-    const selectedPortfolioIban = activePortfolio?.iban || 'DE89 5003 0000 0123 4567 89';
-    const selectedPortfolioBic = activePortfolio?.bic || 'WELADED1XXX';
-    const selectedPortfolioBank = activePortfolio?.bank_name || 'Musterbank AG';
-    const selectedPortfolioTax = activePortfolio?.tax_number || '09/123/45678';
-    const selectedPortfolioVat = activePortfolio?.vat_id || 'DE 987654321';
     const location = useLocation();
+
+    // Echtdaten-Modus: "Dokument erstellen" beim Mieter übergibt dessen Daten per Router-State
+    const tenantState = location.state?.tenant || null;
+    const isRealMode = !!tenantState;
+
+    // Portfolio: im Echtdaten-Modus das Portfolio des Mieters vorbelegen (falls übergeben bzw.
+    // eindeutig), damit Vermieter-/Bankdaten nicht fehlen. Eine manuelle Auswahl hat Vorrang.
+    const [selectedPortfolioId, setSelectedPortfolioId] = useState(() => tenantState?.portfolio_id || 'global');
+    const [portfolioTouched, setPortfolioTouched] = useState(false);
+    const portfolioList = portfolios || [];
+    const effectivePortfolioId = (isRealMode && !portfolioTouched && selectedPortfolioId === 'global' && portfolioList.length === 1)
+        ? portfolioList[0].id
+        : selectedPortfolioId;
+    const activePortfolio = portfolioList.find(p => p.id === effectivePortfolioId) || null;
+    // Portfolio-Vorlagen darf nur der Portfolio-Eigentümer ändern (Mitnutzer: nur lesen)
+    const canWriteTemplates = effectivePortfolioId === 'global' || !activePortfolio?.user_id || activePortfolio.user_id === userId;
+
     const [activeType, setActiveType] = useState(() => {
         return location.state?.templateId || 'payment_reminder';
     });
@@ -549,15 +1734,46 @@ export const DocumentTemplates = () => {
         dbDataFound: false,
         contentLength: 0
     });
+    // Ungespeicherte Änderungen (Pagination und Laden zählen nicht)
+    const [isDirty, setIsDirty] = useState(false);
+    // Ladefehler: Speichern gesperrt, damit die gespeicherte Fassung nicht überschrieben wird
+    const [loadError, setLoadError] = useState(null);
+    // Beim Laden automatisch bereinigte Punkte (Hinweis an den Nutzer)
+    const [loadNotice, setLoadNotice] = useState(null);
+    // Seiten, deren Inhalt nicht auf die Seite passt (würde im Druck abgeschnitten)
+    const [overflowPages, setOverflowPages] = useState([]);
+    // Im Echtdaten-Modus vom Nutzer eingetragene Angaben (nur für dieses Dokument, je Mieter)
+    const tenantKey = tenantState
+        ? [tenantState.lease_id, tenantState.first_name, tenantState.last_name, tenantState.einheit_name, tenantState.start_date].join('|')
+        : '';
+    const [manualState, setManualState] = useState({ tenantKey: '', values: {} });
+    const manualValues = manualState.tenantKey === tenantKey ? manualState.values : EMPTY_MANUAL_VALUES;
+    const updateManualValue = (id, value) => {
+        setManualState(prev => ({
+            tenantKey,
+            values: { ...(prev.tenantKey === tenantKey ? prev.values : {}), [id]: value }
+        }));
+    };
+    // Warnung vor dem Druck (fehlende Angaben)
+    const [printWarning, setPrintWarning] = useState(null);
+    const [creating, setCreating] = useState(false);
+    const [dates] = useState(getDateStrings);
 
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
-    
+
     // Modals
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [newTemplateName, setNewTemplateName] = useState('');
     const [newTemplateCategory, setNewTemplateCategory] = useState('Eigene');
     const [newTemplateSubject, setNewTemplateSubject] = useState('');
+
+    // Werte für die Platzhalter-Anzeige im Editor (NodeViews lesen sie außerhalb des Renderns)
+    const chipValuesRef = useRef(null);
+    const chipViewsRef = useRef(new Set());
+    const loadSeqRef = useRef(0);
+    const tickPendingRef = useRef(false);
+    const previewContainerRef = useRef(null);
 
     // TipTap Editor initialization
     const editor = useEditor({
@@ -565,6 +1781,7 @@ export const DocumentTemplates = () => {
             StarterKit.configure({
                 horizontalRule: false,
             }),
+            BlockStyle,
             LetterNavigation,
             LetterPage,
             LetterSender,
@@ -585,162 +1802,54 @@ export const DocumentTemplates = () => {
             Color,
             Mention.extend({
                 draggable: true,
-                renderHTML({ node, HTMLAttributes }) {
+                // Gespeichert wird NUR die Kennung und die Bezeichnung – nie Beispielwerte.
+                renderHTML({ node }) {
                     const id = node.attrs.id;
-                    const label = node.attrs.label || id;
-                    
-                    const makeMockTable = (headers, rows, totalLabel, totalVal) => {
-                        const tableStyle = "display: table; width: 100%; border-collapse: collapse; margin: 8px 0; border: 1px solid #bae6fd; background: #ffffff; color: #0369a1;";
-                        const headerRowStyle = "display: table-row; background-color: #bae6fd; font-weight: bold; color: #0369a1; border-bottom: 2px solid #bae6fd;";
-                        const rowStyle = "display: table-row; border-bottom: 1px solid #bae6fd;";
-                        const altRowStyle = "display: table-row; border-bottom: 1px solid #bae6fd; background-color: #f0f9ff;";
-                        const headerCellStyle = "display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: left;";
-                        const cellStyle = "display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: left; color: #334155;";
-                        
-                        const children = [
-                            ['span', { style: headerRowStyle }, 
-                                ...headers.map(h => ['span', { style: headerCellStyle }, h])
-                            ],
-                            ...rows.map((row, idx) => 
-                                ['span', { style: idx % 2 === 1 ? altRowStyle : rowStyle },
-                                    ...row.map((cell, cidx) => {
-                                        const isLastCol = cidx === row.length - 1;
-                                        const align = isLastCol ? 'right' : 'left';
-                                        const font = isLastCol ? 'font-weight: bold;' : '';
-                                        return ['span', { style: cellStyle + ` text-align: ${align}; ${font}` }, cell];
-                                    })
-                                ]
-                            )
-                        ];
-
-                        if (totalLabel && totalVal) {
-                            const totalRowStyle = "display: table-row; font-weight: bold; background-color: #e0f2fe; color: #0369a1;";
-                            const labelColSpanStyle = `display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: right;`;
-                            const valStyle = `display: table-cell; padding: 6px; border: 1px solid #bae6fd; font-size: 9pt; text-align: right; color: #0284c7;`;
-                            
-                            children.push(['span', { style: totalRowStyle },
-                                ['span', { style: labelColSpanStyle }, totalLabel],
-                                ...Array(headers.length - 2).fill(null).map(() => ['span', { style: "display: table-cell; border: 1px solid #bae6fd;" }]),
-                                ['span', { style: valStyle }, totalVal]
-                            ]);
-                        }
-
-                        return ['span', { style: tableStyle }, ...children];
-                    };
-
-                    const MOCK_VALUES = {
-                        mieter_name: "Max Mustermann",
-                        mieter_nachname: "Mustermann",
-                        mieter_anrede: "Sehr geehrter Herr Mustermann",
-                        mieter_adresse: "Musterweg 12\n12345 Musterstadt",
-                        gast_name: "Dr. Sabine Sommer",
-                        gast_adresse: "Lindenallee 7\n50667 Köln",
-                        objekt_name: "Wohnpark Sonnenseite",
-                        einheit_name: "Wohnung EG links",
-                        objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
-                        vermieter_name: "ImmoControlpro Vermieter GmbH",
-                        vermieter_bankverbindung: "Sparkasse Musterstadt\nIBAN: DE89 5005 0400 1122 3344 55\nBIC: SOLODEM1MUC",
-                        vermieter_adresse: "Musterstraße 42, 12345 Musterstadt",
-                        vermieter_email: "info@vermieter.de",
-                        vermieter_telefon: "0123 4567890",
-                        vermieter_steuernummer: "123/456/78901",
-                        vermieter_ust_id: "DE123456789",
-                        offener_betrag: "908,70 €",
-                        zahlungsfrist_datum: "17.06.2026",
-                        verzugstage: "14",
-                        mahnstufe: "2",
-                        zinsbetrag: "3,70 €",
-                        abrechnungsjahr: "2025",
-                        abrechnungszeitraum: "01.01.2025 - 31.12.2025",
-                        nutzungszeitraum: "01.01.2025 - 31.12.2025",
-                        gesamtkosten_mieter: "550,00 €",
-                        vorauszahlungs_betrag: "400,00 €",
-                        saldo_betrag: "150,00 €",
-                        saldo_art: "Nachzahlung",
-                        kaution_betrag: "1.950,00 €",
-                        buchungszeitraum: "15.05.2026 - 22.05.2026",
-                        gaeste_anzahl: "2",
-                        rechnungsnummer: "RE-2026-0412",
-                        rechnungsdatum: "03.06.2026",
-                        rechnungs_datum: "03.06.2026",
-                        erstellungsdatum: "03.06.2026",
-                        netto_betrag: "560,75 €",
-                        mwst_betrag: "39,25 €",
-                        brutto_betrag: "600,00 €",
-                        original_rechnungsnummer: "RE-2026-0399",
-                        storno_nummer: "ST-2026-0001",
-                        aktuelle_miete: "650,00 €",
-                        neue_miete: "715,00 €",
-                        erhoehungs_betrag: "65,00 €",
-                        erhoehungs_datum: "01.08.2026",
-                        zustimmungs_frist: "31.07.2026",
-                        einzug_datum: "01.06.2026"
-                    };
-
-                    // Tables
-                    if (id === 'forderungs_tabelle' || id === 'forderungs_detail_tabelle') {
-                        const headers = ['Fälligkeit', 'Bezeichnung', 'Soll-Betrag', 'Ist-Betrag', 'Offen'];
-                        const rows = [
-                            ['04.05.2026', 'Grundmiete + NK-Vorauszahlung Mai 2026', '850,00 €', '0,00 €', '850,00 €'],
-                            ['04.05.2026', 'Mahngebühr Stufe 1', '5,00 €', '0,00 €', '5,00 €']
-                        ];
-                        return [
-                            'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            makeMockTable(headers, rows, 'Gesamtrückstand:', '855,00 €')
-                        ];
-                    }
-                    
-                    if (id === 'nebenkosten_tabelle') {
-                        const headers = ['Kostenart', 'Gesamtkosten', 'Umlageschlüssel', 'Mieteranteil'];
-                        const rows = [
-                            ['Grundsteuer', '1.200,00 €', 'Wohnfläche (100/1000)', '120,00 €'],
-                            ['Heizkosten', '4.500,00 €', 'Verbrauch (850/9000)', '425,00 €']
-                        ];
-                        return [
-                            'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            makeMockTable(headers, rows, 'Summe Anteil:', '545,00 €')
-                        ];
-                    }
-
-                    if (id === 'positions_tabelle') {
-                        const headers = ['Pos', 'Beschreibung', 'Betrag'];
-                        const rows = [
-                            ['1', 'Ferienwohnung Buchung (7 Nächte)', '500,00 €'],
-                            ['2', 'Endreinigung Pauschale', '60,00 €']
-                        ];
-                        return [
-                            'span',
-                            { class: 'variable-chip expanded-variable-table', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            makeMockTable(headers, rows, 'Gesamt:', '560,00 €')
-                        ];
-                    }
-
-                    // Multiline Text/Addresses
-                    if (id === 'mieter_adresse' || id === 'gast_adresse' || id === 'vermieter_bankverbindung') {
-                        return [
-                            'span',
-                            { class: 'variable-chip multiline-variable', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            MOCK_VALUES[id]
-                        ];
-                    }
-
-                    // All other variables mapped to mock values
-                    if (MOCK_VALUES[id] !== undefined) {
-                        return [
-                            'span',
-                            { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false', title: `Platzhalter: ${label}` },
-                            MOCK_VALUES[id]
-                        ];
-                    }
-
-                    // Fallback to default styling
+                    const label = variableLabel(id, node.attrs.label);
                     return [
                         'span',
-                        { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label, contenteditable: 'false' },
-                        `${label}`
+                        { class: 'variable-chip', 'data-type': 'mention', 'data-id': id, 'data-label': label },
+                        label
                     ];
+                },
+                renderText({ node }) {
+                    return `{${node.attrs.id}}`;
+                },
+                // Anzeige im Editor: derselbe Wert wie in Vorschau und Druck (Beispiel- bzw. Echtdaten,
+                // fehlende Angaben rot markiert). Die Werte kommen aus chipValuesRef.
+                addNodeView() {
+                    return ({ node: initialNode }) => {
+                        let currentNode = initialNode;
+                        const dom = document.createElement('span');
+                        const render = () => {
+                            const id = currentNode.attrs.id || '';
+                            const label = variableLabel(id, currentNode.attrs.label);
+                            const entry = lookupVariable(chipValuesRef.current, id);
+                            const isBlock = !!(entry && typeof entry.html === 'string');
+                            dom.className = isBlock ? 'variable-chip expanded-variable-table' : 'variable-chip';
+                            dom.setAttribute('data-type', 'mention');
+                            dom.setAttribute('data-id', id);
+                            dom.setAttribute('data-label', label);
+                            dom.setAttribute('contenteditable', 'false');
+                            dom.title = entry
+                                ? `Platzhalter: ${label}${entry.example ? ' (Beispielwert)' : ''}`
+                                : `Platzhalter: ${label} – Angabe fehlt`;
+                            renderVariableInto(document, dom, entry, label);
+                        };
+                        render();
+                        chipViewsRef.current.add(render);
+                        return {
+                            dom,
+                            update: (updatedNode) => {
+                                if (updatedNode.type !== currentNode.type) return false;
+                                currentNode = updatedNode;
+                                render();
+                                return true;
+                            },
+                            destroy: () => { chipViewsRef.current.delete(render); },
+                            ignoreMutation: (mutation) => mutation.type !== 'selection'
+                        };
+                    };
                 }
             }),
             HorizontalRule.extend({
@@ -768,6 +1877,9 @@ export const DocumentTemplates = () => {
             }),
             Image.configure({
                 inline: true,
+                // Bilder (Logo, Unterschrift) werden als Data-URL eingebettet – ohne allowBase64
+                // verwirft TipTap sie beim nächsten Laden und das Speichern löscht sie endgültig.
+                allowBase64: true,
                 HTMLAttributes: {
                     class: 'editor-image',
                     style: 'max-height: 240px; object-fit: contain; margin: 10px 0; display: block;'
@@ -775,15 +1887,26 @@ export const DocumentTemplates = () => {
             })
         ],
         content: '',
-        onUpdate({ editor }) {
+        onUpdate({ editor, transaction }) {
             let count = 0;
-            editor.state.doc.descendants(node => {
+            editor.state.doc.forEach(node => {
                 if (node.type.name === 'letterPage') {
                     count++;
                 }
             });
             setPageCount(count > 0 ? count : 1);
-            setEditorTick(prev => prev + 1);
+            // Nur echte Bearbeitungen zählen als ungespeicherte Änderung
+            if (!transaction?.getMeta(PAGINATION_META) && !transaction?.getMeta(TEMPLATE_LOAD_META)) {
+                setIsDirty(true);
+            }
+            // Re-Render höchstens einmal pro Frame (Toolbar-Status, Vorschau, fehlende Angaben)
+            if (!tickPendingRef.current) {
+                tickPendingRef.current = true;
+                requestAnimationFrame(() => {
+                    tickPendingRef.current = false;
+                    setEditorTick(prev => prev + 1);
+                });
+            }
         },
         onSelectionUpdate({ editor }) {
             const node = editor.state.selection?.node;
@@ -977,46 +2100,46 @@ export const DocumentTemplates = () => {
                 
                 return false;
             },
+            // Eingefügter Fremd-Text (z.B. aus Word) übernimmt keine Absatz-Inline-Stile
+            transformPastedHTML(html) {
+                return stripPastedBlockStyles(html);
+            },
             handleDrop(view, event, slice, moved) {
                 if (!moved && event.dataTransfer) {
                     const files = event.dataTransfer.files;
                     if (files && files.length > 0) {
                         const file = files[0];
                         if (file.type.startsWith('image/')) {
-                            if (file.size > 2 * 1024 * 1024) {
-                                alert('Das Bild darf maximal 2MB groß sein.');
-                                return true;
-                            }
-                            const reader = new FileReader();
-                            reader.onload = (readerEvent) => {
-                                const base64 = readerEvent.target.result;
-                                const coordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
-                                if (coordinates) {
+                            const dropCoordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
+                            prepareImageForEmbedding(file)
+                                .then((src) => {
+                                    if (!src || !dropCoordinates) return;
                                     const { schema } = view.state;
-                                    const node = schema.nodes.image.create({ src: base64 });
-                                    const transaction = view.state.tr.insert(coordinates.pos, node);
-                                    view.dispatch(transaction);
-                                }
-                            };
-                            reader.readAsDataURL(file);
+                                    const node = schema.nodes.image.create({ src });
+                                    const pos = Math.min(dropCoordinates.pos, view.state.doc.content.size);
+                                    view.dispatch(view.state.tr.insert(pos, node));
+                                })
+                                .catch((err) => alert(err?.message || 'Das Bild konnte nicht eingefügt werden.'));
                             return true;
                         }
                     }
-                    const data = event.dataTransfer.getData('text/plain');
+                    // Platzhalter aus der Palette: eigener MIME-Typ; Kennung wird gegen die
+                    // bekannten Variablen geprüft, die Bezeichnung kommt aus der Palette.
+                    const data = event.dataTransfer.getData(VARIABLE_DRAG_MIME) || event.dataTransfer.getData('text/plain');
                     try {
                         const json = JSON.parse(data);
-                        if (json && json.type === 'mention') {
+                        if (json && json.type === 'mention' && isKnownVariableId(json.id)) {
                             const coordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
                             if (coordinates) {
                                 const { schema } = view.state;
-                                const node = schema.nodes.mention.create({ id: json.id, label: json.label });
+                                const node = schema.nodes.mention.create({ id: json.id, label: variableLabel(json.id) });
                                 const transaction = view.state.tr.insert(coordinates.pos, node);
                                 view.dispatch(transaction);
                                 return true;
                             }
                         }
                     } catch {
-                        // ignore error
+                        // kein Platzhalter – normales Drop-Verhalten
                     }
                 }
                 return false;
@@ -1057,33 +2180,43 @@ export const DocumentTemplates = () => {
         if (!s) return {};
         const r = {};
         s.split(';').forEach(rule => {
-            const [p, v] = rule.split(':').map(x => x.trim());
+            // nur am ersten ':' trennen (Werte wie url(data:…) enthalten weitere Doppelpunkte)
+            const idx = rule.indexOf(':');
+            if (idx < 0) return;
+            const p = rule.slice(0, idx).trim();
+            const v = rule.slice(idx + 1).trim();
             if (p && v) r[p] = v;
         });
         return r;
     };
     const buildStyleStr = (obj) => Object.entries(obj)
-        .filter(([_, v]) => v && v !== '0mm')
+        .filter(([, v]) => v && v !== '0mm')
         .map(([k, v]) => `${k}: ${v}`).join('; ') || null;
 
-    const updateLayoutStyle = (property, value) => {
+    const LAYOUT_PROP_KEYS = { 'margin-top': 'marginTop', 'margin-bottom': 'marginBottom', height: 'height', width: 'width' };
+
+    // Setzt mehrere Abstands-/Größenwerte in EINER Transaktion (ein Undo-Schritt)
+    const updateLayoutStyles = (changes) => {
         if (!layoutPopover || layoutPopover.nodePos < 0 || !editor) return;
         const node = editor.state.doc.nodeAt(layoutPopover.nodePos);
         if (!node) return;
         const styles = parseStyleStr(node.attrs.style);
-        if (value > 0) styles[property] = `${value}mm`;
-        else delete styles[property];
+        Object.entries(changes).forEach(([property, value]) => {
+            if (value > 0) styles[property] = `${value}mm`;
+            else delete styles[property];
+        });
         const tr = editor.state.tr.setNodeMarkup(layoutPopover.nodePos, null, {
             ...node.attrs, style: buildStyleStr(styles)
         });
         editor.view.dispatch(tr);
-        const propKey = property === 'margin-top' ? 'marginTop' :
-            property === 'margin-bottom' ? 'marginBottom' :
-            property === 'height' ? 'height' : 'width';
-        setLayoutPopover(prev => ({
-            ...prev, styles: { ...prev.styles, [propKey]: value }
-        }));
+        setLayoutPopover(prev => {
+            if (!prev) return prev;
+            const nextStyles = { ...prev.styles };
+            Object.entries(changes).forEach(([property, value]) => { nextStyles[LAYOUT_PROP_KEYS[property] || property] = value; });
+            return { ...prev, styles: nextStyles };
+        });
     };
+    const updateLayoutStyle = (property, value) => updateLayoutStyles({ [property]: value });
 
     const canMoveNode = (pos, direction) => {
         if (!editor) return false;
@@ -1094,7 +2227,7 @@ export const DocumentTemplates = () => {
             const index = $pos.index();
             const targetIndex = index + direction;
             return targetIndex >= 0 && targetIndex < parent.childCount;
-        } catch(e) {
+        } catch {
             return false;
         }
     };
@@ -1189,7 +2322,7 @@ export const DocumentTemplates = () => {
             if (secClass === 'letter-sender') {
                 html = `<div class="letter-sender">Absenderzeile (Bitte anpassen)</div>`;
             } else if (secClass === 'letter-header-row') {
-                html = `<div class="letter-header-row"><div class="letter-recipient">Empfängeradresse</div><div class="letter-date">Ort, den Datum</div></div>`;
+                html = `<div class="letter-header-row"><div class="letter-recipient">Empfängeradresse</div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Briefdatum">Briefdatum</span></div></div>`;
             } else if (secClass === 'letter-subject') {
                 html = `<div class="letter-subject">Betreffzeile (Bitte anpassen)</div>`;
             } else if (secClass === 'letter-object') {
@@ -1197,7 +2330,7 @@ export const DocumentTemplates = () => {
             } else if (secClass === 'letter-body') {
                 html = `<div class="letter-body"><p>Brieftext...</p></div>`;
             } else if (secClass === 'letter-footer') {
-                html = `<div class="letter-footer"><div class="footer-col">Anschrift: Vermieter Name</div><div class="footer-col">Kontakt: info@immocontrol.de</div><div class="footer-col">Bankverbindung: IBAN</div></div>`;
+                html = `<div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div>`;
             }
             
             if (!html) return;
@@ -1206,7 +2339,7 @@ export const DocumentTemplates = () => {
             tempDiv.innerHTML = html;
             
             // Parse DOM using ProseMirror DOMParser
-            const parsed = DOMParser.fromSchema(state.schema).parse(tempDiv);
+            const parsed = PMDOMParser.fromSchema(state.schema).parse(tempDiv);
             const node = parsed.firstChild;
             if (!node) return;
             
@@ -1388,22 +2521,54 @@ export const DocumentTemplates = () => {
 
     // Word-like Pagination: overflow:hidden + scrollHeight check
     // Overflow → move LAST child to next page. Underflow → pull FIRST child back.
+    // Maßstab der Seite (CSS-zoom bei kleineren Bildschirmen): Rects sind skaliert, CSS-Längen nicht
+    const A4_WIDTH_PX = 210 * 96 / 25.4;
+    const getPageScale = (domPage) => {
+        const width = domPage ? domPage.getBoundingClientRect().width : 0;
+        return width > 0 ? width / A4_WIDTH_PX : 1;
+    };
+    // Passt "childEl" (inkl. Außenabständen) noch unter den letzten Inhalt von "domBody"?
+    // Alle Werte in derselben (skalierten) Einheit, mit kleiner Hysterese gegen Pendeln.
+    const fitsIntoBody = (domBody, childEl, scale) => {
+        const childRect = childEl.getBoundingClientRect();
+        if (!(childRect.height > 0)) return false;
+        const childStyle = window.getComputedStyle(childEl);
+        const childNeed = childRect.height + ((parseFloat(childStyle.marginTop) || 0) + (parseFloat(childStyle.marginBottom) || 0)) * scale;
+        const bodyRect = domBody.getBoundingClientRect();
+        const lastChild = domBody.lastElementChild;
+        let contentBottom = bodyRect.top;
+        if (lastChild) {
+            const lastStyle = window.getComputedStyle(lastChild);
+            contentBottom = lastChild.getBoundingClientRect().bottom + (parseFloat(lastStyle.marginBottom) || 0) * scale;
+        }
+        const freeSpace = bodyRect.top + domBody.clientHeight * scale - contentBottom;
+        return childNeed + 4 * scale <= freeSpace;
+    };
+
     const runPaginationStep = (editor) => {
         if (!editor || !editor.view || !editor.view.dom) return false;
-        
+
         // DOM synchronisieren damit Messungen korrekt sind
-        try { editor.view.updateState(editor.view.state); } catch(e) { /* ignore */ }
-        
+        try { editor.view.updateState(editor.view.state); } catch { /* ignore */ }
+
+        // Seitenumbruch-Transaktionen: nicht in der Undo-Historie, keine "ungespeicherte Änderung"
+        const dispatchLayout = (tr) => {
+            tr.setMeta('addToHistory', false);
+            tr.setMeta(PAGINATION_META, true);
+            editor.view.dispatch(tr);
+        };
+
         const doc = editor.state.doc;
         const pages = getPagesFromDoc(doc);
-        const domPages = document.querySelectorAll('.ProseMirror > .letter-page');
-        
+        // Nur die Seiten DIESES Editors (nicht global im Dokument suchen)
+        const domPages = editor.view.dom.querySelectorAll(':scope > .letter-page');
+
         if (pages.length === 0 || domPages.length !== pages.length) return false;
-        
+
         // 1. Bereinigung: Verschiebe verwaiste Seiten-Level-Absätze und unzulässige Strukturelemente auf Folgeseiten
-        const structuralTypes = ['letterBody', 'letterFooter', 'letterSender', 
+        const structuralTypes = ['letterBody', 'letterFooter', 'letterSender',
             'letterSubject', 'letterObject', 'letterHeaderRow', 'letterRecipient', 'letterDate'];
-            
+
         for (let i = 0; i < pages.length; i++) {
             const page = pages[i];
             if (page.bodyPos !== -1) {
@@ -1411,7 +2576,7 @@ export const DocumentTemplates = () => {
                 let orphanPos = -1;
                 let orphanNode = null;
                 let isSubjectOnFollowPage = false;
-                
+
                 page.node.forEach((child, offset) => {
                     // Auf Folgeseiten (Seite 2+) wandeln wir das letterSubject in einen fettgedruckten Paragraph im Body um.
                     if (i > 0 && child.type.name === 'letterSubject') {
@@ -1424,31 +2589,31 @@ export const DocumentTemplates = () => {
                         orphanNode = child;
                     }
                 });
-                
+
                 if ((hasOrphan || isSubjectOnFollowPage) && orphanNode) {
                     try {
                         const tr = editor.state.tr;
                         let newNode = orphanNode;
-                        
+
                         if (isSubjectOnFollowPage) {
                             // Wandle letterSubject in einen fettgedruckten Überschriften-Paragraph um
                             const styleStr = 'font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm; display: block;';
                             newNode = editor.schema.nodes.paragraph.create(
-                                { style: styleStr },
+                                { blockStyle: sanitizeBlockStyle(styleStr) },
                                 orphanNode.content
                             );
                         } else {
                             newNode = orphanNode.copy(orphanNode.content);
                         }
-                        
+
                         // Wenn es das Subject auf Folgeseiten oder vor dem Body liegt -> an den Anfang des Bodys
                         const isBeforeBody = orphanPos < page.bodyPos;
                         const insertPos = (isSubjectOnFollowPage || isBeforeBody) ? page.bodyPos + 1 : page.bodyEnd - 1;
-                        
+
                         tr.insert(insertPos, newNode);
                         // Lösche das Original auf Seiten-Ebene
                         tr.delete(tr.mapping.map(orphanPos), tr.mapping.map(orphanPos + orphanNode.nodeSize));
-                        editor.view.dispatch(tr);
+                        dispatchLayout(tr);
                         return true; // Erneut paginieren
                     } catch (e) {
                         console.error('Error auto-fixing orphan/subject paragraph:', e);
@@ -1456,23 +2621,23 @@ export const DocumentTemplates = () => {
                 }
             }
         }
-        
+
         for (let i = 0; i < pages.length; i++) {
             const page = pages[i];
             const domPage = domPages[i];
             const domBody = domPage.querySelector('.letter-body');
             if (!domBody) continue;
-            
+
             // OVERFLOW: scrollHeight > clientHeight = Content ist geclippt
             // Kein Toleranz-Puffer → Overflow triggert sofort beim ersten Enter
             const isOverflowing = domBody.scrollHeight > domBody.clientHeight;
-            
+
             if (isOverflowing && page.bodyNode && page.bodyNode.childCount > 1) {
                 const lastChild = page.bodyNode.lastChild;
                 const lastChildEnd = page.bodyEnd - 1;
                 const lastChildStart = lastChildEnd - lastChild.nodeSize;
                 const nextIdx = i + 1;
-                
+
                 try {
                     if (nextIdx >= pages.length) {
                         // Keine nächste Seite → neue Seite erstellen
@@ -1486,7 +2651,7 @@ export const DocumentTemplates = () => {
                         const tr = editor.state.tr;
                         tr.insert(page.end, newPage);
                         tr.delete(lastChildStart, lastChildEnd);
-                        editor.view.dispatch(tr);
+                        dispatchLayout(tr);
                         return true;
                     } else {
                         // Nächste Seite existiert → AM ANFANG des Bodys der nächsten Seite einfügen
@@ -1494,55 +2659,50 @@ export const DocumentTemplates = () => {
                         const nextPage = pages[nextIdx];
                         const tr = editor.state.tr;
                         const targetPos = nextPage.bodyPos !== -1 ? nextPage.bodyPos + 1 : nextPage.pos + 1;
-                        
+
                         tr.insert(targetPos, lastChild.copy(lastChild.content));
                         tr.delete(lastChildStart, lastChildEnd);
-                        editor.view.dispatch(tr);
+                        dispatchLayout(tr);
                         return true;
                     }
                 } catch (e) {
                     console.error('Pagination overflow error:', e);
                 }
             }
-            
-            // Overflow mit nur einem Kind → kann nicht weiter aufgeteilt werden
+
+            // Overflow mit nur einem Kind → kann nicht weiter aufgeteilt werden (wird gemeldet)
             if (isOverflowing && page.bodyNode && page.bodyNode.childCount <= 1) continue;
-            
+
+            const pageScale = getPageScale(domPage);
+
             // UNDERFLOW: Prüfe ob Content von nächster Seite zurückpasst
             const nextIdx = i + 1;
             if (nextIdx < pages.length) {
                 const nextPage = pages[nextIdx];
                 const domNextPage = domPages[nextIdx];
-                
+
                 // Layout-Sync erzwingen für genaue Messungen
                 domBody.offsetHeight;
-                
+
                 // Prüfe ob es Seiten-Level-Absätze gibt (vor Strukturelementen)
                 // Diese wurden durch Overflow VOR Überschriften eingefügt
-                const structuralTypes = ['letterBody', 'letterFooter', 'letterSender', 
+                const structuralTypes = ['letterBody', 'letterFooter', 'letterSender',
                     'letterSubject', 'letterObject', 'letterHeaderRow', 'letterRecipient', 'letterDate'];
                 const firstPageChild = nextPage.node.firstChild;
                 const isPageLevelParagraph = firstPageChild && !structuralTypes.includes(firstPageChild.type.name);
-                
+
                 if (isPageLevelParagraph) {
                     // Seiten-Level-Absatz → zurückholen wenn Platz da ist
                     const firstDomChild = domNextPage?.firstElementChild;
                     if (firstDomChild) {
-                        const childHeight = firstDomChild.getBoundingClientRect().height;
-                        // Freien Platz berechnen: Abstand vom letzten Kind zum Body-Ende
-                        const bodyRect = domBody.getBoundingClientRect();
-                        const lastBodyChild = domBody.lastElementChild;
-                        const contentBottom = lastBodyChild ? lastBodyChild.getBoundingClientRect().bottom : bodyRect.top;
-                        const freeSpace = bodyRect.top + domBody.clientHeight - contentBottom;
-                        
-                        if (childHeight > 0 && childHeight <= freeSpace) {
+                        if (fitsIntoBody(domBody, firstDomChild, pageScale)) {
                             try {
                                 const fcStart = nextPage.pos + 1;
                                 const fcEnd = fcStart + firstPageChild.nodeSize;
                                 const tr = editor.state.tr;
                                 tr.insert(page.bodyEnd - 1, firstPageChild.copy(firstPageChild.content));
                                 tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
-                                editor.view.dispatch(tr);
+                                dispatchLayout(tr);
                                 return true;
                             } catch (e) {
                                 console.error('Pagination underflow (page-level) error:', e);
@@ -1550,21 +2710,14 @@ export const DocumentTemplates = () => {
                         }
                     }
                 }
-                
+
                 // Body-Underflow (auch wenn kein page-level paragraph, IMMER prüfen)
                 const domNextBody = domPages[nextIdx]?.querySelector('.letter-body');
-                
+
                 if (domNextBody && nextPage.bodyNode && nextPage.bodyNode.childCount > 0) {
                     const firstChildDom = domNextBody.firstElementChild;
                     if (firstChildDom) {
-                        const childHeight = firstChildDom.getBoundingClientRect().height;
-                        // Freien Platz berechnen: Abstand vom letzten Kind zum Body-Ende
-                        const bodyRect2 = domBody.getBoundingClientRect();
-                        const lastBodyChild2 = domBody.lastElementChild;
-                        const contentBottom2 = lastBodyChild2 ? lastBodyChild2.getBoundingClientRect().bottom : bodyRect2.top;
-                        const freeSpace = bodyRect2.top + domBody.clientHeight - contentBottom2;
-                        
-                        if (childHeight > 0 && childHeight <= freeSpace) {
+                        if (fitsIntoBody(domBody, firstChildDom, pageScale)) {
                             try {
                                 const firstChild = nextPage.bodyNode.firstChild;
                                 const fcStart = nextPage.bodyPos + 1;
@@ -1572,7 +2725,7 @@ export const DocumentTemplates = () => {
                                 const tr = editor.state.tr;
                                 tr.insert(page.bodyEnd - 1, firstChild.copy(firstChild.content));
                                 tr.delete(tr.mapping.map(fcStart), tr.mapping.map(fcEnd));
-                                editor.view.dispatch(tr);
+                                dispatchLayout(tr);
                                 return true;
                             } catch (e) {
                                 console.error('Pagination underflow error:', e);
@@ -1590,7 +2743,7 @@ export const DocumentTemplates = () => {
                     })();
                     if (!hasPageLevelContent) {
                         try {
-                            editor.view.dispatch(editor.state.tr.delete(nextPage.pos, nextPage.end));
+                            dispatchLayout(editor.state.tr.delete(nextPage.pos, nextPage.end));
                             return true;
                         } catch (e) {
                             console.error('Error deleting empty page:', e);
@@ -1599,32 +2752,51 @@ export const DocumentTemplates = () => {
                 }
             }
         }
-        
+
         return false;
     };
-    
-    // Führt die Pagination in einer Schleife aus bis keine Änderung mehr nötig ist
-    const runFullPagination = (editor) => {
+
+    // Seiten, deren Body überläuft und nicht weiter aufgeteilt werden kann (würde abgeschnitten)
+    const detectOverflowPages = (editor) => {
+        const domPages = editor.view.dom.querySelectorAll(':scope > .letter-page');
+        const hit = [];
+        domPages.forEach((domPage, idx) => {
+            const domBody = domPage.querySelector('.letter-body');
+            if (domBody && domBody.scrollHeight > domBody.clientHeight + 1) hit.push(idx + 1);
+        });
+        setOverflowPages(prev => (prev.length === hit.length && prev.every((v, i) => v === hit[i]) ? prev : hit));
+    };
+
+    // Führt die Pagination in einer Schleife aus bis keine Änderung mehr nötig ist.
+    // Zeitbudget je Frame; lange Dokumente werden in Folge-Frames fertig umbrochen.
+    const runFullPagination = (editor, round = 0) => {
         if (!editor?.view?.dom) return;
         let changed = true;
         let iterations = 0;
-        const MAX_ITERATIONS = 30; // Schutz gegen Endlosschleifen
-        while (changed && iterations < MAX_ITERATIONS) {
+        const startedAt = performance.now();
+        const MAX_ITERATIONS = 400; // Schutz gegen Endlosschleifen
+        while (changed && iterations < MAX_ITERATIONS && performance.now() - startedAt < 120) {
             changed = runPaginationStep(editor);
             iterations++;
         }
+        if (changed && round < 8) {
+            requestAnimationFrame(() => runFullPagination(editor, round + 1));
+            return;
+        }
         // Page-Count aktualisieren
         let count = 0;
-        editor.state.doc.descendants(node => {
+        editor.state.doc.forEach(node => {
             if (node.type.name === 'letterPage') count++;
         });
         setPageCount(count > 0 ? count : 1);
+        detectOverflowPages(editor);
     };
 
     // Scroll corresponding page into view
     const scrollToPage = (pageNumber) => {
         setPreviewPage(pageNumber);
-        const domPages = document.querySelectorAll(showLivePreview ? '.preview-live-container > .letter-page' : '.ProseMirror > .letter-page');
+        const container = showLivePreview ? previewContainerRef.current : editor?.view?.dom;
+        const domPages = container ? container.querySelectorAll(':scope > .letter-page') : [];
         if (domPages && domPages[pageNumber - 1]) {
             domPages[pageNumber - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
@@ -1633,7 +2805,7 @@ export const DocumentTemplates = () => {
     // Pagination side-effect hooks
     useEffect(() => {
         if (!editor || loading) return;
-        
+
         let timeoutId = null;
         let rafId = null;
         let cancelled = false;
@@ -1642,7 +2814,10 @@ export const DocumentTemplates = () => {
             runFullPagination(editor);
         };
 
-        const onUpdateOrSelection = () => {
+        // Nur bei Inhaltsänderungen (nicht bei jeder Cursorbewegung) und nicht als Reaktion
+        // auf die eigenen Seitenumbruch-Transaktionen
+        const onDocUpdate = ({ transaction } = {}) => {
+            if (transaction?.getMeta(PAGINATION_META)) return;
             if (timeoutId) clearTimeout(timeoutId);
             // Debounce 50ms – Balance zwischen Reaktivität und Performance
             timeoutId = setTimeout(() => {
@@ -1650,8 +2825,7 @@ export const DocumentTemplates = () => {
             }, 50);
         };
 
-        editor.on('update', onUpdateOrSelection);
-        editor.on('selectionUpdate', onUpdateOrSelection);
+        editor.on('update', onDocUpdate);
 
         // Webfont 'Open Sans' aktiv anfordern – sonst misst die Pagination mit der
         // Ersatzschrift (Arial); der Druck nutzt Open Sans und bricht Seiten anders um.
@@ -1680,8 +2854,7 @@ export const DocumentTemplates = () => {
             cancelled = true;
             if (timeoutId) clearTimeout(timeoutId);
             if (rafId) cancelAnimationFrame(rafId);
-            editor.off('update', onUpdateOrSelection);
-            editor.off('selectionUpdate', onUpdateOrSelection);
+            editor.off('update', onDocUpdate);
         };
     }, [editor, loading, showLivePreview]);
 
@@ -1734,187 +2907,269 @@ export const DocumentTemplates = () => {
         }
     }, [loading, editor]);
 
+    // Eigene Vorlagen: je Typ nur EIN Eintrag (Portfolio-Fassung vor Standard-Fassung)
+    const customTemplateEntries = useMemo(() => {
+        const byType = new Map();
+        (customTemplates || []).forEach(row => {
+            if (!row || !row.type) return;
+            const list = byType.get(row.type) || [];
+            list.push(row);
+            byType.set(row.type, list);
+        });
+        const entries = [];
+        byType.forEach((rows, type) => {
+            const preferred = rows.find(r => effectivePortfolioId !== 'global' && r.portfolio_id === effectivePortfolioId)
+                || rows.find(r => !r.portfolio_id && r.user_id === userId)
+                || rows[0];
+            entries.push({ type, row: preferred, versions: rows.length });
+        });
+        return entries;
+    }, [customTemplates, effectivePortfolioId, userId]);
+
     // Combine system and custom templates
     const allTemplates = [
         ...SYSTEM_TEMPLATES.map(t => ({ ...t, isCustom: false })),
-        ...customTemplates.map(t => ({ 
-            id: t.type,
-            label: t.name,
+        ...customTemplateEntries.map(({ type, row, versions }) => ({
+            id: type,
+            label: row.name,
             hasSubject: true,
-            variables: getVariablesForCategory(t.category),
-            group: t.category || 'Eigene',
+            variables: getVariablesForCategory(row.category),
+            group: row.category || 'Eigene',
             isCustom: true,
-            dbId: t.id
+            dbId: row.id,
+            rowUserId: row.user_id,
+            rowPortfolioId: row.portfolio_id,
+            versions
         }))
     ];
 
-    const activeConfig = allTemplates.find(t => t.id === activeType) || allTemplates[0];
+    const activeConfigExact = allTemplates.find(t => t.id === activeType) || null;
+    const activeConfig = activeConfigExact || allTemplates[0];
+
+    // Werte aller Platzhalter (Editor-Anzeige, Live-Vorschau und Druck nutzen dieselben)
+    const variableValues = useMemo(() => buildVariableValues({
+        tenant: tenantState,
+        portfolio: activePortfolio,
+        manualValues,
+        group: activeConfig?.group,
+        dates
+    }), [tenantState, activePortfolio, manualValues, activeConfig?.group, dates]);
+
+    // NodeViews der Platzhalter im Editor mit den aktuellen Werten neu zeichnen und neu umbrechen
+    useEffect(() => {
+        chipValuesRef.current = variableValues;
+        chipViewsRef.current.forEach(render => render());
+        if (!editor || loading) return undefined;
+        const rafId = requestAnimationFrame(() => runFullPagination(editor));
+        return () => cancelAnimationFrame(rafId);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [variableValues, editor, loading]);
+
+    // Ungespeicherte Änderungen: beim Schließen/Neuladen des Browser-Tabs nachfragen
+    useEffect(() => {
+        if (!isDirty) return undefined;
+        const onBeforeUnload = (event) => {
+            event.preventDefault();
+            event.returnValue = '';
+        };
+        window.addEventListener('beforeunload', onBeforeUnload);
+        return () => window.removeEventListener('beforeunload', onBeforeUnload);
+    }, [isDirty]);
+
+    // Rückfrage vor Aktionen, die den Editor-Inhalt ersetzen würden
+    const confirmDiscardChanges = () => {
+        if (!isDirty) return true;
+        return window.confirm('Diese Vorlage hat ungespeicherte Änderungen. Änderungen verwerfen und fortfahren?');
+    };
+
+    const switchTemplate = (type) => {
+        if (type === activeType) return;
+        if (!confirmDiscardChanges()) return;
+        setIsDirty(false);
+        setActiveType(type);
+    };
+
+    const switchPortfolio = (portfolioId) => {
+        if (portfolioId === effectivePortfolioId) return;
+        if (!confirmDiscardChanges()) return;
+        setIsDirty(false);
+        setPortfolioTouched(true);
+        setSelectedPortfolioId(portfolioId);
+    };
 
     // Load templates from DB
     const fetchCustomTemplates = async () => {
-        if (!user) return;
+        if (!userId) return;
         try {
             let query = supabase
                 .from('document_templates')
                 .select('*')
                 .eq('is_custom', true);
 
-            const portfolioIds = (portfolios || []).map(p => p.id);
+            const portfolioIds = portfolioList.map(p => p.id);
             if (portfolioIds.length > 0) {
-                query = query.or(`user_id.eq.${user.id},portfolio_id.in.(${portfolioIds.join(',')})`);
+                query = query.or(`user_id.eq.${userId},portfolio_id.in.(${portfolioIds.join(',')})`);
             } else {
-                query = query.eq('user_id', user.id);
+                query = query.eq('user_id', userId);
             }
 
             const { data, error } = await query;
-            if (!error && data) {
-                setCustomTemplates(data);
+            if (error) {
+                console.error('Error fetching custom templates:', error);
+                return;
             }
+            setCustomTemplates(data || []);
         } catch (e) {
             console.error('Error fetching custom templates:', e);
         }
     };
 
+    // Setzt den Editor-Inhalt beim Laden (nicht in der Undo-Historie, keine "Änderung")
+    const setEditorContentFromLoad = (html) => {
+        if (!editor) return;
+        editor.chain()
+            .setMeta(TEMPLATE_LOAD_META, true)
+            .setMeta('addToHistory', false)
+            .setContent(html || '')
+            .run();
+    };
 
     const loadTemplate = async () => {
-        if (!user) return;
+        if (!userId || !editor) return;
+        // Veraltete Antworten (schneller Vorlagen-/Portfoliowechsel) werden verworfen
+        const seq = ++loadSeqRef.current;
+        const isCurrent = () => seq === loadSeqRef.current;
+        const type = activeType;
+        const portfolioFilter = effectivePortfolioId === 'global' ? null : effectivePortfolioId;
+        const isCustomType = String(type).startsWith('custom_');
+
         setLoading(true);
+        setLoadError(null);
+        setLoadNotice(null);
+
+        const applyLoaded = (contentHtml, loadedSubject, loadSource, dbDataFound) => {
+            if (!isCurrent()) return;
+            const normalized = dbDataFound ? normalizeStoredTemplateHtml(contentHtml || '') : { html: contentHtml || '', changes: [] };
+            setSubject(loadedSubject || '');
+            setEditorContentFromLoad(normalized.html);
+            // Nur mit Schreibrecht als "ungespeichert" markieren (Mitnutzer können nicht speichern)
+            setIsDirty(normalized.changes.length > 0 && canWriteTemplates);
+            setLoadNotice(normalized.changes.length > 0 ? normalized.changes : null);
+            setDiagnostics({
+                lastError: null,
+                loadSource,
+                dbDataFound,
+                contentLength: (contentHtml || '').length
+            });
+        };
+
+        const fetchGlobal = async () => {
+            const { data, error } = await supabase
+                .from('document_templates')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('type', type)
+                .is('portfolio_id', null)
+                .maybeSingle();
+            if (error) throw error;
+            return data;
+        };
+
         try {
-            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
-            
             let query = supabase
                 .from('document_templates')
                 .select('*')
-                .eq('type', activeType);
+                .eq('type', type);
 
             if (portfolioFilter) {
                 query = query.eq('portfolio_id', portfolioFilter);
             } else {
-                query = query.eq('user_id', user.id).is('portfolio_id', null);
+                query = query.eq('user_id', userId).is('portfolio_id', null);
             }
 
-
             const { data, error } = await query.maybeSingle();
-
+            if (!isCurrent()) return;
             if (error) throw error;
 
             if (data) {
-                setSubject(data.subject || '');
-                editor?.commands.setContent(data.content_html || '');
-                setDiagnostics({
-                    lastError: null,
-                    loadSource: 'Datenbank (Portfolio)',
-                    dbDataFound: true,
-                    contentLength: (data.content_html || '').length
-                });
-            } else {
-                // If it's a custom template, it must be in the DB.
-                // If not found in portfolio-specific, try global custom template
-                if (activeConfig.isCustom) {
-                    if (portfolioFilter) {
-                        const { data: globalCustom, error: globalCustomError } = await supabase
-                            .from('document_templates')
-                            .select('*')
-                            .eq('user_id', user.id)
-                            .eq('type', activeType)
-                            .is('portfolio_id', null)
-                            .maybeSingle();
-                        if (globalCustomError) console.error('Fehler beim Laden der globalen Eigene-Vorlage:', globalCustomError);
-                        if (globalCustom) {
-                            setSubject(globalCustom.subject || '');
-                            editor?.commands.setContent(globalCustom.content_html || '');
-                            setDiagnostics({
-                                lastError: null,
-                                loadSource: 'Datenbank (Eigene Global)',
-                                dbDataFound: true,
-                                contentLength: (globalCustom.content_html || '').length
-                            });
-                            setLoading(false);
-                            return;
-                        }
-                    }
-                    editor?.commands.setContent('');
-                    setSubject('');
-                    setDiagnostics({
-                        lastError: null,
-                        loadSource: 'Datenbank (Eigene Leer)',
-                        dbDataFound: false,
-                        contentLength: 0
-                    });
-                    setLoading(false);
+                applyLoaded(data.content_html, data.subject, portfolioFilter ? 'Datenbank (Portfolio)' : 'Datenbank (Global)', true);
+                return;
+            }
+
+            // Portfolio-Fassung fehlt: globale Fassung verwenden (gilt auch für eigene Vorlagen)
+            if (portfolioFilter) {
+                const globalData = await fetchGlobal();
+                if (!isCurrent()) return;
+                if (globalData) {
+                    applyLoaded(globalData.content_html, globalData.subject, isCustomType ? 'Datenbank (Eigene Global)' : 'Datenbank (Global)', true);
                     return;
                 }
-
-                // If portfolio-specific template doesn't exist, try loading the global template first
-                if (portfolioFilter) {
-                    const { data: globalData, error: globalDataError } = await supabase
-                        .from('document_templates')
-                        .select('*')
-                        .eq('user_id', user.id)
-                        .eq('type', activeType)
-                        .is('portfolio_id', null)
-                        .maybeSingle();
-                    if (globalDataError) console.error('Fehler beim Laden der globalen Vorlage:', globalDataError);
-                    if (globalData) {
-                        setSubject(globalData.subject || '');
-                        editor?.commands.setContent(globalData.content_html || '');
-                        setDiagnostics({
-                            lastError: null,
-                            loadSource: 'Datenbank (Global)',
-                            dbDataFound: true,
-                            contentLength: (globalData.content_html || '').length
-                        });
-                        setLoading(false);
-                        return;
-                    }
-                }
-                
-                // Fallback to hardcoded defaults
-                const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
-                setSubject(defaultVal.subject || '');
-                editor?.commands.setContent(defaultVal.content_html || '');
-                setDiagnostics({
-                    lastError: null,
-                    loadSource: 'Hardcoded Default',
-                    dbDataFound: false,
-                    contentLength: (defaultVal.content_html || '').length
-                });
             }
+
+            if (isCustomType) {
+                // Eigene Vorlage ohne gespeicherten Inhalt
+                applyLoaded('', '', 'Datenbank (Eigene Leer)', false);
+                return;
+            }
+
+            // Fallback to hardcoded defaults
+            const defaultVal = DEFAULT_TEMPLATES[type] || { subject: '', content_html: '' };
+            applyLoaded(defaultVal.content_html, defaultVal.subject, 'Hardcoded Default', false);
         } catch (error) {
+            if (!isCurrent()) return;
             console.error('Error loading template:', error);
-            // Fallback to hardcoded defaults in case of DB or network error
-            const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
-            setSubject(defaultVal.subject || '');
-            editor?.commands.setContent(defaultVal.content_html || '');
-            setDiagnostics({
-                lastError: error.message || String(error),
-                loadSource: 'Fehler-Fallback (Default)',
-                dbDataFound: false,
-                contentLength: (defaultVal.content_html || '').length
-            });
+            // Standardtext anzeigen, aber Speichern sperren: sonst würde eine evtl. vorhandene
+            // eigene Fassung beim nächsten Speichern überschrieben.
+            const defaultVal = isCustomType ? { subject: '', content_html: '' } : (DEFAULT_TEMPLATES[type] || { subject: '', content_html: '' });
+            applyLoaded(defaultVal.content_html, defaultVal.subject, 'Fehler-Fallback (Default)', false);
+            const message = error?.message || String(error);
+            setLoadError(message);
+            setDiagnostics(prev => ({ ...prev, lastError: message }));
         } finally {
-            setLoading(false);
+            if (isCurrent()) setLoading(false);
         }
     };
 
     useEffect(() => {
-        if (user) {
+        if (userId) {
             fetchCustomTemplates();
         }
-    }, [user, portfolios]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [userId, portfolios]);
 
-
+    // Nur bei Wechsel von Vorlage, Portfolio oder Nutzer neu laden – NICHT bei Token-Erneuerung,
+    // Tab-Wechsel oder Aktualisierung der Vorlagenliste (sonst gingen ungespeicherte Änderungen verloren).
     useEffect(() => {
-        if (editor) {
+        if (editor && userId) {
             setSelectedVariable(null);
             loadTemplate();
         }
-    }, [activeType, selectedPortfolioId, editor, user, customTemplates]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeType, effectivePortfolioId, editor, userId]);
+
+    const reloadTemplate = () => {
+        if (!confirmDiscardChanges()) return;
+        setIsDirty(false);
+        loadTemplate();
+    };
 
     // Save template
     const handleSave = async () => {
-        if (!user || !editor) return;
-        const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+        if (!userId || !editor) return;
+        if (loadError) {
+            alert('Die Vorlage konnte nicht geladen werden. Speichern ist gesperrt, damit Ihre gespeicherte Fassung nicht überschrieben wird. Bitte die Vorlage neu laden.');
+            return;
+        }
+        if (!activeConfigExact) {
+            alert('Diese Vorlage wurde nicht gefunden. Bitte die Seite neu laden.');
+            return;
+        }
+        if (!canWriteTemplates) {
+            alert('Portfolio-Vorlagen kann nur der Eigentümer des Portfolios ändern.');
+            return;
+        }
+        const config = activeConfigExact;
+        const portfolioFilter = effectivePortfolioId === 'global' ? null : effectivePortfolioId;
         // Hinweis: Wird eine global/standardmäßig geladene Vorlage gespeichert, während ein Portfolio gewählt ist,
         // entsteht eine portfolio-spezifische Kopie (die globale Vorlage bleibt unverändert).
         if (portfolioFilter && diagnostics.loadSource && diagnostics.loadSource !== 'Datenbank (Portfolio)') {
@@ -1923,6 +3178,7 @@ export const DocumentTemplates = () => {
         }
         setSaving(true);
         try {
+            // Neutral serialisiert: nur Kennung und Bezeichnung der Platzhalter
             const contentHtml = editor.getHTML();
 
             let query = supabase
@@ -1933,45 +3189,64 @@ export const DocumentTemplates = () => {
             if (portfolioFilter) {
                 query = query.eq('portfolio_id', portfolioFilter);
             } else {
-                query = query.eq('user_id', user.id).is('portfolio_id', null);
+                query = query.eq('user_id', userId).is('portfolio_id', null);
             }
 
+            const { data: existingRecord, error: existingError } = await query.maybeSingle();
+            if (existingError) throw existingError;
 
-            const { data: existingRecord } = await query.maybeSingle();
-
-            const payload = {
-                user_id: user.id,
-                portfolio_id: portfolioFilter,
-                type: activeType,
-                name: activeConfig.label || activeConfig.name,
-                subject: activeConfig.hasSubject ? subject : null,
+            const fields = {
+                name: config.label || config.name,
+                subject: config.hasSubject ? subject : null,
                 content_html: contentHtml,
-                is_custom: activeConfig.isCustom,
-                category: activeConfig.group,
+                is_custom: config.isCustom,
+                category: config.group,
                 updated_at: new Date().toISOString()
             };
 
-            let error;
             if (existingRecord) {
-                const { error: updateError } = await supabase
+                // Globale Vorlage: user_id bleibt unverändert. Portfolio-Vorlage: Eigentümer ist der
+                // Portfolio-Eigentümer (nur er darf speichern) – kein Besitzwechsel zu Mitnutzern.
+                const updatePayload = portfolioFilter ? { ...fields, user_id: userId } : fields;
+                const { data: updated, error: updateError } = await supabase
                     .from('document_templates')
-                    .update(payload)
-                    .eq('id', existingRecord.id);
-                error = updateError;
+                    .update(updatePayload)
+                    .eq('id', existingRecord.id)
+                    .select('id');
+                if (updateError) throw updateError;
+                if (!updated || updated.length === 0) {
+                    throw new Error('Die Vorlage wurde nicht geändert (keine Berechtigung oder die Vorlage existiert nicht mehr).');
+                }
             } else {
-                const { error: insertError } = await supabase
+                const { data: inserted, error: insertError } = await supabase
                     .from('document_templates')
-                    .insert([payload]);
-                error = insertError;
+                    .insert([{ ...fields, user_id: userId, portfolio_id: portfolioFilter, type: activeType }])
+                    .select('id');
+                if (insertError) {
+                    if (insertError.code === '23505') {
+                        throw new Error('Zwischenzeitlich wurde eine andere Fassung dieser Vorlage gespeichert. Bitte die Vorlage neu laden.');
+                    }
+                    throw insertError;
+                }
+                if (!inserted || inserted.length === 0) {
+                    throw new Error('Die Vorlage konnte nicht angelegt werden (keine Berechtigung).');
+                }
             }
 
-
-            if (error) throw error;
-            await fetchCustomTemplates();
+            setIsDirty(false);
+            setLoadNotice(null);
+            setDiagnostics(prev => ({
+                ...prev,
+                lastError: null,
+                loadSource: portfolioFilter ? 'Datenbank (Portfolio)' : 'Datenbank (Global)',
+                dbDataFound: true,
+                contentLength: contentHtml.length
+            }));
+            if (config.isCustom) await fetchCustomTemplates();
             alert('Vorlage erfolgreich gespeichert.');
         } catch (error) {
             console.error('Error saving template:', error);
-            alert('Fehler beim Speichern der Vorlage: ' + error.message);
+            alert('Fehler beim Speichern der Vorlage: ' + (error?.message || String(error)));
         } finally {
             setSaving(false);
         }
@@ -1980,27 +3255,37 @@ export const DocumentTemplates = () => {
     // Reset to defaults (system templates only)
     const handleReset = () => {
         if (activeConfig.isCustom) return;
-        if (window.confirm('Möchten Sie diese Vorlage wirklich auf die Standardeinstellungen zurücksetzen? Ungespeicherte Änderungen gehen verloren.')) {
+        if (window.confirm('Möchten Sie diese Vorlage wirklich auf die Standardeinstellungen zurücksetzen? Ungespeicherte Änderungen gehen verloren. Gespeichert wird erst mit „Speichern“.')) {
             const defaultVal = DEFAULT_TEMPLATES[activeType] || { subject: '', content_html: '' };
             setSubject(defaultVal.subject || '');
-            editor?.commands.setContent(defaultVal.content_html || '');
+            setEditorContentFromLoad(defaultVal.content_html || '');
+            // Zurücksetzen ist eine (noch nicht gespeicherte) Änderung
+            setIsDirty(true);
         }
     };
 
     // Create custom template
     const handleCreateTemplate = async () => {
+        if (creating) return;
         if (!newTemplateName.trim()) return alert('Name fehlt.');
+        if (!userId) return;
+        if (!canWriteTemplates) {
+            alert('Im Portfolio eines anderen Eigentümers können keine Vorlagen angelegt werden. Bitte „Standard (alle Portfolios)“ wählen.');
+            return;
+        }
+        if (!confirmDiscardChanges()) return;
+        setCreating(true);
         try {
-            const portfolioFilter = selectedPortfolioId === 'global' ? null : selectedPortfolioId;
+            const portfolioFilter = effectivePortfolioId === 'global' ? null : effectivePortfolioId;
             const customType = `custom_${Date.now()}`;
 
             const payload = {
-                user_id: user.id,
+                user_id: userId,
                 portfolio_id: portfolioFilter,
                 type: customType,
                 name: newTemplateName.trim(),
                 subject: newTemplateSubject.trim() || null,
-                content_html: `<p>Sehr geehrte/r <span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
+                content_html: `<p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
                 is_custom: true,
                 category: newTemplateCategory,
                 updated_at: new Date().toISOString()
@@ -2018,36 +3303,67 @@ export const DocumentTemplates = () => {
             setNewTemplateCategory('Eigene');
 
             await fetchCustomTemplates();
+            setIsDirty(false);
             setActiveType(customType);
         } catch (error) {
-            alert('Fehler beim Erstellen der Vorlage: ' + error.message);
+            alert('Fehler beim Erstellen der Vorlage: ' + (error?.message || String(error)));
+        } finally {
+            setCreating(false);
         }
     };
 
-    // Delete custom template
-    const handleDeleteTemplate = async (templateId, type) => {
-        if (!window.confirm('Möchten Sie diese Vorlage wirklich löschen?')) return;
+    // Delete custom template (die angezeigte Fassung)
+    const handleDeleteTemplate = async (template) => {
+        if (!template?.dbId) return;
+        const portfolioName = template.rowPortfolioId
+            ? (portfolioList.find(p => p.id === template.rowPortfolioId)?.name || 'Portfolio')
+            : null;
+        const versionText = portfolioName
+            ? `die Fassung für das Portfolio „${portfolioName}“`
+            : 'die Standard-Fassung (alle Portfolios)';
+        const moreText = template.versions > 1 ? ' Weitere Fassungen dieser Vorlage bleiben erhalten.' : '';
+        if (!window.confirm(`Möchten Sie ${versionText} der Vorlage „${template.label}“ wirklich löschen?${moreText}`)) return;
         try {
-            const { error } = await supabase
+            const { data: deleted, error } = await supabase
                 .from('document_templates')
                 .delete()
-                .eq('id', templateId);
+                .eq('id', template.dbId)
+                .select('id');
 
             if (error) throw error;
-
+            if (!deleted || deleted.length === 0) {
+                throw new Error('Die Vorlage wurde nicht gelöscht (keine Berechtigung oder bereits entfernt).');
+            }
 
             await fetchCustomTemplates();
-            if (type === activeType) setActiveType('payment_reminder');
+            if (template.id === activeType && template.versions <= 1) {
+                // zur nächsten Vorlage derselben Gruppe wechseln (sonst erste Systemvorlage)
+                const sameGroup = allTemplates.filter(t => t.group === template.group && t.id !== template.id);
+                setIsDirty(false);
+                setActiveType(sameGroup[0]?.id || SYSTEM_TEMPLATES[0].id);
+            } else if (template.id === activeType) {
+                // andere Fassung derselben Vorlage laden
+                setIsDirty(false);
+                loadTemplate();
+            }
         } catch (error) {
-            alert('Fehler beim Löschen: ' + error.message);
+            alert('Fehler beim Löschen: ' + (error?.message || String(error)));
         }
+    };
+
+    // Löschen nur für eigene Fassungen bzw. als Portfolio-Eigentümer anbieten
+    const canDeleteTemplate = (template) => {
+        if (!template?.isCustom || !template.dbId) return false;
+        if (template.rowUserId === userId) return true;
+        const owner = template.rowPortfolioId ? portfolioList.find(p => p.id === template.rowPortfolioId)?.user_id : null;
+        return !!owner && owner === userId;
     };
 
     // Insert variable chip into editor
     const insertVariable = (variable) => {
         setSelectedVariable(variable);
-        if (!editor) return;
-        
+        if (!editor || showLivePreview) return;
+
         editor.chain().focus().insertContent({
             type: 'mention',
             attrs: {
@@ -2057,1011 +3373,55 @@ export const DocumentTemplates = () => {
         }).insertContent(' ').run();
     };
 
-    // Handle Image insertion (Base64)
-    // Handle Image insertion (Base64)
-    const handleImageInsert = (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            if (file.size > 2 * 1024 * 1024) {
-                alert('Das Bild darf maximal 2MB groß sein.');
-                return;
-            }
-            const reader = new FileReader();
-            reader.onload = (readerEvent) => {
-                const base64 = readerEvent.target.result;
-                editor?.chain().focus().setImage({ src: base64 }).run();
-            };
-            reader.readAsDataURL(file);
-        }
-    };
-
-    // Get resolved content with mock data filled in
-    const getResolvedHtml = (contentHtml) => {
-        if (!contentHtml) return '';
-        
-        const mockData = {
-            mieter_name: "Max Mustermann",
-            mieter_anrede: "Sehr geehrter Herr Mustermann",
-            mieter_adresse: "Musterweg 12<br/>12345 Musterstadt",
-            objekt_name: "Wohnpark Sonnenseite",
-            einheit_name: "Wohnung EG links",
-            objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
-            vermieter_name: selectedPortfolioCompany || selectedPortfolioName || "ImmoControlpro Vermieter GmbH",
-            vermieter_bankverbindung: selectedPortfolioBank && selectedPortfolioIban && selectedPortfolioBic
-                ? `${selectedPortfolioBank}<br/>IBAN: ${selectedPortfolioIban}<br/>BIC: ${selectedPortfolioBic}`
-                : "Sparkasse Musterstadt<br/>IBAN: DE89 5005 0400 1122 3344 55<br/>BIC: SOLODEM1MUC",
-            offener_betrag: "908,70 €",
-            zahlungsfrist_datum: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('de-DE'),
-            verzugstage: "14",
-            mahnstufe: "2",
-            zinsbetrag: "3,70 €",
-            abrechnungsjahr: "2025",
-            abrechnungszeitraum: "01.01.2025 - 31.12.2025",
-            nutzungszeitraum: "01.01.2025 - 31.12.2025",
-            gesamtkosten_mieter: "550,00 €",
-            vorauszahlungs_betrag: "400,00 €",
-            saldo_betrag: "150,00 €",
-            saldo_art: "Nachzahlung",
-            gast_name: "Dr. Sabine Sommer",
-            gast_adresse: "Lindenallee 7<br/>50667 Köln",
-            buchungszeitraum: "15.05.2026 - 22.05.2026",
-            gaeste_anzahl: "2",
-            rechnungsnummer: "RE-2026-0412",
-            rechnungsdatum: new Date().toLocaleDateString('de-DE'),
-            netto_betrag: "560,75 €",
-            mwst_betrag: "39,25 €",
-            brutto_betrag: "600,00 €",
-            original_rechnungsnummer: "RE-2026-0399",
-            aktuelle_miete: "650,00 €",
-            neue_miete: "715,00 €",
-            erhoehungs_betrag: "65,00 €",
-            erhoehungs_datum: "01.08.2026",
-            zustimmungs_frist: "31.07.2026",
-            einzug_datum: "01.06.2026",
-            vermieter_adresse: selectedPortfolioAddress || "Musterstraße 42, 12345 Musterstadt",
-            vermieter_email: selectedPortfolioEmail,
-            vermieter_telefon: selectedPortfolioPhone,
-            vermieter_steuernummer: selectedPortfolioTax || "123/456/78901",
-            vermieter_ust_id: selectedPortfolioVat || "DE123456789",
-            rechnungs_datum: new Date().toLocaleDateString('de-DE'),
-            erstellungsdatum: new Date().toLocaleDateString('de-DE'),
-            mieter_nachname: "Mustermann",
-            storno_nummer: "ST-2026-0001",
-            kaution_betrag: "1.950,00 €"
-        };
-
-        if (location.state?.tenant) {
-            const t = location.state.tenant;
-            const fullName = `${t.first_name || ''} ${t.last_name || ''}`.trim();
-            if (fullName) {
-                mockData.mieter_name = fullName;
-                mockData.mieter_nachname = t.last_name || mockData.mieter_nachname;
-                const salute = t.gender === 'female' ? 'Sehr geehrte Frau' : t.gender === 'male' ? 'Sehr geehrter Herr' : 'Sehr geehrte(r) Frau/Herr';
-                mockData.mieter_anrede = t.last_name ? `${salute} ${t.last_name}` : mockData.mieter_anrede;
-            }
-            if (t.street) {
-                mockData.mieter_adresse = `${t.street} ${t.house_number || ''}<br/>${t.zip || ''} ${t.city || ''}`;
-            }
-            mockData.objekt_name = t.objekt_name || mockData.objekt_name;
-            mockData.einheit_name = t.einheit_name || mockData.einheit_name;
-            if (t.street) {
-                mockData.objekt_adresse = `${t.street} ${t.house_number || ''}, ${t.zip || ''} ${t.city || ''}`.trim();
-            }
-            if (t.cold_rent) {
-                const rentVal = parseFloat(t.cold_rent) || 0;
-                // Nur die TATSÄCHLICHE aktuelle Miete einsetzen. Die neue Miete und der
-                // Erhöhungsbetrag werden bewusst NICHT automatisch berechnet (keine erfundenen 15 %),
-                // da dies rechtlich relevante Werte sind, die der Nutzer selbst festlegen muss.
-                mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-            }
-            const einzug = t.einzug_datum || t.start_date || t.move_in || t.lease_start;
-            if (einzug) {
-                try { mockData.einzug_datum = new Date(einzug).toLocaleDateString('de-DE'); } catch (_) { /* ungültiges Datum ignorieren */ }
-            }
-        }
-
-        const mockTables = {
-            forderungs_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Fälligkeit</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Bezeichnung</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Soll-Betrag</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ist-Betrag</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundmiete + NK-Vorauszahlung Mai 2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">850,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="4" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamtrückstand:</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">855,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            forderungs_detail_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Datum / Zeitraum</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Posten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Soll</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Haben</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinssatz</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinsen</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">01.05.2026 - 31.05.2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miete Mai 2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,12% p.a.</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">3,70 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">853,70 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">12.05.2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; -"></td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="6" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme inkl. Zinsen:</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">858,70 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            nebenkosten_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Kostenart</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Gesamtkosten</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundsteuer</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1.200,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Müllabfuhr & Straßenreinigung</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">800,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">100,00 €</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Heizkosten (Schätzung)</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2.400,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohnfläche (m²)</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">300,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="3" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">550,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            nebenkosten_detail_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Betriebskostenart</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtkosten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Abwasser</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">600,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Personenmonate</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">75,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Frischwasser</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">900,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wassermesser (m³)</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">125,00 €</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Allgemeinstrom</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">350,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">45,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="3" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">245,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            positions_tabelle: `
-                <table class="invoice-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 5%; text-align: center;">Pos</th>
-                      <th style="width: 55%;">Beschreibung</th>
-                      <th style="width: 10%; text-align: right;">Menge</th>
-                      <th style="width: 15%; text-align: right;">Einzel</th>
-                      <th style="width: 15%; text-align: right;">MwSt</th>
-                      <th style="width: 15%; text-align: right;">Gesamt</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">1</td>
-                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Übernachtungskosten FEWO (7 Nächte)</td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">1</td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">420,56 €</td>
-                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">450,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">2</td>
-                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Endreinigung Pauschal</td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">74,77 €</td>
-                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">80,00 €</td>
-                    </tr>
-                    <tr>
-                      <td style="text-align: center; padding: 8px 0; vertical-align: top;">3</td>
-                      <td style="text-align: left; padding: 8px 10px; word-wrap: break-word; vertical-align: top;">Kurbeitrag (Gästetax) Erwachsen</td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;"></td>
-                      <td style="text-align: right; padding: 8px 0; white-space: nowrap; vertical-align: top;">65,42 €</td>
-                      <td style="text-align: right; padding: 8px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 8px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">70,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div class="totals" style="display: flex; justify-content: flex-end; margin-bottom: 20mm;">
-                  <div class="totals-box" style="width: 80mm;">
-                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                      <span>Summe Netto</span>
-                      <span>560,75 €</span>
-                    </div>
-                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                      <span>zzgl. 7% MwSt</span>
-                      <span>39,25 €</span>
-                    </div>
-                    <div class="t-row final" style="display: flex; justify-content: space-between; margin-bottom: 4px; border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt;">
-                      <span>Gesamtbetrag</span>
-                      <span>600,00 €</span>
-                    </div>
-                  </div>
-                </div>`
-        };
-
-        // Defensiv: Niemals einen Render-Crash (leere Seite) verursachen.
-        // Bei einem Fehler wird der Roh-Inhalt zurückgegeben, statt die App abstürzen zu lassen.
+    // Bild / Unterschrift einfügen (PNG/JPEG/WebP/GIF, wird bei Bedarf verkleinert)
+    const handleImageInsert = async (e) => {
+        const input = e.target;
+        const file = input.files && input.files[0];
+        // Auswahl zurücksetzen, damit dieselbe Datei erneut gewählt werden kann
+        input.value = '';
+        if (!file || !editor) return;
         try {
-            // Parse the HTML using DOMParser to accurately replace complex components without regex parsing bugs
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(contentHtml, 'text/html');
-
-            // Find all span tags that represent our mentions/placeholders
-            const mentions = doc.querySelectorAll('span[data-type="mention"]');
-            if (mentions && typeof mentions.forEach === 'function') {
-                mentions.forEach(mention => {
-                    const id = mention.getAttribute('data-id');
-                    if (!id) return;
-
-                    if (mockTables[id] !== undefined) {
-                        const tempDiv = doc.createElement('div');
-                        tempDiv.innerHTML = mockTables[id].trim();
-                        const replacementNode = tempDiv.firstElementChild;
-                        if (replacementNode && mention.parentNode) {
-                            mention.parentNode.replaceChild(replacementNode, mention);
-                        }
-                    } else if (mockData[id] !== undefined) {
-                        const tempSpan = doc.createElement('span');
-                        tempSpan.innerHTML = mockData[id];
-                        if (mention.parentNode) {
-                            mention.parentNode.replaceChild(tempSpan, mention);
-                        }
-                    }
-                });
-            }
-
-            let res = doc.body.innerHTML;
-
-            // Fallback or text-based bracket placeholders: {key}
-            Object.keys(mockTables).forEach(key => {
-                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-                res = res.replace(textRegex, mockTables[key]);
-            });
-
-            Object.keys(mockData).forEach(key => {
-                const textRegex = new RegExp(`\\{${key}\\}`, 'g');
-                res = res.replace(textRegex, mockData[key]);
-            });
-
-            return res;
+            const src = await prepareImageForEmbedding(file);
+            if (src) editor.chain().focus().setImage({ src }).run();
         } catch (err) {
-            console.error('getResolvedHtml fehlgeschlagen – zeige Roh-Inhalt:', err);
-            return contentHtml || '';
+            alert(err?.message || 'Das Bild konnte nicht eingefügt werden.');
         }
     };
 
-    // Open A4 print preview window with replaced placeholders and tables
+    // Druck-/PDF-Vorschau: gleiche Auflösung wie die Live-Vorschau, getrenntes Fenster
+    const openPrintPreview = (resolved) => {
+        const notices = [];
+        if (!isRealMode) {
+            notices.push({ type: 'info', text: 'Vorschau mit Beispieldaten (gelb markiert) – kein versandfertiges Dokument. Echte Dokumente erstellst du über „Dokument erstellen“ beim Mieter.' });
+        }
+        if (resolved.missing.length > 0) {
+            notices.push({ type: 'warning', text: `Fehlende Angaben (im Dokument rot markiert): ${resolved.missing.join(', ')}` });
+        }
+        if (resolved.error) {
+            notices.push({ type: 'warning', text: 'Die Platzhalter konnten nicht aufgelöst werden.' });
+        }
+        openPrintWindow({
+            bodyHtml: resolved.html,
+            title: `PDF Vorschau - ${activeConfig.label || activeConfig.name || 'Dokument'}`,
+            notices
+        });
+    };
+
     const handlePrintPreview = () => {
         if (!editor) return;
+        const resolved = resolveTemplateHtml(editor.getHTML(), variableValues);
+        if (isRealMode && (resolved.missing.length > 0 || resolved.error)) {
+            // Erst warnen; der Klick auf "Trotzdem öffnen" öffnet das Fenster (Pop-up-Blocker)
+            setPrintWarning({ missing: resolved.missing, error: resolved.error });
+            return;
+        }
+        openPrintPreview(resolved);
+    };
 
-        // 1. Editor-Inhalt holen
-        let contentHtml = editor.getHTML();
-
-        // 2. Realistische Testdaten definieren
-        const mockData = {
-            mieter_name: "Max Mustermann",
-            mieter_anrede: "Sehr geehrter Herr Mustermann",
-            mieter_adresse: "Musterweg 12<br/>12345 Musterstadt",
-            objekt_name: "Wohnpark Sonnenseite",
-            einheit_name: "Wohnung EG links",
-            objekt_adresse: "Musterstraße 42, 12345 Musterstadt",
-            vermieter_name: selectedPortfolioCompany || selectedPortfolioName || "ImmoControlpro Vermieter GmbH",
-            vermieter_bankverbindung: selectedPortfolioBank && selectedPortfolioIban && selectedPortfolioBic
-                ? `${selectedPortfolioBank}<br/>IBAN: ${selectedPortfolioIban}<br/>BIC: ${selectedPortfolioBic}`
-                : "Sparkasse Musterstadt<br/>IBAN: DE89 5005 0400 1122 3344 55<br/>BIC: SOLODEM1MUC",
-            offener_betrag: "908,70 €",
-            zahlungsfrist_datum: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('de-DE'),
-            verzugstage: "14",
-            mahnstufe: "2",
-            zinsbetrag: "3,70 €",
-            abrechnungsjahr: "2025",
-            abrechnungszeitraum: "01.01.2025 - 31.12.2025",
-            nutzungszeitraum: "01.01.2025 - 31.12.2025",
-            gesamtkosten_mieter: "550,00 €",
-            vorauszahlungs_betrag: "400,00 €",
-            saldo_betrag: "150,00 €",
-            saldo_art: "Nachzahlung",
-            gast_name: "Dr. Sabine Sommer",
-            gast_adresse: "Lindenallee 7<br/>50667 Köln",
-            buchungszeitraum: "15.05.2026 - 22.05.2026",
-            gaeste_anzahl: "2",
-            rechnungsnummer: "RE-2026-0412",
-            rechnungsdatum: new Date().toLocaleDateString('de-DE'),
-            netto_betrag: "560,75 €",
-            mwst_betrag: "39,25 €",
-            brutto_betrag: "600,00 €",
-            original_rechnungsnummer: "RE-2026-0399",
-            aktuelle_miete: "650,00 €",
-            neue_miete: "715,00 €",
-            erhoehungs_betrag: "65,00 €",
-            erhoehungs_datum: "01.08.2026",
-            zustimmungs_frist: "31.07.2026",
-            einzug_datum: "01.06.2026",
-            vermieter_adresse: selectedPortfolioAddress || "Musterstraße 42, 12345 Musterstadt",
-            vermieter_email: selectedPortfolioEmail,
-            vermieter_telefon: selectedPortfolioPhone,
-            vermieter_steuernummer: selectedPortfolioTax || "123/456/78901",
-            vermieter_ust_id: selectedPortfolioVat || "DE123456789",
-            rechnungs_datum: new Date().toLocaleDateString('de-DE'),
-            erstellungsdatum: new Date().toLocaleDateString('de-DE'),
-            mieter_nachname: "Mustermann",
-            storno_nummer: "ST-2026-0001",
-            kaution_betrag: "1.950,00 €"
-        };
-
-        if (location.state?.tenant) {
-            const t = location.state.tenant;
-            const fullName = `${t.first_name || ''} ${t.last_name || ''}`.trim();
-            if (fullName) {
-                mockData.mieter_name = fullName;
-                mockData.mieter_nachname = t.last_name || mockData.mieter_nachname;
-                const salute = t.gender === 'female' ? 'Sehr geehrte Frau' : t.gender === 'male' ? 'Sehr geehrter Herr' : 'Sehr geehrte(r) Frau/Herr';
-                mockData.mieter_anrede = t.last_name ? `${salute} ${t.last_name}` : mockData.mieter_anrede;
-            }
-            if (t.street) {
-                mockData.mieter_adresse = `${t.street} ${t.house_number || ''}<br/>${t.zip || ''} ${t.city || ''}`;
-            }
-            mockData.objekt_name = t.objekt_name || mockData.objekt_name;
-            mockData.einheit_name = t.einheit_name || mockData.einheit_name;
-            if (t.street) {
-                mockData.objekt_adresse = `${t.street} ${t.house_number || ''}, ${t.zip || ''} ${t.city || ''}`.trim();
-            }
-            if (t.cold_rent) {
-                const rentVal = parseFloat(t.cold_rent) || 0;
-                // Nur die TATSÄCHLICHE aktuelle Miete einsetzen. Die neue Miete und der
-                // Erhöhungsbetrag werden bewusst NICHT automatisch berechnet (keine erfundenen 15 %),
-                // da dies rechtlich relevante Werte sind, die der Nutzer selbst festlegen muss.
-                mockData.aktuelle_miete = rentVal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-            }
-            const einzug = t.einzug_datum || t.start_date || t.move_in || t.lease_start;
-            if (einzug) {
-                try { mockData.einzug_datum = new Date(einzug).toLocaleDateString('de-DE'); } catch (_) { /* ungültiges Datum ignorieren */ }
-            }
-        }
-
-        // Realistische Tabellenvorlagen definieren
-        const mockTables = {
-            forderungs_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Fälligkeit</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Bezeichnung</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Soll-Betrag</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ist-Betrag</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundmiete + NK-Vorauszahlung Mai 2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">850,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">04.05.2026</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="4" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Gesamtrückstand:</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">855,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            forderungs_detail_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Datum / Zeitraum</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Posten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Soll</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Haben</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinssatz</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Zinsen</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Offen</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">01.05.2026 - 31.05.2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miete Mai 2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">850,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,12% p.a.</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">3,70 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">853,70 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">12.05.2026</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Mahngebühr Stufe 1</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">5,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">0,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">-</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">5,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="6" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme inkl. Zinsen:</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #dc2626;">858,70 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            nebenkosten_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 10pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Kostenart</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Gesamtkosten</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1;">Verteilerschlüssel</th>
-                      <th style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Ihr Anteil</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Grundsteuer</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">1.200,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">150,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Müllabfuhr & Straßenreinigung</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">800,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">100,00 €</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Heizkosten (Schätzung)</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">2.400,00 €</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1;">Wohnfläche (m²)</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">300,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="3" style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">Summe Umlagefähige Kosten:</td>
-                      <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: right;">550,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            nebenkosten_detail_tabelle: `
-                <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt;">
-                  <thead>
-                    <tr style="background-color: #f1f5f9; border-bottom: 2px solid #cbd5e1; text-align: left;">
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Betriebskostenart</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtkosten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1;">Umlageschlüssel</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamteinheiten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Ihre Einheiten</th>
-                      <th style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Anteil €</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Grundsteuer</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.200,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Quadratmeter</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">400,00 m²</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">50,00 m²</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">150,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wohngebäudeversicherung</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">800,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Miteigentumsanteil</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.000,00 MEA</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">125,00 MEA</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">100,00 €</td>
-                    </tr>
-                    <tr>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Kabelgebühren / TV</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">600,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Wohneinheiten</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">6 WE</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1 WE</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">100,00 €</td>
-                    </tr>
-                    <tr style="background-color: #f8fafc;">
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Hausmeister & Gartenpflege</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">1.600,00 €</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1;">Quadratmeter</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">400,00 m²</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">50,00 m²</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; font-weight: bold;">200,00 €</td>
-                    </tr>
-                    <tr style="font-weight: bold; background-color: #f1f5f9;">
-                      <td colspan="5" style="padding: 6px; border: 1px solid #cbd5e1; text-align: right;">Gesamtsumme Umlage:</td>
-                      <td style="padding: 6px; border: 1px solid #cbd5e1; text-align: right; color: #1e3a8a;">550,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>`,
-            
-            positions_tabelle: `
-                <table class="invoice-table" style="width: 100%; border-collapse: collapse; margin-bottom: 8mm;">
-                  <thead>
-                    <tr>
-                      <th style="width: 8%; text-align: center; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Pos.</th>
-                      <th style="width: 42%; text-align: left; border-bottom: 2px solid #000; padding: 8px 10px; font-weight: 700;">Bezeichnung</th>
-                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Einzelpreis</th>
-                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Netto</th>
-                      <th style="width: 5%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">MwSt</th>
-                      <th style="width: 15%; text-align: right; border-bottom: 2px solid #000; padding: 8px 0; font-weight: 700;">Brutto</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr style="border-bottom: 1px solid #ddd;">
-                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">1</td>
-                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">3 Übernachtungen in Ferienwohnung "Bergblick"<br/><small style="color: #64748b;">Zeitraum: 15.05.2026 - 18.05.2026</small></td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">150,00 €</td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">420,56 €</td>
-                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">450,00 €</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #ddd;">
-                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">2</td>
-                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">Endreinigung Pauschal</td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;"></td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">74,77 €</td>
-                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">80,00 €</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #ddd;">
-                      <td style="text-align: center; padding: 6px 0; vertical-align: top;">3</td>
-                      <td style="text-align: left; padding: 6px 10px; word-wrap: break-word; vertical-align: top;">Kurbeitrag (Gästetax) Erwachsen</td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;"></td>
-                      <td style="text-align: right; padding: 6px 0; white-space: nowrap; vertical-align: top;">65,42 €</td>
-                      <td style="text-align: right; padding: 6px 0; vertical-align: top;">7%</td>
-                      <td style="text-align: right; padding: 6px 0; font-weight: bold; white-space: nowrap; vertical-align: top;">70,00 €</td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div class="totals" style="display: flex; justify-content: flex-end; margin-bottom: 20mm;">
-                  <div class="totals-box" style="width: 80mm;">
-                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                      <span>Summe Netto</span>
-                      <span>560,75 €</span>
-                    </div>
-                    <div class="t-row" style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                      <span>zzgl. 7% MwSt</span>
-                      <span>39,25 €</span>
-                    </div>
-                    <div class="t-row final" style="display: flex; justify-content: space-between; margin-bottom: 4px; border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt;">
-                      <span>Gesamtbetrag</span>
-                      <span>600,00 €</span>
-                    </div>
-                  </div>
-                </div>`
-        };
-
-        // Ersetzungsmethode für Mentions & Text-Platzhalter
-        const replacePlaceholders = (htmlStr) => {
-            return getResolvedHtml(htmlStr);
-        };
-
-        const previewHtml = replacePlaceholders(contentHtml);
-
-        // Neues Fenster öffnen und das PDF-Layout reinschreiben
-        const win = window.open('', '_blank');
-        if (win) {
-            win.document.write(`<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <title>PDF Vorschau - ${activeConfig.label || activeConfig.name || 'Dokument'}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        @page {
-            size: A4;
-            margin: 0;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif;
-            color: #000000;
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-        }
-        @media print {
-            .no-print { display: none !important; }
-            html, body {
-                width: 210mm;
-                height: 297mm;
-                margin: 0 !important;
-                padding: 0 !important;
-                overflow: hidden;
-                background: #ffffff;
-            }
-            .letter-page {
-                box-shadow: none !important;
-                border: none !important;
-                margin: 0 !important;
-                padding: 20mm 20mm 35mm 25mm !important;
-                width: 210mm !important;
-                height: 297mm !important;
-                overflow: hidden !important;
-                page-break-after: always !important;
-                page-break-inside: avoid !important;
-            }
-            .letter-page:last-child {
-                page-break-after: avoid !important;
-            }
-        }
-        @media screen {
-            body { 
-                padding: 30px 20px; 
-                background: #f1f5f9;
-            }
-            .letter-page {
-                margin: 0 auto 30px;
-                border-radius: 4px;
-            }
-        }
-        
-        /* DIN 5008 A4 Page Style */
-        .letter-page {
-            width: 210mm;
-            height: 297mm;
-            min-height: 297mm;
-            max-height: 297mm;
-            padding: 20mm 20mm 35mm 25mm;
-            background: #ffffff !important;
-            color: #000000 !important;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-            border: 1px solid #cbd5e1;
-            font-size: 11pt;
-            line-height: 1.5;
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            text-align: left;
-            overflow: hidden;
-            box-sizing: border-box;
-        }
-        
-        .letter-page > p {
-            min-height: 1.2em;
-            margin-bottom: 1em;
-        }
-        /* Leerzeilen: gleiche Höhe wie gefüllte Absätze */
-        .letter-page p:empty,
-        .letter-page p:has(> br:only-child),
-        .letter-body p:empty,
-        .letter-body p:has(> br:only-child) {
-            min-height: 1.6em;
-            margin-bottom: 1em !important;
-        }
-        
-        .letter-sender {
-            font-size: 8pt;
-            color: #555555;
-            border-bottom: 1px solid #cccccc;
-            padding-bottom: 2mm;
-            margin-bottom: 5mm;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .letter-sender:has(+ hr),
-        .letter-sender:has(+ .editor-hr) {
-            border-bottom: none !important;
-            padding-bottom: 0 !important;
-            margin-bottom: 3mm !important;
-        }
-
-        .editor-hr,
-        .letter-page hr {
-            border: none;
-            border-top: 1px solid #cccccc;
-            margin: 2mm 0 5mm 0;
-            width: 100%;
-            display: block;
-            height: 0;
-        }
-        
-        .letter-header-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 10mm;
-        }
-        
-        .letter-recipient {
-            width: 85mm;
-            font-size: 10pt;
-            line-height: 1.4;
-            color: #111111;
-            text-align: left;
-        }
-        
-        .letter-date {
-            font-size: 10pt;
-            color: #333333;
-            text-align: right;
-        }
-        
-        .letter-subject {
-            font-size: 13pt;
-            font-weight: bold;
-            margin-bottom: 4mm;
-            color: #000000;
-            text-align: left;
-        }
-        
-        .letter-object {
-            font-size: 10pt;
-            color: #444444;
-            margin-bottom: 8mm;
-            padding-bottom: 2mm;
-            border-bottom: 1px dotted #e2e8f0;
-            text-align: left;
-        }
-        
-        .letter-body {
-            width: 100% !important;
-            max-width: 100% !important;
-            box-sizing: border-box !important;
-            flex-grow: 1;
-            flex-shrink: 1;
-            min-height: 0;
-            overflow: hidden;
-            margin-bottom: 12mm;
-            font-size: 11pt;
-            line-height: 1.6;
-            text-align: left;
-        }
-        
-        .letter-body p {
-            margin-bottom: 1em !important;
-            min-height: 1.6em;
-        }
-        
-        .letter-footer {
-            position: absolute !important;
-            bottom: 10mm !important;
-            left: 25mm !important;
-            right: 20mm !important;
-            height: 18mm !important;
-            margin-top: 0 !important;
-            display: flex !important;
-            justify-content: space-between !important;
-            border-top: 1px solid #dddddd !important;
-            padding-top: 3mm !important;
-            font-size: 8pt !important;
-            color: #666666 !important;
-            line-height: 1.4 !important;
-            text-align: left !important;
-            box-sizing: border-box !important;
-            background-color: #ffffff !important;
-        }
-        
-        .footer-col {
-            width: 30%;
-        }
-
-        /* Der Editor (ProseMirror) zeigt manuelle Zeilenumbrüche (literale \n) via
-           white-space:pre-wrap an. Das Druckfenster nutzt sonst white-space:normal und
-           zieht sie auf eine Zeile zusammen (z.B. Bankverbindung in der Fußzeile).
-           Hier für die DIN-5008-Textfelder angleichen – Tabellen bewusst ausgenommen. */
-        .letter-sender,
-        .letter-recipient,
-        .letter-date,
-        .letter-subject,
-        .letter-object,
-        .letter-footer,
-        .footer-col {
-            white-space: pre-wrap;
-        }
-
-        /* Platzhalter-Chips (z.B. mehrzeilige Bankverbindung mit echten \n):
-           index.css ist im Druckfenster NICHT geladen, daher hier die Chip-Regeln
-           replizieren. Im Druck als sauberer Text (ohne blaue Editor-Chip-Box),
-           aber mit erhaltenen Zeilenumbrüchen via white-space:pre-wrap. */
-        .variable-chip {
-            white-space: pre-wrap !important;
-            background: transparent !important;
-            border: none !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            color: inherit !important;
-            font-weight: normal !important;
-            font-family: inherit !important;
-        }
-        .variable-chip.multiline-variable {
-            display: inline-block !important;
-            max-width: 100% !important;
-            vertical-align: top !important;
-            line-height: 1.4 !important;
-        }
-        .variable-chip.expanded-variable-table {
-            display: block !important;
-            width: 100% !important;
-        }
-
-        /* Tabellen im Editor */
-        table:not(.invoice-table) {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
-            background-color: transparent !important;
-            border: 1px solid #cbd5e1 !important;
-        }
-        table:not(.invoice-table) th {
-            background-color: #f1f5f9 !important;
-            color: #0f172a !important;
-            font-weight: bold;
-            border: 1px solid #cbd5e1 !important;
-            padding: 8px 12px !important;
-        }
-        table:not(.invoice-table) td {
-            border: 1px solid #cbd5e1 !important;
-            padding: 8px 12px !important;
-            color: #334155 !important;
-            background-color: transparent !important;
-        }
-        
-        /* Stile für Fewo-Rechnungen */
-        .invoice-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 8mm;
-            background-color: transparent !important;
-            border: none !important;
-        }
-        .invoice-table th {
-            border-bottom: 2px solid #000 !important;
-            border-top: none !important;
-            border-left: none !important;
-            border-right: none !important;
-            text-align: left;
-            padding: 8px 0 !important;
-            font-weight: 700;
-            background-color: transparent !important;
-            color: #000000 !important;
-        }
-        .invoice-table td {
-            border-bottom: 1px solid #ddd !important;
-            border-top: none !important;
-            border-left: none !important;
-            border-right: none !important;
-            padding: 8px 0 !important;
-            color: #000000 !important;
-            background-color: transparent !important;
-        }
-        .totals {
-            display: flex;
-            justify-content: flex-end;
-            margin-bottom: 20mm;
-        }
-        .totals-box {
-            width: 80mm;
-        }
-        .t-row {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 4px;
-            color: #000000;
-        }
-        .t-row.final {
-            border-top: 2px solid #000;
-            padding-top: 4px;
-            margin-top: 4px;
-            font-weight: 700;
-            font-size: 11pt;
-            color: #000000;
-        }
-    </style>
-</head>
-<body>
-    <!-- Print button (screen only) -->
-    <div class="no-print" style="text-align:center;padding:12px 0 20px;">
-        <button onclick="window.print()" style="padding:10px 28px;font-size:14px;font-weight:600;background:#0ea5e9;color:white;border:none;border-radius:8px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.15);">
-            🖨️ Als PDF drucken / speichern
-        </button>
-        <p style="margin-top:8px;font-size:12px;color:#64748b;">Drücke Strg+P oder klicke den Button. Wähle "Als PDF speichern" im Druckdialog.</p>
-    </div>
-
-    <div class="preview-content">
-        ${previewHtml}
-    </div>
-
-    <script>
-        // Automatisch den Druckdialog öffnen
-        setTimeout(() => {
-            window.print();
-        }, 500);
-    </script>
-</body>
-</html>`);
-            win.document.close();
-        }
+    const confirmPrintAnyway = () => {
+        setPrintWarning(null);
+        if (!editor) return;
+        openPrintPreview(resolveTemplateHtml(editor.getHTML(), variableValues));
     };
 
     // Categories groups list
@@ -3078,6 +3438,32 @@ export const DocumentTemplates = () => {
     // Filter templates to make sure we don't display empty groups
     const availableGroups = groups.filter(g => allTemplates.some(t => t.group === g));
     const activePage = Math.min(previewPage, pageCount);
+
+    // Bearbeitungs-Werkzeuge in der Live-Vorschau sperren (sie würden den unsichtbaren Entwurf ändern)
+    const editingDisabled = !editor || showLivePreview;
+    // Einmal pro Render statt einmal je Brief-Bereich
+    const presentSections = editor && !showLivePreview ? getPresentSections() : {};
+    // Live-Vorschau: aufgelöstes, maskiertes HTML (nur berechnet, wenn sichtbar)
+    const livePreviewSource = showLivePreview && editor ? editor.getHTML() : '';
+    const livePreview = useMemo(
+        () => (livePreviewSource ? resolveTemplateHtml(livePreviewSource, variableValues) : null),
+        [livePreviewSource, variableValues]
+    );
+    // Echtdaten-Modus: im Dokument verwendete Platzhalter ohne Wert (zum Eintragen)
+    const missingInputs = [];
+    if (isRealMode && editor && !loading) {
+        const baseValues = manualValues && Object.keys(manualValues).length > 0
+            ? buildVariableValues({ tenant: tenantState, portfolio: activePortfolio, manualValues: {}, group: activeConfig?.group, dates })
+            : variableValues;
+        collectUsedVariables(editor.state.doc).forEach((label, id) => {
+            if (!lookupVariable(baseValues, id)) missingInputs.push({ id, label, isTable: TABLE_VARIABLE_IDS.has(id), multiline: MULTILINE_VARIABLE_IDS.has(id) });
+        });
+    }
+    const missingStillOpen = missingInputs.filter(item => item.isTable || isBlank(manualValues[item.id]));
+    const tenantDisplayName = tenantState ? (joinParts([tenantState.first_name, tenantState.last_name], ' ') || 'Mieter') : '';
+    const templateHint = isRealMode ? TEMPLATE_HINTS[activeType] : null;
+    const landlordMissing = !activePortfolio;
+    void editorTick; // Re-Render-Auslöser für Toolbar-Status und Platzhalter-Liste
 
     return (
         <Card title="Schreibvorlagen verwalten" subtitle="Passe hier die automatischen Anschreiben, Mahnstufen, Verträge und Rechnungs-Texte nach deinen Vorstellungen an oder erstelle freie Briefe.">
@@ -3167,6 +3553,52 @@ export const DocumentTemplates = () => {
                 .preview-live-container .footer-col {
                     width: 30%;
                 }
+                ${LETTER_CONTENT_CSS}
+                /* Platzhalter im Editor: hervorgehoben, aber ohne eigene Abstände/Schriftgröße,
+                   damit der Seitenumbruch im Editor dem Druck entspricht (WYSIWYG). */
+                .ProseMirror .variable-chip {
+                    display: inline !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    border: none !important;
+                    border-radius: 2px !important;
+                    font-size: inherit !important;
+                    font-weight: inherit !important;
+                    font-family: inherit !important;
+                    line-height: inherit !important;
+                    white-space: normal !important;
+                    background-color: #e0f2fe !important;
+                    color: #0369a1 !important;
+                    box-shadow: 0 0 0 1px #bae6fd;
+                    cursor: grab !important;
+                }
+                .ProseMirror .variable-chip.expanded-variable-table {
+                    display: block !important;
+                    width: 100% !important;
+                    background-color: transparent !important;
+                    color: inherit !important;
+                    box-shadow: none;
+                    outline: 2px dashed #7dd3fc;
+                    outline-offset: 2px;
+                    user-select: none !important;
+                }
+                .ProseMirror .variable-chip .tpl-missing {
+                    color: #b91c1c !important;
+                }
+                .tpl-banner {
+                    display: flex;
+                    gap: 10px;
+                    align-items: flex-start;
+                    padding: 10px 14px;
+                    border-radius: 8px;
+                    font-size: 0.85rem;
+                    line-height: 1.45;
+                    margin-bottom: 1rem;
+                }
+                .tpl-banner-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; }
+                .tpl-banner-warning { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; }
+                .tpl-banner-error { background: #fee2e2; border: 1px solid #fca5a5; color: #7f1d1d; }
+                .tpl-banner button { cursor: pointer; }
                 @media (max-width: 1450px) {
                     .letter-page {
                         zoom: 0.85;
@@ -3187,9 +3619,9 @@ export const DocumentTemplates = () => {
             <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <span style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Portfolio-Auswahl:</span>
-                    <select 
-                        value={selectedPortfolioId} 
-                        onChange={e => setSelectedPortfolioId(e.target.value)}
+                    <select
+                        value={effectivePortfolioId}
+                        onChange={e => switchPortfolio(e.target.value)}
                         style={{ 
                             padding: '6px 12px', 
                             borderRadius: '6px', 
@@ -3208,15 +3640,59 @@ export const DocumentTemplates = () => {
                     </div>
                 </div>
 
-                <Button 
-                    variant="primary" 
-                    size="sm" 
-                    icon={Plus} 
+                <Button
+                    variant="primary"
+                    size="sm"
+                    icon={Plus}
                     onClick={() => setIsCreateModalOpen(true)}
+                    disabled={!canWriteTemplates}
+                    title={canWriteTemplates ? undefined : 'Im Portfolio eines anderen Eigentümers können keine Vorlagen angelegt werden.'}
                 >
                     Neue Vorlage
                 </Button>
             </div>
+
+            {/* Echtdaten-Modus ("Dokument erstellen" beim Mieter) */}
+            {isRealMode && (
+                <div className="tpl-banner tpl-banner-info">
+                    <Info size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                    <div>
+                        <strong>Dokument für {tenantDisplayName}</strong>
+                        {tenantState?.einheit_name ? ` (${tenantState.einheit_name})` : ''}: Die Platzhalter werden mit den echten Mieter- und Vertragsdaten gefüllt. Fehlende Angaben sind rot markiert und werden nicht durch Beispielwerte ersetzt – trage sie unten ein.
+                        {landlordMissing && (
+                            <div style={{ marginTop: '4px', fontWeight: 600 }}>
+                                Bitte oben das Portfolio des Mieters wählen – sonst fehlen Vermieter-Name, Anschrift, Kontakt und Bankverbindung.
+                            </div>
+                        )}
+                        {templateHint && (
+                            <div style={{ marginTop: '4px' }}>{templateHint}</div>
+                        )}
+                    </div>
+                </div>
+            )}
+            {!canWriteTemplates && (
+                <div className="tpl-banner tpl-banner-warning">
+                    <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                    <div>Nur Lesezugriff: Die Vorlagen dieses Portfolios kann nur der Eigentümer des Portfolios ändern.</div>
+                </div>
+            )}
+            {loadError && (
+                <div className="tpl-banner tpl-banner-error">
+                    <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                    <div style={{ flex: 1 }}>
+                        Die Vorlage konnte nicht geladen werden. Angezeigt wird der Standardtext; <strong>Speichern ist gesperrt</strong>, damit Ihre gespeicherte Fassung nicht überschrieben wird.
+                    </div>
+                    <Button size="sm" variant="secondary" onClick={reloadTemplate}>Erneut laden</Button>
+                </div>
+            )}
+            {loadNotice && (
+                <div className="tpl-banner tpl-banner-warning">
+                    <Info size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                    <div>
+                        Diese gespeicherte Vorlage wurde beim Laden automatisch bereinigt: {loadNotice.join('; ')}. Bitte prüfen und speichern, um die Bereinigung zu übernehmen.
+                    </div>
+                </div>
+            )}
 
             <div className="templates-layout-grid">
                 {/* Left side: Navigation of templates & Variable Library */}
@@ -3253,7 +3729,7 @@ export const DocumentTemplates = () => {
                                         }}
                                     >
                                         <button
-                                            onClick={() => setActiveType(t.id)}
+                                            onClick={() => switchTemplate(t.id)}
                                             style={{
                                                 flex: 1,
                                                 display: 'flex',
@@ -3275,9 +3751,9 @@ export const DocumentTemplates = () => {
                                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.label}</span>
                                         </button>
                                         
-                                        {t.isCustom && (
+                                        {canDeleteTemplate(t) && (
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t.dbId, t.id); }}
+                                                onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t); }}
                                                 title="Vorlage löschen"
                                                 style={{
                                                     background: 'none',
@@ -3325,7 +3801,7 @@ export const DocumentTemplates = () => {
                                     ['letter-body', 'Brieftext / Inhalt'],
                                     ['letter-footer', 'Fußzeile']
                                 ].map(([secClass, label]) => {
-                                    const isPresent = getPresentSections()[secClass];
+                                    const isPresent = presentSections[secClass];
                                     return (
                                         <div key={secClass} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', background: 'var(--surface-color)', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
                                             <span style={{ fontSize: '0.75rem', fontWeight: 500, color: isPresent ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
@@ -3382,7 +3858,9 @@ export const DocumentTemplates = () => {
                                     onClick={() => setSelectedVariable(v)}
                                     draggable="true"
                                     onDragStart={(e) => {
-                                        e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'mention', id: v.id, label: v.label }));
+                                        const payload = JSON.stringify({ type: 'mention', id: v.id });
+                                        e.dataTransfer.setData(VARIABLE_DRAG_MIME, payload);
+                                        e.dataTransfer.setData('text/plain', payload);
                                     }}
                                     title={`Ziehe, um ${v.label} einzufügen. Klicke für Details.`}
                                     style={{
@@ -3459,9 +3937,8 @@ export const DocumentTemplates = () => {
                                 </p>
                                 {selectedVariable.id === 'mieter_anrede' && (
                                     <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px', listStyleType: 'disc', color: '#1e3a8a' }}>
-                                        <li>Frau: <em>„Sehr geehrte Frau [Nachname]“</em></li>
-                                        <li>Herr: <em>„Sehr geehrter Herr [Nachname]“</em></li>
-                                        <li>Mehrere/Sonstige: <em>„Sehr geehrte Damen und Herren“</em></li>
+                                        <li>Mit Mietername: <em>„Sehr geehrte/r [Vorname Nachname]“</em></li>
+                                        <li>Ohne Name: <em>„Sehr geehrte Damen und Herren“</em></li>
                                     </ul>
                                 )}
                                 <div style={{ fontSize: '0.7rem', color: '#4b5563', marginTop: '4px', fontFamily: 'monospace', backgroundColor: '#e2e8f0', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start' }}>
@@ -3518,6 +3995,52 @@ export const DocumentTemplates = () => {
                         </div>
                     ) : (
                         <>
+                            {/* Echtdaten-Modus: fehlende Angaben für dieses Dokument eintragen */}
+                            {isRealMode && missingInputs.length > 0 && (
+                                <div style={{ border: '1px solid #fcd34d', background: '#fffbeb', borderRadius: 'var(--radius-md)', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, fontSize: '0.875rem', color: '#78350f' }}>
+                                        <AlertTriangle size={16} />
+                                        Angaben für dieses Dokument ({missingStillOpen.length} offen)
+                                    </div>
+                                    <div style={{ fontSize: '0.78rem', color: '#78350f' }}>
+                                        Diese Platzhalter haben keinen Wert aus den Mieter- bzw. Portfoliodaten. Eingetragene Werte gelten nur für dieses Dokument und werden nicht in der Vorlage gespeichert.
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '8px' }}>
+                                        {missingInputs.map(item => (
+                                            <label key={item.id} style={{ display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                                <span style={{ fontWeight: 600 }}>{item.label}</span>
+                                                {item.isTable ? (
+                                                    <span style={{ fontSize: '0.72rem', color: '#92400e' }}>
+                                                        Tabelle – wird nur beim Erstellen aus dem jeweiligen Modul (Forderungen, Nebenkosten, Rechnungen) gefüllt.
+                                                    </span>
+                                                ) : item.multiline ? (
+                                                    <textarea
+                                                        rows={2}
+                                                        value={manualValues[item.id] || ''}
+                                                        onChange={e => updateManualValue(item.id, e.target.value)}
+                                                        style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '0.8rem', fontFamily: 'inherit', resize: 'vertical' }}
+                                                    />
+                                                ) : (
+                                                    <input
+                                                        type="text"
+                                                        value={manualValues[item.id] || ''}
+                                                        onChange={e => updateManualValue(item.id, e.target.value)}
+                                                        style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '0.8rem' }}
+                                                    />
+                                                )}
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                            {overflowPages.length > 0 && !showLivePreview && (
+                                <div className="tpl-banner tpl-banner-warning" style={{ marginBottom: 0 }}>
+                                    <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                                    <div>
+                                        Auf Seite {overflowPages.join(', ')} passt der Inhalt nicht in den Textbereich und würde im Druck abgeschnitten. Bitte den Absatz bzw. die Tabelle kürzen oder teilen.
+                                    </div>
+                                </div>
+                            )}
                             {/* Editor Toolbar & Canvas */}
                             <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)' }}>
 
@@ -3527,7 +4050,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().toggleBold().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('bold') ? '#e2e8f0' : 'transparent' }}
                                         title="Fett"
                                     >
@@ -3536,7 +4059,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().toggleItalic().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('italic') ? '#e2e8f0' : 'transparent' }}
                                         title="Kursiv"
                                      >
@@ -3545,7 +4068,7 @@ export const DocumentTemplates = () => {
                                      <button 
                                          type="button"
                                          onClick={() => editor?.chain().focus().toggleUnderline().run()} 
-                                         disabled={!editor}
+                                         disabled={editingDisabled}
                                          style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('underline') ? '#e2e8f0' : 'transparent' }}
                                          title="Unterstreichen"
                                      >
@@ -3556,6 +4079,7 @@ export const DocumentTemplates = () => {
 
                                      {/* Formatierung Dropdown */}
                                      <select
+                                         disabled={editingDisabled}
                                          onChange={(e) => {
                                              const val = e.target.value;
                                              if (val === 'p') editor?.chain().focus().setParagraph().run();
@@ -3589,7 +4113,7 @@ export const DocumentTemplates = () => {
                                      <button 
                                          type="button"
                                          onClick={() => editor?.chain().focus().setTextAlign('left').run()} 
-                                         disabled={!editor}
+                                         disabled={editingDisabled}
                                          style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'left' }) ? '#e2e8f0' : 'transparent' }}
                                          title="Linksbündig"
                                      >
@@ -3598,7 +4122,7 @@ export const DocumentTemplates = () => {
                                      <button 
                                          type="button"
                                          onClick={() => editor?.chain().focus().setTextAlign('center').run()} 
-                                         disabled={!editor}
+                                         disabled={editingDisabled}
                                          style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'center' }) ? '#e2e8f0' : 'transparent' }}
                                          title="Zentriert"
                                      >
@@ -3607,7 +4131,7 @@ export const DocumentTemplates = () => {
                                      <button 
                                          type="button"
                                          onClick={() => editor?.chain().focus().setTextAlign('right').run()} 
-                                         disabled={!editor}
+                                         disabled={editingDisabled}
                                          style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'right' }) ? '#e2e8f0' : 'transparent' }}
                                          title="Rechtsbündig"
                                      >
@@ -3616,7 +4140,7 @@ export const DocumentTemplates = () => {
                                      <button 
                                          type="button"
                                          onClick={() => editor?.chain().focus().setTextAlign('justify').run()} 
-                                         disabled={!editor}
+                                         disabled={editingDisabled}
                                          style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive({ textAlign: 'justify' }) ? '#e2e8f0' : 'transparent' }}
                                          title="Blocksatz"
                                      >
@@ -3659,6 +4183,9 @@ export const DocumentTemplates = () => {
 
 
                                                  onClick={() => editor?.chain().focus().setColor(color.hex).run()}
+
+
+                                                 disabled={editingDisabled}
 
 
                                                  style={{
@@ -3713,7 +4240,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().toggleBulletList().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('bulletList') ? '#e2e8f0' : 'transparent' }}
                                         title="Aufzählungsliste"
                                     >
@@ -3722,7 +4249,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().toggleOrderedList().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer', backgroundColor: editor?.isActive('orderedList') ? '#e2e8f0' : 'transparent' }}
                                         title="Nummerierte Liste"
                                     >
@@ -3735,7 +4262,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().setHorizontalRule().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
                                         title="Trennlinie einfügen"
                                     >
@@ -3748,16 +4275,16 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => document.getElementById('template-image-upload').click()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
                                         title="Bild / Unterschrift einfügen"
                                     >
                                         <ImageIcon size={16} />
                                     </button>
                                     <input 
-                                        id="template-image-upload" 
-                                        type="file" 
-                                        accept="image/*" 
+                                        id="template-image-upload"
+                                        type="file"
+                                        accept="image/png,image/jpeg,image/webp,image/gif"
                                         onChange={handleImageInsert} 
                                         style={{ display: 'none' }} 
                                     />
@@ -3767,7 +4294,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().undo().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
                                         title="Rückgängig"
                                     >
@@ -3776,7 +4303,7 @@ export const DocumentTemplates = () => {
                                     <button 
                                         type="button"
                                         onClick={() => editor?.chain().focus().redo().run()} 
-                                        disabled={!editor}
+                                        disabled={editingDisabled}
                                         style={{ padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
                                         title="Wiederholen"
                                     >
@@ -3807,12 +4334,19 @@ export const DocumentTemplates = () => {
                                             PDF-Vorschau
                                         </Button>
                                         {!activeConfig.isCustom && (
-                                            <Button variant="ghost" size="sm" icon={RotateCcw} onClick={handleReset} style={{ color: 'var(--text-secondary)' }}>
+                                            <Button variant="ghost" size="sm" icon={RotateCcw} onClick={handleReset} disabled={editingDisabled} style={{ color: 'var(--text-secondary)' }}>
                                                 Standard
                                             </Button>
                                         )}
-                                        <Button variant="primary" size="sm" icon={Save} onClick={handleSave} loading={saving}>
-                                            Speichern
+                                        <Button
+                                            variant="primary"
+                                            size="sm"
+                                            icon={Save}
+                                            onClick={handleSave}
+                                            disabled={saving || !!loadError || !canWriteTemplates}
+                                            title={loadError ? 'Speichern gesperrt: Die Vorlage konnte nicht geladen werden.' : (!canWriteTemplates ? 'Nur der Portfolio-Eigentümer kann diese Vorlage ändern.' : undefined)}
+                                        >
+                                            {saving ? 'Speichert…' : (isDirty ? 'Speichern *' : 'Speichern')}
                                         </Button>
                                     </div>
                                 </div>
@@ -4039,8 +4573,15 @@ export const DocumentTemplates = () => {
                                              </button>
                                          </div>
                                      )}
+                                     {showLivePreview && !isRealMode && livePreview?.hasExamples && (
+                                         <div className="tpl-banner tpl-banner-warning" style={{ width: '100%', marginBottom: 0 }}>
+                                             <Info size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                                             <div>Vorschau mit Beispieldaten (gelb markiert). Vermieterdaten stammen aus dem gewählten Portfolio, fehlende Angaben sind rot markiert. Echte Dokumente erstellst du über „Dokument erstellen“ beim Mieter.</div>
+                                         </div>
+                                     )}
                                      {showLivePreview ? (
-                                         <div className="preview-live-container" dangerouslySetInnerHTML={{ __html: getResolvedHtml(editor ? editor.getHTML() : '') }} />
+                                         // Werte sind maskiert und das Ergebnis bereinigt (resolveTemplateHtml)
+                                         <div ref={previewContainerRef} className="preview-live-container" dangerouslySetInnerHTML={{ __html: livePreview?.html || '' }} />
                                      ) : (
                                          <EditorContent editor={editor} />
                                      )}
@@ -4073,12 +4614,7 @@ export const DocumentTemplates = () => {
                                                 </label>
                                             ))}
                                             <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                                                <button onClick={() => { 
-                                                    updateLayoutStyle('margin-top', 0); 
-                                                    setTimeout(() => updateLayoutStyle('margin-bottom', 0), 10); 
-                                                    setTimeout(() => updateLayoutStyle('height', 0), 20); 
-                                                    setTimeout(() => updateLayoutStyle('width', 0), 30); 
-                                                }}
+                                                <button onClick={() => updateLayoutStyles({ 'margin-top': 0, 'margin-bottom': 0, height: 0, width: 0 })}
                                                     style={{ flex: 1, padding: '5px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', color: '#64748b' }}
                                                 >Zurücksetzen</button>
                                             </div>
@@ -4135,8 +4671,8 @@ export const DocumentTemplates = () => {
                 title="Eigene Schreibvorlage erstellen"
                 footer={
                     <>
-                        <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)}>Abbrechen</Button>
-                        <Button variant="primary" onClick={handleCreateTemplate}>Erstellen</Button>
+                        <Button variant="secondary" onClick={() => setIsCreateModalOpen(false)} disabled={creating}>Abbrechen</Button>
+                        <Button variant="primary" onClick={handleCreateTemplate} disabled={creating}>{creating ? 'Wird erstellt…' : 'Erstellen'}</Button>
                     </>
                 }
             >
@@ -4178,7 +4714,36 @@ export const DocumentTemplates = () => {
                 </div>
             </Modal>
 
-            {/* Diagnose-Tools */}
+            {/* Warnung vor dem Druck: fehlende Angaben im Echtdaten-Modus */}
+            <Modal
+                isOpen={!!printWarning}
+                onClose={() => setPrintWarning(null)}
+                title="Fehlende Angaben im Dokument"
+                footer={
+                    <>
+                        <Button variant="secondary" onClick={() => setPrintWarning(null)}>Zurück und ergänzen</Button>
+                        <Button variant="primary" onClick={confirmPrintAnyway}>Trotzdem öffnen</Button>
+                    </>
+                }
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.875rem' }}>
+                    <p style={{ margin: 0 }}>
+                        Für folgende Platzhalter liegen keine Daten vor. Sie werden im Dokument <strong style={{ color: '#b91c1c' }}>rot markiert</strong> gedruckt – es werden keine Beispielwerte eingesetzt:
+                    </p>
+                    <ul style={{ margin: 0, paddingLeft: '18px', listStyleType: 'disc' }}>
+                        {(printWarning?.missing || []).map(label => <li key={label}>{label}</li>)}
+                    </ul>
+                    {printWarning?.error && (
+                        <p style={{ margin: 0, color: 'var(--danger-color)' }}>Die Platzhalter konnten nicht vollständig aufgelöst werden.</p>
+                    )}
+                    <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
+                        Tipp: Fehlende Werte im Bereich „Angaben für dieses Dokument“ eintragen bzw. das Portfolio des Mieters wählen.
+                    </p>
+                </div>
+            </Modal>
+
+            {/* Diagnose-Tools (nur in der Entwicklungsumgebung) */}
+            {import.meta.env.DEV && (
             <div style={{
                 marginTop: '2rem',
                 padding: '1rem',
@@ -4190,30 +4755,32 @@ export const DocumentTemplates = () => {
             }}>
                 <details>
                     <summary style={{ fontWeight: 600, cursor: 'pointer', outline: 'none' }}>
-                        🛠️ Editor-Diagnose (Hier klicken bei Fehlern)
+                        🛠️ Editor-Diagnose (nur Entwicklung)
                     </summary>
                     <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <div><strong>User Status:</strong> {user ? `Eingeloggt (ID: ${user.id})` : 'Nicht eingeloggt'}</div>
+                        <div><strong>User Status:</strong> {user ? 'Eingeloggt' : 'Nicht eingeloggt'}</div>
                         <div><strong>Editor Status:</strong> {editor ? 'Initialisiert und geladen' : 'Nicht initialisiert'}</div>
                         <div><strong>Lade-Status:</strong> {loading ? 'Lädt...' : 'Bereit'}</div>
                         <div><strong>Aktive Vorlage (ID):</strong> {activeType}</div>
-                        <div><strong>Aktives Portfolio (ID):</strong> {selectedPortfolioId}</div>
+                        <div><strong>Aktives Portfolio (ID):</strong> {effectivePortfolioId}</div>
                         <div><strong>Datenquelle:</strong> {diagnostics.loadSource}</div>
                         <div><strong>Eintrag in DB gefunden:</strong> {diagnostics.dbDataFound ? 'Ja' : 'Nein'}</div>
                         <div><strong>Geladene HTML-Länge:</strong> {diagnostics.contentLength} Zeichen</div>
+                        <div><strong>Ungespeicherte Änderungen:</strong> {isDirty ? 'Ja' : 'Nein'}</div>
                         {diagnostics.lastError && (
                             <div style={{ color: 'var(--danger-color)', padding: '8px', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px', borderLeft: '3px solid var(--danger-color)' }}>
                                 <strong>Letzter Fehler:</strong> {diagnostics.lastError}
                             </div>
                         )}
                         <div style={{ marginTop: '8px' }}>
-                            <Button size="xs" variant="secondary" onClick={() => loadTemplate()}>
+                            <Button size="xs" variant="secondary" onClick={reloadTemplate}>
                                 Vorlage neu laden
                             </Button>
                         </div>
                     </div>
                 </details>
             </div>
+            )}
         </Card>
     );
 };
