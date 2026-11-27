@@ -38,23 +38,24 @@ const Availability = () => {
 
                     <div className="lg:w-1/2 relative flex justify-center items-end h-[400px]">
                         {/* Phone 1: Tenant Dashboard */}
+                        {/* Versatz über framer-motion (x), sonst überschreibt dessen transform die Tailwind-translate-Klassen (W1b-09) */}
                         <motion.div
-                            initial={{ opacity: 0, y: 50, rotate: -5 }}
-                            whileInView={{ opacity: 1, y: 0, rotate: -5 }}
+                            initial={{ opacity: 0, x: '-60%', y: 50, rotate: -5 }}
+                            whileInView={{ opacity: 1, x: '-60%', y: 0, rotate: -5 }}
                             viewport={{ once: true }}
                             transition={{ delay: 0.2 }}
-                            className="absolute left-1/2 -translate-x-[60%] z-10 w-64"
+                            className="absolute left-1/2 z-10 w-40 sm:w-64"
                         >
                             <PhoneMockup src="/images/w-MieterDashboard.png" alt="Mieter Dashboard Mobile" className="shadow-2xl" />
                         </motion.div>
 
                         {/* Phone 2: Messages */}
                         <motion.div
-                            initial={{ opacity: 0, y: 80, rotate: 10 }}
-                            whileInView={{ opacity: 1, y: 40, rotate: 10 }}
+                            initial={{ opacity: 0, x: '10%', y: 80, rotate: 10 }}
+                            whileInView={{ opacity: 1, x: '10%', y: 40, rotate: 10 }}
                             viewport={{ once: true }}
                             transition={{ delay: 0.4 }}
-                            className="absolute left-1/2 translate-x-[10%] z-20 w-64"
+                            className="absolute left-1/2 z-20 w-40 sm:w-64"
                         >
                             <PhoneMockup src="/images/w_Nachrichten.png" alt="Nachrichten Mobile" className="shadow-2xl border-slate-800" />
                         </motion.div>

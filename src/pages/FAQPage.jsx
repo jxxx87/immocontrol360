@@ -1,28 +1,99 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, ChevronDown, ChevronUp, Link as LinkIcon, Check } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import MainLayout from '../layouts/MainLayout';
-import { faqCategories } from '../data/faqData';
+import { faqCategories, TRIAL_DAYS } from '../data/faqData';
+import { SITE_URL } from '../components/siteConfig';
 import ContactForm from '../components/sections/ContactForm';
 
-const FAQItem = ({ question, answer }) => {
-    const [isOpen, setIsOpen] = useState(false);
-    const [copied, setCopied] = useState(false);
-    const id = question.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+// Früherer Anker (aus dem Fragetext, Umlaute ersatzlos entfernt) – bereits geteilte Links funktionieren weiter;
+// für umformulierte Fragen stehen die alten Anker zusätzlich in faqData (legacyAnchors)
+const legacySlug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const slugify = (text) => text.toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
-    const copyLink = (e) => {
+// Kategorien ohne Fragen ausblenden; jede Frage bekommt einen eindeutigen Anker,
+// der weder mit einer Kategorie noch mit anderen IDs der Seite kollidiert.
+const visibleCategories = (() => {
+    const cats = faqCategories.filter(cat => cat.items.length > 0);
+    const used = new Set(['contact', ...cats.map(cat => cat.id)]);
+    return cats.map(cat => ({
+        ...cat,
+        items: cat.items.map(item => {
+            const base = item.id || slugify(item.q) || 'frage';
+            let anchor = base;
+            for (let n = 2; used.has(anchor); n++) anchor = `${base}-${n}`;
+            used.add(anchor);
+            // Frühere Anker: aus dem aktuellen Fragetext plus (bei umformulierten Fragen) die in faqData hinterlegten
+            return { ...item, anchor, legacyAnchors: [legacySlug(item.q), ...(item.legacyAnchors || [])] };
+        })
+    }));
+})();
+
+// #hash → { anchor, isItem } (Frage, auch über den früheren Anker) oder Kategorie
+const resolveHash = (hash) => {
+    let target = (hash || '').replace(/^#/, '');
+    try { target = decodeURIComponent(target); } catch { /* ungültige Kodierung: unverändert lassen */ }
+    if (!target) return null;
+    for (const cat of visibleCategories) {
+        if (cat.id === target) return { anchor: cat.id, isItem: false };
+        const item = cat.items.find(it => it.anchor === target || it.legacyAnchors.includes(target));
+        if (item) return { anchor: item.anchor, isItem: true };
+    }
+    return null;
+};
+
+// In die Zwischenablage kopieren – mit Rückfall für ältere Browser/unsichere Kontexte
+const copyToClipboard = async (text) => {
+    try {
+        if (window.isSecureContext && navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch { /* Rückfall unten */ }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+    } catch {
+        return false;
+    }
+};
+
+const FAQItem = ({ anchor, question, answer, isOpen, onToggle }) => {
+    const [copyState, setCopyState] = useState(null); // null | 'copied' | 'failed'
+    const resetTimer = useRef(null);
+
+    useEffect(() => () => clearTimeout(resetTimer.current), []);
+
+    const copyLink = async (e) => {
         e.stopPropagation();
-        const url = `${window.location.origin}${window.location.pathname}#${id}`;
-        navigator.clipboard.writeText(url);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        const url = `${window.location.origin}${window.location.pathname}#${anchor}`;
+        const ok = await copyToClipboard(url);
+        if (!ok) {
+            // Link wenigstens in die Adresszeile schreiben, damit er von dort kopiert werden kann
+            try { window.history.replaceState(window.history.state, '', `#${anchor}`); } catch { /* ignorieren */ }
+        }
+        setCopyState(ok ? 'copied' : 'failed');
+        clearTimeout(resetTimer.current);
+        resetTimer.current = setTimeout(() => setCopyState(null), ok ? 2000 : 5000);
     };
 
     return (
-        <div id={id} className="border-b border-slate-200 last:border-0 scroll-mt-24">
+        <div id={anchor} className="border-b border-slate-200 last:border-0 scroll-mt-24">
             <button
-                onClick={() => setIsOpen(!isOpen)}
+                onClick={onToggle}
+                aria-expanded={isOpen}
+                aria-controls={`${anchor}-antwort`}
                 className="w-full py-6 flex items-start justify-between text-left group hover:bg-slate-50/50 transition-colors px-4 -mx-4 rounded-lg"
             >
                 <h3 className="text-lg font-semibold text-slate-900 pr-8 group-hover:text-primary transition-colors">
@@ -36,6 +107,7 @@ const FAQItem = ({ question, answer }) => {
             <AnimatePresence>
                 {isOpen && (
                     <motion.div
+                        id={`${anchor}-antwort`}
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: "auto", opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
@@ -49,8 +121,12 @@ const FAQItem = ({ question, answer }) => {
                                     onClick={copyLink}
                                     className="text-xs font-medium text-slate-400 hover:text-primary flex items-center gap-1.5 transition-colors"
                                 >
-                                    {copied ? <Check size={14} className="text-green-500" /> : <LinkIcon size={14} />}
-                                    {copied ? 'Link kopiert!' : 'Link kopieren'}
+                                    {copyState === 'copied' ? <Check size={14} className="text-green-500" /> : <LinkIcon size={14} />}
+                                    {copyState === 'copied'
+                                        ? 'Link kopiert!'
+                                        : copyState === 'failed'
+                                            ? 'Kopieren nicht möglich – bitte den Link aus der Adresszeile kopieren'
+                                            : 'Link kopieren'}
                                 </button>
                             </div>
                         </div>
@@ -62,14 +138,28 @@ const FAQItem = ({ question, answer }) => {
 };
 
 const FAQPage = () => {
-    const [searchQuery, setSearchQuery] = useState('');
-    const [activeCategory, setActiveCategory] = useState(faqCategories[0].id);
     const location = useLocation();
+    const [searchQuery, setSearchQuery] = useState('');
+    const [activeCategory, setActiveCategory] = useState(visibleCategories[0]?.id);
+    // Geöffnete Fragen; eine per Link (#anker) aufgerufene Frage ist direkt aufgeklappt
+    const [openAnchors, setOpenAnchors] = useState(() => {
+        const target = resolveHash(location.hash);
+        return new Set(target?.isItem ? [target.anchor] : []);
+    });
+
+    const toggleItem = (anchor) => {
+        setOpenAnchors(prev => {
+            const next = new Set(prev);
+            if (next.has(anchor)) next.delete(anchor);
+            else next.add(anchor);
+            return next;
+        });
+    };
 
     // Scroll spy effect for sticky nav
     useEffect(() => {
         const handleScroll = () => {
-            const sections = faqCategories.map(cat => document.getElementById(cat.id));
+            const sections = visibleCategories.map(cat => document.getElementById(cat.id));
             const scrollPosition = window.scrollY + 150; // Offset
 
             for (const section of sections) {
@@ -83,32 +173,32 @@ const FAQPage = () => {
         return () => window.removeEventListener('scroll', handleScroll);
     }, []);
 
-    // Handle hash links on load
+    // Hash-Links (beim Laden und bei späteren Hash-Wechseln): Frage aufklappen und hinscrollen
     useEffect(() => {
-        if (location.hash) {
-            const id = location.hash.replace('#', '');
-            const element = document.getElementById(id);
-            if (element) {
-                setTimeout(() => {
-                    element.scrollIntoView({ behavior: 'smooth' });
-                }, 100);
+        const target = resolveHash(location.hash);
+        if (!target) return;
+        const timer = setTimeout(() => {
+            if (target.isItem) {
+                setOpenAnchors(prev => (prev.has(target.anchor) ? prev : new Set(prev).add(target.anchor)));
             }
-        }
+            document.getElementById(target.anchor)?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+        return () => clearTimeout(timer);
     }, [location]);
 
-    // JSON-LD Schema
+    // JSON-LD Schema (alle Fragen)
     useEffect(() => {
         const schema = {
             "@context": "https://schema.org",
             "@type": "FAQPage",
-            "mainEntity": faqCategories.flatMap(cat => cat.items.map(item => ({
+            "mainEntity": visibleCategories.flatMap(cat => cat.items.map(item => ({
                 "@type": "Question",
                 "name": item.q,
                 "acceptedAnswer": {
                     "@type": "Answer",
                     "text": item.a
                 }
-            }))).slice(0, 30)
+            })))
         };
 
         const script = document.createElement('script');
@@ -122,14 +212,14 @@ const FAQPage = () => {
     }, []);
 
     const filteredCategories = searchQuery
-        ? faqCategories.map(cat => ({
+        ? visibleCategories.map(cat => ({
             ...cat,
             items: cat.items.filter(item =>
                 item.q.toLowerCase().includes(searchQuery.toLowerCase()) ||
                 item.a.toLowerCase().includes(searchQuery.toLowerCase())
             )
         })).filter(cat => cat.items.length > 0)
-        : faqCategories;
+        : visibleCategories;
 
     const scrollToCategory = (id) => {
         const element = document.getElementById(id);
@@ -149,7 +239,8 @@ const FAQPage = () => {
         <MainLayout>
             {/* SEO Meta Tags */}
             <title>FAQ | ImmoControlPro360 – Antworten für Investoren</title>
-            <meta name="description" content="Antworten zu Preisen, Funktionen, Trial, Sicherheit, Mieterportal, Ticketsystem. ImmoControlPro360 – 10 Tage kostenlos testen." />
+            <meta name="description" content={`Antworten zu Preisen, Funktionen, Testphase, Sicherheit, Mieterportal, Ticketsystem und Datenimport. ImmoControlPro360 – ${TRIAL_DAYS} Tage kostenlos testen.`} />
+            <link rel="canonical" href={`${SITE_URL}/faq`} />
 
             {/* Premium Blue Hero */}
             <section className="bg-primary pt-32 pb-24 border-b border-white/10 relative overflow-hidden rounded-b-[3rem] md:rounded-b-[5rem] shadow-xl shadow-blue-900/20">
@@ -166,7 +257,7 @@ const FAQPage = () => {
                     >
                         <h1 className="text-4xl md:text-5xl font-bold text-white mb-6 drop-shadow-sm">Häufige Fragen</h1>
                         <p className="text-xl text-blue-50 mb-10 max-w-2xl mx-auto font-light leading-relaxed drop-shadow-sm">
-                            Alles Wichtige zu Funktionen, Plänen, Trial und Sicherheit – klar und schnell beantwortet.
+                            Alles Wichtige zu Funktionen, Plänen, Testphase und Sicherheit – klar und schnell beantwortet.
                         </p>
 
                         <div className="relative max-w-2xl mx-auto">
@@ -194,7 +285,7 @@ const FAQPage = () => {
                 <aside className="lg:w-64 flex-shrink-0">
                     <div className="sticky top-24 z-30 bg-white lg:bg-transparent py-2 lg:py-0 -mx-4 px-4 lg:mx-0 lg:px-0 border-b lg:border-0 border-slate-100 overflow-x-auto">
                         <nav className="flex lg:flex-col gap-2 min-w-max lg:min-w-0">
-                            {faqCategories.map((cat) => (
+                            {filteredCategories.map((cat) => (
                                 <button
                                     key={cat.id}
                                     onClick={() => scrollToCategory(cat.id)}
@@ -224,8 +315,15 @@ const FAQPage = () => {
                                         </span>
                                     </h2>
                                     <div className="">
-                                        {cat.items.map((item, idx) => (
-                                            <FAQItem key={idx} question={item.q} answer={item.a} />
+                                        {cat.items.map((item) => (
+                                            <FAQItem
+                                                key={item.anchor}
+                                                anchor={item.anchor}
+                                                question={item.q}
+                                                answer={item.a}
+                                                isOpen={openAnchors.has(item.anchor)}
+                                                onToggle={() => toggleItem(item.anchor)}
+                                            />
                                         ))}
                                     </div>
                                 </section>
@@ -258,14 +356,14 @@ const FAQPage = () => {
                 <div className="container relative z-10 text-center text-white max-w-3xl mx-auto">
                     <h2 className="text-3xl md:text-5xl font-bold mb-8 drop-shadow-sm">Bereit für mehr Kontrolle?</h2>
                     <p className="text-xl text-blue-50 mb-10 leading-relaxed font-light drop-shadow-sm">
-                        Teste ImmoControlPro360 10 Tage kostenlos und bring Struktur in dein Portfolio.
+                        Teste ImmoControlPro360 {TRIAL_DAYS} Tage kostenlos und bring Struktur in dein Portfolio.
                     </p>
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                         <Link
                             to="/register-trial"
                             className="bg-white text-primary hover:bg-blue-50 px-8 py-4 rounded-lg font-bold text-lg w-full sm:w-auto shadow-xl shadow-black/20 hover:shadow-black/30 hover:scale-105 transition-transform border-none"
                         >
-                            10 Tage kostenlos testen
+                            {TRIAL_DAYS} Tage kostenlos testen
                         </Link>
                         <Link
                             to="/preise"

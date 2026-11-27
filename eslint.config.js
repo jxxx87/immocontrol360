@@ -5,7 +5,8 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // backups/ enthält nur alte Quellstände (nicht im Build) und wird nicht mitgeprüft
+  globalIgnores(['dist', 'backups']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [
@@ -23,7 +24,9 @@ export default defineConfig([
       },
     },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // ESLint 9 erkennt Verwendungen in JSX nicht (<motion.div>, <Icon /> aus Destrukturierung):
+      // Großgeschriebene Namen und das framer-motion-Objekt "motion" gelten daher als verwendet.
+      'no-unused-vars': ['error', { varsIgnorePattern: '^(?:[A-Z_]|motion$)', argsIgnorePattern: '^[A-Z_]' }],
     },
   },
 ])

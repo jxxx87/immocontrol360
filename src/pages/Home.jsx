@@ -7,10 +7,16 @@ import Availability from '../components/sections/Availability';
 import PricingTeaser from '../components/sections/PricingTeaser';
 import FAQ from '../components/sections/FAQ';
 import ContactForm from '../components/sections/ContactForm';
+import { SITE_URL } from '../components/siteConfig';
+import { TRIAL_DAYS } from '../lib/plans';
 
 const Home = () => {
     return (
         <MainLayout>
+            <title>ImmoControlPro360 – Immobilienverwaltung für private Investoren</title>
+            <meta name="description" content={`Immobilien, Mieter, Finanzen, Nebenkosten und Mieterportal in einer Web-App – für private und semi-professionelle Immobilieninvestoren. ${TRIAL_DAYS} Tage kostenlos testen, ohne Kreditkarte.`} />
+            <link rel="canonical" href={`${SITE_URL}/`} />
+
             <Hero />
             <PainSection />
             {/* Solution text section */}

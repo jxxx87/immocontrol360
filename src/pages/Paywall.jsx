@@ -1,15 +1,24 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
     Check, X, Crown, Shield, Zap, ArrowRight,
     Building2, Users, Calculator, TrendingUp,
-    CreditCard, Star, Clock, Lock
+    LogIn, Star, Clock, Lock
 } from 'lucide-react';
 import MainLayout from '../layouts/MainLayout';
+import { APP_URL } from '../components/siteConfig';
+import {
+    PLANS, DEFAULT_PLAN_ID, getPlan, getPriceInfo, VAT_NOTE,
+    ENTERPRISE_CONTACT_EMAIL, TRIAL_DAYS, PLAN_UNIT_LIMITS
+} from '../lib/plans';
 
-const PlanCard = ({ plan, isYearly, isSelected, onSelect, onCheckout }) => {
-    const price = isYearly ? plan.priceYearly : plan.priceMonthly;
+// Wer schon ein Konto hat (abgelaufene Testphase), schließt das Abo in der App ab
+// (nach der Anmeldung: Einstellungen → Abrechnung & Abo) – nicht über eine Neuregistrierung.
+const APP_LOGIN_URL = `${APP_URL}/login`;
+
+const PlanCard = ({ plan, isYearly, isSelected, onSelect }) => {
+    const { perMonth, yearlyTotal } = getPriceInfo(plan, isYearly);
 
     return (
         <motion.div
@@ -19,8 +28,10 @@ const PlanCard = ({ plan, isYearly, isSelected, onSelect, onCheckout }) => {
                     : 'border-slate-200 bg-white hover:border-primary/40 hover:shadow-lg'
                 }`}
             onClick={onSelect}
+            // Tastatur: Fokus auf dem Button der Karte wählt den Tarif ebenfalls aus
+            onFocus={onSelect}
         >
-            {plan.popular && (
+            {plan.highlighted && (
                 <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-primary to-indigo-600 text-white text-xs font-bold px-4 py-1.5 rounded-full shadow-lg shadow-primary/30 whitespace-nowrap flex items-center gap-1.5">
                     <Crown size={12} /> Beliebteste Wahl
                 </div>
@@ -33,12 +44,15 @@ const PlanCard = ({ plan, isYearly, isSelected, onSelect, onCheckout }) => {
 
             <div className="mb-8">
                 <div className="flex items-baseline gap-1">
-                    <span className="text-4xl font-extrabold text-slate-900">{price} €</span>
-                    <span className="text-slate-400 text-sm">/ Monat</span>
+                    <span className="text-4xl font-extrabold text-slate-900">{perMonth} €</span>
+                    <span className="text-slate-500 text-sm">/ Monat</span>
                 </div>
-                <p className="text-xs text-slate-400 mt-1">
-                    {isYearly ? 'jährlich abgerechnet' : 'monatlich kündbar'}
+                <p className="text-xs text-slate-500 mt-1">
+                    {isYearly
+                        ? `jährliche Zahlung: ${yearlyTotal} € pro Jahr im Voraus`
+                        : 'monatliche Zahlung, monatlich kündbar'}
                 </p>
+                <p className="text-xs text-slate-500">{VAT_NOTE}</p>
             </div>
 
             <ul className="space-y-3 mb-8 flex-1">
@@ -49,87 +63,38 @@ const PlanCard = ({ plan, isYearly, isSelected, onSelect, onCheckout }) => {
                         ) : (
                             <X size={16} className="text-slate-300 shrink-0 mt-0.5" />
                         )}
-                        <span className={feature.included ? 'text-slate-700' : 'text-slate-400'}>
+                        <span className={feature.included ? 'text-slate-700' : 'text-slate-500'}>
                             {feature.text}
                         </span>
                     </li>
                 ))}
             </ul>
 
-            <button
-                onClick={(e) => { e.stopPropagation(); onCheckout(); }}
+            <a
+                href={APP_LOGIN_URL}
+                onClick={(e) => e.stopPropagation()}
                 className={`w-full py-4 rounded-xl font-bold text-center transition-all flex items-center justify-center gap-2 ${isSelected
                         ? 'bg-gradient-to-r from-primary to-indigo-600 text-white shadow-lg shadow-primary/30 hover:shadow-primary/40 hover:scale-[1.02]'
                         : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200'
                     }`}
             >
-                <CreditCard size={18} />
-                {isSelected ? 'Jetzt starten' : 'Plan wählen'}
-            </button>
+                <LogIn size={18} />
+                Anmelden & Abo abschließen
+            </a>
         </motion.div>
     );
 };
 
 const Paywall = () => {
-    const navigate = useNavigate();
     const [isYearly, setIsYearly] = useState(true);
-    const [selectedPlan, setSelectedPlan] = useState('professional');
-
-    const plans = [
-        {
-            id: 'starter',
-            title: 'Starter',
-            priceMonthly: '9,99',
-            priceYearly: '8,99',
-            description: 'Für Einsteiger mit ersten Objekten.',
-            popular: false,
-            features: [
-                { text: 'Bis zu 5 Einheiten', included: true },
-                { text: 'Immobilien & Mieterverwaltung', included: true },
-                { text: 'Finanzen', included: true },
-                { text: 'Nebenkostenabrechnung', included: true },
-                { text: 'Zählermanagement', included: true },
-                { text: 'Kein Mieterportal', included: false },
-                { text: 'Kein Investorportal', included: false },
-            ],
-        },
-        {
-            id: 'professional',
-            title: 'Professional',
-            priceMonthly: '32,99',
-            priceYearly: '29,99',
-            description: 'Für wachsende Portfolios. Volle Kontrolle.',
-            popular: true,
-            features: [
-                { text: 'Bis zu 50 Einheiten', included: true },
-                { text: 'Alles aus dem Starter inbegriffen', included: true },
-                { text: 'Mieterportal', included: true },
-                { text: 'Investorportal', included: true },
-            ],
-        },
-        {
-            id: 'business',
-            title: 'Business',
-            priceMonthly: '59,99',
-            priceYearly: '53,99',
-            description: 'Für semi-professionelle Investoren.',
-            popular: false,
-            features: [
-                { text: 'Bis zu 250 Einheiten', included: true },
-                { text: 'Alles aus Professional inbegriffen', included: true },
-                { text: 'Multi-User Zugriff', included: true },
-                { text: 'Priorisierter Support', included: true },
-            ],
-        },
-    ];
-
-    const handleCheckout = (planId) => {
-        const cycle = isYearly ? 'yearly' : 'monthly';
-        navigate(`/abo-starten?plan=${planId}&cycle=${cycle}&source=paywall`);
-    };
+    const [selectedPlan, setSelectedPlan] = useState(DEFAULT_PLAN_ID);
+    const cycle = isYearly ? 'yearly' : 'monthly';
 
     return (
         <MainLayout>
+            <title>Abo abschließen | ImmoControlPro360</title>
+            <meta name="robots" content="noindex" />
+
             {/* Full-screen Paywall Overlay */}
             <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50">
 
@@ -147,7 +112,7 @@ const Paywall = () => {
                             className="inline-flex items-center gap-2 bg-amber-50 text-amber-700 text-sm font-semibold px-5 py-2 rounded-full border border-amber-200 shadow-sm mb-8"
                         >
                             <Clock size={16} />
-                            Dein 10-Tage-Testzeitraum ist abgelaufen
+                            Dein {TRIAL_DAYS}-Tage-Testzeitraum ist abgelaufen
                         </motion.div>
 
                         <motion.h1
@@ -168,7 +133,8 @@ const Paywall = () => {
                             transition={{ delay: 0.2 }}
                             className="text-xl text-slate-500 mb-10 max-w-2xl mx-auto leading-relaxed"
                         >
-                            Wähle den Plan, der zu deinem Portfolio passt und behalte die volle Kontrolle über deine Immobilien.
+                            Wähle den Plan, der zu deinem Portfolio passt, und arbeite direkt mit deinen bisherigen Daten weiter.
+                            Melde dich dazu mit deinem bestehenden Konto in der App an.
                         </motion.p>
 
                         {/* What you're missing section */}
@@ -196,8 +162,10 @@ const Paywall = () => {
 
                         {/* Toggle */}
                         <div className="flex items-center justify-center gap-4 mb-4">
-                            <div className="bg-slate-100 p-1.5 rounded-full inline-flex border border-slate-200">
+                            <div className="bg-slate-100 p-1.5 rounded-full inline-flex border border-slate-200" role="group" aria-label="Zahlweise">
                                 <button
+                                    type="button"
+                                    aria-pressed={!isYearly}
                                     onClick={() => setIsYearly(false)}
                                     className={`px-5 py-2 rounded-full text-sm font-bold transition-all ${!isYearly
                                             ? 'bg-white text-slate-900 shadow-sm'
@@ -207,6 +175,8 @@ const Paywall = () => {
                                     Monatlich
                                 </button>
                                 <button
+                                    type="button"
+                                    aria-pressed={isYearly}
                                     onClick={() => setIsYearly(true)}
                                     className={`px-5 py-2 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${isYearly
                                             ? 'bg-white text-slate-900 shadow-sm'
@@ -227,23 +197,33 @@ const Paywall = () => {
                 <section className="pb-20 px-4 -mt-4">
                     <div className="container max-w-6xl mx-auto">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
-                            {plans.map((plan) => (
+                            {PLANS.map((plan) => (
                                 <PlanCard
                                     key={plan.id}
                                     plan={plan}
                                     isYearly={isYearly}
                                     isSelected={selectedPlan === plan.id}
                                     onSelect={() => setSelectedPlan(plan.id)}
-                                    onCheckout={() => handleCheckout(plan.id)}
                                 />
                             ))}
                         </div>
 
+                        <p className="text-center text-sm text-slate-500 max-w-3xl mx-auto mt-10 leading-relaxed">
+                            Tarif und Zahlweise wählst du nach der Anmeldung in der App unter „Einstellungen → Abrechnung & Abo“; die Zahlung läuft über Stripe.
+                            Alle Preise inkl. gesetzlicher MwSt. Der verbindliche Gesamtbetrag wird dir vor der Zahlung im Stripe-Checkout angezeigt.
+                        </p>
+                        <p className="text-center text-sm text-slate-500 mt-2">
+                            Noch kein Konto?{' '}
+                            <Link to={`/abo-starten?plan=${selectedPlan}&cycle=${cycle}`} className="text-primary font-semibold hover:underline">
+                                {TRIAL_DAYS} Tage kostenlos testen
+                            </Link>
+                        </p>
+
                         {/* Enterprise link */}
                         <div className="text-center mt-10">
-                            <p className="text-slate-400 mb-2 text-sm">Mehr als 250 Einheiten?</p>
+                            <p className="text-slate-500 mb-2 text-sm">Mehr als {PLAN_UNIT_LIMITS.business} Einheiten?</p>
                             <a
-                                href="mailto:sales@immocontrolpro360.de"
+                                href={`mailto:${ENTERPRISE_CONTACT_EMAIL}`}
                                 className="text-primary font-bold hover:underline text-sm"
                             >
                                 Kontaktiere uns für Enterprise-Konditionen →
@@ -263,18 +243,19 @@ const Paywall = () => {
                             {[
                                 {
                                     icon: Shield,
-                                    title: 'DSGVO-konform',
-                                    desc: 'Deutsche Server, verschlüsselte Daten, Row Level Security – deine Daten gehören nur dir.',
+                                    title: 'Datenschutz & Sicherheit',
+                                    // Belegt: Supabase-Projekt in Region eu-west-1 (Irland); keine Aussage zu „deutschen Servern“
+                                    desc: 'Datenbank auf Servern in der EU (Irland), verschlüsselte Übertragung und Zugriffsschutz auf Datenbankebene (Row Level Security).',
                                 },
                                 {
                                     icon: Zap,
                                     title: 'Sofort startklar',
-                                    desc: 'Keine Installation, kein Setup. Registriere dich, lege dein erstes Objekt an und los geht\'s.',
+                                    desc: 'Keine Installation, kein Setup. Melde dich an und arbeite direkt mit deinen Objekten weiter.',
                                 },
                                 {
                                     icon: Star,
-                                    title: 'Monatlich kündbar',
-                                    desc: 'Keine versteckten Kosten, keine Vertragsbindung. Bei jährlicher Zahlung sparst du 10%.',
+                                    title: 'Flexible Zahlweise',
+                                    desc: 'Monatlich oder jährlich zahlen – bei jährlicher Zahlung sparst du rund 10 %. Kündigung jeweils zum Ende des Abrechnungszeitraums (Fristen siehe AGB).',
                                 },
                             ].map(({ icon: Icon, title, desc }, i) => (
                                 <div key={i} className="text-center p-6">
@@ -289,15 +270,15 @@ const Paywall = () => {
 
                         {/* CTA at bottom */}
                         <div className="mt-16 text-center">
-                            <button
-                                onClick={() => handleCheckout(selectedPlan)}
+                            <a
+                                href={APP_LOGIN_URL}
                                 className="bg-gradient-to-r from-primary to-indigo-600 text-white font-bold px-10 py-4 rounded-xl text-lg shadow-xl shadow-primary/20 hover:shadow-primary/30 hover:scale-[1.02] transition-all inline-flex items-center gap-2"
                             >
-                                Jetzt mit {plans.find(p => p.id === selectedPlan)?.title} starten
+                                Anmelden und mit {getPlan(selectedPlan)?.title} weitermachen
                                 <ArrowRight size={20} />
-                            </button>
-                            <p className="mt-4 text-sm text-slate-400 flex items-center justify-center gap-2">
-                                <Shield size={14} /> Sichere Zahlung via Stripe · Jederzeit kündbar
+                            </a>
+                            <p className="mt-4 text-sm text-slate-500 flex items-center justify-center gap-2">
+                                <Shield size={14} /> Sichere Zahlung via Stripe · Alle Preise inkl. MwSt.
                             </p>
                         </div>
                     </div>

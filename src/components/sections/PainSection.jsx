@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Ghost, PieChart, Users, TrendingUp, FileSpreadsheet } from 'lucide-react';
+import { PieChart, Users, TrendingUp, FileSpreadsheet } from 'lucide-react';
 
 const PainSection = () => {
     const pains = [

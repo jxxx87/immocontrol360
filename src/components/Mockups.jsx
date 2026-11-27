@@ -1,7 +1,8 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 
-export const LaptopMockup = ({ src, alt, className = '', children }) => {
+// loading/fetchPriority steuerbar: Bilder im sichtbaren Startbereich (Hero) mit
+// loading="eager" und fetchPriority="high" übergeben, alles darunter bleibt lazy (W1b-10).
+export const LaptopMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority }) => {
     return (
         <div className={`relative mx-auto ${className}`}>
             {/* Laptop Screen */}
@@ -20,7 +21,9 @@ export const LaptopMockup = ({ src, alt, className = '', children }) => {
                             src={src}
                             alt={alt}
                             className="w-full h-full object-cover object-top"
-                            loading="lazy"
+                            loading={loading}
+                            decoding="async"
+                            fetchPriority={fetchPriority}
                         />
                     )}
                 </div>
@@ -36,7 +39,7 @@ export const LaptopMockup = ({ src, alt, className = '', children }) => {
     );
 };
 
-export const PhoneMockup = ({ src, alt, className = '', children }) => {
+export const PhoneMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority }) => {
     return (
         <div className={`relative mx-auto ${className}`} style={{ maxWidth: '300px' }}>
             <div className="relative bg-white rounded-[2.5rem] border-[8px] border-neutral-900 shadow-2xl overflow-hidden aspect-[9/19]">
@@ -52,7 +55,9 @@ export const PhoneMockup = ({ src, alt, className = '', children }) => {
                             src={src}
                             alt={alt}
                             className="w-full h-full object-cover"
-                            loading="lazy"
+                            loading={loading}
+                            decoding="async"
+                            fetchPriority={fetchPriority}
                         />
                     )}
                 </div>

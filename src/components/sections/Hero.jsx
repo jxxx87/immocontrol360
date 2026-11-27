@@ -1,10 +1,10 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Check } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { LaptopMockup } from '../Mockups';
 
-const Hero = ({ isLanding = false }) => {
+const Hero = () => {
     return (
         <section className="relative pt-32 pb-20 md:pt-40 md:pb-28 overflow-hidden bg-primary rounded-b-[3rem] md:rounded-b-[5rem] shadow-xl shadow-blue-900/20">
             {/* Background decoration */}
@@ -29,18 +29,16 @@ const Hero = ({ isLanding = false }) => {
                         </h1>
                         <p className="text-lg md:text-xl text-blue-50 mb-10 max-w-2xl mx-auto leading-relaxed font-light drop-shadow-sm">
                             Struktur, Kontrolle und Wachstum – in einer Plattform.<br className="hidden md:block" />
-                            {isLanding ? 'KPI-Dashboard, Mieterportal mit Tickets und Investorportal inkl. Deal-Analyse & Sanierungsrechner.' : 'Verwalte Objekte und Mieter, reduziere Stress und triff bessere Entscheidungen.'}
+                            Verwalte Objekte und Mieter, reduziere Stress und triff bessere Entscheidungen.
                         </p>
 
                         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
                             <Link to="/register-trial" className="btn-primary w-full sm:w-auto text-lg px-8 py-4 bg-white text-primary hover:bg-blue-50 border-none shadow-xl shadow-black/20 hover:shadow-black/30 hover:scale-105 transition-transform">
                                 Jetzt starten – 10 Tage kostenlos testen
                             </Link>
-                            {!isLanding && (
-                                <Link to="/preise" className="px-8 py-4 w-full sm:w-auto text-lg rounded-lg font-semibold bg-white/10 hover:bg-white/20 border border-white/20 transition-all text-white backdrop-blur-sm">
-                                    Preise ansehen
-                                </Link>
-                            )}
+                            <Link to="/preise" className="px-8 py-4 w-full sm:w-auto text-lg rounded-lg font-semibold bg-white/10 hover:bg-white/20 border border-white/20 transition-all text-white backdrop-blur-sm">
+                                Preise ansehen
+                            </Link>
                         </div>
 
                         <p className="text-sm text-blue-200 flex items-center justify-center gap-2 font-medium">
@@ -91,6 +89,8 @@ const Hero = ({ isLanding = false }) => {
                         src="/images/w_Dashboard.png"
                         alt="ImmoControlPro360 Dashboard"
                         className="w-full shadow-2xl shadow-blue-900/50 rounded-xl"
+                        loading="eager"
+                        fetchPriority="high"
                     />
                 </motion.div>
             </div>

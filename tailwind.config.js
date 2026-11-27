@@ -24,7 +24,9 @@ export default {
         accent: '#6366f1',
       },
       fontFamily: {
-        sans: ['Inter', 'sans-serif'],
+        // Inter, sonst die Systemschrift des Geräts – die Seite bleibt auch ohne nachgeladene Webfont
+        // (z. B. nach Entfernen des Google-Fonts-Imports, W1b-03/W1c-01) ordentlich lesbar.
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', '"Segoe UI"', 'Roboto', '"Helvetica Neue"', 'Arial', 'sans-serif'],
       },
       borderRadius: {
         lg: '12px',

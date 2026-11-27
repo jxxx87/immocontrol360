@@ -1,5 +1,13 @@
 import React from 'react';
 import MainLayout from '../layouts/MainLayout';
+import { SITE_URL, SUPPORT_EMAIL } from '../components/siteConfig';
+
+// Kurzbeschreibungen für Suchmaschinen (je Rechtstext)
+const META_DESCRIPTIONS = {
+    impressum: 'Impressum von ImmoControlPro360: Anbieterkennzeichnung und Kontakt.',
+    datenschutz: 'Datenschutzerklärung von ImmoControlPro360: welche Daten wir auf der Website und in der Web-App verarbeiten und welche Rechte du hast.',
+    agb: 'Allgemeine Geschäftsbedingungen (AGB) für die Nutzung der SaaS-Plattform ImmoControlPro360.',
+};
 
 const Legal = ({ type }) => {
     const content = {
@@ -7,7 +15,7 @@ const Legal = ({ type }) => {
             title: 'Impressum',
             body: (
                 <>
-                    <h2 className="text-xl font-bold mb-4 mt-6 text-slate-800">Angaben gemäß § 5 TMG</h2>
+                    <h2 className="text-xl font-bold mb-4 mt-6 text-slate-800">Angaben gemäß § 5 DDG</h2>
                     <p className="mb-6 leading-relaxed">
                         Johann Lutz<br />
                         Obere Himmelsbergstraße 137<br />
@@ -16,10 +24,10 @@ const Legal = ({ type }) => {
 
                     <h2 className="text-xl font-bold mb-4 text-slate-800">Kontakt</h2>
                     <p className="mb-6 leading-relaxed">
-                        E-Mail: support@immocontrolpro360.de
+                        E-Mail: {SUPPORT_EMAIL}
                     </p>
 
-                    <h2 className="text-xl font-bold mb-4 text-slate-800">Verantwortlich für den Inhalt nach § 55 Abs. 2 RStV</h2>
+                    <h2 className="text-xl font-bold mb-4 text-slate-800">Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</h2>
                     <p className="mb-6 leading-relaxed">
                         Johann Lutz<br />
                         Obere Himmelsbergstraße 137<br />
@@ -27,9 +35,9 @@ const Legal = ({ type }) => {
                     </p>
 
                     <h2 className="text-xl font-bold mb-4 text-slate-800">Streitschlichtung</h2>
+                    {/* Hinweis auf die EU-OS-Plattform entfernt: Plattform zum 20.07.2025 eingestellt (VO (EU) 2024/3228) */}
                     <p className="mb-6 leading-relaxed">
-                        Die Europäische Kommission stellt eine Plattform zur Online-Streitbeilegung (OS) bereit: <a href="https://ec.europa.eu/consumers/odr/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">https://ec.europa.eu/consumers/odr/</a>.<br />
-                        Unsere E-Mail-Adresse finden Sie oben im Impressum. Wir sind nicht bereit oder verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.
+                        Wir sind nicht bereit oder verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.
                     </p>
                 </>
             )
@@ -99,12 +107,17 @@ const Legal = ({ type }) => {
                         66482 Zweibrücken
                     </p>
                     <p className="mb-6 leading-relaxed">
-                        E-Mail: support@immocontrolpro360.de
+                        E-Mail: {SUPPORT_EMAIL}
                     </p>
 
                     <h3 className="text-xl font-semibold mb-2 text-slate-700">Widerruf Ihrer Einwilligung zur Datenverarbeitung</h3>
                     <p className="mb-6 leading-relaxed">
                         Viele Datenverarbeitungsvorgänge sind nur mit Ihrer ausdrücklichen Einwilligung möglich. Sie können eine bereits erteilte Einwilligung jederzeit widerrufen. Dazu reicht eine formlose Mitteilung per E-Mail an uns. Die Rechtmäßigkeit der bis zum Widerruf erfolgten Datenverarbeitung bleibt vom Widerruf unberührt.
+                    </p>
+
+                    <h3 className="text-xl font-semibold mb-2 text-slate-700">Widerspruchsrecht gegen die Datenverarbeitung (Art. 21 DSGVO)</h3>
+                    <p className="mb-6 leading-relaxed">
+                        Soweit wir Ihre Daten auf Grundlage von Art. 6 Abs. 1 lit. f DSGVO (berechtigtes Interesse) verarbeiten, haben Sie das Recht, aus Gründen, die sich aus Ihrer besonderen Situation ergeben, jederzeit Widerspruch gegen diese Verarbeitung einzulegen. Wir verarbeiten die betroffenen Daten dann nicht mehr, es sei denn, wir können zwingende schutzwürdige Gründe für die Verarbeitung nachweisen, die Ihre Interessen, Rechte und Freiheiten überwiegen, oder die Verarbeitung dient der Geltendmachung, Ausübung oder Verteidigung von Rechtsansprüchen. Werden Ihre Daten verarbeitet, um Direktwerbung zu betreiben, können Sie dieser Verarbeitung jederzeit widersprechen.
                     </p>
 
                     <h3 className="text-xl font-semibold mb-2 text-slate-700">Beschwerderecht bei der zuständigen Aufsichtsbehörde</h3>
@@ -155,13 +168,24 @@ const Legal = ({ type }) => {
                     <h2 className="text-2xl font-bold mb-4 mt-8 text-slate-800">5. Zahlungsdienstleister (Payment-Abwicklung)</h2>
                     <h3 className="text-xl font-semibold mb-2 text-slate-700">Stripe</h3>
                     <p className="mb-4 leading-relaxed">
-                        Wir binden auf unserer Website Dienste des Zahlungsabwicklers Stripe ein. Anbieter für Kunden innerhalb der EU ist die Stripe Payments Europe Ltd., 1 Grand Canal Street Lower, Grand Canal Dock, Dublin, Irland (nachfolgend „Stripe“).
+                        Für den Abschluss und die Abrechnung kostenpflichtiger Abonnements nutzen wir in unserer Web-App (app.immocontrol360.de) Dienste des Zahlungsabwicklers Stripe; auf dieser Website selbst ist Stripe nicht eingebunden. Anbieter für Kunden innerhalb der EU ist die Stripe Payments Europe Ltd., 1 Grand Canal Street Lower, Grand Canal Dock, Dublin, Irland (nachfolgend „Stripe“).
                     </p>
                     <p className="mb-4 leading-relaxed">
                         Bei Zahlung über eine Zahlungsart von Stripe werden die von Ihnen eingegebenen Zahlungsdaten (z. B. Kreditkartennummer, IBAN, Betrag, Währung, Name, E-Mail-Adresse und Rechnungsanschrift) an Stripe übermittelt. Die Weitergabe Ihrer Daten an Stripe erfolgt zum Zwecke der Zahlungsabwicklung und auf Grundlage von Art. 6 Abs. 1 lit. b DSGVO (Vertragserfüllung).
                     </p>
                     <p className="mb-6 leading-relaxed">
                         Details zum Datenschutz bei Stripe finden Sie unter folgendem Link: <a href="https://stripe.com/de/privacy" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-semibold">https://stripe.com/de/privacy</a>.
+                    </p>
+
+                    <h2 className="text-2xl font-bold mb-4 mt-8 text-slate-800">6. Nutzerkonto, Web-App und Datenspeicherung (Supabase)</h2>
+                    <p className="mb-4 leading-relaxed">
+                        Für die Registrierung und Anmeldung in unserer Web-App (app.immocontrol360.de), für die Speicherung der Daten, die Sie dort anlegen (z. B. Objekte, Mieter, Verträge und Dokumente), sowie für Anfragen über das Kontaktformular dieser Website nutzen wir die Plattform Supabase (Anbieter: Supabase, Inc.). Die Datenbank unseres Projekts wird in einem Rechenzentrum in der EU (Region Irland) betrieben.
+                    </p>
+                    <p className="mb-4 leading-relaxed">
+                        Verarbeitet werden insbesondere Ihre E-Mail-Adresse, Ihr Passwort (nur als kryptografischer Hashwert, nicht im Klartext), technische Zugriffsdaten (z. B. IP-Adresse und Zeitpunkt der Anmeldung) sowie die von Ihnen eingegebenen Inhalte. Für die Anmeldung speichert die Web-App ein Sitzungs-Token im lokalen Speicher Ihres Browsers bzw. Geräts; es ist für die Nutzung technisch erforderlich. Die Verarbeitung erfolgt zur Bereitstellung unseres Dienstes und zur Vertragserfüllung (Art. 6 Abs. 1 lit. b DSGVO); für Kontaktanfragen gelten die im Abschnitt „Kontaktformular“ genannten Rechtsgrundlagen.
+                    </p>
+                    <p className="mb-6 leading-relaxed">
+                        Details zum Datenschutz bei Supabase finden Sie unter folgendem Link: <a href="https://supabase.com/privacy" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-semibold">https://supabase.com/privacy</a>.
                     </p>
                 </>
             )
@@ -270,13 +294,19 @@ const Legal = ({ type }) => {
     };
 
     const data = content[type] || { title: 'Seite nicht gefunden', body: 'Inhalt nicht verfügbar.' };
+    const isKnownType = Boolean(content[type]);
 
     return (
         <MainLayout>
+            <title>{`${data.title} | ImmoControlPro360`}</title>
+            {isKnownType && <meta name="description" content={META_DESCRIPTIONS[type]} />}
+            {isKnownType && <link rel="canonical" href={`${SITE_URL}/${type}`} />}
+
             <section className="py-20 md:py-32 bg-white">
                 <div className="container max-w-3xl mx-auto px-4">
                     <h1 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900">{data.title}</h1>
-                    <div className="prose prose-slate max-w-none text-slate-600">
+                    {/* Formatierung über die Einzelklassen der Absätze (kein Tailwind-Typography-Plugin installiert) */}
+                    <div className="max-w-none text-slate-600">
                         {data.body || <p>Hier folgt der Text für {data.title}...</p>}
                     </div>
                 </div>

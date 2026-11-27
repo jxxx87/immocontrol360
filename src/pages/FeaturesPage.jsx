@@ -1,19 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { motion, useScroll, useSpring, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
     CheckCircle2, ArrowRight, Search,
     LayoutDashboard, Building2, Users, FileText,
-    Gauge, PenTool, Upload, Calculator, Receipt,
-    PiggyBank, Wallet, MessageSquare, Ticket,
-    TrendingUp, Hammer, Briefcase, Mail, X, ChevronRight,
-    Filter, MoreHorizontal, Download, Plus, Bell, Settings,
-    Home, PieChart
+    Upload, Calculator,
+    PiggyBank, Ticket,
+    TrendingUp, ChevronRight,
+    Plus, Bell, PieChart
 } from 'lucide-react';
 import MainLayout from '../layouts/MainLayout';
 import { LaptopMockup, PhoneMockup } from '../components/Mockups';
 import { featureCategories } from '../data/featureData';
+import { TRIAL_DAYS } from '../data/faqData';
+import { SITE_URL } from '../components/siteConfig';
 import { Link } from 'react-router-dom';
 import ContactForm from '../components/sections/ContactForm';
+
+// Rausch-Textur lokal als Data-URI (früher von grainy-gradients.vercel.app geladen –
+// so entsteht beim Seitenaufruf keine Verbindung zu einem fremden Server mehr)
+const NOISE_SVG = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 250 250'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(#n)'/></svg>";
+const NOISE_BG = `url("data:image/svg+xml,${encodeURIComponent(NOISE_SVG)}")`;
 
 // --- VIRTUAL APP SHELL & COMPONENTS ---
 // Simulates the WebApp layout (Sidebar + Header + Content)
@@ -63,30 +69,31 @@ const AppShell = ({ title, children, sidebarActive = 'dashboard' }) => (
 
 // --- SPECIFIC UI SCREENS ---
 
-// 1. Dashboard UI (Fallback if image missing)
+// 1. Dashboard UI (Fallback if image missing) – zeigt dieselben Kennzahlen wie das echte Dashboard
 const UI_Dashboard = () => (
-    <AppShell title="Cockpit" sidebarActive="dashboard">
+    <AppShell title="Dashboard" sidebarActive="dashboard">
         <div className="grid grid-cols-4 gap-4 mb-6">
             <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
-                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Cashflow</div>
+                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Einnahmen</div>
                 <div className="text-lg font-bold text-slate-800">4.250 €</div>
             </div>
             <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
-                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Rendite ø</div>
-                <div className="text-lg font-bold text-green-600">5.8 %</div>
+                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Ausgaben</div>
+                <div className="text-lg font-bold text-slate-800">1.320 €</div>
             </div>
-            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm col-span-2">
-                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Offene Tickets</div>
-                <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 bg-red-100 text-red-600 rounded-full text-[10px] font-bold">2 Dringend</span>
-                    <span className="px-2 py-0.5 bg-blue-100 text-blue-600 rounded-full text-[10px] font-bold">5 Offen</span>
-                </div>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
+                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Leerstand</div>
+                <div className="text-lg font-bold text-green-600">0 Einh.</div>
+            </div>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
+                <div className="text-slate-400 text-[10px] uppercase font-bold mb-1">Offene Ford.</div>
+                <div className="text-lg font-bold text-slate-800">0,00 €</div>
             </div>
         </div>
         <div className="bg-white rounded-lg border border-slate-200 h-40 flex items-center justify-center text-slate-300 relative overflow-hidden">
             <div className="absolute inset-0 bg-gradient-to-t from-white to-transparent bottom-0 z-10" />
             <PieChart size={32} className="opacity-20" />
-            <div className="absolute font-medium text-slate-400">Performance Chart</div>
+            <div className="absolute font-medium text-slate-400">Einnahmen & Ausgaben</div>
         </div>
     </AppShell>
 );
@@ -96,9 +103,9 @@ const UI_Immobilien = () => (
     <AppShell title="Objektverwaltung" sidebarActive="immobilien">
         <div className="flex justify-between mb-4">
             <div className="flex gap-2">
-                <button className="bg-white border px-3 py-1 rounded text-slate-600 text-[10px]">Filter</button>
+                <span className="bg-white border px-3 py-1 rounded text-slate-600 text-[10px]">Filter</span>
             </div>
-            <button className="bg-primary text-white px-3 py-1 rounded shadow-sm hover:bg-blue-600 text-[10px]">+ Objekt</button>
+            <span className="bg-primary text-white px-3 py-1 rounded shadow-sm text-[10px]">+ Objekt</span>
         </div>
         <div className="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm flex-1">
             <table className="w-full text-left">
@@ -160,21 +167,21 @@ const UI_Zaehler = () => (
             <h3 className="font-bold text-slate-800 mb-4 border-b border-slate-100 pb-2">Neuen Stand erfassen</h3>
             <div className="space-y-4">
                 <div>
-                    <label className="text-[10px] text-slate-500 font-bold uppercase block mb-1">Zähler</label>
+                    <div className="text-[10px] text-slate-500 font-bold uppercase block mb-1">Zähler</div>
                     <div className="w-full bg-slate-50 border border-slate-200 rounded p-2 text-slate-700 flex justify-between items-center">
-                        <span>Wasser Hauptzähler (WH-001)</span>
+                        <span>Kaltwasser Hauptzähler (WH-001)</span>
                         <ChevronRight size={12} className="text-slate-400" />
                     </div>
                 </div>
                 <div>
-                    <label className="text-[10px] text-slate-500 font-bold uppercase block mb-1">Neuer Stand (m³)</label>
+                    <div className="text-[10px] text-slate-500 font-bold uppercase block mb-1">Neuer Stand (m³)</div>
                     <div className="flex items-center gap-2 relative">
-                        <input type="text" readOnly value="1.245,33" className="w-full border border-primary rounded p-2 text-slate-900 font-mono focus:outline-none focus:ring-2 ring-primary/20" />
+                        <div className="w-full border border-primary rounded p-2 text-slate-900 font-mono">1.245,33</div>
                         <span className="absolute right-3 text-slate-400 font-medium text-[10px]">m³</span>
                     </div>
                 </div>
                 <div className="pt-2">
-                    <button className="w-full bg-primary text-white py-2 rounded font-medium hover:bg-blue-600 shadow-sm text-xs">Speichern</button>
+                    <div className="w-full bg-primary text-white py-2 rounded font-medium shadow-sm text-xs text-center">Speichern</div>
                 </div>
             </div>
         </div>
@@ -291,7 +298,7 @@ const UI_Nebenkosten = () => (
                 <Calculator size={32} className="mx-auto text-primary mb-4" strokeWidth={1.5} />
                 <h3 className="font-bold text-slate-800 mb-2">Gesamtkosten ermittelt</h3>
                 <p className="text-xs text-slate-500 mb-6">Wir haben 12.450 € umlagefähige Kosten für 2023 gefunden.</p>
-                <button className="w-full bg-primary text-white py-2 rounded font-bold text-xs shadow-sm hover:bg-blue-600">Verteilschlüssel prüfen</button>
+                <div className="w-full bg-primary text-white py-2 rounded font-bold text-xs shadow-sm text-center">Verteilschlüssel prüfen</div>
             </div>
         </div>
     </AppShell>
@@ -302,18 +309,18 @@ const UI_Kontakte = () => (
     <div className="w-full h-full bg-slate-50 flex flex-col font-sans select-none">
         <div className="bg-white p-4 pt-8 border-b border-slate-200 pb-3">
             <h2 className="text-base font-bold text-slate-800">Meine Kontakte</h2>
-            <div className="mt-3 relative"><Search className="absolute left-2.5 top-2 text-slate-400" size={14} /><input className="w-full bg-slate-100 rounded-lg py-1.5 pl-9 text-xs focus:bg-white focus:ring-2 ring-primary/20 border-transparent focus:border-primary/20 transition-all outline-none" placeholder="Suchen..." /></div>
+            <div className="mt-3 relative"><Search className="absolute left-2.5 top-2 text-slate-400" size={14} /><div className="w-full bg-slate-100 rounded-lg py-1.5 pl-9 text-xs text-slate-400">Suchen...</div></div>
         </div>
         <div className="flex-1 overflow-y-hidden p-3 space-y-2.5">
-            <div className="text-[9px] font-bold text-slate-400 uppercase ml-1">Favoriten</div>
-            {[{ n: 'Sanitär Müller', r: 'Handwerker', t: 'Notfall' }, { n: 'Elektro Schmidt', r: 'Handwerker', t: '' }, { n: 'RA Kanzlei Meyer', r: 'Anwalt', t: '' }].map((c, i) => (
+            <div className="text-[9px] font-bold text-slate-400 uppercase ml-1">Alle Kontakte</div>
+            {[{ n: 'Sanitär Müller', r: 'Handwerker', t: 'Dienstleister' }, { n: 'Elektro Schmidt', r: 'Handwerker', t: 'Dienstleister' }, { n: 'Anna Becker', r: 'Whg. 3, EG links', t: 'Mieter' }].map((c, i) => (
                 <div key={i} className="bg-white p-3 rounded-xl border border-slate-200 flex items-center gap-3 shadow-sm">
                     <div className="w-10 h-10 rounded-full bg-blue-50 text-primary border border-blue-100 flex items-center justify-center font-bold text-sm">{c.n.charAt(0)}</div>
                     <div className="flex-1">
                         <div className="font-bold text-slate-800 text-xs">{c.n}</div>
                         <div className="text-slate-500 text-[10px]">{c.r}</div>
                     </div>
-                    {c.t && <div className="p-1 px-2 bg-red-50 text-red-600 border border-red-100 rounded-md text-[9px] font-bold tracking-wide">{c.t}</div>}
+                    <div className="p-1 px-2 bg-blue-50 text-primary border border-blue-100 rounded-md text-[9px] font-bold tracking-wide">{c.t}</div>
                 </div>
             ))}
         </div>
@@ -329,7 +336,7 @@ const UI_Tickets_Mobile = () => (
             <div className="flex gap-2 mt-4 text-[10px] relative z-10">
                 <span className="bg-white/20 px-3 py-1 rounded-full border border-white/30 backdrop-blur-sm">Alle</span>
                 <span className="bg-white text-primary px-3 py-1 rounded-full font-bold shadow-md">Offen (2)</span>
-                <span className="bg-white/20 px-3 py-1 rounded-full border border-white/30 backdrop-blur-sm">Erledigt</span>
+                <span className="bg-white/20 px-3 py-1 rounded-full border border-white/30 backdrop-blur-sm">Abgeschlossen</span>
             </div>
         </div>
         <div className="p-3 space-y-3 bg-slate-50 flex-1">
@@ -346,45 +353,37 @@ const UI_Tickets_Mobile = () => (
             </div>
         </div>
         <div className="p-4 border-t border-slate-200 bg-white">
-            <button className="w-full bg-primary text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-500/30 text-xs flex items-center justify-center gap-2 hover:bg-blue-600 transition-colors">
+            <div className="w-full bg-primary text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-500/30 text-xs flex items-center justify-center gap-2">
                 <Plus size={16} /> Ticket erstellen
-            </button>
+            </div>
         </div>
     </div>
 );
 
-// 15. Investor Cockpit / Pipeline
+// 15. Investor Cockpit / Gespeicherte Deals
 const UI_Investor = () => (
-    <AppShell title="Deal Pipeline" sidebarActive="investor">
-        <div className="flex gap-3 overflow-x-auto pb-2 h-full">
-            {/* Column 1: Neu */}
-            <div className="w-48 flex-shrink-0 flex flex-col bg-slate-100 rounded-lg p-2 h-full border border-slate-200">
-                <div className="font-bold text-slate-500 text-[10px] px-2 mb-2 flex justify-between uppercase tracking-wider">NEU <span className="bg-slate-200 text-slate-600 px-1.5 rounded-full text-[9px]">2</span></div>
-                <div className="space-y-2">
-                    <div className="bg-white p-2 rounded-lg shadow-sm border border-slate-200 cursor-pointer hover:shadow-md transition-all hover:-translate-y-1">
-                        <div className="h-24 bg-slate-100 rounded mb-2 -mx-1 -mt-1 overflow-hidden relative">
-                            <div className="absolute font-bold text-slate-300 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[10px]">BILD</div>
-                        </div>
-                        <div className="font-bold text-slate-800 text-[10px] mb-1">MFH Leipzig - Sanierung</div>
-                        <div className="flex justify-between mt-2 text-[9px] text-slate-500 border-t border-slate-50 pt-1">
-                            <span>850k €</span>
-                            <span className="text-green-600 font-bold bg-green-50 px-1 rounded">7.2%</span>
-                        </div>
-                    </div>
-                </div>
+    <AppShell title="Investor Cockpit" sidebarActive="investor">
+        <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">CASHFLOW / MO.</div><div className="text-base font-bold text-green-600">1.240 €</div></div>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">NETTORENDITE</div><div className="text-base font-bold text-slate-800">4,9 %</div></div>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">LTV</div><div className="text-base font-bold text-primary">62 %</div></div>
+        </div>
+        <div className="bg-white rounded-lg border border-slate-200 overflow-hidden text-[10px] shadow-sm flex-1">
+            <div className="flex items-center gap-2 bg-slate-50 p-2 font-bold text-slate-500 border-b border-slate-200">
+                <FileText size={12} /> Gespeicherte Deals
             </div>
-            {/* Column 2: Prüfung */}
-            <div className="w-48 flex-shrink-0 flex flex-col bg-slate-100 rounded-lg p-2 h-full border border-slate-200">
-                <div className="font-bold text-slate-500 text-[10px] px-2 mb-2 uppercase tracking-wider">PRÜFUNG</div>
-                <div className="bg-white p-2 rounded-lg shadow-sm border border-slate-200 border-l-4 border-l-primary hover:shadow-md transition-all hover:-translate-y-1 cursor-pointer">
-                    <div className="font-bold text-slate-800 text-[10px] mb-2">ETW Berlin Mitte</div>
-                    <div className="space-y-1.5 bg-slate-50 p-1.5 rounded">
-                        <div className="flex justify-between text-[9px] text-slate-500"><span>Kalkulation</span><span className="font-bold text-primary">60%</span></div>
-                        <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden"><div className="h-full w-2/3 bg-primary rounded-full" /></div>
-                    </div>
-                    <div className="mt-2 text-[9px] text-slate-400 flex gap-1"><FileText size={10} /> <span>Exposé.pdf</span></div>
+            {[
+                { n: 'MFH Leipzig', t: 'Buy & Hold', p: '850.000 €', k: '7,2 % brutto' },
+                { n: 'ETW Berlin Mitte', t: 'Fix & Flip', p: '310.000 €', k: '14 % Marge' },
+                { n: 'DHH Dresden', t: 'Buy & Hold', p: '420.000 €', k: '5,1 % brutto' },
+            ].map((d, i) => (
+                <div key={i} className="flex p-3 border-b border-slate-50 items-center">
+                    <div className="w-2/5 font-medium text-slate-700">{d.n}</div>
+                    <div className="w-1/5"><span className="px-1.5 py-0.5 rounded bg-blue-50 text-primary text-[9px] font-bold">{d.t}</span></div>
+                    <div className="w-1/5 text-right font-mono text-slate-600">{d.p}</div>
+                    <div className="w-1/5 text-right font-bold text-green-600">{d.k}</div>
                 </div>
-            </div>
+            ))}
         </div>
     </AppShell>
 );
@@ -395,7 +394,7 @@ const UI_Sanierung = () => (
         <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">BUDGET</div><div className="text-base font-bold text-slate-800">125.000 €</div></div>
             <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">GEPLANT</div><div className="text-base font-bold text-primary">118.450 €</div></div>
-            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">PUFFER</div><div className="text-base font-bold text-green-600">6.550 €</div></div>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-sm"><div className="text-[9px] text-slate-400 font-bold uppercase mb-1">DIFFERENZ</div><div className="text-base font-bold text-green-600">6.550 €</div></div>
         </div>
         <div className="bg-white rounded-lg border border-slate-200 overflow-hidden text-[10px] shadow-sm flex-1">
             <div className="flex bg-slate-50 p-2 font-bold text-slate-500 border-b border-slate-200">
@@ -453,7 +452,7 @@ const UI_Aushaenge = () => (
     <AppShell title="Aushänge" sidebarActive="immobilien">
         <div className="flex gap-4 h-full">
             <div className="w-1/3 border-r border-slate-200 pr-4 space-y-2">
-                <button className="w-full bg-primary text-white py-1.5 rounded text-xs font-bold mb-2 shadow-sm">+ Neu</button>
+                <div className="w-full bg-primary text-white py-1.5 rounded text-xs font-bold mb-2 shadow-sm text-center">+ Neu</div>
                 <div className="bg-blue-50 p-2 rounded border border-blue-100 text-primary font-medium text-[10px]">Wasser abgestellt</div>
                 <div className="p-2 rounded border border-transparent hover:bg-slate-100 text-slate-600 text-[10px]">Hausordnung</div>
                 <div className="p-2 rounded border border-transparent hover:bg-slate-100 text-slate-600 text-[10px]">Mülltrennung</div>
@@ -472,9 +471,9 @@ const UI_Aushaenge = () => (
 )
 
 // MAPPING ENGINE
-const getVisualContent = (imageString, type) => {
+const getVisualContent = (imageString) => {
     // Priority: Real Image path (start with /) -> Component Map -> Generic Fallback
-    if (imageString.startsWith('/')) return { type: 'image', src: imageString };
+    if (typeof imageString === 'string' && imageString.startsWith('/')) return { type: 'image', src: imageString };
 
     // Fallback UI Map based on featureData IDs or placeholders
     const uiMap = {
@@ -495,13 +494,20 @@ const getVisualContent = (imageString, type) => {
     if (uiMap[imageString]) return { type: 'component', component: uiMap[imageString] };
 
     // Generic fallback if a key is missing but logic requests a UI
+    // (z. B. Screenshot-Pfad ohne führendes '/images/...') – im Dev-Modus sichtbar machen
+    if (import.meta.env.DEV) {
+        console.warn(`[FeaturesPage] Unbekannte Abbildung "${imageString}" – zeige Dashboard-Platzhalter. Screenshots brauchen den Pfad '/images/<datei>'.`);
+    }
     return { type: 'component', component: <UI_Dashboard /> };
 };
 
 
+// Klebt unter der fixen Navbar, damit sie bedienbar bleibt. Navbar eingescrollt: py-3 + Inhalt –
+// mobil 64 px (h-10 Logo/Menü-Button), ab md 72 px (Button "kostenlos testen" mit py-3 = 48 px)
 const StickySubNav = ({ categories, activeCategory, onSelect }) => {
+    if (categories.length === 0) return null;
     return (
-        <div className="sticky top-0 lg:top-0 z-40 bg-white/90 backdrop-blur-md border-y border-slate-200 shadow-sm mb-12">
+        <div className="sticky top-16 md:top-[72px] z-40 bg-white/90 backdrop-blur-md border-y border-slate-200 shadow-sm mb-12">
             <div className="container overflow-x-auto hide-scrollbar">
                 <div className="flex items-center gap-1 py-3 min-w-max">
                     {categories.map(cat => (
@@ -594,20 +600,20 @@ const FeatureModule = ({ module, index }) => {
                     {/* Backdrop Glow */}
                     <div className="absolute inset-0 bg-gradient-to-tr from-blue-100 via-indigo-50 to-white rounded-full blur-[100px] opacity-60 -z-10 group-hover:opacity-80 transition-opacity duration-1000" />
 
-                    {/* Device Frame */}
+                    {/* Device Frame – nachgebaute Ansichten sind reine Illustration (für Tastatur/Screenreader ausgeblendet) */}
                     {module.type === 'phone' ? (
                         <div className="flex justify-center py-8">
                             <PhoneMockup className="shadow-[0_20px_50px_-12px_rgba(0,0,0,0.3)] group-hover:-translate-y-4 transition-transform duration-700">
                                 {visual.type === 'image'
-                                    ? <img src={visual.src} alt={module.title} className="w-full h-full object-cover" />
-                                    : <div className="w-full h-full bg-slate-50">{visual.component}</div>}
+                                    ? <img src={visual.src} alt={`${module.title} – Ansicht in der App`} className="w-full h-full object-cover" loading="lazy" />
+                                    : <div className="w-full h-full bg-slate-50" aria-hidden="true" inert>{visual.component}</div>}
                             </PhoneMockup>
                         </div>
                     ) : (
                         <LaptopMockup className="shadow-[0_30px_60px_-15px_rgba(0,0,0,0.2)] rounded-xl group-hover:scale-[1.02] transition-transform duration-700 bg-white">
                             {visual.type === 'image'
-                                ? <img src={visual.src} alt={module.title} className="w-full h-full object-cover" />
-                                : <div className="w-full h-full bg-white">{visual.component}</div>}
+                                ? <img src={visual.src} alt={`${module.title} – Ansicht in der App`} className="w-full h-full object-cover object-top" loading="lazy" />
+                                : <div className="w-full h-full bg-white" aria-hidden="true" inert>{visual.component}</div>}
                         </LaptopMockup>
                     )}
 
@@ -616,8 +622,8 @@ const FeatureModule = ({ module, index }) => {
                         <div className="hidden md:block absolute -right-8 -bottom-16 w-1/3 z-20 hover:scale-110 transition-transform duration-500">
                             <PhoneMockup className="shadow-[0_20px_50px_-12px_rgba(0,0,0,0.4)] border-slate-900 border-[6px] rounded-[2.5rem]">
                                 {module.secondImage && module.secondImage.startsWith('/')
-                                    ? <img src={module.secondImage} alt="Mobile" className="w-full h-full object-cover" />
-                                    : <UI_Tickets_Mobile />
+                                    ? <img src={module.secondImage} alt={`${module.title} – mobile Ansicht`} className="w-full h-full object-cover" loading="lazy" />
+                                    : <div className="w-full h-full" aria-hidden="true" inert><UI_Tickets_Mobile /></div>
                                 }
                             </PhoneMockup>
                         </div>
@@ -644,18 +650,42 @@ const FeaturesPageV2 = () => {
     };
 
     // Filter Logic
+    const query = searchQuery.trim().toLowerCase();
     const filteredCategories = featureCategories.map(cat => ({
         ...cat,
         modules: cat.modules.filter(mod =>
-            !searchQuery ||
-            mod.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            mod.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            mod.features.some(f => f.toLowerCase().includes(searchQuery.toLowerCase()))
+            !query ||
+            mod.title.toLowerCase().includes(query) ||
+            mod.description.toLowerCase().includes(query) ||
+            mod.features.some(f => f.toLowerCase().includes(query))
         )
     })).filter(cat => cat.modules.length > 0);
+    const visibleCategoryIds = filteredCategories.map(cat => cat.id).join('|');
+
+    // Scroll-Spy: aktive Kategorie in der Sub-Navigation beim Scrollen mitführen
+    useEffect(() => {
+        const ids = visibleCategoryIds ? visibleCategoryIds.split('|') : [];
+        const handleScroll = () => {
+            const scrollPosition = window.scrollY + 160; // Navbar + Sub-Navigation
+            for (const id of ids) {
+                const section = document.getElementById(id);
+                if (section && section.offsetTop <= scrollPosition && (section.offsetTop + section.offsetHeight) > scrollPosition) {
+                    setActiveCategory(id);
+                    break;
+                }
+            }
+        };
+        window.addEventListener('scroll', handleScroll, { passive: true });
+        return () => window.removeEventListener('scroll', handleScroll);
+    }, [visibleCategoryIds]);
 
     return (
         <MainLayout>
+            {/* SEO Meta Tags */}
+            <title>Funktionen | ImmoControlPro360 – Immobilienverwaltung für Investoren</title>
+            <meta name="description" content={`Alle Funktionen von ImmoControlPro360 im Überblick: Dashboard, Mietverhältnisse, Nebenkostenabrechnung, Ticketsystem, Mieterportal und Investor-Rechner. ${TRIAL_DAYS} Tage kostenlos testen.`} />
+            <link rel="canonical" href={`${SITE_URL}/funktionen`} />
+
             {/* HERO */}
             <section className="pt-32 pb-24 relative overflow-hidden bg-primary rounded-b-[3rem] md:rounded-b-[5rem] shadow-xl shadow-blue-900/20">
                 {/* Background Gradients */}
@@ -675,7 +705,7 @@ const FeaturesPageV2 = () => {
                             <span className="bg-white/20 px-4 py-1.5 rounded-full text-sm font-medium border border-white/20 backdrop-blur-md shadow-lg flex items-center gap-2"><TrendingUp size={14} /> Investorportal</span>
                         </div>
                         <h1 className="text-4xl md:text-7xl font-bold mb-8 leading-tight tracking-tight drop-shadow-sm">
-                            Jedes Feature sorgfältig durchdacht um es einfach und effizient zu halten.
+                            Jedes Feature sorgfältig durchdacht, um es einfach und effizient zu halten.
                         </h1>
                         <p className="text-lg md:text-2xl text-blue-50 mb-12 font-light max-w-3xl mx-auto leading-relaxed drop-shadow-sm">
                             Vom Anlegen der ersten Einheiten bis zur hundertsten komplexen Dealkalkulation. Hier siehst du genau, was das System für dich leistet.
@@ -703,15 +733,26 @@ const FeaturesPageV2 = () => {
                 </div>
             </section>
 
-            {/* STICKY NAV */}
+            {/* STICKY NAV – nur Kategorien mit Treffern */}
             <StickySubNav
-                categories={featureCategories}
+                categories={filteredCategories}
                 activeCategory={activeCategory}
                 onSelect={scrollToCategory}
             />
 
             {/* MAIN CONTENT */}
             <div className="container pb-32">
+                {filteredCategories.length === 0 && (
+                    <div className="text-center py-20 my-12 bg-slate-50 rounded-2xl border border-slate-100 border-dashed max-w-3xl mx-auto">
+                        <p className="text-slate-500 text-lg">Keine Funktionen für „{searchQuery}“ gefunden.</p>
+                        <button
+                            onClick={() => setSearchQuery('')}
+                            className="mt-4 text-primary font-medium hover:underline"
+                        >
+                            Suche zurücksetzen
+                        </button>
+                    </div>
+                )}
                 {filteredCategories.map((category) => (
                     <section key={category.id} id={category.id} className="mb-40 scroll-mt-48">
                         {/* Category Header */}
@@ -737,13 +778,13 @@ const FeaturesPageV2 = () => {
             {/* SUMMARY CTA */}
             <section className="py-32 bg-primary text-white text-center relative overflow-hidden">
                 {/* Background FX */}
-                <div className="absolute top-0 left-0 w-full h-full bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay pointer-events-none" />
+                <div className="absolute top-0 left-0 w-full h-full opacity-20 mix-blend-overlay pointer-events-none" style={{ backgroundImage: NOISE_BG }} />
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[1000px] h-[1000px] bg-white/10 rounded-full blur-[120px] pointer-events-none" />
 
                 <div className="container relative z-10 max-w-4xl mx-auto">
                     <h2 className="text-5xl md:text-6xl font-bold mb-8 drop-shadow-sm">Schluss mit Excel-Chaos.</h2>
                     <p className="text-2xl text-blue-50 mb-12 max-w-3xl mx-auto font-light">
-                        Starte jetzt deine 10-tägige Testphase. <br />Völlig unverbindlich, ohne Kreditkarte.
+                        Starte jetzt deine {TRIAL_DAYS}-tägige Testphase. <br />Völlig unverbindlich, ohne Kreditkarte.
                     </p>
 
                     <Link to="/register-trial" className="btn-primary bg-white text-primary hover:bg-blue-50 px-12 py-6 text-xl shadow-2xl shadow-black/20 border-none transition-transform hover:scale-105 font-bold inline-block rounded-2xl">

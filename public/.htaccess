@@ -1,3 +1,11 @@
+# Marketing-Website immocontrol360.de (liegt im kombinierten Deploy im Root des production-Branches).
+# Liegt die Web-App als Unterordner /app (app.immocontrol360.de) darunter, gelten die Header-Regeln
+# voraussichtlich auch dort. Sie sind mit der App abgeglichen: keine Kamera-/Mikrofon-/Standort-/USB-Nutzung,
+# keine Einbettung in fremde Seiten. Die Rewrite-Regeln der App stehen in deren eigener .htaccess.
+# HTTP -> HTTPS leitet Hostinger bereits selbst weiter (301); bewusst keine eigene Regel hier,
+# damit hinter dem Hostinger-CDN keine Weiterleitungsschleife entstehen kann.
+
+# SPA-Fallback: unbekannte Pfade liefern index.html (Routing übernimmt React)
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
@@ -6,4 +14,26 @@
   RewriteCond %{REQUEST_FILENAME} !-d
   RewriteCond %{REQUEST_FILENAME} !-l
   RewriteRule . /index.html [L]
+</IfModule>
+
+<IfModule mod_headers.c>
+  # Sicherheits-Header
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), usb=()"
+  # HSTS 180 Tage, bewusst ohne includeSubDomains und ohne preload
+  Header always set Strict-Transport-Security "max-age=15552000"
+
+  # HTML immer beim Server nachfragen, damit ein neuer Deploy sofort ankommt
+  <FilesMatch "\.html?$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+
+  # Von Vite gehashte Build-Dateien (assets/name-HASH.ext, 8-stelliger Hash) ändern ihren Namen bei jeder
+  # Änderung und dürfen daher ein Jahr unverändert zwischengespeichert werden.
+  # Achtung: eigene Dateien in public/ nicht nach dem Muster "name-XXXXXXXX.png" benennen.
+  <FilesMatch "-[A-Za-z0-9_-]{8}\.(js|mjs|css|woff2?|ttf|otf|png|jpe?g|gif|svg|webp|avif|ico)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
 </IfModule>

@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Umgebungsvariablen nicht einchecken (Vorlage mit Schlüsselnamen: .env.example).
+# Hinweis: Die bisher getrackte .env muss einmalig mit "git rm --cached .env" aus dem Index genommen werden.
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

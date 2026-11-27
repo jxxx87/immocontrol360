@@ -2,13 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Menu, X, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { APP_URL, BRAND_NAME } from './siteConfig';
 
 const Navbar = () => {
-    const [isOpen, setIsOpen] = useState(false);
     const [scrolled, setScrolled] = useState(false);
     const location = useLocation();
     const isLanding = location.pathname === '/landing' || location.pathname === '/investor';
-    const appUrl = import.meta.env.DEV ? 'http://localhost:5173' : 'https://app.immocontrol360.de';
+    const loginUrl = `${APP_URL}/login`;
+
+    // Das mobile Menü gehört zum aktuellen History-Eintrag: nach jedem Seitenwechsel
+    // (neuer location.key) ist es automatisch geschlossen.
+    const [menuKey, setMenuKey] = useState(null);
+    const isOpen = menuKey !== null && menuKey === location.key;
+    const toggleMenu = () => setMenuKey(isOpen ? null : location.key);
 
     useEffect(() => {
         const handleScroll = () => {
@@ -18,20 +24,16 @@ const Navbar = () => {
         return () => window.removeEventListener('scroll', handleScroll);
     }, []);
 
-    // Close mobile menu on route change
-    useEffect(() => {
-        setIsOpen(false);
-    }, [location]);
-
     if (isLanding) {
         return (
             <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'bg-white/90 backdrop-blur-md shadow-sm py-3' : 'bg-transparent py-5'}`}>
                 <div className="container flex items-center justify-between">
                     <Link to="/" className="flex items-center gap-2">
-                        <img src="/logo.png" alt="ImmoControlPro360" className="h-10 w-auto" />
+                        <img src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
                     </Link>
-                    <div className="hidden md:flex items-center gap-4">
-                        <a href={`${appUrl}/login`} className="text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">
+                    {/* Login auf allen Bildschirmbreiten (die Landingpages haben kein Mobile-Menü) */}
+                    <div className="flex items-center gap-4">
+                        <a href={loginUrl} className="text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">
                             Login
                         </a>
                     </div>
@@ -45,7 +47,7 @@ const Navbar = () => {
             <div className="container flex items-center justify-between">
                 {/* Logo */}
                 <Link to="/" className="flex items-center gap-2">
-                    <img src="/images/logo.png" alt="ImmoControlPro360" className="h-10 w-auto" />
+                    <img src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
                 </Link>
 
                 {/* Desktop Menu */}
@@ -58,7 +60,7 @@ const Navbar = () => {
 
                 {/* Desktop Actions */}
                 <div className="hidden md:flex items-center gap-6">
-                    <a href={`${appUrl}/login`} className="text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">
+                    <a href={loginUrl} className="text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">
                         Login
                     </a>
                     <Link to="/register-trial" className="btn-primary flex items-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30">
@@ -68,17 +70,21 @@ const Navbar = () => {
 
                 {/* Mobile Toggle */}
                 <button
-                    onClick={() => setIsOpen(!isOpen)}
-                    className="md:hidden z-50 relative p-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
-                    aria-label="Menu"
+                    type="button"
+                    onClick={toggleMenu}
+                    className="md:hidden z-50 relative p-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    aria-label={isOpen ? 'Menü schließen' : 'Menü öffnen'}
+                    aria-expanded={isOpen}
+                    aria-controls="mobile-menu"
                 >
-                    {isOpen ? <X size={24} /> : <Menu size={24} />}
+                    {isOpen ? <X size={24} aria-hidden="true" /> : <Menu size={24} aria-hidden="true" />}
                 </button>
 
                 {/* Mobile Menu Overlay */}
                 <AnimatePresence>
                     {isOpen && (
                         <motion.div
+                            id="mobile-menu"
                             initial={{ opacity: 0, y: -20 }}
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, y: -20 }}
@@ -88,7 +94,7 @@ const Navbar = () => {
                             <Link to="/funktionen" className="text-lg font-medium text-slate-800 py-2 border-b border-slate-50">Was du bekommst</Link>
                             <Link to="/preise" className="text-lg font-medium text-slate-800 py-2 border-b border-slate-50">Preise</Link>
                             <Link to="/faq" className="text-lg font-medium text-slate-800 py-2 border-b border-slate-50">FAQ</Link>
-                            <a href={`${appUrl}/login`} className="text-lg font-medium text-slate-800 py-2 border-b border-slate-50">Login</a>
+                            <a href={loginUrl} className="text-lg font-medium text-slate-800 py-2 border-b border-slate-50">Login</a>
                             <Link to="/register-trial" className="btn-primary w-full justify-center mt-2">
                                 Jetzt kostenlos testen
                             </Link>

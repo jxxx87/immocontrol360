@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Check, ArrowRight } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { LaptopMockup, PhoneMockup } from '../Mockups';
 
 const Features = () => {
@@ -107,10 +107,10 @@ const Features = () => {
                     {/* Background decoration */}
                     <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-white/10 rounded-full blur-[100px] pointer-events-none" />
                     <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-indigo-600/30 rounded-full blur-[100px] pointer-events-none" />
-                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay pointer-events-none" />
+                    <div className="absolute inset-0 bg-noise opacity-20 mix-blend-overlay pointer-events-none" />
 
                     <div className="relative z-10 max-w-3xl mx-auto text-center mb-12">
-                        <h2 className="text-3xl md:text-4xl font-bold mb-6 drop-shadow-sm">
+                        <h2 className="text-3xl md:text-4xl font-bold mb-6 text-white drop-shadow-sm">
                             Investorportal: Alle Kennzahlen im Überblick, Deals prüfen, Risiken kalkulieren, Wachstum planen.
                         </h2>
                         <p className="text-blue-50 text-lg mb-8 drop-shadow-sm">
@@ -127,16 +127,26 @@ const Features = () => {
                     <div className="relative z-10 max-w-5xl mx-auto">
                         {/* Tabs */}
                         <div className="flex justify-center mb-8">
-                            <div className="bg-white/10 p-1 rounded-xl inline-flex backdrop-blur-md border border-white/20 shadow-lg">
+                            <div role="tablist" aria-label="Rechner im Investorportal" className="bg-white/10 p-1 rounded-xl inline-flex backdrop-blur-md border border-white/20 shadow-lg">
                                 <button
+                                    type="button"
+                                    role="tab"
+                                    id="investor-tab-buyhold"
+                                    aria-selected={activeTab === 'buyhold'}
+                                    aria-controls="investor-tabpanel"
                                     onClick={() => setActiveTab('buyhold')}
-                                    className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'buyhold' ? 'bg-white text-primary shadow-md' : 'text-blue-100 hover:text-white hover:bg-white/10'}`}
+                                    className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${activeTab === 'buyhold' ? 'bg-white text-primary shadow-md' : 'text-blue-100 hover:text-white hover:bg-white/10'}`}
                                 >
                                     Buy & Hold
                                 </button>
                                 <button
+                                    type="button"
+                                    role="tab"
+                                    id="investor-tab-fixflip"
+                                    aria-selected={activeTab === 'fixflip'}
+                                    aria-controls="investor-tabpanel"
                                     onClick={() => setActiveTab('fixflip')}
-                                    className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'fixflip' ? 'bg-white text-primary shadow-md' : 'text-blue-100 hover:text-white hover:bg-white/10'}`}
+                                    className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${activeTab === 'fixflip' ? 'bg-white text-primary shadow-md' : 'text-blue-100 hover:text-white hover:bg-white/10'}`}
                                 >
                                     Fix & Flip
                                 </button>
@@ -145,6 +155,9 @@ const Features = () => {
 
                         <motion.div
                             key={activeTab}
+                            id="investor-tabpanel"
+                            role="tabpanel"
+                            aria-labelledby={`investor-tab-${activeTab}`}
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.3 }}
