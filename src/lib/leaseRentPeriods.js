@@ -44,6 +44,7 @@ export const formatDateDE = (iso, fallback = '—') => {
 export const formatMonthDE = (iso, fallback = '—') => {
     if (!iso) return fallback;
     const [y, m] = String(iso).slice(0, 7).split('-');
+    if (!y || !m) return fallback;
     return `${m}/${y}`;
 };
 

@@ -1,27 +1,137 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
+// ─────────────────────────────────────────────────────────────────────────────
+// sync-applicant-files
+//
+// Überträgt die Bewerberunterlagen aus dem Bucket "applicant-documents" in die
+// Cloud (OneDrive / Google Drive) des Vermieters und löscht sie danach aus dem Bucket.
+//
+// Zugriff (Komplett-Check 2026-11-27):
+//  • Öffentlich (Vertrag C1): Body { process_token, applicant_id }. Der Bewerber muss
+//    zu diesem Prozess gehören, der Prozess muss öffentlich laufen (in_vermietung) und
+//    die Bewerbung muss frisch sein (direkt nach dem Absenden).
+//  • Angemeldeter Vermieter (Vertrag C2): Eigentümer des Prozesses darf die
+//    Übertragung jederzeit erneut anstoßen (z. B. nach Verbinden einer Cloud).
+//  • Eine Datei wird nur gelöscht, wenn der Upload nachweislich geklappt hat.
+//    Was nicht übertragen werden kann, bleibt im Bucket (Hinweis in der Antwort).
+// ─────────────────────────────────────────────────────────────────────────────
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+const BUCKET = 'applicant-documents'
+const APP_FOLDER_NAME = "ImmoControlpro360"
+const PUBLIC_SYNC_WINDOW_MS = 60 * 60 * 1000
+const MAX_FILES = 10
+const MAX_FILE_BYTES = 20 * 1024 * 1024
+const ALLOWED_EXTENSIONS: Record<string, string> = {
+  pdf: 'application/pdf',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  heic: 'image/heic',
+  heif: 'image/heif',
+  tif: 'image/tiff',
+  tiff: 'image/tiff',
+}
+
+class HttpError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+const json = (body: Record<string, unknown>, status = 200) =>
+  new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    status,
+  })
+
+const isUuid = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+
+const isRecent = (timestamp: unknown, windowMs: number): boolean => {
+  const t = Date.parse(String(timestamp ?? ''))
+  if (Number.isNaN(t)) return false
+  const diff = Date.now() - t
+  return diff <= windowMs && diff > -5 * 60 * 1000
+}
+
+// ── Pfad-Bereinigung (E1-03 / E1-06) ────────────────────────────────────────
+// Ein Segment darf nie '/', '\', '..', Steuerzeichen o. ä. enthalten. Für OneDrive
+// werden dieselben Zeichen entfernt wie in cloud-sync, damit der Bewerberordner im
+// selben Objektordner landet (z. B. "WG: A | B" -> "WG A  B").
+const ONEDRIVE_INVALID = /["*:<>?\/\\|]/g
+function cleanSegment(raw: unknown, fallback: string, provider: string): string {
+  let s = String(raw ?? '').normalize('NFC')
+  s = s.replace(/[\u0000-\u001f\u007f]/g, '')
+  s = provider === 'onedrive' ? s.replace(ONEDRIVE_INVALID, '') : s.replace(/[\/\\]/g, '_')
+  s = s.trim()
+  if (s.length > 120) s = s.slice(0, 120).trim()
+  // '.', '..' und reine Punktfolgen wären Pfad-Navigation -> nie als Ordnername verwenden
+  if (!s || /^\.+$/.test(s)) return fallback
+  return s
+}
+
+function cleanFileName(raw: string, provider: string): string {
+  const base = cleanSegment(raw, 'Dokument', provider)
+  return base.replace(/^\.+/, '') || 'Dokument'
+}
+
+const fileExtension = (name: string): string => {
+  const idx = name.lastIndexOf('.')
+  return idx > 0 ? name.slice(idx + 1).toLowerCase() : ''
+}
+
+// Google-Drive-Suchausdruck: Backslash und Hochkomma escapen
+const gq = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+async function getCaller(req: Request, supabaseAdmin: any) {
+  const header = req.headers.get('Authorization') || ''
+  const jwt = header.replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) return null
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(jwt)
+    if (error || !data?.user?.id || data.user.is_anonymous === true) return null
+    return data.user
+  } catch (_err) {
+    return null
+  }
 }
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
+  if (req.method !== 'POST') {
+    return json({ success: false, error: 'Methode nicht erlaubt.' }, 405)
+  }
 
   try {
-    const { applicantId } = await req.json()
-    if (!applicantId) {
-      throw new Error('Missing applicantId')
+    let payload: any
+    try {
+      payload = await req.json()
+    } catch (_err) {
+      throw new HttpError(400, 'Ungültige Anfrage.')
+    }
+    const applicantId = payload?.applicant_id ?? payload?.applicantId
+    const processToken = payload?.process_token ?? payload?.processToken
+    if (!isUuid(applicantId)) {
+      throw new HttpError(400, 'Es wurde keine gültige Bewerbung angegeben.')
     }
 
     // Initialize Supabase admin client with service role key to bypass RLS and read storage
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
-      { auth: { persistSession: false } }
+      { auth: { persistSession: false, autoRefreshToken: false } }
     )
 
     // 1. Fetch applicant and process details
@@ -29,17 +139,30 @@ serve(async (req) => {
       .from('rental_applicants')
       .select('*, process:rental_processes(*)')
       .eq('id', applicantId)
-      .single()
+      .maybeSingle()
 
-    if (applicantError || !applicant) {
-      throw new Error(`Applicant not found: ${applicantError?.message || ''}`)
+    if (applicantError) throw new Error(`Applicant lookup failed: ${applicantError.message}`)
+    const process = applicant?.process
+    if (!applicant || !process) {
+      throw new HttpError(404, 'Die Bewerbung wurde nicht gefunden.')
     }
 
-    const process = applicant.process
-    if (!process) {
-      throw new Error('Rental process not found for applicant')
+    // 2. Zugriff prüfen
+    const caller = await getCaller(req, supabaseAdmin)
+    const isOwner = !!caller && caller.id === process.user_id
+    if (!isOwner) {
+      // Öffentlicher Aufruf (Vertrag C1)
+      if (typeof processToken !== 'string' || processToken.length < 8 || processToken !== process.token) {
+        throw new HttpError(403, 'Der Link zum Vermietungsprozess ist ungültig.')
+      }
+      if (process.status !== 'in_vermietung') {
+        throw new HttpError(403, 'Dieser Vermietungsprozess ist nicht (mehr) aktiv.')
+      }
+      if (!isRecent(applicant.created_at, PUBLIC_SYNC_WINDOW_MS)) {
+        throw new HttpError(409, 'Die Unterlagen können nur direkt nach dem Absenden der Bewerbung übertragen werden.')
+      }
     }
-    
+
     const landlordId = process.user_id
     const unitId = process.unit_id
 
@@ -48,7 +171,7 @@ serve(async (req) => {
       .from('units')
       .select('*')
       .eq('id', unitId)
-      .single()
+      .maybeSingle()
 
     if (unitError || !unit) {
       throw new Error('Unit not found')
@@ -58,97 +181,116 @@ serve(async (req) => {
       .from('properties')
       .select('*')
       .eq('id', unit.property_id)
-      .single()
+      .maybeSingle()
 
     if (propError || !property) {
       throw new Error('Property not found')
     }
 
-    // 2. Fetch list of files in storage for this applicant
-    const { data: storageFiles, error: storageError } = await supabaseAdmin
-      .storage
-      .from('applicant-documents')
-      .list(applicantId)
+    // 3. Fetch list of files in storage for this applicant (nur Dateien, keine Unterordner)
+    // Ablage: neu "<process_id>/<applicant_id>/…" (SEC-LETTING), bisher "<applicant_id>/…"
+    const storagePrefixes = [`${process.id}/${applicantId}`, applicantId]
+    const allFiles: any[] = []
+    for (const prefix of storagePrefixes) {
+      const { data: storageList, error: storageError } = await supabaseAdmin
+        .storage
+        .from(BUCKET)
+        .list(prefix, { limit: 100 })
 
-    if (storageError) {
-      throw new Error(`Storage listing error: ${storageError.message}`)
+      if (storageError) {
+        throw new Error(`Storage listing error: ${storageError.message}`)
+      }
+      for (const f of storageList || []) {
+        if (f && f.id && f.name && f.name !== '.emptyFolderPlaceholder') {
+          allFiles.push({ ...f, storagePath: `${prefix}/${f.name}` })
+        }
+      }
+    }
+    if (allFiles.length === 0) {
+      // No files uploaded, return success early
+      return json({ success: true, transferred: 0, remaining_in_storage: 0, message: 'No documents to sync.' })
     }
 
-    if (!storageFiles || storageFiles.length === 0) {
-      // No files uploaded, return success early
-      return new Response(JSON.stringify({ success: true, message: 'No documents to sync.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
+    // Typ-, Größen- und Mengenbegrenzung
+    const skipped: string[] = []
+    const files = allFiles.filter((f: any) => {
+      const ext = fileExtension(f.name)
+      const size = Number(f.metadata?.size ?? 0)
+      const ok = !!ALLOWED_EXTENSIONS[ext] && size <= MAX_FILE_BYTES
+      if (!ok) skipped.push(f.name)
+      return ok
+    }).slice(0, MAX_FILES)
+    if (allFiles.length - skipped.length > MAX_FILES) {
+      console.warn(`Applicant ${applicantId}: more than ${MAX_FILES} files, only the first ${MAX_FILES} are transferred.`)
+    }
+
+    const pendingResponse = (reason: string, transferred = 0) => {
+      console.warn(`Applicant ${applicantId}: documents kept in storage (${reason}).`)
+      return json({
+        success: false,
+        pending: true,
+        transferred,
+        remaining_in_storage: allFiles.length - transferred,
+        message: 'Die Unterlagen konnten noch nicht in die Cloud des Vermieters übertragen werden und verbleiben vorerst im Speicher der Plattform.',
       })
     }
 
-    // 3. Resolve landlord's cloud connection
+    if (files.length === 0) {
+      return pendingResponse('no allowed files')
+    }
+
+    // 4. Resolve landlord's cloud connection (neueste Verbindung)
     const { data: connectionData, error: connError } = await supabaseAdmin
       .from('cloud_connections')
       .select('*')
       .eq('user_id', landlordId)
+      .order('created_at', { ascending: false })
       .limit(1)
 
     if (connError || !connectionData || connectionData.length === 0) {
-      throw new Error('Landlord has no active cloud connection configured.')
+      return pendingResponse('no cloud connection')
     }
 
     const connection = connectionData[0]
     const provider = connection.provider
+    if (provider !== 'onedrive' && provider !== 'googledrive') {
+      return pendingResponse(`unsupported provider ${provider}`)
+    }
     let accessToken = connection.access_token
 
     // Refresh cloud token if expired
     const expiresAt = new Date(connection.expires_at)
-    if (expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
-      if (provider === 'onedrive') {
-        const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: Deno.env.get('ONEDRIVE_CLIENT_ID')!,
-            client_secret: Deno.env.get('ONEDRIVE_CLIENT_SECRET')!,
-            refresh_token: connection.refresh_token,
-            grant_type: 'refresh_token',
-          }),
-        })
-        const tokenResponse = await res.json()
-        if (tokenResponse.access_token) {
-          accessToken = tokenResponse.access_token
-          const newExpiresAt = new Date()
-          newExpiresAt.setSeconds(newExpiresAt.getSeconds() + tokenResponse.expires_in)
-          await supabaseAdmin.from('cloud_connections').update({
-            access_token: accessToken,
-            refresh_token: tokenResponse.refresh_token || connection.refresh_token,
-            expires_at: newExpiresAt.toISOString()
-          }).eq('id', connection.id)
-        }
-      } else if (provider === 'googledrive') {
-        const res = await fetch('https://oauth2.googleapis.com/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: Deno.env.get('GOOGLE_CLIENT_ID')!,
-            client_secret: Deno.env.get('GOOGLE_CLIENT_SECRET')!,
-            refresh_token: connection.refresh_token,
-            grant_type: 'refresh_token',
-          }),
-        })
-        const tokenResponse = await res.json()
-        if (tokenResponse.access_token) {
-          accessToken = tokenResponse.access_token
-          const newExpiresAt = new Date()
-          newExpiresAt.setSeconds(newExpiresAt.getSeconds() + tokenResponse.expires_in)
-          await supabaseAdmin.from('cloud_connections').update({
-            access_token: accessToken,
-            refresh_token: tokenResponse.refresh_token || connection.refresh_token,
-            expires_at: newExpiresAt.toISOString()
-          }).eq('id', connection.id)
-        }
+    if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
+      const tokenUrl = provider === 'onedrive'
+        ? 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+        : 'https://oauth2.googleapis.com/token'
+      const res = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_ID' : 'GOOGLE_CLIENT_ID') ?? '',
+          client_secret: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_SECRET' : 'GOOGLE_CLIENT_SECRET') ?? '',
+          refresh_token: connection.refresh_token ?? '',
+          grant_type: 'refresh_token',
+        }),
+      })
+      const tokenResponse = await res.json().catch(() => ({}))
+      if (!res.ok || !tokenResponse.access_token) {
+        // Widerrufene/abgelaufene Verbindung: nichts löschen, Unterlagen bleiben im Speicher
+        return pendingResponse(`token refresh failed (${res.status} ${tokenResponse.error || ''})`)
       }
+      accessToken = tokenResponse.access_token
+      const newExpiresAt = new Date(Date.now() + (Number(tokenResponse.expires_in) || 3600) * 1000)
+      const { error: updErr } = await supabaseAdmin.from('cloud_connections').update({
+        access_token: accessToken,
+        refresh_token: tokenResponse.refresh_token || connection.refresh_token,
+        expires_at: newExpiresAt.toISOString()
+      }).eq('id', connection.id)
+      if (updErr) console.error('Cloud token update failed:', updErr.message)
     }
 
-    // Graph API helper
-    const msGraphCall = async (endpoint: string, method: string = 'GET', body: any = null, isRaw: boolean = false) => {
+    // Graph API helpers: Lesen (404 -> null) und Schreiben (jeder Fehler wirft)
+    const graphRequest = async (endpoint: string, method: string, body: any = null, isRaw = false) => {
       const options: RequestInit = {
         method,
         headers: {
@@ -156,14 +298,22 @@ serve(async (req) => {
           'Content-Type': isRaw ? 'application/octet-stream' : 'application/json'
         }
       }
-      if (body) {
-        options.body = isRaw ? body : JSON.stringify(body)
-      }
-      const res = await fetch(`https://graph.microsoft.com/v1.0${endpoint}`, options)
+      if (body) options.body = isRaw ? body : JSON.stringify(body)
+      return await fetch(`https://graph.microsoft.com/v1.0${endpoint}`, options)
+    }
+    const graphGet = async (endpoint: string) => {
+      const res = await graphRequest(endpoint, 'GET')
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`Graph API Error (${res.status})`)
+      return await res.json()
+    }
+    const graphWrite = async (endpoint: string, method: string, body: any, isRaw = false) => {
+      const res = await graphRequest(endpoint, method, body, isRaw)
       if (!res.ok) {
-        if (res.status === 404) return null
-        const err = await res.text()
-        throw new Error(`Graph API Error (${res.status}): ${err}`)
+        const detail = await res.text().catch(() => '')
+        const err: any = new Error(`Graph API Error (${res.status}): ${detail.slice(0, 300)}`)
+        err.status = res.status
+        throw err
       }
       return res.status === 204 ? null : await res.json()
     }
@@ -184,19 +334,18 @@ serve(async (req) => {
       if (body) options.body = JSON.stringify(body)
       const res = await fetch(url, options)
       if (!res.ok) {
-        if (res.status === 404) return null
-        const err = await res.text()
-        throw new Error(`Google Drive API Error (${res.status}): ${err}`)
+        if (res.status === 404 && method === 'GET') return null
+        throw new Error(`Google Drive API Error (${res.status})`)
       }
       return res.status === 204 ? null : await res.json()
     }
 
-    // 4. Calculate Property display name
-    let propertyFolderName = ''
+    // 5. Calculate Property display name (wie cloud-sync)
+    let propertyFolderRaw = ''
     if (property.economic_unit_id) {
       const { data: relatedProps } = await supabaseAdmin
         .from('properties')
-        .select('*')
+        .select('street, house_number')
         .eq('economic_unit_id', property.economic_unit_id)
         .order('street')
 
@@ -217,173 +366,193 @@ serve(async (req) => {
       })
       const displayNames = parts.slice(0, 2).join(' | ')
       const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames
-      propertyFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`
+      propertyFolderRaw = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`
     } else {
-      propertyFolderName = `${property.street} ${property.house_number || ''}`.trim()
+      propertyFolderRaw = `${property.street} ${property.house_number || ''}`.trim()
     }
 
-    const appFolderName = "ImmoControlpro360"
-    const unitName = unit.unit_name.replace(/[\/:*?"<>|]/g, '_')
-    const applicantName = `${applicant.last_name}_${applicant.first_name}`.replace(/[\s\/:*?"<>|]/g, '_')
+    // Alle Segmente einzeln bereinigt – keine Pfad-Zusammensetzung aus Rohwerten
+    const applicantRaw = `${applicant.last_name || ''}_${applicant.first_name || ''}`.replace(/\s+/g, '_')
+    const segments = [
+      cleanSegment(propertyFolderRaw, 'Objekt', provider),
+      'Neuvermietung',
+      cleanSegment(unit.unit_name, 'Einheit', provider),
+      cleanSegment(applicantRaw.replace(/^_+|_+$/g, ''), `Bewerber_${applicantId.slice(0, 8)}`, provider),
+    ]
 
-    // Target sub-path in cloud
-    const targetSubPath = `${propertyFolderName}/Neuvermietung/${unitName}/${applicantName}`
+    let transferred = 0
+    const failed: string[] = []
 
-    // 5. Transfer files level-by-level
+    const downloadFile = async (file: any) => {
+      const { data: fileBlob, error: downloadError } = await supabaseAdmin
+        .storage
+        .from(BUCKET)
+        .download(file.storagePath)
+      if (downloadError || !fileBlob) {
+        console.error(`Error downloading ${file.name}:`, downloadError?.message || downloadError)
+        return null
+      }
+      if (fileBlob.size > MAX_FILE_BYTES) {
+        console.warn(`File ${file.name} exceeds size limit, skipped.`)
+        return null
+      }
+      return fileBlob
+    }
+
+    const removeFromStorage = async (file: any) => {
+      const { error: removeErr } = await supabaseAdmin.storage.from(BUCKET).remove([file.storagePath])
+      if (removeErr) {
+        console.error(`Could not remove ${file.name} from storage:`, removeErr.message)
+        return false
+      }
+      return true
+    }
+
+    // 6. Transfer files level-by-level
     if (provider === 'onedrive') {
-      // Helper to ensure target folder exists and return its details
-      const ensurePathOneDrive = async (path: string) => {
-        const segments = path.split('/').filter(s => s.length > 0)
-        let currentParentId = "root"
-        let currentPath = appFolderName
-        
-        // Ensure root app folder
-        let rootFolder = await msGraphCall(`/me/drive/root:/${appFolderName}`)
-        if (!rootFolder) {
-          rootFolder = await msGraphCall(`/me/drive/root/children`, 'POST', {
-            name: appFolderName,
-            folder: {},
-            "@microsoft.graph.conflictBehavior": "rename"
-          })
-        }
-        currentParentId = rootFolder.id
-
-        for (const segment of segments) {
-          const safeSegment = segment.replace(/["*:<>?\/\\|]/g, '')
-          currentPath = `${currentPath}/${safeSegment}`
-          let folder = await msGraphCall(`/me/drive/root:/${currentPath}`)
-          if (!folder) {
-            folder = await msGraphCall(`/me/drive/items/${currentParentId}/children`, 'POST', {
-              name: safeSegment,
+      // Ordner Ebene für Ebene über Item-IDs anlegen/auflösen (kein Roh-Pfad in der URL)
+      const ensureChildFolder = async (parentId: string | null, name: string) => {
+        const lookup = parentId
+          ? `/me/drive/items/${encodeURIComponent(parentId)}:/${encodeURIComponent(name)}`
+          : `/me/drive/root:/${encodeURIComponent(name)}`
+        let folder = await graphGet(lookup)
+        if (!folder) {
+          const childrenEndpoint = parentId
+            ? `/me/drive/items/${encodeURIComponent(parentId)}/children`
+            : `/me/drive/root/children`
+          try {
+            folder = await graphWrite(childrenEndpoint, 'POST', {
+              name,
               folder: {},
-              "@microsoft.graph.conflictBehavior": "replace"
+              "@microsoft.graph.conflictBehavior": "fail"
             })
+          } catch (err: any) {
+            if (err?.status !== 409) throw err
+            folder = await graphGet(lookup) // parallel angelegt
           }
-          currentParentId = folder.id
         }
-        return currentParentId
+        if (!folder?.id || !folder.folder) throw new Error('OneDrive folder could not be resolved')
+        return folder.id as string
       }
 
-      await ensurePathOneDrive(targetSubPath)
+      let parentId = await ensureChildFolder(null, APP_FOLDER_NAME)
+      for (const segment of segments) {
+        parentId = await ensureChildFolder(parentId, segment)
+      }
 
       // Upload each file
-      for (const file of storageFiles) {
-        const filePath = `${applicantId}/${file.name}`
-        
-        // Download from Supabase
-        const { data: fileBlob, error: downloadError } = await supabaseAdmin
-          .storage
-          .from('applicant-documents')
-          .download(filePath)
+      for (const file of files) {
+        try {
+          const fileBlob = await downloadFile(file)
+          if (!fileBlob) { failed.push(file.name); continue }
 
-        if (downloadError || !fileBlob) {
-          console.error(`Error downloading ${file.name}:`, downloadError)
-          continue
+          const arrayBuffer = await fileBlob.arrayBuffer()
+          const safeFileName = cleanFileName(file.name, provider)
+          const endpoint = `/me/drive/items/${encodeURIComponent(parentId)}:/${encodeURIComponent(safeFileName)}:/content?@microsoft.graph.conflictBehavior=rename`
+
+          // Upload to OneDrive – nur bei bestätigtem Ergebnis aus dem Speicher löschen
+          const uploaded = await graphWrite(endpoint, 'PUT', arrayBuffer, true)
+          if (!uploaded?.id) { failed.push(file.name); continue }
+
+          if (await removeFromStorage(file)) transferred++
+          else failed.push(file.name)
+        } catch (err: any) {
+          console.error(`OneDrive upload failed for ${file.name}:`, err?.message || err)
+          failed.push(file.name)
         }
-
-        const arrayBuffer = await fileBlob.arrayBuffer()
-        const safeFileName = file.name.replace(/["*:<>?\/\\|]/g, '')
-        const endpoint = `/me/drive/root:/${appFolderName}/${targetSubPath}/${safeFileName}:/content`
-        
-        // Upload to OneDrive
-        await msGraphCall(endpoint, 'PUT', arrayBuffer, true)
-
-        // Delete from Supabase Storage to save space
-        await supabaseAdmin.storage.from('applicant-documents').remove([filePath])
       }
-    } else if (provider === 'googledrive') {
-      // Ensure Google Drive path
-      const getGoogleRootId = async () => {
-        const rootSearch = await googleDriveCall('/files', 'GET', null, {
-          q: `name = '${appFolderName}' and mimeType = 'application/vnd.google-apps.folder' and 'root' in parents and trashed = false`,
+    } else {
+      // Google Drive
+      const findOrCreateFolder = async (name: string, parentId: string) => {
+        const search = await googleDriveCall('/files', 'GET', null, {
+          q: `name = '${gq(name)}' and '${gq(parentId)}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
           fields: 'files(id, name)'
         })
-        let rootFolder = rootSearch?.files?.[0]
-        if (!rootFolder) {
-          rootFolder = await googleDriveCall('/files', 'POST', {
-            name: appFolderName,
+        let folder = search?.files?.[0]
+        if (!folder) {
+          folder = await googleDriveCall('/files', 'POST', {
+            name,
             mimeType: 'application/vnd.google-apps.folder',
-            parents: ['root']
+            parents: [parentId]
           })
         }
-        return rootFolder.id
+        if (!folder?.id) throw new Error('Google Drive folder could not be resolved')
+        return folder.id as string
       }
 
-      const ensurePathGoogle = async (path: string) => {
-        const rootId = await getGoogleRootId()
-        const segments = path.split('/').filter(s => s.length > 0)
-        let currentParentId = rootId
+      let targetFolderId = await findOrCreateFolder(APP_FOLDER_NAME, 'root')
+      for (const segment of segments) {
+        targetFolderId = await findOrCreateFolder(segment, targetFolderId)
+      }
 
-        for (const segment of segments) {
-          const search = await googleDriveCall('/files', 'GET', null, {
-            q: `name = '${segment.replace(/'/g, "\\'")}' and '${currentParentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-            fields: 'files(id, name)'
+      const encoder = new TextEncoder()
+
+      // Upload each file (multipart: Inhalt + Name + Zielordner in einem Schritt)
+      for (const file of files) {
+        try {
+          const fileBlob = await downloadFile(file)
+          if (!fileBlob) { failed.push(file.name); continue }
+
+          const data = new Uint8Array(await fileBlob.arrayBuffer())
+          const ext = fileExtension(file.name)
+          const mimeType = ALLOWED_EXTENSIONS[ext] || fileBlob.type || 'application/octet-stream'
+          const boundary = `immo${crypto.randomUUID().replace(/-/g, '')}`
+          const meta = JSON.stringify({ name: cleanFileName(file.name, provider), parents: [targetFolderId] })
+          const head = encoder.encode(
+            `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
+            `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+          )
+          const tail = encoder.encode(`\r\n--${boundary}--`)
+          const body = new Uint8Array(head.length + data.length + tail.length)
+          body.set(head, 0)
+          body.set(data, head.length)
+          body.set(tail, head.length + data.length)
+
+          const resUpload = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': `multipart/related; boundary=${boundary}`
+            },
+            body
           })
-          let folder = search?.files?.[0]
-          if (!folder) {
-            folder = await googleDriveCall('/files', 'POST', {
-              name: segment,
-              mimeType: 'application/vnd.google-apps.folder',
-              parents: [currentParentId]
-            })
+          const uploadedFile = await resUpload.json().catch(() => ({}))
+          if (!resUpload.ok || !uploadedFile.id) {
+            console.error(`Google Drive upload failed for ${file.name}: HTTP ${resUpload.status}`)
+            failed.push(file.name)
+            continue
           }
-          currentParentId = folder.id
-        }
-        return currentParentId
-      }
 
-      const targetFolderId = await ensurePathGoogle(targetSubPath)
-
-      // Upload each file
-      for (const file of storageFiles) {
-        const filePath = `${applicantId}/${file.name}`
-        
-        // Download from Supabase
-        const { data: fileBlob, error: downloadError } = await supabaseAdmin
-          .storage
-          .from('applicant-documents')
-          .download(filePath)
-
-        if (downloadError || !fileBlob) {
-          console.error(`Error downloading ${file.name}:`, downloadError)
-          continue
-        }
-
-        const arrayBuffer = await fileBlob.arrayBuffer()
-        
-        // 1. Upload media binary
-        const resUpload = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=media', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': fileBlob.type
-          },
-          body: arrayBuffer
-        })
-        const uploadedFile = await resUpload.json()
-        if (uploadedFile.id) {
-          // 2. Patch file name and move to target folder
-          await googleDriveCall(`/files/${uploadedFile.id}`, 'PATCH', {
-            name: file.name
-          }, {
-            addParents: targetFolderId
-          })
-
-          // Delete from Supabase Storage
-          await supabaseAdmin.storage.from('applicant-documents').remove([filePath])
+          if (await removeFromStorage(file)) transferred++
+          else failed.push(file.name)
+        } catch (err: any) {
+          console.error(`Google Drive upload failed for ${file.name}:`, err?.message || err)
+          failed.push(file.name)
         }
       }
     }
 
-    return new Response(JSON.stringify({ success: true, message: 'All documents synced and storage purged.' }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 200,
+    const remaining = allFiles.length - transferred
+    if (failed.length > 0 || skipped.length > 0) {
+      console.warn(`Applicant ${applicantId}: ${transferred} transferred, ${failed.length} failed, ${skipped.length} skipped.`)
+    }
+    return json({
+      success: failed.length === 0 && remaining === 0,
+      pending: remaining > 0,
+      transferred,
+      failed: failed.length,
+      skipped: skipped.length,
+      remaining_in_storage: remaining,
+      message: remaining === 0
+        ? 'All documents synced and storage purged.'
+        : 'Ein Teil der Unterlagen konnte nicht übertragen werden und verbleibt vorerst im Speicher der Plattform.',
     })
 
   } catch (error: any) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    })
+    if (error instanceof HttpError) {
+      return json({ success: false, error: error.message }, error.status)
+    }
+    console.error('sync-applicant-files error:', error?.message || error)
+    return json({ success: false, error: 'Die Unterlagen konnten nicht übertragen werden.' }, 500)
   }
 })

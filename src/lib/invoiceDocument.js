@@ -47,7 +47,17 @@ const num = (v) => {
     const n = typeof v === 'number' ? v : parseFloat(v);
     return Number.isFinite(n) ? n : 0;
 };
-export const r2 = (v) => Math.round((num(v) + Number.EPSILON) * 100) / 100;
+// Kaufmännische Rundung auf Cent (DIN 1333): Betrag runden, Vorzeichen übernehmen (-1,005 -> -1,01).
+// Dezimal statt binär skaliert: Number.EPSILON reicht ab ca. 2 € nicht (2.135 * 100 = 213.49999999999997).
+// toPrecision(15) entfernt Gleitkomma-Rauschen aus Summen (0.1 + 0.2); Ergebnis nie -0.
+export const r2 = (v) => {
+    const n = num(v);
+    const abs = Number(Math.abs(n).toPrecision(15));
+    if (abs < 0.005) return 0;
+    if (abs >= 1e15) return n;
+    const rounded = Number(`${Math.round(Number(`${abs}e2`))}e-2`);
+    return n < 0 ? -rounded : rounded;
+};
 
 const fmt = (n) => {
     const v = Math.abs(num(n)) < 0.005 ? 0 : num(n);
@@ -100,8 +110,10 @@ export const parseLocalDate = (value) => {
     if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
     const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value).trim());
     if (m) {
-        const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-        return isNaN(d.getTime()) ? null : d;
+        const y = Number(m[1]), mo = Number(m[2]) - 1, day = Number(m[3]);
+        const d = new Date(y, mo, day);
+        // Unmögliche Kalenderdaten (2023-02-29, 2026-04-31) nicht still auf einen anderen Tag verschieben
+        return d.getFullYear() === y && d.getMonth() === mo && d.getDate() === day ? d : null;
     }
     const d = new Date(value);
     return isNaN(d.getTime()) ? null : d;

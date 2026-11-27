@@ -7,5 +7,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true, // Fail if port 5173 is already in use
+  },
+  // Unit-Tests der reinen Rechenlogik (npm test)
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.{js,jsx}'],
   }
 })

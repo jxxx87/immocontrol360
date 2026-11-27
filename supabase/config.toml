@@ -1,3 +1,25 @@
+# Edge-Function-Konfiguration
+#
+# Komplett-Check 2026-11-27 (Paket CLOUD, Befund E1-21): ALLE Functions des Repos stehen hier mit
+# explizitem verify_jwt. Die Werte entsprechen dem Live-Stand des Projekts am 2026-11-27, damit ein
+# Deploy aus dem Repo das Verhalten nicht unbemerkt ändert. Änderungen an Functions anderer Pakete
+# (Abo/Stripe, Mail/Push) nur zusammen mit deren Auth-Korrekturen.
+#
+#   verify_jwt = true  : das Gateway lässt nur Aufrufe mit gültigem JWT durch (auch der öffentliche
+#                        anon-Key ist ein gültiges JWT!) – die Function muss den Nutzer trotzdem selbst prüfen.
+#   verify_jwt = false : die Function prüft den Aufrufer selbst (Nutzer-JWT, Stripe-Signatur …)
+#                        oder ist bewusst öffentlich.
+#
+# Hinweis: Bei Umstellung auf die neuen asymmetrischen JWT-Signing-Keys verify_jwt=true prüfen –
+# die Cloud-Functions validieren den Nutzer zusätzlich selbst per getUser().
+
+# --- Cloud (Paket CLOUD) ------------------------------------------------------------------------
+
+[functions.cloud-auth]
+enabled = true
+# Live false. Die Function prüft den Nutzer selbst (Vertrag C2: getUser, role=authenticated).
+verify_jwt = false
+entrypoint = "./functions/cloud-auth/index.ts"
 
 [functions.cloud-sync]
 enabled = true
@@ -20,3 +42,57 @@ entrypoint = "./functions/cloud-drive/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/cloud-drive/*.html" ]
+
+# --- Vermietung / Mail / Push (Live-Stand) ------------------------------------------------------
+
+[functions.sync-applicant-files]
+verify_jwt = true
+import_map = "./functions/sync-applicant-files/deno.json"
+
+[functions.send-letting-email]
+verify_jwt = true
+import_map = "./functions/send-letting-email/deno.json"
+
+# Wird nur von der DB-Funktion notify_push aufgerufen (Live false).
+[functions.send-push-notification]
+verify_jwt = false
+
+# --- Abo / Stripe (Live-Stand) -------------------------------------------------------------------
+
+# Stripe sendet kein JWT – Prüfung über die Webhook-Signatur.
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.stripe-connect-onboard]
+verify_jwt = true
+
+[functions.create-checkout-session]
+verify_jwt = false
+
+[functions.create-portal-session]
+verify_jwt = false
+
+[functions.create-portal-checkout-session]
+verify_jwt = false
+
+[functions.register-trial]
+verify_jwt = false
+
+[functions.start-trial]
+verify_jwt = false
+
+# --- Marketing-Website (neu, noch nicht deployt) -------------------------------------------------
+
+# Kontaktformular – Aufruf mit dem öffentlichen anon-Key, daher genügt verify_jwt = true.
+[functions.contact-form]
+verify_jwt = true
+
+# --- Nicht deployt (Altlasten ohne Aufrufer) – sicherer Standard, falls doch einmal deployt ---------
+
+[functions.generate-report-pdf]
+verify_jwt = true
+
+[functions.import_xlsx]
+verify_jwt = true
+
+# Live existiert zusätzlich die Function "hyper-responder" (verify_jwt = true) ohne Quellcode im Repo.

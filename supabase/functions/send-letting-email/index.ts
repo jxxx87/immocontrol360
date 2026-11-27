@@ -2,10 +2,41 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 import nodemailer from "npm:nodemailer@6.9.13"
 
+// ─────────────────────────────────────────────────────────────────────────────
+// send-letting-email
+//
+// Sicherheitsmodell (Komplett-Check 2026-11-27):
+//  • Angemeldete Aktionen (test_connection, send_tenant_invite, get_invite_link,
+//    send_custom_email) – Vertrag C2: Der Nutzer wird ausschließlich aus dem
+//    Authorization-Header ermittelt. Der öffentliche anon-Key zählt NICHT als
+//    Anmeldung, `userId` im Body wird ignoriert (darf aus Kompatibilität weiter
+//    mitgeschickt werden).
+//  • Öffentliche Aktionen (application_received, booking_confirmed,
+//    booking_canceled) – Vertrag C1: nur mit `process_token` des laufenden
+//    Vermietungsprozesses plus `applicant_id` bzw. `booking_id`. Empfänger kommen
+//    ausschließlich aus der Datenbank, nie aus dem Body.
+//  • Fachliche Fehler werden mit HTTP 200 und { success: false, error } beantwortet,
+//    damit die App die deutsche Meldung anzeigen kann (supabase.functions.invoke
+//    liefert bei Nicht-2xx nur eine generische Fehlermeldung).
+// ─────────────────────────────────────────────────────────────────────────────
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
+
+const APP_ORIGIN = 'https://app.immocontrol360.de'
+// Weiterleitungsziele für Login-/Einladungslinks (feste Allowlist, nie frei aus dem Body)
+const ALLOWED_REDIRECT_ORIGINS = new Set([APP_ORIGIN])
+
+// Öffentliche Prozess-Mails dürfen nur kurz nach dem auslösenden Ereignis verschickt werden
+const PUBLIC_EVENT_WINDOW_MS = 30 * 60 * 1000
+const MAX_ATTACHMENTS = 10
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_HTML_LENGTH = 500_000
+const ALLOWED_SMTP_PORTS = new Set([25, 465, 587, 2525])
+
+const EXISTING_ACCOUNT_MSG = 'Für diese E-Mail-Adresse besteht bereits ein Benutzerkonto, das nicht eindeutig diesem Mieter zugeordnet ist. Aus Sicherheitsgründen wird kein Anmeldelink erzeugt. Der Mieter kann sich mit seinem Passwort bzw. über „Passwort vergessen“ anmelden.'
 
 interface SmtpConfig {
   host: string;
@@ -15,207 +46,585 @@ interface SmtpConfig {
   from: string;
 }
 
-async function getSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
-  // 1. Try to fetch user-specific SMTP settings
+class HttpError extends Error {
+  status: number;
+  soft: boolean;
+  constructor(status: number, message: string, soft = true) {
+    super(message);
+    this.status = status;
+    this.soft = soft;
+  }
+}
+
+const json = (body: Record<string, unknown>, status = 200) =>
+  new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    status,
+  });
+
+// ── Helfer: Eingaben ────────────────────────────────────────────────────────
+const escapeHtml = (value: unknown): string =>
+  String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c] as string));
+
+// Einzeilig + Längenbegrenzung (Betreffzeilen, Namen)
+const oneLine = (value: unknown, max = 120): string =>
+  String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
+const normEmail = (value: unknown): string =>
+  typeof value === 'string' ? value.trim().toLowerCase() : '';
+
+const isValidEmail = (value: string): boolean =>
+  typeof value === 'string' &&
+  value.length <= 254 &&
+  /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:"]+$/.test(value);
+
+const isUuid = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+// "Name <adresse@domain>" -> "adresse@domain"
+const extractAddress = (from: string): string => {
+  const m = String(from || '').match(/<([^>]+)>/);
+  return (m ? m[1] : String(from || '')).trim();
+};
+
+const isRecent = (timestamp: unknown, windowMs: number): boolean => {
+  const t = Date.parse(String(timestamp ?? ''));
+  if (Number.isNaN(t)) return false;
+  const diff = Date.now() - t;
+  return diff <= windowMs && diff > -5 * 60 * 1000;
+};
+
+// Best-Effort-Schutz gegen mehrfaches Auslösen derselben Prozess-Mail innerhalb
+// einer laufenden Function-Instanz (eine dauerhafte Markierung bräuchte eine DB-Spalte).
+const recentEvents = new Map<string, number>();
+const claimEvent = (key: string): boolean => {
+  const now = Date.now();
+  for (const [k, t] of recentEvents) {
+    if (now - t > PUBLIC_EVENT_WINDOW_MS) recentEvents.delete(k);
+  }
+  if (recentEvents.has(key)) return false;
+  recentEvents.set(key, now);
+  return true;
+};
+const releaseEvent = (key: string) => { recentEvents.delete(key); };
+
+const resolveRedirectOrigin = (origin: unknown): string => {
+  if (typeof origin === 'string') {
+    const cleaned = origin.trim().replace(/\/+$/, '');
+    if (ALLOWED_REDIRECT_ORIGINS.has(cleaned)) return cleaned;
+  }
+  return APP_ORIGIN;
+};
+
+// ── SMTP ────────────────────────────────────────────────────────────────────
+// Nur das eigene Postfach des Nutzers (kein Plattform-Fallback)
+async function getUserSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
+  if (!userId) return null;
   const { data: userSettings, error } = await supabaseAdmin
     .from('user_smtp_settings')
-    .select('*')
+    .select('smtp_host, smtp_port, smtp_user, smtp_pass, smtp_sender')
     .eq('user_id', userId)
     .maybeSingle();
 
-  if (userSettings && !error) {
-    console.log(`Using custom SMTP settings for user ${userId} (${userSettings.smtp_user})...`);
-    return {
-      host: userSettings.smtp_host,
-      port: userSettings.smtp_port,
-      user: userSettings.smtp_user,
-      pass: userSettings.smtp_pass,
-      from: userSettings.smtp_sender
-    };
+  if (error) {
+    console.error('SMTP settings lookup failed:', error.message);
+    return null;
   }
+  if (!userSettings || !userSettings.smtp_host) return null;
 
-  // 2. Fallback to platform-wide SMTP settings
-  const smtpHost = Deno.env.get('SMTP_HOST');
-  if (smtpHost) {
-    console.log(`Using platform global SMTP settings...`);
-    return {
-      host: smtpHost,
-      port: parseInt(Deno.env.get('SMTP_PORT') || '587'),
-      user: Deno.env.get('SMTP_USER') || '',
-      pass: Deno.env.get('SMTP_PASS') || '',
-      from: Deno.env.get('SMTP_SENDER') || Deno.env.get('SMTP_USER') || 'no-reply@immocontrol360.de'
-    };
-  }
-
-  return null;
+  return {
+    host: userSettings.smtp_host,
+    port: Number(userSettings.smtp_port) || 587,
+    user: userSettings.smtp_user,
+    pass: userSettings.smtp_pass,
+    from: userSettings.smtp_sender || userSettings.smtp_user,
+  };
 }
 
-async function sendMail(config: SmtpConfig, to: string, subject: string, html: string, attachments?: any[]) {
+// Plattform-Postfach (nur für serverseitig erzeugte Benachrichtigungen mit fester Vorlage)
+function getPlatformSmtpConfig(): SmtpConfig | null {
+  const smtpHost = Deno.env.get('SMTP_HOST');
+  if (!smtpHost) return null;
+  return {
+    host: smtpHost,
+    port: parseInt(Deno.env.get('SMTP_PORT') || '587'),
+    user: Deno.env.get('SMTP_USER') || '',
+    pass: Deno.env.get('SMTP_PASS') || '',
+    from: Deno.env.get('SMTP_SENDER') || Deno.env.get('SMTP_USER') || 'no-reply@immocontrol360.de',
+  };
+}
+
+async function getNotificationSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
+  const own = await getUserSmtpConfig(supabaseAdmin, userId);
+  if (own) {
+    console.log('Using custom SMTP settings of the landlord.');
+    return own;
+  }
+  const platform = getPlatformSmtpConfig();
+  if (platform) console.log('Using platform SMTP settings.');
+  return platform;
+}
+
+async function sendMail(config: SmtpConfig, to: string, subject: string, html: string, attachments?: any[], replyTo?: string) {
   const transporter = nodemailer.createTransport({
     host: config.host,
     port: config.port,
     secure: config.port === 465,
-    auth: {
-      user: config.user,
-      pass: config.pass,
-    },
+    auth: config.user ? { user: config.user, pass: config.pass } : undefined,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
   });
 
-  const info = await transporter.sendMail({
+  // Envelope-Absender nur setzen, wenn eine gültige Adresse bekannt ist (SPF/Bounces).
+  // Logins wie "apikey" sind keine Adresse -> Adresse aus dem From-Header nehmen bzw.
+  // nodemailer den Envelope selbst ableiten lassen.
+  const smtpUser = normEmail(config.user);
+  const fromAddress = normEmail(extractAddress(config.from));
+  const envelopeFrom = isValidEmail(smtpUser) ? config.user.trim() : (isValidEmail(fromAddress) ? fromAddress : '');
+
+  const mail: Record<string, unknown> = {
     from: config.from,
     to,
-    subject,
+    subject: oneLine(subject, 200),
     html,
     attachments,
-    envelope: {
-      from: config.user, // Force envelope sender to match SMTP auth user (resolves SPF/bounce issues)
-      to: to
-    }
-  });
+  };
+  if (envelopeFrom) mail.envelope = { from: envelopeFrom, to };
+  if (replyTo && isValidEmail(normEmail(replyTo))) mail.replyTo = replyTo;
 
+  const info = await transporter.sendMail(mail);
   console.log(`Email sent successfully: ${info.messageId}`);
   return info;
 }
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+// SMTP-Fehler in verständliche Meldungen übersetzen (keine rohen Servertexte an den Client)
+function describeSmtpError(err: any): string {
+  const code = String(err?.code || '');
+  const responseCode = Number(err?.responseCode || 0);
+  if (code === 'EAUTH' || responseCode === 535 || responseCode === 534) {
+    return 'Anmeldung am Mailserver fehlgeschlagen. Bitte Benutzername und Passwort prüfen.';
+  }
+  if (['ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH'].includes(code)) {
+    return 'Der Mailserver ist nicht erreichbar. Bitte Server und Port prüfen.';
+  }
+  if (code === 'ETLS') {
+    return 'Die verschlüsselte Verbindung zum Mailserver ist fehlgeschlagen. Bitte Port und SSL/TLS prüfen.';
+  }
+  if (code === 'EENVELOPE' || (responseCode >= 550 && responseCode < 560)) {
+    return 'Der Mailserver hat Absender oder Empfänger abgelehnt.';
+  }
+  return 'Die E-Mail konnte nicht versendet werden.';
+}
+
+// Nur öffentliche Mailserver auf üblichen SMTP-Ports (kein Port-Scan/SSRF ins interne Netz)
+function isAllowedSmtpHost(host: string): boolean {
+  if (!host || host.length > 253) return false;
+  if (!/^[a-z0-9.-]+$/.test(host)) return false; // keine IPv6-Literale, keine Sonderzeichen
+  if (!host.includes('.')) return false;
+  if (host === 'localhost' || /\.(localhost|local|internal|lan|home|intranet)$/.test(host)) return false;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    if ([ipv4[1], ipv4[2], ipv4[3], ipv4[4]].some((p) => Number(p) > 255)) return false;
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+  }
+  return true;
+}
+
+// Anhänge serverseitig auf {filename, content(base64), encoding, contentType} beschränken
+// (nodemailer würde sonst auch path/href/raw akzeptieren -> Dateizugriff/SSRF)
+function sanitizeAttachments(list: unknown): any[] | undefined {
+  if (list === undefined || list === null) return undefined;
+  if (!Array.isArray(list)) throw new HttpError(422, 'Die Anhänge sind ungültig.');
+  if (list.length === 0) return undefined;
+  if (list.length > MAX_ATTACHMENTS) throw new HttpError(422, `Es sind höchstens ${MAX_ATTACHMENTS} Anhänge möglich.`);
+
+  let totalBytes = 0;
+  return list.map((att: any, index: number) => {
+    if (!att || typeof att !== 'object') throw new HttpError(422, 'Ein Anhang ist ungültig.');
+    if (att.encoding && att.encoding !== 'base64') throw new HttpError(422, 'Anhänge müssen Base64-kodiert sein.');
+    const content = typeof att.content === 'string' ? att.content.replace(/\s+/g, '') : '';
+    if (!content || !/^[A-Za-z0-9+/]+={0,2}$/.test(content)) {
+      throw new HttpError(422, 'Ein Anhang konnte nicht gelesen werden.');
+    }
+    totalBytes += Math.floor((content.length * 3) / 4);
+    if (totalBytes > MAX_ATTACHMENT_BYTES) {
+      throw new HttpError(422, 'Die Anhänge sind zu groß (maximal 10 MB insgesamt).');
+    }
+    const filename = oneLine(att.filename, 150).replace(/[\\/]/g, '_') || `Anhang-${index + 1}`;
+    const contentType = typeof att.contentType === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(att.contentType)
+      ? att.contentType
+      : 'application/octet-stream';
+    return { filename, content, encoding: 'base64', contentType };
+  });
+}
+
+// ── Aufrufer (Vertrag C2) ───────────────────────────────────────────────────
+async function getCaller(req: Request, supabaseAdmin: any) {
+  const header = req.headers.get('Authorization') || '';
+  const jwt = header.replace(/^Bearer\s+/i, '').trim();
+  if (!jwt) return null;
+  try {
+    // Der anon-Key (role=anon, ohne sub) wird von auth.getUser abgelehnt.
+    const { data, error } = await supabaseAdmin.auth.getUser(jwt);
+    if (error || !data?.user?.id) return null;
+    if (data.user.is_anonymous === true) return null;
+    return data.user;
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function requireCaller(req: Request, supabaseAdmin: any) {
+  const caller = await getCaller(req, supabaseAdmin);
+  if (!caller) throw new HttpError(401, 'Bitte melden Sie sich an, um diese Aktion auszuführen.', false);
+  return caller;
+}
+
+// Eigentümer des Mieters oder Mitnutzer mit Schreibrecht "mietverhaeltnisse" auf ein
+// Portfolio desselben Vermieters, in dem der Mieter einen Mietvertrag hat
+// (entspricht has_tenant_access(tenant, 'mietverhaeltnisse', 'write') im Fundament).
+async function getWritableTenant(supabaseAdmin: any, caller: any, tenantId: string) {
+  const { data: tenant, error } = await supabaseAdmin
+    .from('tenants')
+    .select('id, user_id, first_name, last_name, email')
+    .eq('id', tenantId)
+    .maybeSingle();
+  if (error) {
+    console.error('Tenant lookup failed:', error.message);
+    return null;
+  }
+  if (!tenant) return null;
+  if (tenant.user_id === caller.id) return tenant;
+
+  const callerEmail = normEmail(caller.email);
+  if (!callerEmail) return null;
+
+  const { data: leases, error: leaseErr } = await supabaseAdmin
+    .from('leases')
+    .select('unit:units(property:properties(portfolio_id, portfolio:portfolios(user_id)))')
+    .eq('tenant_id', tenantId);
+  if (leaseErr) {
+    console.error('Lease lookup failed:', leaseErr.message);
+    return null;
+  }
+  const portfolioIds = [...new Set(
+    (leases || [])
+      .map((l: any) => l?.unit?.property)
+      .filter((p: any) => p && p.portfolio_id && p.portfolio?.user_id === tenant.user_id)
+      .map((p: any) => p.portfolio_id),
+  )];
+  if (portfolioIds.length === 0) return null;
+
+  const { data: shares, error: shareErr } = await supabaseAdmin
+    .from('portfolio_shares')
+    .select('shared_with_email, permissions')
+    .in('portfolio_id', portfolioIds)
+    .eq('status', 'accepted');
+  if (shareErr) {
+    console.error('Share lookup failed:', shareErr.message);
+    return null;
+  }
+  const allowed = (shares || []).some((s: any) =>
+    normEmail(s.shared_with_email) === callerEmail &&
+    s.permissions && typeof s.permissions === 'object' &&
+    s.permissions.mietverhaeltnisse === 'write'
+  );
+  return allowed ? tenant : null;
+}
+
+// Bestehende Mieter-Konten dieses Mieters (über user_roles)
+async function findTenantAccounts(supabaseAdmin: any, tenantId: string) {
+  const { data: roles, error } = await supabaseAdmin
+    .from('user_roles')
+    .select('user_id')
+    .eq('tenant_id', tenantId)
+    .eq('role', 'tenant');
+  if (error) {
+    console.error('Role lookup failed:', error.message);
+    return [];
+  }
+  const accounts: any[] = [];
+  for (const r of roles || []) {
+    const { data, error: userErr } = await supabaseAdmin.auth.admin.getUserById(r.user_id);
+    if (!userErr && data?.user) accounts.push(data.user);
+  }
+  return accounts;
+}
+
+// Ein Konto gilt nur dann als "ausschließlich Mieter-Konto dieses Mieters", wenn
+//  • es über die Mieter-Einladung für genau diesen Mieter entstanden ist (user_metadata.tenant_id),
+//  • alle Rollenzeilen Mieterrollen dieses Mieters sind und
+//  • es keine eigenen Vermieterdaten (Portfolios, Objekte, Mieter) besitzt.
+// Nur dann darf ein Anmeldelink erzeugt werden.
+async function isExclusiveTenantAccount(supabaseAdmin: any, user: any, tenantId: string): Promise<boolean> {
+  if (!user?.id) return false;
+  const metaTenant = String(user.user_metadata?.tenant_id || '').toLowerCase();
+  if (metaTenant !== String(tenantId).toLowerCase()) return false;
+
+  const { data: roles, error } = await supabaseAdmin
+    .from('user_roles')
+    .select('role, tenant_id')
+    .eq('user_id', user.id);
+  if (error) return false;
+  if ((roles || []).some((r: any) => r.role !== 'tenant' || String(r.tenant_id || '').toLowerCase() !== String(tenantId).toLowerCase())) {
+    return false;
   }
 
-  try {
-    const payload = await req.json();
-    const { action, applicantId, bookingId, settings, test_email, userId, to, subject, html, tenantId, unitId, propertyId, origin, attachments } = payload;
+  for (const table of ['portfolios', 'properties', 'tenants']) {
+    const { count, error: countErr } = await supabaseAdmin
+      .from(table)
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+    if (countErr || (count ?? 0) > 0) return false;
+  }
+  return true;
+}
 
-    // Create Supabase Admin client
-    const supabaseAdmin = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    );
+// Einheit/Objekt für die Einladungs-Metadaten serverseitig aus den Mietverträgen ableiten
+async function resolveTenantPlacement(supabaseAdmin: any, tenantId: string, requestedUnitId: unknown) {
+  const { data: leases, error } = await supabaseAdmin
+    .from('leases')
+    .select('unit_id, status, unit:units(property_id)')
+    .eq('tenant_id', tenantId);
+  if (error) {
+    console.error('Lease placement lookup failed:', error.message);
+    return { unitId: null, propertyId: null };
+  }
+  const list = leases || [];
+  const pick = (isUuid(requestedUnitId) ? list.find((l: any) => l.unit_id === requestedUnitId) : null)
+    || list.find((l: any) => l.status === 'active')
+    || null;
+  return { unitId: pick?.unit_id || null, propertyId: pick?.unit?.property_id || null };
+}
 
-    // ACTION: TEST CONNECTION
-    if (action === 'test_connection') {
-      if (!settings || !test_email) {
-        throw new Error('Missing settings or test_email parameter');
-      }
+async function prepareTenantLink(supabaseAdmin: any, caller: any, payload: any) {
+  const tenantId = payload.tenantId ?? payload.tenant_id;
+  if (!isUuid(tenantId)) throw new HttpError(422, 'Es wurde kein gültiger Mieter angegeben.');
 
-      console.log(`Testing SMTP connection for host: ${settings.smtp_host}...`);
-      const config: SmtpConfig = {
-        host: settings.smtp_host,
-        port: parseInt(settings.smtp_port || '587'),
-        user: settings.smtp_user,
-        pass: settings.smtp_pass,
-        from: settings.smtp_sender || settings.smtp_user
-      };
+  const tenant = await getWritableTenant(supabaseAdmin, caller, tenantId);
+  if (!tenant) throw new HttpError(403, 'Sie haben keine Berechtigung, für diesen Mieter Einladungen zu erstellen.');
 
-      const testHtml = `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-          <div style="background-color: #0ea5e9; color: white; padding: 20px; border-radius: 6px; text-align: center;">
-            <h2 style="margin: 0; font-size: 20px;">E-Mail Verbindung erfolgreich</h2>
-          </div>
-          <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-            <p>Hallo,</p>
-            <p>Dies ist eine Test-E-Mail von <strong>ImmoControlpro360</strong>.</p>
-            <p>Ihre SMTP-Verbindung wurde erfolgreich eingerichtet und verifiziert! Ab sofort werden Bewerber-E-Mails und Einladungen über diese Einstellungen versendet.</p>
-            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
-            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr ImmoControlpro360 Team</p>
-          </div>
-        </div>
-      `;
+  const storedEmail = normEmail(tenant.email);
+  const requested = normEmail(payload.to) || storedEmail;
+  if (!requested) {
+    throw new HttpError(422, 'Beim Mieter ist keine E-Mail-Adresse hinterlegt. Bitte tragen Sie sie zuerst in den Mieterdaten ein.');
+  }
 
-      await sendMail(config, test_email, 'ImmoControlpro360 - E-Mail Verbindungstest', testHtml);
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      });
+  const accounts = await findTenantAccounts(supabaseAdmin, tenantId);
+  const existing = accounts.find((a: any) => normEmail(a.email) === requested) || null;
+
+  // Links nur an die beim Mieter hinterlegte Adresse bzw. an das bestehende Mieter-Konto dieses Mieters
+  if (!existing && requested !== storedEmail) {
+    throw new HttpError(422, 'Die E-Mail-Adresse stimmt nicht mit der beim Mieter hinterlegten Adresse überein. Bitte passen Sie zuerst die Mieterdaten an.');
+  }
+  if (!isValidEmail(requested)) {
+    throw new HttpError(422, 'Die beim Mieter hinterlegte E-Mail-Adresse ist ungültig.');
+  }
+
+  const placement = await resolveTenantPlacement(supabaseAdmin, tenantId, payload.unitId ?? payload.unit_id);
+  return { tenant, email: requested, existing, placement };
+}
+
+async function generateTenantLink(supabaseAdmin: any, ctx: any, redirectTo: string): Promise<string> {
+  if (ctx.existing) {
+    // Bestehendes Konto: Magic-Link nur für ein ausschließliches Mieter-Konto dieses Mieters
+    if (!(await isExclusiveTenantAccount(supabaseAdmin, ctx.existing, ctx.tenant.id))) {
+      throw new HttpError(409, EXISTING_ACCOUNT_MSG);
     }
+    const magicResult = await supabaseAdmin.auth.admin.generateLink({
+      type: 'magiclink',
+      email: ctx.email,
+      options: { redirectTo },
+    });
+    const link = magicResult.data?.properties?.action_link;
+    if (magicResult.error || !link) {
+      console.error('Magic link generation failed:', magicResult.error?.message);
+      throw new HttpError(502, 'Der Anmeldelink konnte nicht erzeugt werden. Bitte versuchen Sie es später erneut.');
+    }
+    if (magicResult.data?.user?.id && magicResult.data.user.id !== ctx.existing.id) {
+      throw new HttpError(409, EXISTING_ACCOUNT_MSG);
+    }
+    return link;
+  }
 
-    // ACTION: SEND TENANT INVITATION (Custom SMTP + Magic Link)
-    if (action === 'send_tenant_invite') {
-      if (!to || !tenantId || !userId) {
-        throw new Error('Missing required fields for tenant invitation: to (email), tenantId, userId');
-      }
+  // Neues (oder noch nicht bestätigtes, früher eingeladenes) Konto: Einladungslink
+  const inviteResult = await supabaseAdmin.auth.admin.generateLink({
+    type: 'invite',
+    email: ctx.email,
+    options: {
+      redirectTo,
+      data: {
+        role: 'tenant',
+        tenant_id: ctx.tenant.id,
+        unit_id: ctx.placement.unitId,
+        property_id: ctx.placement.propertyId,
+      },
+    },
+  });
+  if (inviteResult.error || !inviteResult.data?.properties?.action_link) {
+    // Typisch: bestätigtes Konto existiert bereits -> niemals auf Magic-Link für fremde Konten ausweichen
+    console.warn('Invite link generation refused:', inviteResult.error?.message);
+    throw new HttpError(409, EXISTING_ACCOUNT_MSG);
+  }
+  // Auch ein (unbestätigtes) Fremdkonto darf keinen Link bekommen
+  if (!(await isExclusiveTenantAccount(supabaseAdmin, inviteResult.data.user, ctx.tenant.id))) {
+    throw new HttpError(409, EXISTING_ACCOUNT_MSG);
+  }
+  return inviteResult.data.properties.action_link;
+}
 
-      // Generate invite link (creates user in auth.users if not exists) or fallback to magiclink
-      let baseOrigin = origin || 'https://app.immocontrol360.de';
-      if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
-        baseOrigin = 'https://app.immocontrol360.de';
-      }
-      if (baseOrigin.endsWith('/')) {
-        baseOrigin = baseOrigin.slice(0, -1);
-      }
-      const redirectTo = `${baseOrigin}/tenant/stammdaten`;
-      console.log(`Generating link for ${to} redirecting to ${redirectTo}...`);
-      
-      let linkData;
-      let linkErr;
-      
-      const inviteResult = await supabaseAdmin.auth.admin.generateLink({
-        type: 'invite',
-        email: to,
-        options: {
-          redirectTo: redirectTo,
-          data: {
-            role: 'tenant',
-            tenant_id: tenantId,
-            unit_id: unitId || null,
-            property_id: propertyId || null
-          }
-        }
-      });
-      
-      if (!inviteResult.error && inviteResult.data?.properties?.action_link) {
-        linkData = inviteResult.data;
-        console.log(`Successfully generated invite link.`);
-      } else {
-        console.log(`Invite link generation failed: ${inviteResult.error?.message}. Trying magiclink...`);
-        const magicResult = await supabaseAdmin.auth.admin.generateLink({
-          type: 'magiclink',
-          email: to,
-          options: {
-            redirectTo: redirectTo,
-            data: {
-              role: 'tenant',
-              tenant_id: tenantId,
-              unit_id: unitId || null,
-              property_id: propertyId || null
-            }
-          }
-        });
-        
-        if (!magicResult.error && magicResult.data?.properties?.action_link) {
-          linkData = magicResult.data;
-          console.log(`Successfully generated magiclink.`);
-        } else {
-          linkErr = magicResult.error || new Error('Failed to generate magiclink');
-        }
-      }
+// ── Öffentliche Prozess-Aktionen (Vertrag C1) ───────────────────────────────
+async function loadPublicProcess(supabaseAdmin: any, payload: any) {
+  const token = payload.process_token ?? payload.processToken;
+  if (typeof token !== 'string' || token.length < 8 || token.length > 200) {
+    throw new HttpError(403, 'Der Link zum Vermietungsprozess ist ungültig.');
+  }
+  const { data: process, error } = await supabaseAdmin
+    .from('rental_processes')
+    .select('*')
+    .eq('token', token)
+    .maybeSingle();
+  if (error) {
+    console.error('Process lookup failed:', error.message);
+    throw new Error('Process lookup failed');
+  }
+  if (!process || process.status !== 'in_vermietung') {
+    throw new HttpError(403, 'Dieser Vermietungsprozess ist nicht (mehr) aktiv.');
+  }
+  return process;
+}
 
-      if (linkErr || !linkData?.properties?.action_link) {
-        throw new Error(`Failed to generate any auth link: ${linkErr?.message || 'No action link returned'}`);
-      }
+async function loadListing(supabaseAdmin: any, process: any) {
+  const { data: unit, error } = await supabaseAdmin
+    .from('units')
+    .select('unit_name, property:properties(street, house_number, zip, city, object_key)')
+    .eq('id', process.unit_id)
+    .maybeSingle();
+  if (error) console.error('Unit lookup failed:', error.message);
 
-      const magicLink = linkData.properties.action_link;
-      console.log(`Successfully generated auth link.`);
+  const p = unit?.property || {};
+  const streetLine = [p.street, p.house_number].filter(Boolean).join(' ');
+  const cityLine = [p.zip, p.city].filter(Boolean).join(' ');
+  const addressStr = [streetLine, cityLine].filter(Boolean).join(', ');
+  const fallbackTitle = [streetLine || p.object_key, unit?.unit_name].filter(Boolean).join(' - ');
+  const listingTitle = oneLine(process.listing_title, 150) || oneLine(fallbackTitle, 150) || 'Wohnung';
+  return { listingTitle, addressStr };
+}
 
-      // Fetch tenant name
-      const { data: tenant } = await supabaseAdmin
-        .from('tenants')
-        .select('first_name, last_name')
-        .eq('id', tenantId)
-        .maybeSingle();
+async function getLandlordEmail(supabaseAdmin: any, userId: string): Promise<string | null> {
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('email')
+    .eq('id', userId)
+    .maybeSingle();
+  const profileEmail = normEmail(profile?.email);
+  if (isValidEmail(profileEmail)) return profileEmail;
 
-      const salutation = tenant && tenant.first_name && tenant.last_name 
-        ? `Hallo ${tenant.first_name} ${tenant.last_name},` 
-        : 'Hallo,';
+  const { data } = await supabaseAdmin.auth.admin.getUserById(userId);
+  const authEmail = normEmail(data?.user?.email);
+  return isValidEmail(authEmail) ? authEmail : null;
+}
 
-      // Fetch SMTP config for landlord
-      const config = await getSmtpConfig(supabaseAdmin, userId);
-      if (!config) {
-        throw new Error('No SMTP configuration found');
-      }
+async function loadBookingContext(supabaseAdmin: any, process: any, payload: any) {
+  const bookingId = payload.booking_id ?? payload.bookingId;
+  if (!isUuid(bookingId)) throw new HttpError(422, 'Es wurde keine gültige Buchung angegeben.');
 
-      // Render HTML template
-      const inviteHtml = `
+  const { data: booking, error: bookErr } = await supabaseAdmin
+    .from('rental_viewing_bookings')
+    .select('*')
+    .eq('id', bookingId)
+    .maybeSingle();
+  if (bookErr) throw new Error(`Booking lookup failed: ${bookErr.message}`);
+  if (!booking) throw new HttpError(404, 'Die Buchung wurde nicht gefunden.');
+
+  const { data: viewing, error: viewErr } = await supabaseAdmin
+    .from('rental_viewings')
+    .select('*')
+    .eq('id', booking.viewing_id)
+    .eq('process_id', process.id)
+    .maybeSingle();
+  if (viewErr) throw new Error(`Viewing lookup failed: ${viewErr.message}`);
+  if (!viewing) throw new HttpError(404, 'Die Buchung gehört nicht zu diesem Vermietungsprozess.');
+
+  const requestedApplicant = payload.applicant_id ?? payload.applicantId;
+  if (requestedApplicant && requestedApplicant !== booking.applicant_id) {
+    throw new HttpError(404, 'Die Buchung gehört nicht zu diesem Bewerber.');
+  }
+
+  const { data: applicant, error: appErr } = await supabaseAdmin
+    .from('rental_applicants')
+    .select('*')
+    .eq('id', booking.applicant_id)
+    .eq('process_id', process.id)
+    .maybeSingle();
+  if (appErr) throw new Error(`Applicant lookup failed: ${appErr.message}`);
+  if (!applicant) throw new HttpError(404, 'Der Bewerber gehört nicht zu diesem Vermietungsprozess.');
+
+  return { booking, viewing, applicant };
+}
+
+const bookingPortalLink = (process: any, applicant: any) =>
+  `${APP_ORIGIN}/besichtigung/${encodeURIComponent(process.token)}?applicantId=${encodeURIComponent(applicant.id)}`;
+
+const formatViewingDate = (date: string, long: boolean) => {
+  const d = new Date(`${String(date).substring(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return String(date ?? '');
+  return long
+    ? d.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })
+    : d.toLocaleDateString('de-DE', { timeZone: 'UTC' });
+};
+
+const formatSlot = (booking: any) =>
+  `${String(booking.start_time ?? '').substring(0, 5)} - ${String(booking.end_time ?? '').substring(0, 5)} Uhr`;
+
+// Versendet Bewerber- und Vermieter-Mail; Empfänger ausschließlich aus der DB
+async function dispatchProcessMails(
+  supabaseAdmin: any,
+  process: any,
+  applicant: any,
+  tenantMail: { subject: string; html: string },
+  landlordMail: { subject: string; html: string },
+) {
+  const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+  if (!config) {
+    console.warn('No email config found. Skipping email sending.');
+    return json({ success: false, warning: 'No email config configured' });
+  }
+
+  const applicantEmail = normEmail(applicant.email);
+  const landlordEmail = await getLandlordEmail(supabaseAdmin, process.user_id);
+
+  try {
+    if (isValidEmail(applicantEmail)) {
+      await sendMail(config, applicantEmail, tenantMail.subject, tenantMail.html);
+    } else {
+      console.warn('Applicant has no valid email address, skipping applicant mail.');
+    }
+    if (landlordEmail) {
+      await sendMail(config, landlordEmail, landlordMail.subject, landlordMail.html);
+    }
+  } catch (err: any) {
+    console.error('Process mail failed:', err?.code || '', err?.message || err);
+    throw new HttpError(502, 'Die Bestätigungs-E-Mail konnte nicht versendet werden.');
+  }
+  return json({ success: true });
+}
+
+// ── Mail-Vorlagen ───────────────────────────────────────────────────────────
+const SIGNATURE = `<hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
+            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>`;
+
+function inviteMailHtml(salutation: string, link: string) {
+  const safeLink = escapeHtml(link);
+  return `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #0ea5e9; color: white; padding: 20px; border-radius: 6px; text-align: center;">
             <h2 style="margin: 0; font-size: 20px;">Einladung zum Mieterportal</h2>
@@ -232,318 +641,343 @@ serve(async (req) => {
             </ul>
             <p>Klicken Sie auf den folgenden Button, um sich direkt und ohne Passwort im Portal anzumelden:</p>
             <div style="text-align: center; margin: 30px 0;">
-              <a href="${magicLink}" style="background-color: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Jetzt im Mieterportal anmelden</a>
+              <a href="${safeLink}" style="background-color: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Jetzt im Mieterportal anmelden</a>
             </div>
-            <p style="font-size: 13px; color: #64748b;">Falls der Button oben nicht funktioniert, kopieren Sie bitte folgenden Link in Ihren Browser:<br/>${magicLink}</p>
+            <p style="font-size: 13px; color: #64748b;">Falls der Button oben nicht funktioniert, kopieren Sie bitte folgenden Link in Ihren Browser:<br/>${safeLink}</p>
+            ${SIGNATURE}
+          </div>
+        </div>
+      `;
+}
+
+// ── Handler ─────────────────────────────────────────────────────────────────
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+  if (req.method !== 'POST') {
+    return json({ success: false, error: 'Methode nicht erlaubt.' }, 405);
+  }
+
+  try {
+    let payload: any;
+    try {
+      payload = await req.json();
+    } catch (_err) {
+      throw new HttpError(400, 'Ungültige Anfrage.', false);
+    }
+    if (!payload || typeof payload !== 'object') throw new HttpError(400, 'Ungültige Anfrage.', false);
+    const { action } = payload;
+
+    // Create Supabase Admin client
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+      { auth: { persistSession: false, autoRefreshToken: false } }
+    );
+
+    // ACTION: TEST CONNECTION (nur angemeldet; nur öffentliche Mailserver; Testmail nur an eigene Adresse)
+    if (action === 'test_connection') {
+      const caller = await requireCaller(req, supabaseAdmin);
+      const settings = payload.settings || {};
+      const host = String(settings.smtp_host || '').trim().toLowerCase();
+      if (!isAllowedSmtpHost(host)) {
+        throw new HttpError(422, 'Bitte geben Sie einen gültigen, öffentlich erreichbaren SMTP-Server an.');
+      }
+      const port = parseInt(String(settings.smtp_port || '587'), 10);
+      if (!ALLOWED_SMTP_PORTS.has(port)) {
+        throw new HttpError(422, 'Erlaubte SMTP-Ports sind 25, 465, 587 und 2525.');
+      }
+      const smtpUser = String(settings.smtp_user || '').trim();
+      let smtpPass = typeof settings.smtp_pass === 'string' ? settings.smtp_pass : '';
+      if (!smtpUser || smtpUser.length > 320 || smtpPass.length > 1024) {
+        throw new HttpError(422, 'Bitte geben Sie gültige SMTP-Zugangsdaten an.');
+      }
+      // Ist das Passwort im Formular leer, das gespeicherte Passwort desselben Kontos verwenden
+      if (!smtpPass) {
+        const stored = await getUserSmtpConfig(supabaseAdmin, caller.id);
+        if (stored && String(stored.host).trim().toLowerCase() === host && stored.user === smtpUser) {
+          smtpPass = stored.pass;
+        }
+      }
+      const from = oneLine(settings.smtp_sender || smtpUser, 320);
+
+      const testEmail = normEmail(payload.test_email);
+      const allowedTargets = new Set(
+        [normEmail(caller.email), normEmail(extractAddress(from)), isValidEmail(normEmail(smtpUser)) ? normEmail(smtpUser) : '']
+          .filter(Boolean),
+      );
+      if (!isValidEmail(testEmail) || !allowedTargets.has(testEmail)) {
+        throw new HttpError(422, 'Die Test-E-Mail kann nur an Ihre eigene Konto-Adresse oder an die Absenderadresse gesendet werden.');
+      }
+
+      const config: SmtpConfig = { host, port, user: smtpUser, pass: smtpPass, from };
+
+      const testHtml = `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+          <div style="background-color: #0ea5e9; color: white; padding: 20px; border-radius: 6px; text-align: center;">
+            <h2 style="margin: 0; font-size: 20px;">E-Mail Verbindung erfolgreich</h2>
+          </div>
+          <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
+            <p>Hallo,</p>
+            <p>Dies ist eine Test-E-Mail von <strong>ImmoControlpro360</strong>.</p>
+            <p>Ihre SMTP-Verbindung wurde erfolgreich eingerichtet und verifiziert! Ab sofort werden Bewerber-E-Mails und Einladungen über diese Einstellungen versendet.</p>
             <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
-            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>
+            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr ImmoControlpro360 Team</p>
           </div>
         </div>
       `;
 
-      // Send email
-      await sendMail(config, to, 'Einladung zum ImmoControlpro360 Mieterportal', inviteHtml);
+      try {
+        await sendMail(config, testEmail, 'ImmoControlpro360 - E-Mail Verbindungstest', testHtml);
+      } catch (err: any) {
+        console.error('SMTP test failed:', err?.code || '', err?.message || err);
+        return json({ success: false, error: describeSmtpError(err) });
+      }
+      return json({ success: true });
+    }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      });
+    // ACTION: SEND TENANT INVITATION (Custom SMTP + Magic Link)
+    if (action === 'send_tenant_invite') {
+      const caller = await requireCaller(req, supabaseAdmin);
+      const ctx = await prepareTenantLink(supabaseAdmin, caller, payload);
+
+      // Postfach vor der Link-Erzeugung prüfen (eigenes Postfach, sonst Plattform-Postfach – feste Vorlage)
+      const config = await getNotificationSmtpConfig(supabaseAdmin, caller.id);
+      if (!config) {
+        throw new HttpError(422, 'Es ist kein E-Mail-Versand eingerichtet. Bitte hinterlegen Sie unter Einstellungen > E-Mail Ihr Postfach.');
+      }
+
+      const redirectTo = `${resolveRedirectOrigin(payload.origin)}/tenant/stammdaten`;
+      const magicLink = await generateTenantLink(supabaseAdmin, ctx, redirectTo);
+
+      const firstName = oneLine(ctx.tenant.first_name, 80);
+      const lastName = oneLine(ctx.tenant.last_name, 80);
+      const salutation = firstName && lastName
+        ? `Hallo ${escapeHtml(firstName)} ${escapeHtml(lastName)},`
+        : 'Hallo,';
+
+      try {
+        await sendMail(config, ctx.email, 'Einladung zum ImmoControlpro360 Mieterportal', inviteMailHtml(salutation, magicLink));
+      } catch (err: any) {
+        console.error('Invite mail failed:', err?.code || '', err?.message || err);
+        throw new HttpError(502, describeSmtpError(err));
+      }
+      return json({ success: true });
     }
 
     // ACTION: GET TENANT PORTAL INVITE LINK (Without sending email, returns the action link for QR code)
     if (action === 'get_invite_link') {
-      if (!to || !tenantId) {
-        throw new Error('Missing required fields for invite link: to (email), tenantId');
-      }
-
-      let baseOrigin = origin || 'https://app.immocontrol360.de';
-      if (baseOrigin.includes('localhost') || baseOrigin.includes('127.0.0.1')) {
-        baseOrigin = 'https://app.immocontrol360.de';
-      }
-      if (baseOrigin.endsWith('/')) {
-        baseOrigin = baseOrigin.slice(0, -1);
-      }
-      const redirectTo = `${baseOrigin}/tenant`;
-      
-      let linkData;
-      let linkErr;
-      
-      const inviteResult = await supabaseAdmin.auth.admin.generateLink({
-        type: 'invite',
-        email: to,
-        options: {
-          redirectTo: redirectTo,
-          data: {
-            role: 'tenant',
-            tenant_id: tenantId,
-            unit_id: unitId || null,
-            property_id: propertyId || null
-          }
-        }
-      });
-      
-      if (!inviteResult.error && inviteResult.data?.properties?.action_link) {
-        linkData = inviteResult.data;
-      } else {
-        const magicResult = await supabaseAdmin.auth.admin.generateLink({
-          type: 'magiclink',
-          email: to,
-          options: {
-            redirectTo: redirectTo,
-            data: {
-              role: 'tenant',
-              tenant_id: tenantId,
-              unit_id: unitId || null,
-              property_id: propertyId || null
-            }
-          }
-        });
-        
-        if (!magicResult.error && magicResult.data?.properties?.action_link) {
-          linkData = magicResult.data;
-        } else {
-          linkErr = magicResult.error || new Error('Failed to generate magiclink');
-        }
-      }
-
-      if (linkErr || !linkData?.properties?.action_link) {
-        throw new Error(`Failed to generate any auth link: ${linkErr?.message || 'No action link returned'}`);
-      }
-
-      return new Response(JSON.stringify({ success: true, actionLink: linkData.properties.action_link }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      });
+      const caller = await requireCaller(req, supabaseAdmin);
+      const ctx = await prepareTenantLink(supabaseAdmin, caller, payload);
+      const redirectTo = `${resolveRedirectOrigin(payload.origin)}/tenant`;
+      const actionLink = await generateTenantLink(supabaseAdmin, ctx, redirectTo);
+      return json({ success: true, actionLink });
     }
 
-    // ACTION: SEND CUSTOM EMAIL (Generic dispatch)
+    // ACTION: SEND CUSTOM EMAIL (nur angemeldet, nur über das eigene Postfach des Aufrufers)
     if (action === 'send_custom_email') {
-      if (!to || !subject || !html || !userId) {
-        throw new Error('Missing required fields for custom email: to, subject, html, userId');
+      const caller = await requireCaller(req, supabaseAdmin);
+
+      const to = normEmail(payload.to);
+      if (!isValidEmail(to)) {
+        throw new HttpError(422, 'Bitte geben Sie genau eine gültige Empfängeradresse an.');
       }
-      const config = await getSmtpConfig(supabaseAdmin, userId);
+      const subject = oneLine(payload.subject, 200);
+      if (!subject) throw new HttpError(422, 'Bitte geben Sie einen Betreff an.');
+      const html = typeof payload.html === 'string' ? payload.html : '';
+      if (!html.trim()) throw new HttpError(422, 'Bitte geben Sie eine Nachricht ein.');
+      if (html.length > MAX_HTML_LENGTH) throw new HttpError(422, 'Die Nachricht ist zu lang.');
+      const attachments = sanitizeAttachments(payload.attachments);
+
+      let config = await getUserSmtpConfig(supabaseAdmin, caller.id);
+      let replyTo: string | undefined;
       if (!config) {
-        throw new Error('No email configuration found (neither user-specific nor platform fallback)');
+        // Ohne eigenes Postfach: Plattform-Postfach nur an eigene Mieter/Kontakte des Aufrufers
+        // (kein Versand an beliebige Adressen), Antworten gehen an den Vermieter.
+        const likeTo = to.replace(/[\\%_]/g, (m) => '\\' + m);
+        const [{ data: ownTenant }, { data: ownContact }] = await Promise.all([
+          supabaseAdmin.from('tenants').select('id').eq('user_id', caller.id).ilike('email', likeTo).limit(1),
+          supabaseAdmin.from('contacts').select('id').eq('user_id', caller.id).ilike('email', likeTo).limit(1),
+        ]);
+        const isOwnRecipient = (ownTenant && ownTenant.length > 0) || (ownContact && ownContact.length > 0);
+        const platform = isOwnRecipient ? getPlatformSmtpConfig() : null;
+        if (!platform) {
+          throw new HttpError(422, 'Für den Versand eigener E-Mails richten Sie bitte zuerst Ihr E-Mail-Postfach unter Einstellungen > E-Mail ein.');
+        }
+        config = platform;
+        replyTo = caller.email || undefined;
       }
-      await sendMail(config, to, subject, html, attachments);
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      });
+
+      try {
+        await sendMail(config, to, subject, html, attachments, replyTo);
+      } catch (err: any) {
+        console.error('Custom mail failed:', err?.code || '', err?.message || err);
+        throw new HttpError(502, describeSmtpError(err));
+      }
+      return json({ success: true });
     }
 
-    // ACTION: APPLICATION RECEIVED
+    // ACTION: APPLICATION RECEIVED (öffentlich, Vertrag C1)
     if (action === 'application_received') {
-      // 1. Fetch applicant info
+      const process = await loadPublicProcess(supabaseAdmin, payload);
+      const applicantId = payload.applicant_id ?? payload.applicantId;
+      if (!isUuid(applicantId)) throw new HttpError(422, 'Es wurde keine gültige Bewerbung angegeben.');
+
       const { data: applicant, error: appErr } = await supabaseAdmin
         .from('rental_applicants')
         .select('*')
         .eq('id', applicantId)
-        .single();
-      if (appErr || !applicant) throw new Error('Applicant not found');
-
-      // 2. Fetch process details
-      const { data: process, error: procErr } = await supabaseAdmin
-        .from('rental_processes')
-        .select('*')
-        .eq('id', applicant.process_id)
-        .single();
-      if (procErr || !process) throw new Error('Rental process not found');
-
-      // 3. Fetch property / unit info
-      const { data: unit, error: unitErr } = await supabaseAdmin
-        .from('units')
-        .select('*, properties(name, street, house_number, zip, city)')
-        .eq('id', process.unit_id)
-        .single();
-      if (unitErr || !unit) throw new Error('Unit not found');
-
-      const property = unit.properties;
-      const listingTitle = process.listing_title || `${property.name} - ${unit.unit_name}`;
-      const addressStr = `${property.street} ${property.house_number}, ${property.zip} ${property.city}`;
-
-      // Resolve SMTP configuration for landlord (process.user_id)
-      const config = await getSmtpConfig(supabaseAdmin, process.user_id);
-      if (!config) {
-        console.warn('No email config found. Skipping email sending.');
-        return new Response(JSON.stringify({ success: false, warning: 'No email config configured' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          status: 200,
-        });
+        .eq('process_id', process.id)
+        .maybeSingle();
+      if (appErr) throw new Error(`Applicant lookup failed: ${appErr.message}`);
+      if (!applicant) throw new HttpError(404, 'Die Bewerbung wurde nicht gefunden.');
+      if (!isRecent(applicant.created_at, PUBLIC_EVENT_WINDOW_MS)) {
+        throw new HttpError(409, 'Die Eingangsbestätigung kann nur direkt nach dem Absenden der Bewerbung verschickt werden.');
+      }
+      const eventKey = `application_received:${applicant.id}`;
+      if (!claimEvent(eventKey)) {
+        throw new HttpError(409, 'Die Eingangsbestätigung wurde bereits verschickt.');
       }
 
-      // Email template to applicant (Tenant)
-      const tenantSubject = `Bewerbung eingegangen: ${listingTitle}`;
-      const bookingLink = `https://app.immocontrol360.de/besichtigung/${process.token}?applicantId=${applicant.id}`;
-      const tenantHtml = `
+      try {
+        const { listingTitle, addressStr } = await loadListing(supabaseAdmin, process);
+        const firstName = escapeHtml(oneLine(applicant.first_name, 80));
+        const lastName = escapeHtml(oneLine(applicant.last_name, 80));
+        const plainName = oneLine(`${applicant.first_name || ''} ${applicant.last_name || ''}`, 120);
+        const safeTitle = escapeHtml(listingTitle);
+        const safeAddress = escapeHtml(addressStr);
+        const bookingLink = escapeHtml(bookingPortalLink(process, applicant));
+        const income = Number(applicant.monthly_income);
+        const incomeStr = applicant.monthly_income !== null && applicant.monthly_income !== undefined && Number.isFinite(income)
+          ? income.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+          : 'Keine Angabe';
+
+        // Email template to applicant (Tenant)
+        const tenantHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #0ea5e9; color: white; padding: 20px; border-radius: 6px; text-align: center;">
             <h2 style="margin: 0; font-size: 20px;">Bewerbung eingegangen</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-            <p>Hallo ${applicant.first_name} ${applicant.last_name},</p>
-            <p>vielen Dank für Ihr Interesse an der Wohnung <strong>${listingTitle}</strong> (${addressStr}).</p>
+            <p>Hallo ${firstName} ${lastName},</p>
+            <p>vielen Dank für Ihr Interesse an der Wohnung <strong>${safeTitle}</strong>${safeAddress ? ` (${safeAddress})` : ''}.</p>
             <p>Ihre Selbstauskunft und Unterlagen wurden erfolgreich an uns übermittelt.</p>
             <p>Sie können sich jetzt direkt online Ihren Wunschtermin für die Besichtigung aussuchen:</p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${bookingLink}" style="background-color: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Besichtigungstermin wählen</a>
             </div>
             <p style="font-size: 13px; color: #64748b;">Falls der Button oben nicht funktioniert, kopieren Sie bitte folgenden Link in Ihren Browser:<br/>${bookingLink}</p>
-            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
-            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>
+            ${SIGNATURE}
           </div>
         </div>
       `;
 
-      // Email template to Landlord
-      const landlordSubject = `Neue Bewerbung: ${applicant.first_name} ${applicant.last_name} - ${listingTitle}`;
-      const landlordHtml = `
+        // Email template to Landlord
+        const landlordHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #1e293b; color: white; padding: 20px; border-radius: 6px;">
             <h2 style="margin: 0; font-size: 20px;">Neue Bewerbung eingegangen</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
             <p>Hallo,</p>
-            <p>für die Wohnung <strong>${listingTitle}</strong> ist eine neue Bewerbung eingegangen.</p>
+            <p>für die Wohnung <strong>${safeTitle}</strong> ist eine neue Bewerbung eingegangen.</p>
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9; width: 150px;">Bewerber:</td>
-                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${applicant.first_name} ${applicant.last_name}</td>
+                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${firstName} ${lastName}</td>
               </tr>
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9;">E-Mail:</td>
-                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${applicant.email}</td>
+                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${escapeHtml(oneLine(applicant.email, 254))}</td>
               </tr>
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9;">Telefon:</td>
-                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${applicant.phone || 'Keine Angabe'}</td>
+                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${escapeHtml(oneLine(applicant.phone, 60)) || 'Keine Angabe'}</td>
               </tr>
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9;">Monatseinkommen:</td>
-                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${applicant.monthly_income ? applicant.monthly_income.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' }) : 'Keine Angabe'}</td>
+                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${escapeHtml(incomeStr)}</td>
               </tr>
             </table>
             <p>Die vollständige Selbstauskunft sowie alle hochgeladenen Dokumente finden Sie direkt in Ihrem Vermietungscockpit oder im Objektordner in der Cloud.</p>
             <div style="text-align: center; margin: 30px 0;">
-              <a href="https://app.immocontrol360.de/letting" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Zum Vermietungscockpit</a>
+              <a href="${APP_ORIGIN}/letting" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Zum Vermietungscockpit</a>
             </div>
           </div>
         </div>
       `;
 
-      // Trigger emails
-      await sendMail(config, applicant.email, tenantSubject, tenantHtml);
-      
-      // Try to get landlord email from profile
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('email')
-        .eq('id', process.user_id)
-        .maybeSingle();
-
-      if (profile?.email) {
-        await sendMail(config, profile.email, landlordSubject, landlordHtml);
+        return await dispatchProcessMails(
+          supabaseAdmin, process, applicant,
+          { subject: `Bewerbung eingegangen: ${listingTitle}`, html: tenantHtml },
+          { subject: `Neue Bewerbung: ${plainName} - ${listingTitle}`, html: landlordHtml },
+        );
+      } catch (err) {
+        releaseEvent(eventKey);
+        throw err;
       }
+    }
 
-    } else if (action === 'booking_confirmed') {
-      // 1. Fetch booking details
-      const { data: booking, error: bookErr } = await supabaseAdmin
-        .from('rental_viewing_bookings')
-        .select('*')
-        .eq('id', bookingId)
-        .single();
-      if (bookErr || !booking) throw new Error('Booking not found');
-
-      // 2. Fetch viewing day
-      const { data: viewing, error: viewErr } = await supabaseAdmin
-        .from('rental_viewings')
-        .select('*')
-        .eq('id', booking.viewing_id)
-        .single();
-      if (viewErr || !viewing) throw new Error('Viewing day not found');
-
-      // 3. Fetch applicant
-      const { data: applicant, error: appErr } = await supabaseAdmin
-        .from('rental_applicants')
-        .select('*')
-        .eq('id', booking.applicant_id)
-        .single();
-      if (appErr || !applicant) throw new Error('Applicant not found');
-
-      // 4. Fetch process
-      const { data: process, error: procErr } = await supabaseAdmin
-        .from('rental_processes')
-        .select('*')
-        .eq('id', applicant.process_id)
-        .single();
-      if (procErr || !process) throw new Error('Rental process not found');
-
-      // 5. Fetch property
-      const { data: unit, error: unitErr } = await supabaseAdmin
-        .from('units')
-        .select('*, properties(name, street, house_number, zip, city)')
-        .eq('id', process.unit_id)
-        .single();
-      if (unitErr || !unit) throw new Error('Unit not found');
-
-      const property = unit.properties;
-      const listingTitle = process.listing_title || `${property.name} - ${unit.unit_name}`;
-      const addressStr = `${property.street} ${property.house_number}, ${property.zip} ${property.city}`;
-      const dateStr = new Date(viewing.date).toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-      const timeStr = `${booking.start_time.substring(0, 5)} - ${booking.end_time.substring(0, 5)} Uhr`;
-
-      // Resolve SMTP configuration for landlord (process.user_id)
-      const config = await getSmtpConfig(supabaseAdmin, process.user_id);
-      if (!config) {
-        console.warn('No email config found. Skipping email sending.');
-        return new Response(JSON.stringify({ success: false, warning: 'No email config configured' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          status: 200,
-        });
+    // ACTION: BOOKING CONFIRMED (öffentlich, Vertrag C1)
+    if (action === 'booking_confirmed') {
+      const process = await loadPublicProcess(supabaseAdmin, payload);
+      const { booking, viewing, applicant } = await loadBookingContext(supabaseAdmin, process, payload);
+      if (booking.status !== 'booked') throw new HttpError(409, 'Diese Buchung ist nicht (mehr) aktiv.');
+      if (!isRecent(booking.created_at, PUBLIC_EVENT_WINDOW_MS)) {
+        throw new HttpError(409, 'Die Terminbestätigung kann nur direkt nach der Buchung verschickt werden.');
       }
+      const eventKey = `booking_confirmed:${booking.id}`;
+      if (!claimEvent(eventKey)) throw new HttpError(409, 'Die Terminbestätigung wurde bereits verschickt.');
 
-      // Tenant Email Template
-      const tenantSubject = `Besichtigungstermin bestätigt: ${listingTitle}`;
-      const manageLink = `https://app.immocontrol360.de/besichtigung/${process.token}?applicantId=${applicant.id}`;
-      const tenantHtml = `
+      try {
+        const { listingTitle, addressStr } = await loadListing(supabaseAdmin, process);
+        const firstName = escapeHtml(oneLine(applicant.first_name, 80));
+        const lastName = escapeHtml(oneLine(applicant.last_name, 80));
+        const plainName = oneLine(`${applicant.first_name || ''} ${applicant.last_name || ''}`, 120);
+        const safeTitle = escapeHtml(listingTitle);
+        const dateStr = escapeHtml(formatViewingDate(viewing.date, true));
+        const timeStr = escapeHtml(formatSlot(booking));
+        const manageLink = escapeHtml(bookingPortalLink(process, applicant));
+
+        // Tenant Email Template
+        const tenantHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #10b981; color: white; padding: 20px; border-radius: 6px; text-align: center;">
             <h2 style="margin: 0; font-size: 20px;">Besichtigungstermin bestätigt</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-            <p>Hallo ${applicant.first_name} ${applicant.last_name},</p>
-            <p>Ihr Besichtigungstermin für die Wohnung <strong>${listingTitle}</strong> wurde erfolgreich gebucht.</p>
+            <p>Hallo ${firstName} ${lastName},</p>
+            <p>Ihr Besichtigungstermin für die Wohnung <strong>${safeTitle}</strong> wurde erfolgreich gebucht.</p>
             <div style="background-color: #f8fafc; padding: 20px; border-radius: 6px; margin: 20px 0; border: 1px solid #e2e8f0;">
               <strong style="display: block; font-size: 15px; color: #64748b; text-transform: uppercase; margin-bottom: 5px;">Datum & Uhrzeit:</strong>
               <span style="font-size: 18px; font-weight: bold; color: #1e293b;">${dateStr}</span><br/>
               <span style="font-size: 16px; font-weight: bold; color: #10b981;">${timeStr}</span>
               <strong style="display: block; font-size: 15px; color: #64748b; text-transform: uppercase; margin-top: 15px; margin-bottom: 5px;">Adresse:</strong>
-              <span style="font-size: 15px; font-weight: bold; color: #1e293b;">${addressStr}</span>
+              <span style="font-size: 15px; font-weight: bold; color: #1e293b;">${escapeHtml(addressStr) || 'Wird Ihnen vom Vermieter mitgeteilt'}</span>
             </div>
             <p>Sollten Sie den Termin absagen oder verschieben müssen, nutzen Sie bitte das Portal:</p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${manageLink}" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Termin verwalten / verschieben</a>
             </div>
-            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
-            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>
+            ${SIGNATURE}
           </div>
         </div>
       `;
 
-      // Landlord Email Template
-      const landlordSubject = `Termin gebucht: ${applicant.first_name} ${applicant.last_name} - ${listingTitle}`;
-      const landlordHtml = `
+        // Landlord Email Template
+        const landlordHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #10b981; color: white; padding: 20px; border-radius: 6px;">
             <h2 style="margin: 0; font-size: 20px;">Besichtigung gebucht</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
             <p>Hallo,</p>
-            <p>für Ihre Wohnung <strong>${listingTitle}</strong> wurde ein Besichtigungstermin gebucht.</p>
+            <p>für Ihre Wohnung <strong>${safeTitle}</strong> wurde ein Besichtigungstermin gebucht.</p>
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9; width: 150px;">Bewerber:</td>
-                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${applicant.first_name} ${applicant.last_name}</td>
+                <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${firstName} ${lastName}</td>
               </tr>
               <tr>
                 <td style="padding: 8px 0; font-weight: bold; border-bottom: 1px solid #f1f5f9;">Datum:</td>
@@ -559,124 +993,93 @@ serve(async (req) => {
         </div>
       `;
 
-      await sendMail(config, applicant.email, tenantSubject, tenantHtml);
-
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('email')
-        .eq('id', process.user_id)
-        .maybeSingle();
-
-      if (profile?.email) {
-        await sendMail(config, profile.email, landlordSubject, landlordHtml);
+        return await dispatchProcessMails(
+          supabaseAdmin, process, applicant,
+          { subject: `Besichtigungstermin bestätigt: ${listingTitle}`, html: tenantHtml },
+          { subject: `Termin gebucht: ${plainName} - ${listingTitle}`, html: landlordHtml },
+        );
+      } catch (err) {
+        releaseEvent(eventKey);
+        throw err;
       }
+    }
 
-    } else if (action === 'booking_canceled') {
-      // 1. Fetch booking details
-      const { data: booking, error: bookErr } = await supabaseAdmin
-        .from('rental_viewing_bookings')
-        .select('*')
-        .eq('id', bookingId)
-        .single();
-      if (bookErr || !booking) throw new Error('Booking not found');
-
-      // 2. Fetch viewing day
-      const { data: viewing, error: viewErr } = await supabaseAdmin
-        .from('rental_viewings')
-        .select('*')
-        .eq('id', booking.viewing_id)
-        .single();
-      if (viewErr || !viewing) throw new Error('Viewing day not found');
-
-      // 3. Fetch applicant
-      const { data: applicant, error: appErr } = await supabaseAdmin
-        .from('rental_applicants')
-        .select('*')
-        .eq('id', booking.applicant_id)
-        .single();
-      if (appErr || !applicant) throw new Error('Applicant not found');
-
-      // 4. Fetch process
-      const { data: process, error: procErr } = await supabaseAdmin
-        .from('rental_processes')
-        .select('*')
-        .eq('id', applicant.process_id)
-        .single();
-      if (procErr || !process) throw new Error('Rental process not found');
-
-      const listingTitle = process.listing_title || "Besichtigungstermin";
-      const dateStr = new Date(viewing.date).toLocaleDateString('de-DE');
-      const timeStr = `${booking.start_time.substring(0, 5)} - ${booking.end_time.substring(0, 5)} Uhr`;
-
-      // Resolve SMTP configuration for landlord (process.user_id)
-      const config = await getSmtpConfig(supabaseAdmin, process.user_id);
-      if (!config) {
-        console.warn('No email config found. Skipping email sending.');
-        return new Response(JSON.stringify({ success: false, warning: 'No email config configured' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          status: 200,
-        });
+    // ACTION: BOOKING CANCELED (öffentlich, Vertrag C1)
+    if (action === 'booking_canceled') {
+      const process = await loadPublicProcess(supabaseAdmin, payload);
+      const { booking, viewing, applicant } = await loadBookingContext(supabaseAdmin, process, payload);
+      // Absage-Mail nur, wenn die Buchung tatsächlich gerade storniert wurde
+      if (booking.status !== 'canceled') throw new HttpError(409, 'Diese Buchung wurde nicht storniert.');
+      if (!isRecent(booking.canceled_at, PUBLIC_EVENT_WINDOW_MS)) {
+        throw new HttpError(409, 'Die Absagebestätigung kann nur direkt nach der Stornierung verschickt werden.');
       }
+      const eventKey = `booking_canceled:${booking.id}`;
+      if (!claimEvent(eventKey)) throw new HttpError(409, 'Die Absagebestätigung wurde bereits verschickt.');
 
-      // Tenant Cancellation Email
-      const tenantSubject = `Besichtigungstermin abgesagt: ${listingTitle}`;
-      const bookNewLink = `https://app.immocontrol360.de/besichtigung/${process.token}?applicantId=${applicant.id}`;
-      const tenantHtml = `
+      try {
+        const listingTitle = oneLine(process.listing_title, 150) || 'Besichtigungstermin';
+        const firstName = escapeHtml(oneLine(applicant.first_name, 80));
+        const lastName = escapeHtml(oneLine(applicant.last_name, 80));
+        const plainName = oneLine(`${applicant.first_name || ''} ${applicant.last_name || ''}`, 120);
+        const safeTitle = escapeHtml(listingTitle);
+        const dateStr = escapeHtml(formatViewingDate(viewing.date, false));
+        const timeStr = escapeHtml(formatSlot(booking));
+        const bookNewLink = escapeHtml(bookingPortalLink(process, applicant));
+
+        // Tenant Cancellation Email
+        const tenantHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #ef4444; color: white; padding: 20px; border-radius: 6px; text-align: center;">
             <h2 style="margin: 0; font-size: 20px;">Besichtigungstermin abgesagt</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
-            <p>Hallo ${applicant.first_name} ${applicant.last_name},</p>
-            <p>Ihr Termin am <strong>${dateStr} um ${timeStr}</strong> für die Wohnung <strong>${listingTitle}</strong> wurde abgesagt.</p>
+            <p>Hallo ${firstName} ${lastName},</p>
+            <p>Ihr Termin am <strong>${dateStr} um ${timeStr}</strong> für die Wohnung <strong>${safeTitle}</strong> wurde abgesagt.</p>
             <p>Sie können sich jederzeit einen neuen freien Termin aussuchen:</p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${bookNewLink}" style="background-color: #ef4444; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Neuen Termin buchen</a>
             </div>
-            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;"/>
-            <p style="font-size: 14px; color: #64748b; margin: 0;">Freundliche Grüße,<br/>Ihr Vermieter-Team</p>
+            ${SIGNATURE}
           </div>
         </div>
       `;
 
-      // Landlord Notification Email
-      const landlordSubject = `Termin abgesagt: ${applicant.first_name} ${applicant.last_name} - ${listingTitle}`;
-      const landlordHtml = `
+        // Landlord Notification Email
+        const landlordHtml = `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
           <div style="background-color: #ef4444; color: white; padding: 20px; border-radius: 6px;">
             <h2 style="margin: 0; font-size: 20px;">Besichtigung abgesagt</h2>
           </div>
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
             <p>Hallo,</p>
-            <p>der Besichtigungstermin mit <strong>${applicant.first_name} ${applicant.last_name}</strong> wurde abgesagt.</p>
+            <p>der Besichtigungstermin mit <strong>${firstName} ${lastName}</strong> wurde abgesagt.</p>
             <p><strong>Ursprünglicher Termin:</strong> ${dateStr} um ${timeStr}</p>
-            <p>Der Slot is im Planer wieder als frei markiert.</p>
+            <p>Der Slot ist im Planer wieder als frei markiert.</p>
           </div>
         </div>
       `;
 
-      await sendMail(config, applicant.email, tenantSubject, tenantHtml);
-
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('email')
-        .eq('id', process.user_id)
-        .maybeSingle();
-
-      if (profile?.email) {
-        await sendMail(config, profile.email, landlordSubject, landlordHtml);
+        return await dispatchProcessMails(
+          supabaseAdmin, process, applicant,
+          { subject: `Besichtigungstermin abgesagt: ${listingTitle}`, html: tenantHtml },
+          { subject: `Termin abgesagt: ${plainName} - ${listingTitle}`, html: landlordHtml },
+        );
+      } catch (err) {
+        releaseEvent(eventKey);
+        throw err;
       }
     }
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 200,
-    });
+    // Unbekannte oder fehlende Aktion: kein stiller Erfolg
+    throw new HttpError(400, 'Unbekannte Aktion.', false);
   } catch (error: any) {
+    if (error instanceof HttpError) {
+      if (error.status >= 500 || !error.soft) {
+        console.warn(`send-letting-email: ${error.status} ${error.message}`);
+      }
+      return json({ success: false, error: error.message }, error.soft ? 200 : error.status);
+    }
     console.error('Error in send-letting-email function:', error);
-    return new Response(JSON.stringify({ error: error.message }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    });
+    return json({ success: false, error: 'Bei der Verarbeitung ist ein interner Fehler aufgetreten.' }, 500);
   }
 })

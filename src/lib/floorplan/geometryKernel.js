@@ -1404,12 +1404,16 @@ export const findFurnitureAtPoint = (storey, px, py) => {
         const rot = Number(f.rotation) || 0;
         const cos = Math.cos(-rot * Math.PI / 180);
         const sin = Math.sin(-rot * Math.PI / 180);
+        // Gleiche Ersatzwerte wie getFurnitureCorners (Auswahlrahmen): fehlende Maße 500 mm, fehlende Lage 0
+        const w = Number(f.width_mm) || 500;
+        const d = Number(f.depth_mm) || 500;
+        const fx = Number(f.x) || 0, fy = Number(f.y) || 0;
 
         // Transform point to furniture local coords
-        const lx = cos * (px - f.x) - sin * (py - f.y);
-        const ly = sin * (px - f.x) + cos * (py - f.y);
+        const lx = cos * (px - fx) - sin * (py - fy);
+        const ly = sin * (px - fx) + cos * (py - fy);
 
-        if (lx >= 0 && lx <= f.width_mm && ly >= 0 && ly <= f.depth_mm) {
+        if (lx >= 0 && lx <= w && ly >= 0 && ly <= d) {
             return f;
         }
     }

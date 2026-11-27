@@ -219,14 +219,16 @@ export function generateCalcLines(params) {
     for (const floor of floors) {
         for (const whg of (floor.whgs || [])) {
             whgCount++;
+            // Negative/ungültige Maße als 0 werten – sonst ergibt √(negativ) NaN und
+            // die Wandflächen ALLER Räume fielen auf 0
             for (const room of (whg.rooms || [])) {
-                allRooms.push({ ...room, floorHeight });
+                allRooms.push({ ...room, sqm: nonNegative(room.sqm), floorHeight });
             }
             for (const bath of (whg.bathrooms || [])) {
-                allBaths.push({ ...bath, floorHeight });
+                allBaths.push({ ...bath, sqm: nonNegative(bath.sqm), floorHeight });
             }
             for (const win of (whg.windows || [])) {
-                allWindows.push(win);
+                allWindows.push({ ...win, width: nonNegative(win.width), height: nonNegative(win.height) });
             }
         }
     }
@@ -374,8 +376,8 @@ export function generateCalcLines(params) {
     const egFloor = floors[0];
     if (egFloor) {
         for (const whg of (egFloor.whgs || [])) {
-            for (const room of (whg.rooms || [])) egFlaeche += (room.sqm || 0);
-            for (const bath of (whg.bathrooms || [])) egFlaeche += (bath.sqm || 0);
+            for (const room of (whg.rooms || [])) egFlaeche += nonNegative(room.sqm);
+            for (const bath of (whg.bathrooms || [])) egFlaeche += nonNegative(bath.sqm);
         }
     }
 
@@ -588,8 +590,20 @@ export function generateCalcLines(params) {
     return lines;
 }
 
+/**
+ * Kaufmännisch auf 2 Nachkommastellen runden (…5 → weg von 0).
+ * Gleitkomma-Rauschen wird vorher entfernt (z. B. 2,5 × 19,99 = 49,974999… → 49,98 statt 49,97).
+ */
 function round2(v) {
-    return Math.round((v || 0) * 100) / 100;
+    const n = Number(v) || 0;
+    const cents = Math.round(Number((Math.abs(n) * 100).toPrecision(15)));
+    return (Math.sign(n) * cents) / 100 || 0;
+}
+
+/** Fläche/Maß als nicht-negative Zahl (leer, ungültig oder negativ → 0). */
+function nonNegative(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /**

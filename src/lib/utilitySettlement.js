@@ -82,8 +82,14 @@ export const validatePeriod = (start, end) => {
         errors.push('Bitte Beginn und Ende des Abrechnungszeitraums angeben.');
     } else if (isoPart(start) > isoPart(end)) {
         errors.push('Das Ende des Abrechnungszeitraums liegt vor dem Beginn.');
-    } else if (isoPart(end) >= addMonthsISO(start, 12)) {
-        warnings.push('Der Abrechnungszeitraum ist länger als 12 Monate. Nach § 556 Abs. 3 BGB ist über die Vorauszahlungen jährlich abzurechnen.');
+    } else {
+        // 12 Monate enden am Vortag des gleichen Kalendertags im Folgejahr; fehlt dieser Tag
+        // (Beginn 29.02.), mit dem Monatsletzten (§ 188 Abs. 2, 3 BGB) -> Folgebeginn 01.03.
+        const sameDay = addMonthsISO(start, 12);
+        const nextStart = sameDay.slice(8) === isoPart(start).slice(8) ? sameDay : addDaysISO(sameDay, 1);
+        if (isoPart(end) >= nextStart) {
+            warnings.push('Der Abrechnungszeitraum ist länger als 12 Monate. Nach § 556 Abs. 3 BGB ist über die Vorauszahlungen jährlich abzurechnen.');
+        }
     }
     return { errors, warnings };
 };

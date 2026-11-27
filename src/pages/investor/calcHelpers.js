@@ -7,7 +7,15 @@
  */
 
 /* ─── Zahlen ─── */
-export const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+/**
+ * Kaufmännisch auf 2 Nachkommastellen runden (…5 → weg von 0).
+ * Gleitkomma-Rauschen wird vorher entfernt (z. B. 1,005 × 100 = 100,4999… → 1,01 statt 1,00).
+ */
+export const round2 = (v) => {
+    const n = Number(v) || 0;
+    const cents = Math.round(Number((Math.abs(n) * 100).toPrecision(15)));
+    return (Math.sign(n) * cents) / 100 || 0;
+};
 
 export const toNumber = (v) => {
     const n = parseFloat(v);

@@ -24,7 +24,13 @@ export const num = (v) => {
     return Number.isFinite(n) ? n : 0;
 };
 
-export const round2 = (v) => Math.round((num(v) + Number.EPSILON) * 100) / 100;
+// Kaufmännisch auf Cent runden (ab x,xx5 vom Nullpunkt weg, wie round() für numeric in PostgreSQL).
+// toPrecision(15) entfernt das Binär-Rauschen (500,01 × 0,5 = 250,00499999999997 → 250,01; 8,575 → 8,58).
+export const round2 = (v) => {
+    const n = num(v);
+    const cents = Number((Math.abs(n) * 100).toPrecision(15));
+    return ((n < 0 ? -1 : 1) * Math.round(cents)) / 100 || 0;
+};
 
 // Lokales Datum als 'YYYY-MM-DD' (nicht UTC wie toISOString)
 export const toLocalDateStr = (date = new Date()) =>
@@ -40,8 +46,11 @@ export const parseDateOnly = (value) => {
     }
     const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
     if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return isNaN(d.getTime()) ? null : d;
+    const [y, mo, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const d = new Date(y, mo - 1, day);
+    // kein stilles Überlaufen (2023-02-29 wäre sonst der 01.03.2023)
+    if (isNaN(d.getTime()) || d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== day) return null;
+    return d;
 };
 
 // 'YYYY-MM' + n Monate
@@ -201,7 +210,10 @@ export const computeArrears = ({ leases = [], index, mahnKeys, today = new Date(
             const expected = expectedRentForMonth(lease, m, row);
             if (expected <= 0) continue;
 
-            const dueDate = (row && row.due_date ? String(row.due_date).slice(0, 10) : null) || dueDateForMonth(lease, m);
+            let dueDate = (row && row.due_date ? String(row.due_date).slice(0, 10) : null) || dueDateForMonth(lease, m);
+            // Einzug nach dem Zahltag: die anteilige Miete des ersten Monats wird nicht vor Mietbeginn fällig
+            const startStr = toLocalDateStr(start);
+            if (dueDate < startStr) dueDate = startStr;
             if (dueDate >= todayStr) continue; // am Fälligkeitstag selbst noch fristgerecht
 
             const paid = paidForMonth(index, lease.id, m);
