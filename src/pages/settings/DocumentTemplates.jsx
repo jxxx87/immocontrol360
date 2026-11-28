@@ -150,11 +150,14 @@ const VARIABLES_BY_CATEGORY = {
 };
 const getVariablesForCategory = (category) => VARIABLES_BY_CATEGORY[category] || GLOBAL_VARIABLES;
 
+// Stufen wie im Mahn-Dialog der Forderungsakte (ClaimDetail): 1 Zahlungserinnerung, 2 Abmahnung, 3 Letzte Zahlungsaufforderung.
+// dunning_1 („Mahnung“) bietet der Mahn-Dialog nicht an – die Vorlage bleibt bearbeitbar (gespeicherte Fassungen
+// gehen nicht verloren), ist aber als ungenutzt gekennzeichnet (unusedNote: Hinweis in Liste und Editor).
 const SYSTEM_TEMPLATE_LIST = [
-    { id: 'payment_reminder', label: 'Zahlungserinnerung', hasSubject: true, group: 'Mahnwesen' },
-    { id: 'dunning_1', label: 'Mahnung (Stufe 1)', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'payment_reminder', label: 'Zahlungserinnerung (Stufe 1)', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'dunning_1', label: 'Mahnung (derzeit nicht verwendet)', hasSubject: true, group: 'Mahnwesen', unusedNote: 'Diese Vorlage wird derzeit in keinem Schreiben verwendet: Der Mahn-Dialog der Forderungsakte bietet nur Zahlungserinnerung (Stufe 1), Abmahnung (Stufe 2) und Letzte Zahlungsaufforderung (Stufe 3) an. Änderungen hier erscheinen daher in keinem Mahnschreiben.' },
     { id: 'dunning_2', label: 'Abmahnung (Stufe 2)', hasSubject: true, group: 'Mahnwesen' },
-    { id: 'dunning_final', label: 'Letzte Zahlungsaufforderung', hasSubject: true, group: 'Mahnwesen' },
+    { id: 'dunning_final', label: 'Letzte Zahlungsaufforderung (Stufe 3)', hasSubject: true, group: 'Mahnwesen' },
     { id: 'utility_costs', label: 'Nebenkostenabrechnung', hasSubject: true, group: 'Nebenkosten' },
     { id: 'fewo_invoice', label: 'Fewo-Rechnung', hasSubject: true, group: 'FEWO-Rechnungen' },
     { id: 'fewo_credit_note', label: 'Fewo-Gutschrift', hasSubject: true, group: 'FEWO-Rechnungen' },
@@ -3349,14 +3352,17 @@ export const DocumentTemplates = ({ onDirtyChange } = {}) => {
         try {
             const portfolioFilter = effectivePortfolioId === 'global' ? null : effectivePortfolioId;
             const customType = `custom_${Date.now()}`;
+            // Der Betreff gehört in den Brief selbst (Block „Betreffzeile“). Die Spalte subject liest kein
+            // Druck-/PDF-Weg – dort abgelegt, wäre die Eingabe für den Nutzer verloren.
+            const subjectText = newTemplateSubject.trim();
+            const subjectBlock = subjectText ? `<div class="letter-subject">${escapeHtml(subjectText)}</div>` : '';
 
             const payload = {
                 user_id: userId,
                 portfolio_id: portfolioFilter,
                 type: customType,
                 name: newTemplateName.trim(),
-                subject: newTemplateSubject.trim() || null,
-                content_html: `<p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
+                content_html: `${subjectBlock}<p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>Geben Sie hier Ihren Text ein...</p>`,
                 is_custom: true,
                 category: newTemplateCategory,
                 updated_at: new Date().toISOString()
@@ -3817,6 +3823,12 @@ export const DocumentTemplates = ({ onDirtyChange } = {}) => {
                     </div>
                 </div>
             )}
+            {activeConfig?.unusedNote && (
+                <div className="tpl-banner tpl-banner-warning">
+                    <Info size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                    <div>{activeConfig.unusedNote}</div>
+                </div>
+            )}
 
             <div className="templates-layout-grid">
                 {/* Left side: Navigation of templates & Variable Library */}
@@ -3854,6 +3866,7 @@ export const DocumentTemplates = ({ onDirtyChange } = {}) => {
                                     >
                                         <button
                                             onClick={() => switchTemplate(t.id)}
+                                            title={t.unusedNote || t.label}
                                             style={{
                                                 flex: 1,
                                                 display: 'flex',
@@ -4821,7 +4834,7 @@ export const DocumentTemplates = ({ onDirtyChange } = {}) => {
                         onChange={e => setNewTemplateName(e.target.value)}
                     />
                     <Input 
-                        label="Betreffzeile (optional)"
+                        label="Betreffzeile (optional, steht fett über dem Brieftext)"
                         placeholder="z.B. Bestätigung Ihres Kündigungsschreibens"
                         value={newTemplateSubject}
                         onChange={e => setNewTemplateSubject(e.target.value)}

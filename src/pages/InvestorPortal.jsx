@@ -22,7 +22,8 @@ import {
     ClipboardList,
     FileText,
     Edit3,
-    Flame
+    Flame,
+    Lock
 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
@@ -34,13 +35,17 @@ import RateInput from '../components/ui/RateInput';
 import FixFlipCalculator from './investor/FixFlipCalculator';
 import InvestorCalculators from './investor/InvestorCalculators';
 import { TRANSFER_TAX_RATES, TRANSFER_TAX_RATES_AS_OF } from './investor/transferTaxRates';
+import { getCurrentLease } from './investor/calcHelpers';
+import { getFixFlipRanking } from './investor/fixFlipCalc';
 import { supabase } from '../lib/supabase';
+import { useUnsavedChangesGuard } from '../lib/useUnsavedChangesGuard';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePdfTemplate } from '../lib/usePdfTemplate';
 import { translateError } from '../lib/errorTranslator';
 import { parseNum, round2, parseLocalDate, calculateCurrentDebt, getLoanSnapshot } from '../lib/loanSchedule';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
+import { usePermission } from '../context/PermissionContext';
 import { useViewMode } from '../context/ViewModeContext';
 import ExportDropdown from '../components/ExportDropdown';
 import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
@@ -75,11 +80,10 @@ const fullMonthsBetween = (from, to) => {
 // Darlehen (Rate, Restschuld, Monatswerte) – gemeinsam mit Darlehen-Seite und Objektliste: src/lib/loanSchedule.js
 
 // Einheitliche Definition "laufender Mietvertrag" (Einnahmen, Leerstand, Optimierungen):
-// Status aktiv und der Stichtag liegt innerhalb der Vertragslaufzeit
-const isLeaseCurrent = (lease, todayStr) => !!lease && lease.status === 'active'
-    && (!lease.start_date || dateStr(lease.start_date) <= todayStr)
-    && (!lease.end_date || dateStr(lease.end_date) >= todayStr);
-const getActiveLease = (unit, todayStr = localTodayStr()) => (unit?.leases || []).find(l => isLeaseCurrent(l, todayStr)) || null;
+// Status aktiv und der Stichtag liegt innerhalb der Vertragslaufzeit; bei mehreren gleichzeitig
+// laufenden Verträgen der zuletzt begonnene – gemeinsame Hilfsfunktion mit den Rechnern
+// (investor/calcHelpers.getCurrentLease) und der Objektseite
+const getActiveLease = (unit, todayStr = localTodayStr()) => getCurrentLease(unit, todayStr);
 const hasUpcomingLease = (unit, todayStr) => (unit?.leases || []).some(l => l.status === 'active' && l.start_date && dateStr(l.start_date) > todayStr);
 
 // Wartefristen für Mieterhöhungen in Monaten seit der letzten Erhöhung bzw. dem Mietbeginn:
@@ -137,6 +141,23 @@ const normalizeAuditData = (data) => {
 // Neuer Zins leer = bisheriger (gewichteter) Zins der Darlehen
 const DEFAULT_SCENARIO = { rentGrowth: 3, interestAdj: '', repaymentAdj: 2 };
 const normalizeScenario = (s) => ({ ...DEFAULT_SCENARIO, ...(s && typeof s === 'object' ? s : {}) });
+
+// Vergleichsstand des Buy-&-Hold-Rechners für die Rückfrage bei ungespeicherten Eingaben
+// (_key der Darlehen ist nur ein React-Schlüssel und wird bei jedem Laden neu vergeben)
+const auditSnapshot = (data, scen, name) => JSON.stringify({
+    data: {
+        ...data,
+        loans: (Array.isArray(data?.loans) ? data.loans : []).map(loan => {
+            const rest = { ...loan };
+            delete rest._key;
+            return rest;
+        })
+    },
+    scen,
+    name
+});
+const UNSAVED_DEAL_MESSAGE = 'Es gibt ungespeicherte Deal-Eingaben. Seite trotzdem verlassen? Die Änderungen gehen verloren.';
+const DEALS_PATH = '/investor-portal?tab=deals';
 
 const clampFixedYears = (v) => {
     const n = parseNum(v);
@@ -334,14 +355,10 @@ const getDealRanking = (deal) => {
         const m = computeAuditMetrics(normalizeAuditData(deal.deal_data), normalizeScenario(deal.scenario_data));
         return Number.isFinite(m.cfPreTaxMo) ? m.cfPreTaxMo * 12 * 10 : 0;
     }
-    // Fix & Flip: Durchschnitt aller positiven Gewinne
-    const res = deal.scenario_data || {};
-    const profits = [];
-    if ((res.profitLow || 0) > 0) profits.push(res.profitLow);
-    if ((res.profitHigh || 0) > 0) profits.push(res.profitHigh);
-    if ((res.kapProfitIst || 0) > 0) profits.push(res.kapProfitIst);
-    if ((res.kapProfitSoll || 0) > 0) profits.push(res.kapProfitSoll);
-    return profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
+    // Fix & Flip: Durchschnitt aller positiven Gewinne – wie bei Buy & Hold aus den Eingaben (deal_data)
+    // neu berechnet; die gespeicherten Ergebnisse (scenario_data) wären nach einer Übernahme der
+    // Sanierungssumme aus dem Sanierungsrechner veraltet
+    return getFixFlipRanking(deal.deal_data);
 };
 
 // Cockpit-Kennzahlen aus Objekten, Darlehen und WE-Werten. Nicht berechenbare Quoten (fehlender Nenner) = null.
@@ -447,6 +464,7 @@ const InvestorPortal = () => {
     const location = useLocation();
     const navigate = useNavigate();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     // Getrennte Refs: Desktop-Zeile und Mobile-Card sind beide im DOM (per CSS ausgeblendet)
     const auditRefDesktop = useRef(null);
     const auditRefMobile = useRef(null);
@@ -491,13 +509,6 @@ const InvestorPortal = () => {
     const [selectedKpi, setSelectedKpi] = useState(null);
     const [showCashflowDetailsModal, setShowCashflowDetailsModal] = useState(false);
 
-    // Renovation Stats (for cockpit card)
-    // eslint-disable-next-line no-unused-vars
-    const [renovationStats, setRenovationStats] = useState({ activeProjects: 0, openTasks: 0 });
-
-    // Rent increase tracking
-    const [pendingIncreases, setPendingIncreases] = useState([]);
-    const [showIncreasesModal, setShowIncreasesModal] = useState(false);
     const [showThresholdModal, setShowThresholdModal] = useState(false);
 
     // Deals State
@@ -511,6 +522,53 @@ const InvestorPortal = () => {
 
     const [scenario, setScenario] = useState(() => ({ ...DEFAULT_SCENARIO }));
 
+    // Rückfrage bei ungespeicherten Deal-Eingaben: Vergleichsstand des Buy-&-Hold-Rechners (beim Laden,
+    // Neuanlegen und Speichern gesetzt); der Fix-&-Flip-Rechner meldet seinen Stand über onDirtyChange
+    const [savedAuditSnapshot, setSavedAuditSnapshot] = useState(() => auditSnapshot(createDefaultAuditData(), { ...DEFAULT_SCENARIO }, 'Neuer Deal'));
+    const [fixFlipDirty, setFixFlipDirty] = useState(false);
+    // Navigation nach dem Speichern bzw. nach bestätigtem Verlassen ohne zweite Rückfrage (siehe leaveTo)
+    const [leaveRequest, setLeaveRequest] = useState(0);
+    const pendingLeaveRef = useRef(null);
+
+    // ─── Schreibrechte: Lesemodus für Mitnutzer ohne Schreibrecht ───
+    // Objektwerte (Marktwert, Lage-Score, Zustand/DD) und WE-Finanzen brauchen wie die RLS das Schreibrecht
+    // „Immobilien“ im Portfolio des Objekts, Deals das Schreibrecht „Investorportal“ (Deal ohne Portfolio:
+    // nur der eigene). Die Datenbank prüft zusätzlich.
+    const canWriteIn = (category, portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite(category, portfolioId) : perm.canWrite(category);
+    };
+    const canEditProperty = (p) => !!p && canWriteIn('immobilien', p.portfolio_id);
+    // Wie has_economic_unit_access: eigene WE oder Schreibrecht in einem Portfolio der verknüpften Objekte
+    const canEditWE = (g) => economicUnits.some(eu => eu.id === g.economic_unit_id && eu.user_id === user?.id)
+        || (g.properties || []).some(pr => canEditProperty(pr));
+    const canEditRow = (p) => (p.isGroup ? canEditWE(p) : canEditProperty(p));
+    const canWriteDeal = (deal) => (deal.portfolio_id ? canWriteIn('investorportal', deal.portfolio_id) : deal.user_id === user?.id);
+    // Neuer Deal wird im gewählten Portfolio angelegt (ohne Auswahl: eigener Deal ohne Portfolio)
+    const canCreateDeal = selectedPortfolioID ? canWriteIn('investorportal', selectedPortfolioID) : true;
+    const editingDeal = editingDealId ? deals.find(d => d.id === editingDealId) : null;
+    // Nicht (mehr) geladener Deal: die Datenbank entscheidet beim Speichern
+    const canSaveCurrentDeal = editingDealId ? (!editingDeal || canWriteDeal(editingDeal)) : canCreateDeal;
+
+    const buyHoldDirty = activeTab === 'audit' && activeDealType !== 'fix_flip'
+        && auditSnapshot(auditData, scenario, dealName) !== savedAuditSnapshot;
+    const dealDirty = canSaveCurrentDeal
+        && (buyHoldDirty || (activeTab === 'audit' && activeDealType === 'fix_flip' && fixFlipDirty));
+    useUnsavedChangesGuard(dealDirty && leaveRequest === 0 ? UNSAVED_DEAL_MESSAGE : null);
+
+    // Erst den Wächter abschalten, dann (im Effekt nach dem Wiederherstellen des Navigators) navigieren –
+    // ein navigate() direkt nach dem Speichern würde sonst noch einmal nachfragen
+    const leaveTo = (to) => {
+        pendingLeaveRef.current = to;
+        setLeaveRequest(n => n + 1);
+    };
+    useEffect(() => {
+        if (!leaveRequest || !pendingLeaveRef.current) return;
+        const to = pendingLeaveRef.current;
+        pendingLeaveRef.current = null;
+        navigate(to);
+    }, [leaveRequest, navigate]);
+
     // Tooltip for Grunderwerbsteuer
     const [showTaxInfo, setShowTaxInfo] = useState(false);
     const [showRenovInfo, setShowRenovInfo] = useState(false);
@@ -519,16 +577,18 @@ const InvestorPortal = () => {
     // (die frühere eigene Liste war veraltet: Hamburg 4,5 / Bremen 5,0 / Schleswig-Holstein 5,5 %)
     const statesTaxRef = TRANSFER_TAX_RATES;
 
-    // Tab aus der URL übernehmen und Deals laden – nur bei URL-/Nutzerwechsel, NICHT bei geänderten Deals
-    // (früher hing der Effekt an `deals` und lud sich selbst endlos neu)
+    // Tab aus der URL übernehmen und Deals laden – nur bei URL-/Nutzer-/Portfoliowechsel, NICHT bei geänderten
+    // Deals (früher hing der Effekt an `deals` und lud sich selbst endlos neu)
     useEffect(() => {
         const params = new URLSearchParams(location.search);
         const tab = params.get('tab');
         setActiveTab(tab || 'cockpit');
+        // Angeforderte Navigation (leaveTo) ist angekommen – Wächter wieder scharf schalten
+        setLeaveRequest(0);
         const urlDealId = params.get('dealId');
         if (tab === 'deals' || !tab || tab === 'cockpit' || (tab === 'audit' && urlDealId)) fetchDeals();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [location.search, user?.id]);
+    }, [location.search, user?.id, selectedPortfolioID]);
 
     // Auto-load a deal when returning from Sanierungsrechner with ?dealId=xxx (ohne erneutes Laden der Deals)
     useEffect(() => {
@@ -580,7 +640,7 @@ const InvestorPortal = () => {
     const fetchData = async ({ silent = false } = {}) => {
         try {
             if (!silent) setLoading(true);
-            let propQuery = supabase.from('properties').select('*, units(*, leases(*, tenant:tenants(first_name, last_name)))');
+            let propQuery = supabase.from('properties').select('*, units(*, leases(*))');
             if (selectedPortfolioID) propQuery = propQuery.eq('portfolio_id', selectedPortfolioID);
             const { data: propData, error: propError } = await propQuery;
             if (propError) throw propError;
@@ -609,47 +669,6 @@ const InvestorPortal = () => {
             setEconomicUnits(weData);
             setDetailProperty(prev => (prev ? ((propData || []).find(p => p.id === prev.id) || prev) : prev));
             setLoadError(null);
-
-            // Fetch renovation stats for cockpit card
-            try {
-                const [projRes, taskRes] = await Promise.all([
-                    supabase.from('renovation_projects').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'active'),
-                    supabase.from('renovation_tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('is_completed', false),
-                ]);
-                setRenovationStats({ activeProjects: projRes.count || 0, openTasks: taskRes.count || 0 });
-            } catch { /* renovation tables may not exist yet */ }
-
-            // Calculate pending rent increases (Wartefristen siehe getRentIncreaseWaitMonths)
-            const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietvertrag', index: 'Indexmietvertrag' };
-            const now = new Date();
-            const todayStr = localTodayStr();
-            const pending = [];
-            (propData || []).forEach(p => {
-                const addr = `${p.street} ${p.house_number || ''}`.trim();
-                (p.units || []).forEach(u => {
-                    const activeLease = getActiveLease(u, todayStr);
-                    if (!activeLease) return;
-                    const type = activeLease.lease_type || 'normal';
-                    const baseDate = parseLocalDate(activeLease.last_rent_increase || activeLease.start_date);
-                    if (!baseDate) return;
-                    const nextDate = new Date(baseDate);
-                    nextDate.setMonth(nextDate.getMonth() + getRentIncreaseWaitMonths(type));
-                    const oneMonthBefore = new Date(nextDate);
-                    oneMonthBefore.setMonth(oneMonthBefore.getMonth() - 1);
-                    if (now >= oneMonthBefore) {
-                        pending.push({
-                            tenantName: activeLease.tenant?.first_name
-                                ? `${activeLease.tenant.first_name} ${activeLease.tenant.last_name || ''}`
-                                : (activeLease.tenant_id || '–'),
-                            property: addr,
-                            unit: u.unit_name || '–',
-                            leaseType: LEASE_TYPE_LABELS[type] || type,
-                            nextDate,
-                        });
-                    }
-                });
-            });
-            setPendingIncreases(pending);
         } catch (error) {
             console.error('Fehler beim Laden der Daten:', error);
             // Keine Kennzahlen aus unvollständigen Daten – Fehlerhinweis mit "Erneut laden" anzeigen
@@ -722,12 +741,15 @@ const InvestorPortal = () => {
         return getPropertyLoanPayment(p.id);
     };
 
+    // Leerstand je Objekt: Ferienwohnungen gelten nie als leer und zählen deshalb auch nicht im Nenner
+    // (wie Dashboard und Cockpit-Quote)
     const getVacancy = (p) => {
         const todayStr = localTodayStr();
-        const units = p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || []);
+        const units = (p.isGroup ? p.properties.flatMap(subP => subP.units || []) : (p.units || []))
+            .filter(u => !u.is_vacation_rental);
         const total = units.length;
         if (total === 0) return '–';
-        const vacant = units.filter(u => !u.is_vacation_rental && !getActiveLease(u, todayStr)).length;
+        const vacant = units.filter(u => !getActiveLease(u, todayStr)).length;
         return `${vacant} / ${total}`;
     };
 
@@ -954,6 +976,9 @@ const InvestorPortal = () => {
     // Sofort in der Anzeige übernehmen (funktional, kein veralteter State), in die DB erst nach einer kurzen
     // Eingabepause – statt eines UPDATE pro Tastendruck bzw. Slider-Schritt
     const handleUpdateProperty = (id, updates) => {
+        // Lesemodus: ohne Schreibrecht „Immobilien“ nichts ändern (die Eingaben sind dann gesperrt)
+        const target = properties.find(p => p.id === id) || (detailProperty?.id === id ? detailProperty : null);
+        if (target && !canEditProperty(target)) return;
         setProperties(prev => prev.map(p => (p.id === id ? { ...p, ...updates } : p)));
         setDetailProperty(prev => (prev && prev.id === id ? { ...prev, ...updates } : prev));
         const pending = pendingPropUpdatesRef.current;
@@ -967,6 +992,7 @@ const InvestorPortal = () => {
     // WE-Finanzen bearbeiten: Ausgangswerte merken, damit nur tatsächlich geänderte Felder gespeichert werden
     // (sonst würden die vorbefüllten Objektsummen als feste WE-Werte eingefroren)
     const openWeEditModal = (p, field) => {
+        if (!canEditWE(p)) return;
         setWeEditModal({
             ...p,
             field,
@@ -1034,13 +1060,16 @@ const InvestorPortal = () => {
     const cashflowColor = (val) => val >= 0 ? '#10B981' : '#EF4444';
 
     // ─── DEAL CRUD ──────────────────────────────────────────────────
+    // Deals des gewählten Portfolios (plus eigene ohne Portfolio), bei „Alle Portfolios“ alle lesbaren –
+    // auch die von Mitnutzern bzw. vom Eigentümer im geteilten Portfolio angelegten (die RLS begrenzt)
     const fetchDeals = async () => {
         if (!user) return;
-        const { data, error } = await supabase
+        let query = supabase
             .from('deals')
             .select('*')
-            .eq('user_id', user.id)
             .order('updated_at', { ascending: false });
+        if (selectedPortfolioID) query = query.or(`portfolio_id.eq.${selectedPortfolioID},portfolio_id.is.null`);
+        const { data, error } = await query;
         if (error) {
             console.error('Fehler beim Laden der Deals:', error);
             setDealsError(translateError(error));
@@ -1050,11 +1079,12 @@ const InvestorPortal = () => {
         setDeals(data || []);
     };
 
-    // Update-Payload: Eigentümer (user_id) nie umschreiben, Portfolio nicht auf "kein Portfolio" zurücksetzen
+    // Update-Payload: Eigentümer (user_id) und Portfolio des Deals nie umschreiben – ein Deal aus Portfolio A
+    // darf beim Speichern unter gewähltem Portfolio B nicht still nach B wandern (Sichtbarkeit für Mitnutzer)
     const toDealUpdatePayload = (payload) => {
         // eslint-disable-next-line no-unused-vars
         const { user_id, portfolio_id, ...rest } = payload;
-        return selectedPortfolioID ? { ...rest, portfolio_id: selectedPortfolioID } : rest;
+        return rest;
     };
 
     // Speichert den Deal; liefert die Deal-ID bei Erfolg, sonst null (Fehler wird angezeigt)
@@ -1074,8 +1104,14 @@ const InvestorPortal = () => {
 
     const saveDeal = async (skipNavigate = false) => {
         if (!user || savingDeal) return editingDealId;
+        if (!canSaveCurrentDeal) {
+            alert('Nur Lesezugriff: Für dieses Portfolio haben Sie im Investorportal kein Schreibrecht.');
+            return null;
+        }
         setSavingDeal(true);
         let resultId = null;
+        // Stand zum Zeitpunkt des Speicherns (Vergleich für die Rückfrage bei ungespeicherten Eingaben)
+        const snapshotAtSave = auditSnapshot(auditData, scenario, dealName);
         try {
             const metrics = computeAuditMetrics(auditData, scenario);
             const payload = {
@@ -1094,8 +1130,9 @@ const InvestorPortal = () => {
                 updated_at: new Date().toISOString()
             };
             resultId = await writeDeal(payload);
+            setSavedAuditSnapshot(snapshotAtSave);
             await fetchDeals();
-            if (!skipNavigate) navigate('/investor-portal?tab=deals');
+            if (!skipNavigate) leaveTo(DEALS_PATH);
         } catch (err) {
             // Eingaben bleiben erhalten, keine Navigation
             alert('Fehler beim Speichern des Deals: ' + translateError(err));
@@ -1110,6 +1147,10 @@ const InvestorPortal = () => {
     // { skipNavigate: true } und bricht den Sprung ab, wenn das Speichern fehlschlägt
     const saveFixFlipDeal = async (inputs, results, opts = {}) => {
         if (!user || savingDeal) return false;
+        if (!canSaveCurrentDeal) {
+            alert('Nur Lesezugriff: Für dieses Portfolio haben Sie im Investorportal kein Schreibrecht.');
+            return false;
+        }
         setSavingDeal(true);
         try {
             const payload = {
@@ -1129,7 +1170,7 @@ const InvestorPortal = () => {
             };
             await writeDeal(payload);
             await fetchDeals();
-            if (!opts?.skipNavigate) navigate('/investor-portal?tab=deals');
+            if (!opts?.skipNavigate) leaveTo(DEALS_PATH);
             return true;
         } catch (e) {
             console.error(e);
@@ -1142,6 +1183,11 @@ const InvestorPortal = () => {
 
     // Rückgabe true nur bei tatsächlich gelöschtem Deal (der Fix-&-Flip-Rechner wechselt dann zur Übersicht)
     const deleteDeal = async (id) => {
+        const target = deals.find(d => d.id === id);
+        if (target && !canWriteDeal(target)) {
+            alert('Nur Lesezugriff: Diesen Deal können Sie nicht löschen.');
+            return false;
+        }
         if (!confirm('Deal wirklich löschen?')) return false;
         const { data, error } = await supabase.from('deals').delete().eq('id', id).select('id');
         if (error || !data || data.length === 0) {
@@ -1160,8 +1206,11 @@ const InvestorPortal = () => {
         setActiveDealType(type);
         if (type === 'buy_hold') {
             // Fehlende Felder/Darlehen aus alten oder extern geschriebenen Deals mit Standardwerten ergänzen
-            setAuditData(normalizeAuditData(deal.deal_data));
-            setScenario(normalizeScenario(deal.scenario_data));
+            const data = normalizeAuditData(deal.deal_data);
+            const scen = normalizeScenario(deal.scenario_data);
+            setAuditData(data);
+            setScenario(scen);
+            setSavedAuditSnapshot(auditSnapshot(data, scen, deal.name));
         } else {
             setAuditData(deal.deal_data && typeof deal.deal_data === 'object' ? deal.deal_data : {});
         }
@@ -1173,9 +1222,13 @@ const InvestorPortal = () => {
     const startNewDeal = (type = 'buy_hold') => {
         setActiveDealType(type);
         // Gleiche Standardwerte wie der Startzustand – inkl. Kaufnebenkosten-Sätzen
-        setAuditData(createDefaultAuditData());
-        setScenario({ ...DEFAULT_SCENARIO });
-        setDealName(type === 'fix_flip' ? 'Neuer Fix & Flip Deal' : 'Neuer Deal');
+        const data = createDefaultAuditData();
+        const scen = { ...DEFAULT_SCENARIO };
+        const name = type === 'fix_flip' ? 'Neuer Fix & Flip Deal' : 'Neuer Deal';
+        setAuditData(data);
+        setScenario(scen);
+        setDealName(name);
+        setSavedAuditSnapshot(auditSnapshot(data, scen, name));
         setEditingDealId(null);
         navigate('/investor-portal?tab=audit');
     };
@@ -1191,9 +1244,17 @@ const InvestorPortal = () => {
     // ─── RENDER: DEALS OVERVIEW ─────────────────────────────────────
     const renderDealsOverview = () => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-lg)' }}>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-                <Button icon={Plus} onClick={() => startNewDeal('buy_hold')}>Buy & Hold</Button>
-                <Button icon={Plus} onClick={() => startNewDeal('fix_flip')}>Fix & Flip</Button>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '12px' }}>
+                {canCreateDeal ? (
+                    <>
+                        <Button icon={Plus} onClick={() => startNewDeal('buy_hold')}>Buy & Hold</Button>
+                        <Button icon={Plus} onClick={() => startNewDeal('fix_flip')}>Fix & Flip</Button>
+                    </>
+                ) : (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        <Lock size={14} /> Nur Lesezugriff – neue Deals legt ein Konto mit Schreibrecht an
+                    </span>
+                )}
             </div>
             <Card title="Gespeicherte Deals" icon={FileText} color="#8B5CF6">
                 {dealsError ? (
@@ -1251,9 +1312,11 @@ const InvestorPortal = () => {
                                                         <span style={{ cursor: 'pointer', color: 'var(--primary-color)' }} onClick={() => loadDeal(deal)} title="Bearbeiten">
                                                             <Edit3 size={15} />
                                                         </span>
-                                                        <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7 }} onClick={() => deleteDeal(deal.id)} title="Löschen">
-                                                            <Trash2 size={15} />
-                                                        </span>
+                                                        {canWriteDeal(deal) && (
+                                                            <span style={{ cursor: 'pointer', color: 'var(--danger-color, #ef4444)', opacity: 0.7 }} onClick={() => deleteDeal(deal.id)} title="Löschen">
+                                                                <Trash2 size={15} />
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 </td>
                                             </tr>
@@ -1311,9 +1374,11 @@ const InvestorPortal = () => {
                                             <button onClick={(e) => { e.stopPropagation(); loadDeal(deal); }} style={{ color: 'var(--primary-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                                 <Edit3 size={16} /> Bearbeiten
                                             </button>
-                                            <button onClick={(e) => { e.stopPropagation(); deleteDeal(deal.id); }} style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                <Trash2 size={16} /> Löschen
-                                            </button>
+                                            {canWriteDeal(deal) && (
+                                                <button onClick={(e) => { e.stopPropagation(); deleteDeal(deal.id); }} style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                    <Trash2 size={16} /> Löschen
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
                                 ))}
@@ -1560,17 +1625,17 @@ const InvestorPortal = () => {
             navigate(`/loans?propertyId=${pid}`);
         };
 
-        // Leerstandsquote matching Dashboard logic (gemeinsame Definition "laufender Mietvertrag")
+        // Leerstandsquote wie im Dashboard: Ferienwohnungen gelten nie als leer und stehen deshalb auch
+        // nicht im Nenner (gemeinsame Definition "laufender Mietvertrag")
         let totalResUnits = 0;
         let vacantResUnits = 0;
         const todayStr = localTodayStr();
 
         properties.forEach(p => {
             (p.units || []).forEach(u => {
+                if (u.is_vacation_rental) return;
                 totalResUnits++;
-                if (!u.is_vacation_rental && !getActiveLease(u, todayStr)) {
-                    vacantResUnits++;
-                }
+                if (!getActiveLease(u, todayStr)) vacantResUnits++;
             });
         });
         const vacancyRate = totalResUnits > 0 ? (vacantResUnits / totalResUnits) * 100 : 0;
@@ -1791,7 +1856,7 @@ const InvestorPortal = () => {
                     <Card title="Risikomanagement" icon={ShieldCheck} color="#EF4444">
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem' }}>
                             <div>
-                                <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Leerstands-Quote (Wohnen):</div>
+                                <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Leerstands-Quote (ohne Ferienwohnungen):</div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '3px' }}>
                                     <div style={{ flex: 1, height: '6px', backgroundColor: 'var(--border-color)', borderRadius: '3px', overflow: 'hidden' }}>
                                         <div style={{ width: `${vacancyRate}%`, height: '100%', backgroundColor: vacancyRate > 10 ? '#EF4444' : '#10B981' }}></div>
@@ -2011,7 +2076,7 @@ const InvestorPortal = () => {
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
-                                                            p.isGroup ? (
+                                                            p.isGroup && canEditRow(p) ? (
                                                                 <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'total_investment_cost'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
                                                                     {formatCurrency(p.total_investment_cost)}
                                                                 </span>
@@ -2019,6 +2084,7 @@ const InvestorPortal = () => {
                                                                 formatCurrency(p.total_investment_cost)
                                                             )
                                                         ) : (
+                                                            canEditRow(p) ? (
                                                             <button
                                                                 onClick={(e) => { 
                                                                     e.stopPropagation(); 
@@ -2034,11 +2100,12 @@ const InvestorPortal = () => {
                                                             >
                                                                 +
                                                             </button>
+                                                            ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                         )}
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {(parseFloat(p.equity_invested) || 0) > 0 ? (
-                                                            p.isGroup ? (
+                                                            p.isGroup && canEditRow(p) ? (
                                                                 <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'equity_invested'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
                                                                     {formatCurrency(p.equity_invested)}
                                                                 </span>
@@ -2046,6 +2113,7 @@ const InvestorPortal = () => {
                                                                 formatCurrency(p.equity_invested)
                                                             )
                                                         ) : (
+                                                            canEditRow(p) ? (
                                                             <button
                                                                 onClick={(e) => { 
                                                                     e.stopPropagation(); 
@@ -2061,6 +2129,7 @@ const InvestorPortal = () => {
                                                             >
                                                                 +
                                                             </button>
+                                                            ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                         )}
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
@@ -2077,7 +2146,7 @@ const InvestorPortal = () => {
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
                                                         {marketValue > 0 ? (
-                                                            p.isGroup ? (
+                                                            p.isGroup && canEditRow(p) ? (
                                                                 <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'market_value_total'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
                                                                     {formatCurrency(marketValue)}
                                                                 </span>
@@ -2085,6 +2154,7 @@ const InvestorPortal = () => {
                                                                 formatCurrency(marketValue)
                                                             )
                                                         ) : (
+                                                            canEditRow(p) ? (
                                                             <button
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
@@ -2104,6 +2174,7 @@ const InvestorPortal = () => {
                                                             >
                                                                 +
                                                             </button>
+                                                            ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                         )}
                                                     </td>
                                                     <td style={{ textAlign: 'right', padding: '14px 16px', fontSize: '0.9rem', fontWeight: p.isGroup ? 600 : 500 }}>
@@ -2215,7 +2286,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Gesamtinvest</div>
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.total_investment_cost) || 0) > 0 ? (
-                                                        p.isGroup ? (
+                                                        p.isGroup && canEditRow(p) ? (
                                                             <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'total_investment_cost'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Gesamtinvestition bearbeiten">
                                                                 {formatCurrency(p.total_investment_cost)}
                                                             </span>
@@ -2223,6 +2294,7 @@ const InvestorPortal = () => {
                                                             formatCurrency(p.total_investment_cost)
                                                         )
                                                     ) : (
+                                                        canEditRow(p) ? (
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -2238,6 +2310,7 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
+                                                        ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -2245,7 +2318,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eigenkapital</div>
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {(parseFloat(p.equity_invested) || 0) > 0 ? (
-                                                        p.isGroup ? (
+                                                        p.isGroup && canEditRow(p) ? (
                                                             <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'equity_invested'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Eigenkapital bearbeiten">
                                                                 {formatCurrency(p.equity_invested)}
                                                             </span>
@@ -2253,6 +2326,7 @@ const InvestorPortal = () => {
                                                             formatCurrency(p.equity_invested)
                                                         )
                                                     ) : (
+                                                        canEditRow(p) ? (
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -2268,6 +2342,7 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
+                                                        ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -2291,7 +2366,7 @@ const InvestorPortal = () => {
                                                 <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Marktwert</div>
                                                 <div style={{ fontWeight: p.isGroup ? 600 : 500 }}>
                                                     {marketValue > 0 ? (
-                                                        p.isGroup ? (
+                                                        p.isGroup && canEditRow(p) ? (
                                                             <span onClick={(e) => { e.stopPropagation(); openWeEditModal(p, 'market_value_total'); }} style={{ cursor: 'pointer', borderBottom: '1px dashed var(--primary-color)', paddingBottom: '2px' }} title="Marktwert bearbeiten">
                                                                 {formatCurrency(marketValue)}
                                                             </span>
@@ -2299,6 +2374,7 @@ const InvestorPortal = () => {
                                                             formatCurrency(marketValue)
                                                         )
                                                     ) : (
+                                                        canEditRow(p) ? (
                                                         <button
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -2318,6 +2394,7 @@ const InvestorPortal = () => {
                                                         >
                                                             +
                                                         </button>
+                                                        ) : <span style={{ color: 'var(--text-secondary)' }}>—</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -2461,16 +2538,23 @@ const InvestorPortal = () => {
         else if (score <= 4) scoreColor = '#EF4444';
 
         const ddSelectStyle = { padding: '6px 8px', border: '1px solid var(--border-color)', borderRadius: '6px', fontSize: '0.8rem', backgroundColor: 'var(--surface-color)', width: '100%', color: 'var(--text-primary)' };
+        // Lesemodus ohne Schreibrecht „Immobilien“ im Portfolio des Objekts
+        const editable = canEditProperty(p);
 
         return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px', padding: '20px', backgroundColor: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-sm)', marginTop: '8px' }}>
+                {!editable && (
+                    <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                        <Lock size={14} /> Nur Lesezugriff – Lage-Score und Zustand kann ein Konto mit Schreibrecht „Immobilien“ ändern.
+                    </div>
+                )}
                 {/* Lage Score */}
                 <div>
                     <h4 style={{ fontSize: '0.85rem', fontWeight: 700, marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <MapPin size={16} color="var(--primary-color)" /> Lage-Score
                     </h4>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <input type="range" min="1" max="10" step="1" value={score}
+                        <input type="range" min="1" max="10" step="1" value={score} disabled={!editable}
                             onChange={e => handleUpdateProperty(p.id, { location_score_total: parseInt(e.target.value) })}
                             style={{ flex: 1, accentColor: scoreColor }}
                         />
@@ -2499,7 +2583,7 @@ const InvestorPortal = () => {
                         ].map(item => (
                             <div key={item.key}>
                                 <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>{item.label}</label>
-                                <select value={p[item.key] || 0} onChange={e => handleUpdateProperty(p.id, { [item.key]: parseInt(e.target.value) })} style={ddSelectStyle}>
+                                <select value={p[item.key] || 0} disabled={!editable} onChange={e => handleUpdateProperty(p.id, { [item.key]: parseInt(e.target.value) })} style={ddSelectStyle}>
                                     <option value="0">—</option>
                                     <option value="1">Saniert</option>
                                     <option value="2">Gut</option>
@@ -2527,7 +2611,7 @@ const InvestorPortal = () => {
                         ].map(item => (
                             <div key={item.key}>
                                 <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>{item.label}</label>
-                                <select value={p[item.key] || 0} onChange={e => handleUpdateProperty(p.id, { [item.key]: parseInt(e.target.value) })} style={ddSelectStyle}>
+                                <select value={p[item.key] || 0} disabled={!editable} onChange={e => handleUpdateProperty(p.id, { [item.key]: parseInt(e.target.value) })} style={ddSelectStyle}>
                                     <option value="0">—</option>
                                     <option value="1">Saniert</option>
                                     <option value="2">Gut</option>
@@ -2552,6 +2636,7 @@ const InvestorPortal = () => {
         const rentSollMo = getPropertyRentSoll(p);
         const debt = getPropertyDebt(p.id);
         const propLoans = loans.filter(l => l.property_id === p.id);
+        const editable = canEditProperty(p);
 
         return (
             <Modal isOpen={isDetailOpen} onClose={() => setIsDetailOpen(false)} title={`${p.street} ${p.house_number}`}
@@ -2587,6 +2672,7 @@ const InvestorPortal = () => {
                             <CurrencyInput
                                 label="Marktwert gesamt (€)"
                                 value={p.market_value_total}
+                                disabled={!editable}
                                 onChange={e => {
                                     const val = parseNum(e.target.value) || 0;
                                     // Abgeleiteten m²-Wert nur mit bekannter Fläche schreiben
@@ -2599,6 +2685,7 @@ const InvestorPortal = () => {
                                 label="Marktwert je m² (€)"
                                 value={p.market_value_per_sqm}
                                 allowDecimals
+                                disabled={!editable}
                                 onChange={e => {
                                     const val = parseNum(e.target.value) || 0;
                                     // Ohne Fläche den Gesamt-Marktwert nicht mit 0 überschreiben
@@ -2608,9 +2695,14 @@ const InvestorPortal = () => {
                                 }}
                             />
                         </div>
-                        {totalSqm <= 0 && (
+                        {totalSqm <= 0 && editable && (
                             <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
                                 Keine Wohnfläche hinterlegt – Gesamt- und m²-Wert werden unabhängig voneinander gespeichert.
+                            </p>
+                        )}
+                        {!editable && (
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '4px 0 0 0', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <Lock size={12} /> Nur Lesezugriff – den Marktwert kann ein Konto mit Schreibrecht „Immobilien“ ändern.
                             </p>
                         )}
                     </div>
@@ -2725,7 +2817,7 @@ const InvestorPortal = () => {
             {/* Deal Header: Name + Save + Back */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                 <span style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '4px' }}
-                    onClick={() => navigate('/investor-portal?tab=deals')}>
+                    onClick={() => navigate(DEALS_PATH)}>
                     ← Zur Übersicht
                 </span>
                 <div style={{ flex: 1 }} />
@@ -2738,9 +2830,15 @@ const InvestorPortal = () => {
                 <Button variant="secondary" icon={FileText} onClick={handleBuyHoldPrint}>
                     PDF
                 </Button>
-                <Button icon={savingDeal ? Loader2 : Save} onClick={() => saveDeal(true)} disabled={savingDeal} style={savingDeal ? { opacity: 0.7, pointerEvents: 'none' } : {}}>
-                    {savingDeal ? 'Speichert...' : (editingDealId ? 'Aktualisieren' : 'Speichern')}
-                </Button>
+                {canSaveCurrentDeal ? (
+                    <Button icon={savingDeal ? Loader2 : Save} onClick={() => saveDeal(true)} disabled={savingDeal} style={savingDeal ? { opacity: 0.7, pointerEvents: 'none' } : {}}>
+                        {savingDeal ? 'Speichert...' : (editingDealId ? 'Aktualisieren' : 'Speichern')}
+                    </Button>
+                ) : (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }} title="Für dieses Portfolio haben Sie im Investorportal kein Schreibrecht – Eingaben werden nicht gespeichert.">
+                        <Lock size={14} /> Nur Lesezugriff
+                    </span>
+                )}
             </div>
 
             {/* Mobile Stepper Progress */}
@@ -2814,7 +2912,7 @@ const InvestorPortal = () => {
                             <div>
                                 <div style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                     <span style={{ fontSize: '0.8rem', fontWeight: 500 }}>Sanierung (€)</span>
-                                    <Calculator
+                                    {canSaveCurrentDeal && <Calculator
                                         size={14}
                                         style={{ color: '#f97316', cursor: 'pointer', flexShrink: 0 }}
                                         title="Sanierungsrechner öffnen"
@@ -2836,13 +2934,14 @@ const InvestorPortal = () => {
                                                 alert('Die Sanierungskalkulation konnte nicht geladen werden: ' + translateError(error));
                                                 return;
                                             }
+                                            // Gerade gespeichert: ohne erneute Rückfrage wechseln
                                             if (data && data.length > 0) {
-                                                navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
+                                                leaveTo(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
                                             } else {
-                                                navigate(`/renovation/calculator/new?dealId=${currentDealId}&dealName=${currentName}&returnTo=${ret}`);
+                                                leaveTo(`/renovation/calculator/new?dealId=${currentDealId}&dealName=${currentName}&returnTo=${ret}`);
                                             }
                                         }}
-                                    />
+                                    />}
                                     <div style={{ position: 'relative', display: 'inline-block' }}>
                                         <Info size={13} style={{ color: 'var(--text-secondary)', cursor: 'pointer', opacity: 0.7 }}
                                             onMouseEnter={() => setShowRenovInfo(true)}
@@ -3119,7 +3218,11 @@ const InvestorPortal = () => {
     );
 
     // ─── LOADING ────────────────────────────────────────────────────
-    if (loading) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}><Loader2 className="animate-spin" size={48} /></div>;
+    // Der Deal-Rechner braucht keine Objektdaten: bei einem Portfolio-Wechsel eingehängt lassen,
+    // sonst gingen die Eingaben des Fix-&-Flip-Rechners (lokaler State) verloren. Ausnahme: Rücksprung mit
+    // ?dealId, dessen Deal noch nicht geladen ist – dann wie bisher der Spinner statt eines leeren Buy-&-Hold-Rechners
+    const pendingUrlDealId = activeTab === 'audit' ? new URLSearchParams(location.search).get('dealId') : null;
+    if (loading && (activeTab !== 'audit' || (pendingUrlDealId && pendingUrlDealId !== editingDealId))) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}><Loader2 className="animate-spin" size={48} /></div>;
 
     // ─── MAIN RENDER ────────────────────────────────────────────────
     return (
@@ -3224,8 +3327,11 @@ const InvestorPortal = () => {
                     <FixFlipCalculator
                         initialData={fixFlipInitialData}
                         onSave={saveFixFlipDeal}
-                        onBack={() => navigate('/investor-portal?tab=deals')}
-                        onDelete={editingDealId ? () => deleteDeal(editingDealId) : null}
+                        onBack={() => navigate(DEALS_PATH)}
+                        onLeave={leaveTo}
+                        onDelete={editingDealId && canSaveCurrentDeal ? () => deleteDeal(editingDealId) : null}
+                        onDirtyChange={setFixFlipDirty}
+                        readOnly={!canSaveCurrentDeal}
                         isSaving={savingDeal}
                         dealId={editingDealId}
                     />
@@ -3234,48 +3340,6 @@ const InvestorPortal = () => {
             {activeTab === 'calculator' && !loadError && (
                 <InvestorCalculators properties={properties} loans={loans} economicUnits={economicUnits} />
             )}
-
-            {/* Mieterhöhungen Detail Modal */}
-            <Modal
-                isOpen={showIncreasesModal}
-                onClose={() => setShowIncreasesModal(false)}
-                title="Mieterhöhungen prüfen"
-                footer={<Button variant="secondary" onClick={() => setShowIncreasesModal(false)}>Schließen</Button>}
-            >
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                    Bei folgenden Mietverhältnissen ist die gesetzliche Wartefrist für eine Mieterhöhung (§§ 557a, 557b, 558 BGB) abgelaufen oder läuft in den nächsten 30 Tagen ab. Ob und in welcher Höhe erhöht werden kann (Vertrag, Mietspiegel, Kappungsgrenze), bitte gesondert prüfen:
-                </p>
-                {pendingIncreases.length === 0 ? (
-                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)' }}>Keine Erhöhungen fällig.</div>
-                ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {pendingIncreases.map((item, i) => (
-                            <div key={i} style={{
-                                padding: '12px 16px',
-                                borderRadius: 'var(--radius-md)',
-                                border: '1px solid var(--border-color)',
-                                backgroundColor: 'var(--surface-color)',
-                            }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{item.tenantName}</span>
-                                    <span style={{
-                                        fontSize: '0.75rem', fontWeight: 600, padding: '2px 8px',
-                                        borderRadius: '12px', backgroundColor: 'rgba(236, 72, 153, 0.1)', color: '#EC4899'
-                                    }}>
-                                        ⚠️ {item.nextDate.toLocaleDateString('de-DE')}
-                                    </span>
-                                </div>
-                                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                                    {item.property} / {item.unit}
-                                </div>
-                                <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                                    {item.leaseType}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </Modal>
 
             {/* Kappungsgrenzen / Erhöhungspotenzial Detail Modal */}
             <Modal

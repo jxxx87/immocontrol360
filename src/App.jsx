@@ -89,6 +89,12 @@ const RoleBasedIndex = () => {
 const inv = (element, category) => <InvestorRoute category={category}>{element}</InvestorRoute>;
 const ten = (element) => <TenantRoute>{element}</TenantRoute>;
 
+// Kategorien wie die RLS der Daten (Liste = Leserecht für mindestens eine davon).
+// Das Menü (components/layout/Sidebar.jsx) verwendet dieselben Regeln.
+const LOANS_CATEGORIES = ['finanzen', 'investorportal'];         // loans
+const DOCUMENTS_CATEGORIES = ['immobilien', 'mieterportal'];    // documents + Storage-Bucket
+const RENOVATION_CATEGORIES = ['immobilien', 'investorportal']; // renovation_*, floor_plans
+
 function App() {
   return (
     <Router>
@@ -125,14 +131,14 @@ function App() {
                       <Route path="forderungen/:claimId" element={inv(<ClaimDetail />, 'finanzen')} />
                       <Route path="finance" element={inv(<Finance />, 'finanzen')} />
                       <Route path="bank-reconciliation" element={inv(<BankReconciliation />, 'finanzen')} />
-                      <Route path="loans" element={inv(<Loans />, 'finanzen')} />
+                      <Route path="loans" element={inv(<Loans />, LOANS_CATEGORIES)} />
                       <Route path="utility-costs" element={inv(<UtilityCosts />, 'nebenkosten')} />
                       <Route path="invoices" element={inv(<Invoices />, 'finanzen')} />
                       <Route path="invoices/new" element={inv(<InvoiceForm />, 'finanzen')} />
                       <Route path="invoices/edit/:id" element={inv(<InvoiceForm />, 'finanzen')} />
                       <Route path="meters" element={inv(<Meters />, 'zaehler')} />
                       <Route path="contacts" element={inv(<Contacts />, 'kontakte')} />
-                      <Route path="documents" element={inv(<Documents />, 'immobilien')} />
+                      <Route path="documents" element={inv(<Documents />, DOCUMENTS_CATEGORIES)} />
                       <Route path="cloud-documents" element={inv(<CloudExplorer />, 'immobilien')} />
                       <Route path="settings" element={inv(<Settings />)} />
                       <Route path="settings/cloud/callback" element={inv(<CloudCallback />)} />
@@ -143,7 +149,8 @@ function App() {
 
                       {/* ── Investor Portal Routes ── */}
                       <Route path="letting" element={inv(<Letting />, 'mieterportal')} />
-                      <Route path="tenant-management" element={inv(<TenantManagement />, 'mieterportal')} />
+                      {/* Daten der Mieter-Verwaltung (Einladungen, Portalzugänge, Links) hängen per RLS an „mietverhaeltnisse“ */}
+                      <Route path="tenant-management" element={inv(<TenantManagement />, 'mietverhaeltnisse')} />
                       <Route path="ticket-board" element={inv(<TicketKanban />, 'mieterportal')} />
                       <Route path="announcements" element={inv(<Announcements />, 'mieterportal')} />
                       <Route path="investor-messages" element={inv(<InvestorMessages />, 'mieterportal')} />
@@ -158,11 +165,11 @@ function App() {
                       <Route path="investor-portal" element={inv(<InvestorPortal />, 'investorportal')} />
 
                       {/* ── Sanierungsmanager Routes ── */}
-                      <Route path="renovation" element={inv(<RenovationManager />, 'immobilien')} />
-                      <Route path="renovation/new" element={inv(<RenovationWizard />, 'immobilien')} />
-                      <Route path="renovation/:id" element={inv(<RenovationProjectDetail />, 'immobilien')} />
-                      <Route path="renovation/calculator/:id" element={inv(<RenovationCalculatorDetail />, 'immobilien')} />
-                      <Route path="renovation/floorplan/:id" element={inv(<FloorPlanEditor />, 'immobilien')} />
+                      <Route path="renovation" element={inv(<RenovationManager />, RENOVATION_CATEGORIES)} />
+                      <Route path="renovation/new" element={inv(<RenovationWizard />, RENOVATION_CATEGORIES)} />
+                      <Route path="renovation/:id" element={inv(<RenovationProjectDetail />, RENOVATION_CATEGORIES)} />
+                      <Route path="renovation/calculator/:id" element={inv(<RenovationCalculatorDetail />, RENOVATION_CATEGORIES)} />
+                      <Route path="renovation/floorplan/:id" element={inv(<FloorPlanEditor />, RENOVATION_CATEGORIES)} />
 
                       {/* ── PDF Template Route ── */}
                       <Route path="portfolio/settings/pdf-template" element={inv(<PdfTemplateEditor />)} />

@@ -91,6 +91,32 @@ const calcTrend = (current, previous) => {
 
 const monthStartStr = (year, month0) => toLocalDateStr(new Date(year, month0, 1));
 
+// Die Vertragsbeträge (leases.cold_rent …) folgen einer Mietänderung „gültig ab“ erst, wenn
+// sync_all_rent_ledgers läuft (die Datenbank hat keinen Zeitplan dafür). Das Dashboard stößt den
+// Abgleich deshalb höchstens einmal am Tag je Konto an (Tag in UTC wie current_date der Datenbank).
+// Er legt auch die Sollstellung des laufenden Monats an und setzt abgelaufene Verträge auf beendet.
+// Ein Fehler blockiert das Dashboard nicht; der nächste Aufruf (neu laden) versucht es erneut.
+const RENT_SYNC_STORAGE_KEY = 'rentPeriodSyncDay';
+const rentSyncRuns = new Map();
+const syncRentPeriodsOncePerDay = (userId) => {
+    const key = `${userId}:${new Date().toISOString().slice(0, 10)}`;
+    try {
+        if (localStorage.getItem(RENT_SYNC_STORAGE_KEY) === key) return Promise.resolve();
+    } catch { /* Speicher nicht verfügbar: Abgleich trotzdem einmal je Sitzung */ }
+    if (!rentSyncRuns.has(key)) {
+        rentSyncRuns.set(key, supabase.rpc('sync_all_rent_ledgers')
+            .then(({ error }) => {
+                if (error) {
+                    console.warn('Mietzeitraum-Abgleich fehlgeschlagen:', error);
+                    return;
+                }
+                try { localStorage.setItem(RENT_SYNC_STORAGE_KEY, key); } catch { /* ignore */ }
+            })
+            .catch(err => console.warn('Mietzeitraum-Abgleich fehlgeschlagen:', err)));
+    }
+    return rentSyncRuns.get(key);
+};
+
 const Dashboard = () => {
     const { user } = useAuth();
     const userId = user?.id;
@@ -111,6 +137,10 @@ const Dashboard = () => {
         if (!userId) return;
         const requestId = ++requestIdRef.current;
         try {
+            // Vorher Vertragsbeträge/Sollstellung auf den heute gültigen Mietzeitraum bringen (einmal am Tag)
+            await syncRentPeriodsOncePerDay(userId);
+            if (requestId !== requestIdRef.current) return;
+
             const now = new Date();
             // Zeitraum für Diagramm (6 Monate) und Vormonatsvergleich
             const windowStart = monthStartStr(now.getFullYear(), now.getMonth() - 5);

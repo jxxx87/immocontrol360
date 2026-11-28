@@ -3,6 +3,7 @@ import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { supabase } from '../../lib/supabase';
+import { ALLOWED_SMTP_PORTS, isAllowedSmtpHost, isAllowedSmtpPort } from '../../lib/smtpServerCheck';
 import { useAuth } from '../../context/AuthContext';
 import { Mail, CheckCircle2, AlertTriangle, Loader2, Trash2 } from 'lucide-react';
 
@@ -14,6 +15,10 @@ import { Mail, CheckCircle2, AlertTriangle, Loader2, Trash2 } from 'lucide-react
 const EMAIL_PATTERN = /[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/;
 
 const normalizeHost = (host) => (host || '').trim().toLowerCase();
+
+// Nur die Ports, die die Edge Function beim Test und Versand zulässt (lib/smtpServerCheck.js)
+const PORT_LABELS = { 25: '25', 465: '465 (SSL/TLS)', 587: '587 (STARTTLS)', 2525: '2525' };
+const PORT_OPTIONS = ALLOWED_SMTP_PORTS.map(port => String(port));
 
 const extractSenderAddress = (sender) => {
     const value = (sender || '').trim();
@@ -98,9 +103,12 @@ export const EmailSettings = () => {
                 ? 'Server oder Benutzername wurden geändert. Bitte geben Sie das Passwort des Postfachs erneut ein.'
                 : 'Bitte geben Sie das Passwort des Postfachs ein.';
         }
-        const port = Number(form.smtp_port);
-        if (!Number.isInteger(port) || port < 1 || port > 65535) {
-            return 'Bitte einen gültigen SMTP-Port angeben (ganze Zahl von 1 bis 65535, üblich: 465 oder 587).';
+        // Dieselbe Prüfung wie in der Edge Function (Test und Versand): nur öffentliche Mailserver
+        if (!isAllowedSmtpHost(normalizeHost(form.smtp_host))) {
+            return 'Bitte einen öffentlich erreichbaren SMTP-Server angeben (z. B. mail.ihredomain.de). Nicht erlaubt sind localhost, interne Namen sowie private oder reservierte IP-Adressen.';
+        }
+        if (!isAllowedSmtpPort(form.smtp_port)) {
+            return 'Bitte einen erlaubten SMTP-Port wählen (25, 465, 587 oder 2525).';
         }
         if (!EMAIL_PATTERN.test(extractSenderAddress(form.smtp_sender))) {
             return 'Bitte beim Absender eine gültige E-Mail-Adresse angeben, z. B. „Max Mustermann <info@ihredomain.de>".';
@@ -227,12 +235,12 @@ export const EmailSettings = () => {
             };
             if (!usesStoredPassword) settings.smtp_pass = form.smtp_pass;
 
+            // Ohne neu eingegebenes Passwort nimmt die Function das gespeicherte, wenn Server
+            // und Benutzer mit der gespeicherten Einrichtung übereinstimmen
             const { data, error } = await supabase.functions.invoke('send-letting-email', {
                 body: {
                     action: 'test_connection',
                     settings,
-                    // Ohne neu eingegebenes Passwort soll der Server das gespeicherte verwenden
-                    use_stored_password: usesStoredPassword,
                     test_email: testRecipient
                 }
             });
@@ -335,16 +343,31 @@ export const EmailSettings = () => {
                             onChange={e => setForm({ ...form, smtp_host: e.target.value })}
                             placeholder="smtp.example.com"
                         />
-                        <Input
-                            label="SMTP-Port *"
-                            value={form.smtp_port}
-                            onChange={e => setForm({ ...form, smtp_port: e.target.value })}
-                            placeholder="587"
-                            type="number"
-                            min="1"
-                            max="65535"
-                            step="1"
-                        />
+                        <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                            <label htmlFor="smtp-port-select" style={{
+                                display: 'block',
+                                marginBottom: '0.25rem',
+                                fontWeight: 500,
+                                fontSize: '0.875rem',
+                                color: 'var(--text-primary)'
+                            }}>
+                                SMTP-Port *
+                            </label>
+                            <select
+                                id="smtp-port-select"
+                                value={form.smtp_port}
+                                onChange={e => setForm({ ...form, smtp_port: e.target.value })}
+                                style={{ width: '100%', fontSize: '0.875rem', outline: 'none' }}
+                            >
+                                {/* Früher gespeicherter, nicht mehr erlaubter Port bleibt sichtbar */}
+                                {!PORT_OPTIONS.includes(form.smtp_port) && (
+                                    <option value={form.smtp_port}>{form.smtp_port || '–'} (nicht erlaubt)</option>
+                                )}
+                                {PORT_OPTIONS.map(port => (
+                                    <option key={port} value={port}>{PORT_LABELS[port] || port}</option>
+                                ))}
+                            </select>
+                        </div>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>

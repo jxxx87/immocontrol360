@@ -45,7 +45,9 @@ export const TenantRoute = ({ children }) => {
 
 // Bereiche der Vermieter-/Investor-Oberfläche.
 //   category    : Freigabe-Kategorie, für die mindestens Leserecht nötig ist
-//                 (im gewählten Portfolio bzw. in "Alle Portfolios")
+//                 (im gewählten Portfolio bzw. in "Alle Portfolios"); eine Liste
+//                 bedeutet: Leserecht für mindestens eine davon (wie die RLS der Daten,
+//                 z. B. loans: finanzen ODER investorportal)
 //   allowTenant : Seite wird auch im Mieterportal genutzt (z. B. Objektkalender)
 export const InvestorRoute = ({ category, allowTenant = false, children }) => {
     const { userRole } = useAuth();
@@ -63,15 +65,16 @@ export const InvestorRoute = ({ category, allowTenant = false, children }) => {
         );
     }
 
-    if (category) {
+    const categories = !category ? [] : (Array.isArray(category) ? category : [category]);
+    if (categories.length > 0) {
         if (loadingPermissions) return <RouteLoading />;
-        if (!canRead || !canRead(category)) {
-            const label = CATEGORY_LABELS[category] || category;
+        if (!canRead || !categories.some((c) => canRead(c))) {
+            const label = categories.map((c) => `„${CATEGORY_LABELS[c] || c}"`).join(' oder ');
             return (
                 <Navigate
                     to="/"
                     replace
-                    state={{ accessNotice: `Für den Bereich „${label}" haben Sie im gewählten Portfolio keine Berechtigung. Bitten Sie den Eigentümer des Portfolios um eine Freigabe oder wählen Sie oben ein anderes Portfolio.` }}
+                    state={{ accessNotice: `Für den Bereich ${label} haben Sie im gewählten Portfolio keine Berechtigung. Bitten Sie den Eigentümer des Portfolios um eine Freigabe oder wählen Sie oben ein anderes Portfolio.` }}
                 />
             );
         }

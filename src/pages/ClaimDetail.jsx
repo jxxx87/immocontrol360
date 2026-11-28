@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePermission } from '../context/PermissionContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
@@ -97,6 +98,7 @@ const ClaimDetail = () => {
     const { claimId } = useParams();
     const navigate = useNavigate();
     const { user } = useAuth();
+    const perm = usePermission();
 
     const [claim, setClaim] = useState(null);
     const [totals, setTotals] = useState(null);
@@ -346,6 +348,11 @@ const ClaimDetail = () => {
     };
 
     const isOwnClaim = !!(claim && user && claim.user_id === user.id);
+    // Lesemodus: Schreibrecht „Finanzen“ für das Portfolio der Forderung (wie die RLS bzw. die Forderungs-RPCs).
+    // Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich.
+    const claimPortfolioId = claim?.leases?.units?.properties?.portfolio_id || null;
+    const canEdit = !!claim && (isOwnClaim || !perm || perm.loadingPermissions
+        || perm.canWrite('finanzen', claimPortfolioId || undefined));
 
     // Token und PIN des aktiven Links sind nur bekannt, wenn er auf dieser Seite gerade erzeugt wurde
     const portalSecretActive = !!(portalSecret && claimAccessLink && portalSecret.linkId === claimAccessLink.id);
@@ -356,11 +363,11 @@ const ClaimDetail = () => {
         setIsPdfModalOpen(true);
     };
 
-    // Zahlungen bucht record_claim_payment derzeit nur für den Eigentümer der Forderung
+    // record_claim_payment/create_payment_plan prüfen Eigentümer oder Schreibrecht „Finanzen“ (has_claim_access)
     const paymentErrorMessage = (err) => {
         const raw = String(err?.message || '');
-        if (!isOwnClaim && /Forderung nicht gefunden|Rate nicht gefunden/i.test(raw)) {
-            return 'Zahlungen können derzeit nur vom Eigentümer der Forderung gebucht werden.';
+        if (/Forderung nicht gefunden/i.test(raw)) {
+            return 'Keine Schreibberechtigung für „Finanzen“ in diesem Portfolio (oder die Forderung ist nicht mehr vorhanden).';
         }
         return translateClaimError(err, 'Unbekannter Fehler');
     };
@@ -1620,9 +1627,9 @@ const ClaimDetail = () => {
                                             const feeAmt = num(item.claim_items?.fee_amount);
                                             const intAmt = num(item.claim_items?.interest_amount);
                                             const inPlan = isPlanItem(item);
-                                            const canSettle = !isLocked && !inPlan && num(item.open_amount) > 0;
+                                            const canSettle = canEdit && !isLocked && !inPlan && num(item.open_amount) > 0;
                                             // Die letzte Position bleibt (sonst leere Forderung) – stattdessen die Forderung stornieren
-                                            const canDelete = !isLocked && !inPlan && num(item.paid_principal) === 0 && items.length > 1;
+                                            const canDelete = canEdit && !isLocked && !inPlan && num(item.paid_principal) === 0 && items.length > 1;
                                             const itemWaived = getItemWaived(item);
                                             return (
                                                 <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
@@ -1724,7 +1731,7 @@ const ClaimDetail = () => {
                                                 <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{getEventTitle(event)}</div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(event.event_date).toLocaleString('de-DE')}</div>
-                                                    {deletePolicy.allowed && (
+                                                    {canEdit && deletePolicy.allowed && (
                                                         <button
                                                             onClick={() => handleDeleteEvent(event)}
                                                             disabled={isSubmitting}
@@ -1872,7 +1879,7 @@ const ClaimDetail = () => {
                                                     "{request.tenant_message}"
                                                 </div>
                                             )}
-                                            {request.status === 'requested' && (
+                                            {canEdit && request.status === 'requested' && (
                                                 <div style={{ display: 'flex', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                                                     <div style={{ display: 'flex', gap: '12px' }}>
                                                         <Button
@@ -1901,7 +1908,7 @@ const ClaimDetail = () => {
                                                     </Button>
                                                 </div>
                                             )}
-                                            {request.status !== 'requested' && (
+                                            {canEdit && request.status !== 'requested' && (
                                                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
                                                     <Button
                                                         variant="secondary"
@@ -1925,6 +1932,15 @@ const ClaimDetail = () => {
                 <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--spacing-xl)' }}>
                     <Card style={{ padding: '16px', height: 'auto' }}>
                         <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px', borderBottom: '1px solid #E5E7EB', paddingBottom: '8px' }}>Aktionen</h3>
+                        {!canEdit ? (
+                            <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: 'var(--bg-secondary, #F9FAFB)', border: '1px solid var(--border-color)', borderRadius: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                <div>
+                                    <strong>Nur lesen:</strong> Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Zahlungen, Ratenpläne,
+                                    Notizen, Fristen, Portal-Links und Mahnschreiben erfordern Schreibrecht „Finanzen“.
+                                </div>
+                            </div>
+                        ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
                             <Button
                                 variant="secondary"
@@ -1995,6 +2011,7 @@ const ClaimDetail = () => {
                                 <Printer size={16} style={{ flexShrink: 0 }} /> PDF erzeugen
                             </Button>
                         </div>
+                        )}
                     </Card>
 
                     <Card style={{ padding: '16px', height: 'auto' }}>

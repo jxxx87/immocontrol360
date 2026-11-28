@@ -100,7 +100,7 @@ export const TOOL_HINTS = {
     [TOOLS.FURNITURE]: 'Möbel: Aus dem Katalog wählen und auf den Grundriss klicken.',
     [TOOLS.DELETE]: 'Löschen: Klicke auf ein Element um es zu entfernen.',
     [TOOLS.CALIBRATE]: 'Referenzmaß: Zwei Punkte auf dem Hintergrundbild setzen, dann die reale Strecke eingeben.',
-    [TOOLS.SLAB]: 'Decke/Bodenplatte: Erstellt eine horizontale Platte über dem Außenwandpolygon.',
+    [TOOLS.SLAB]: 'Decke/Bodenplatte: Punkte setzen (rastet an Wandpunkten und Außenecken ein). Zum Startpunkt klicken zum Schließen. ESC abbrechen.',
     [TOOLS.ROOF]: 'Dach: Dachform wählen und Parameter einstellen.',
     [TOOLS.ANNOTATE_POLYLINE]: 'Polylinie: Klicken für Punkte, Doppelklick zum Beenden. ESC abbrechen.',
     [TOOLS.ANNOTATE_CIRCLE]: 'Kreis: Mittelpunkt klicken, dann Radius ziehen.',

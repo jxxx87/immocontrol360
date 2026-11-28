@@ -11,11 +11,13 @@ import { generateCalcLines } from './calcEngine';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { generateClientPdf } from '../../lib/pdfGenerator';
 import { usePdfTemplate, fetchPdfTemplate } from '../../lib/usePdfTemplate';
 import { translateError } from '../../lib/errorTranslator';
-import { fmtEUR0 as fmt0, round2, safeInternalPath, assertWrite } from '../../components/renovation/renovationUtils';
+import { useUnsavedChangesGuard } from '../../lib/useUnsavedChangesGuard';
+import { fmtEUR, fmtEUR0 as fmt0, round2, safeInternalPath, assertWrite } from '../../components/renovation/renovationUtils';
 
 /* ─── Building type icons ───────── */
 const BUILDING_TYPES = [
@@ -36,6 +38,7 @@ const CURRENT_FLOOR_OPTIONS = ['Fliesen', 'Laminat/Vinyl/Parkett'];
 const STEP_LABELS = ['Gebäude', 'Räume & Ausstattung', 'Kalkulation'];
 
 const DEFAULT_RETURN = '/renovation?tab=calculator';
+const UNSAVED_MESSAGE = 'Es gibt ungespeicherte Eingaben. Seite trotzdem verlassen? Die Änderungen gehen verloren.';
 
 /* ─── Strukturhilfen (außerhalb der Komponente) ───── */
 let idSeq = 0;
@@ -96,6 +99,7 @@ const RenovationCalculatorDetail = () => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
     const [searchParams] = useSearchParams();
     const pdfTemplate = usePdfTemplate('sanierung_rechner');
@@ -152,6 +156,10 @@ const RenovationCalculatorDetail = () => {
     const [showRecalcDialog, setShowRecalcDialog] = useState(false);
     const [calcGenerated, setCalcGenerated] = useState(false);
     const [loadingCalc, setLoadingCalc] = useState(false);
+    // Herkunft der Preisliste der letzten Berechnung: 'own' | 'owner' | 'fallback'
+    const [catalogSource, setCatalogSource] = useState(null);
+    // Ziel für die Navigation nach erfolgreichem Speichern (erst nach dem Abschalten der Rückfrage)
+    const [pendingNav, setPendingNav] = useState(null);
 
     // ─── WM Tooltip ─────────
     const [showWmInfo, setShowWmInfo] = useState(null); // bath id
@@ -166,6 +174,22 @@ const RenovationCalculatorDetail = () => {
         () => [...properties, ...extraProperties.filter(e => !properties.some(p => p.id === e.id))],
         [properties, extraProperties]
     );
+
+    /* ─── Lesemodus: gespeicherte Kalkulation eines Objekts ohne Schreibrecht ───── */
+    // Wie die RLS (renovation_calculations_update prüft das gespeicherte Objekt): Schreibrecht „Immobilien“
+    // oder „Investorportal“ im Portfolio des Objekts. Neue Kalkulationen und solche ohne Objekt (nur das
+    // eigene Konto sieht sie) bleiben bearbeitbar; die Datenbank prüft beim Speichern zusätzlich.
+    const savedProperty = savedOwner.propertyId ? propertyOptions.find(p => p.id === savedOwner.propertyId) : null;
+    const canEdit = isNew || !savedOwner.propertyId || !savedProperty || !perm || perm.loadingPermissions
+        || perm.canWrite('immobilien', savedProperty.portfolio_id) || perm.canWrite('investorportal', savedProperty.portfolio_id);
+
+    // Rückfrage bei ungespeicherten Eingaben – auch bei Klicks in Seitenleiste/Topbar und beim Schließen des Tabs
+    useUnsavedChangesGuard(dirty && canEdit ? UNSAVED_MESSAGE : null);
+    // Navigation nach erfolgreichem Speichern erst, wenn die Rückfrage abgeschaltet ist (dirty = false)
+    useEffect(() => {
+        if (!pendingNav || dirty) return;
+        navigate(pendingNav);
+    }, [pendingNav, dirty, navigate]);
 
     /* ─── Auto-select deal from URL param ?dealId=xxx ───── */
     useEffect(() => {
@@ -219,8 +243,12 @@ const RenovationCalculatorDetail = () => {
         setUnits(data || []);
     };
 
+    // Deals wie im Investorportal: gewähltes Portfolio plus eigene ohne Portfolio, sonst alle lesbaren
+    // (auch die des Eigentümers bzw. von Mitnutzern im geteilten Portfolio – die RLS begrenzt)
     const loadDeals = async () => {
-        const { data, error } = await supabase.from('deals').select('id, name, deal_type, deal_data').eq('user_id', user.id).order('updated_at', { ascending: false });
+        let q = supabase.from('deals').select('id, name, deal_type, deal_data').order('updated_at', { ascending: false });
+        if (selectedPortfolioID) q = q.or(`portfolio_id.eq.${selectedPortfolioID},portfolio_id.is.null`);
+        const { data, error } = await q;
         if (error) {
             console.error('Error loading deals:', error);
             setDataWarning('Deals konnten nicht geladen werden: ' + translateError(error));
@@ -272,14 +300,14 @@ const RenovationCalculatorDetail = () => {
 
     useEffect(() => {
         if (!user) return;
-        loadDeals();
         if (!isNew) loadCalculation();
     }, [user]);
 
-    // Objektliste folgt der Portfolio-Auswahl
+    // Objekt- und Deal-Liste folgen der Portfolio-Auswahl
     useEffect(() => {
         if (!user) return;
         loadProperties();
+        loadDeals();
     }, [user, selectedPortfolioID]);
 
     // Gespeicherte Immobilie immer in der Auswahl anbieten (z. B. aus anderem Portfolio)
@@ -294,14 +322,6 @@ const RenovationCalculatorDetail = () => {
             });
         return () => { cancelled = true; };
     }, [propertyId, propertyOptions]);
-
-    // Warnung beim Schließen/Neuladen des Tabs mit ungespeicherten Eingaben
-    useEffect(() => {
-        if (!dirty) return;
-        const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
-        window.addEventListener('beforeunload', handler);
-        return () => window.removeEventListener('beforeunload', handler);
-    }, [dirty]);
 
     /* ─── On deal selection: auto-set calc type + name, clear property ───── */
     const handleDealChange = (selectedId) => {
@@ -549,7 +569,7 @@ const RenovationCalculatorDetail = () => {
 
     /* ─── Save ───── */
     const handleSave = async () => {
-        if (saving || loadError) return;
+        if (saving || loadError || !canEdit) return;
         if (!name.trim()) { alert('Bitte Name der Kalkulation eingeben.'); return; }
         // Objekt entfernt (oder statt Objekt ein Deal gewählt) bei einer Kalkulation eines anderen Kontos:
         // Ohne Objekt sieht sie nur ihr user_id-Konto, die Datenbank ordnet sie deshalb dem Bearbeiter zu.
@@ -618,7 +638,8 @@ const RenovationCalculatorDetail = () => {
                     navigate(returnTo);
                 }, 800);
             } else {
-                navigate(DEFAULT_RETURN);
+                // Nicht sofort navigieren: die Rückfrage (dirty) ist in diesem Moment noch aktiv
+                setPendingNav(DEFAULT_RETURN);
             }
         } catch (err) {
             alert('Fehler beim Speichern: ' + translateError(err));
@@ -627,9 +648,8 @@ const RenovationCalculatorDetail = () => {
         }
     };
 
-    /* ─── Zurück (mit Rückfrage bei ungespeicherten Eingaben) ───── */
+    /* ─── Zurück (die Rückfrage bei ungespeicherten Eingaben stellt useUnsavedChangesGuard) ───── */
     const handleBack = () => {
-        if (dirty && !window.confirm('Es gibt ungespeicherte Eingaben. Seite trotzdem verlassen? Die Änderungen gehen verloren.')) return;
         navigate(returnTo || DEFAULT_RETURN);
     };
 
@@ -673,6 +693,12 @@ const RenovationCalculatorDetail = () => {
                 </h1>
             </div>
 
+            {!canEdit && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', background: 'var(--background-color)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                    <Info size={15} /> Nur Lesezugriff: Diese Kalkulation gehört zu einem Objekt, für das Sie kein Schreibrecht haben. Ansehen und PDF-Export sind möglich, Änderungen nicht.
+                </div>
+            )}
+
             {dataWarning && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', color: '#92400e', fontSize: '0.82rem' }}>
                     <AlertTriangle size={15} /> <span style={{ flex: 1 }}>{dataWarning}</span>
@@ -712,12 +738,13 @@ const RenovationCalculatorDetail = () => {
             {/* ═══ STEP 1: BUILDING ═══ */}
             {step === 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <fieldset disabled={!canEdit} style={{ ...readOnlyFieldset, gap: '16px' }}>
                     {/* Deal / Property selection (mutual exclusive) */}
                     <Card>
                         <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '12px' }}>Zuordnung & Name</h3>
                         <div style={{ display: 'grid', gap: '12px', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr' }}>
                             <div>
-                                <label style={labelStyle}>Neuer Deal</label>
+                                <label style={labelStyle}>Verknüpfter Deal</label>
                                 <select
                                     value={dealId}
                                     onChange={e => handleDealChange(e.target.value)}
@@ -876,6 +903,7 @@ const RenovationCalculatorDetail = () => {
                             </div>
                         </Card>
                     )}
+                    </fieldset>
 
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
                         <Button onClick={() => setStep(1)}>
@@ -903,6 +931,7 @@ const RenovationCalculatorDetail = () => {
                         </div>
                     )}
 
+                    <fieldset disabled={!canEdit} style={{ ...readOnlyFieldset, gap: '12px' }}>
                     {floors.map((floor, fi) => (
                         <Card key={floor.id}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
@@ -926,9 +955,10 @@ const RenovationCalculatorDetail = () => {
                                         <input value={whg.name} onChange={e => updateWhgField(fi, wi, 'name', e.target.value)} style={{ ...inputStyle, fontWeight: 700, maxWidth: '200px' }} />
                                         <button onClick={() => removeWhg(fi, wi)} style={deleteBtnStyle} title="Entfernen"><Trash2 size={14} /></button>
                                         <div style={{ flex: 1 }} />
-                                        <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', cursor: 'pointer' }}>
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', cursor: 'pointer' }}
+                                            title="Nur Notiz – fließt nicht in die Kalkulation ein. Balkonflächen bitte in Schritt 3 unter Metallbau (Balkon-Stahlkonstruktion, WPC Balkonbelag in m²) eintragen.">
                                             <input type="checkbox" checked={whg.balcony} onChange={e => updateWhgField(fi, wi, 'balcony', e.target.checked)} />
-                                            Balkon
+                                            Balkon <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>(Notiz)</span>
                                         </label>
                                     </div>
 
@@ -1041,8 +1071,9 @@ const RenovationCalculatorDetail = () => {
                                                     <span style={miniLabel}>Höhe cm</span>
                                                     <input type="number" value={win.height} onChange={e => updateWindow(fi, wi, wii, 'height', Number(e.target.value))} style={inputStyleSm} />
                                                 </div>
-                                                <label style={checkboxLabel}>
-                                                    <input type="checkbox" checked={win.rollladen} onChange={e => updateWindow(fi, wi, wii, 'rollladen', e.target.checked)} /> Rollladen
+                                                <label style={checkboxLabel}
+                                                    title="Nur Notiz – fließt nicht in die Kalkulation ein (keine Rollladen-Position im Katalog). Bei Bedarf in Schritt 3 als eigene Position ergänzen.">
+                                                    <input type="checkbox" checked={win.rollladen} onChange={e => updateWindow(fi, wi, wii, 'rollladen', e.target.checked)} /> Rollladen <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>(Notiz)</span>
                                                 </label>
                                                 <button onClick={() => removeWindow(fi, wi, wii)} style={deleteBtnStyle}><Trash2 size={12} /></button>
                                             </div>
@@ -1070,6 +1101,7 @@ const RenovationCalculatorDetail = () => {
                             )}
                         </Card>
                     ))}
+                    </fieldset>
 
                     {!structureComplete && (
                         <div style={{
@@ -1102,14 +1134,28 @@ const RenovationCalculatorDetail = () => {
             {step === 2 && (() => {
                 /* ─── Generate Calculation ───── */
                 const doGenerateCalc = async (mode = 'all') => {
+                    if (!canEdit) return;
                     setLoadingCalc(true);
                     try {
-                        // Load user trades from DB
-                        const { data: tData, error: tErr } = await supabase
+                        // Preisliste wie im Projekt-Assistenten: die des Portfolio-Eigentümers des Objekts bzw. des
+                        // Kontos, dem die Kalkulation gehört; ohne (lesbare) Einträge die eigene Preisliste
+                        const assignedProperty = propertyId ? propertyOptions.find(p => p.id === propertyId) : null;
+                        const portfolioOwner = assignedProperty
+                            ? (portfolios || []).find(pf => pf.id === assignedProperty.portfolio_id)?.user_id
+                            : null;
+                        // Ohne Objekt gehört die Kalkulation dem eigenen Konto → eigene Preisliste
+                        const catalogOwner = assignedProperty ? (portfolioOwner || savedOwner.userId || user.id) : user.id;
+                        const loadTrades = (uid) => supabase
                             .from('renovation_trades')
                             .select('*, subtrades:renovation_subtrades(*)')
-                            .eq('user_id', user.id)
+                            .eq('user_id', uid)
                             .order('sort_order');
+                        let { data: tData, error: tErr } = await loadTrades(catalogOwner);
+                        let source = catalogOwner === user.id ? 'own' : 'owner';
+                        if (catalogOwner !== user.id && (tErr || (tData || []).length === 0)) {
+                            ({ data: tData, error: tErr } = await loadTrades(user.id));
+                            source = 'fallback';
+                        }
                         // Ohne erfolgreich geladene Stammdaten die vorhandene Kalkulation NICHT ersetzen
                         if (tErr) throw tErr;
 
@@ -1140,6 +1186,7 @@ const RenovationCalculatorDetail = () => {
                             setCalcLines(prev => mergeEmptyLines(prev, newLines));
                         }
                         setDirty(true);
+                        setCatalogSource(source);
 
                         setCalcGenerated(true);
                         // Auto-expand all trades
@@ -1227,7 +1274,8 @@ const RenovationCalculatorDetail = () => {
                         const pdfData = Object.entries(groupedByTrade).map(([tradeName, lines]) => ({
                             gewerk: tradeName,
                             summe: lines.filter(l => l.enabled).reduce((s, l) => s + (l.gp || 0), 0),
-                            positionen: lines.filter(l => l.enabled).map(l => `${l.position}: ${l.qty} ${l.unit || 'Stk'} × ${(l.ep || 0).toFixed(2)} € = ${(l.gp || 0).toFixed(2)} €`).join('\n'),
+                            // Deutsche Schreibweise wie im übrigen PDF (Menge mit Komma, Beträge „1.250,00 €“)
+                            positionen: lines.filter(l => l.enabled).map(l => `${l.position}: ${(Number(l.qty) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 })} ${l.unit || 'Stk'} × ${fmtEUR(l.ep)} = ${fmtEUR(l.gp)}`).join('\n'),
                         }));
                         // Resolve the correct PDF template based on the property's portfolio
                         let tpl = pdfTemplate;
@@ -1290,20 +1338,31 @@ const RenovationCalculatorDetail = () => {
                         {/* Action Buttons */}
                         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                             {!calcGenerated ? (
-                                <Button onClick={() => doGenerateCalc('all')} disabled={loadingCalc} style={{ flex: 1 }}>
-                                    {loadingCalc ? <Loader2 size={16} className="animate-spin" /> : <><Calculator size={15} style={{ marginRight: '6px' }} /> Kalkulation erstellen</>}
-                                </Button>
+                                canEdit && (
+                                    <Button onClick={() => doGenerateCalc('all')} disabled={loadingCalc} style={{ flex: 1 }}>
+                                        {loadingCalc ? <Loader2 size={16} className="animate-spin" /> : <><Calculator size={15} style={{ marginRight: '6px' }} /> Kalkulation erstellen</>}
+                                    </Button>
+                                )
                             ) : (
                                 <>
-                                    <Button variant="secondary" onClick={() => setShowRecalcDialog(true)} style={{ flex: 1 }}>
-                                        <Calculator size={15} style={{ marginRight: '6px' }} /> Neu berechnen
-                                    </Button>
+                                    {canEdit && (
+                                        <Button variant="secondary" onClick={() => setShowRecalcDialog(true)} style={{ flex: 1 }}>
+                                            <Calculator size={15} style={{ marginRight: '6px' }} /> Neu berechnen
+                                        </Button>
+                                    )}
                                     <Button variant="secondary" onClick={exportPdf}>
                                         <FileText size={15} style={{ marginRight: '6px' }} /> PDF Export
                                     </Button>
                                 </>
                             )}
                         </div>
+                        {catalogSource && catalogSource !== 'own' && (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                {catalogSource === 'owner'
+                                    ? 'Preise aus der Preisliste des Portfolio-Eigentümers.'
+                                    : 'Die Preisliste des Portfolio-Eigentümers ist leer oder nicht lesbar – es wurde Ihre eigene Preisliste verwendet.'}
+                            </div>
+                        )}
 
                         {/* Recalc Dialog */}
                         {showRecalcDialog && (
@@ -1389,12 +1448,12 @@ const RenovationCalculatorDetail = () => {
                                                                 background: line.enabled && line.qty > 0 ? 'transparent' : 'var(--background-color)',
                                                             }}>
                                                                 <input
-                                                                    type="checkbox" checked={line.enabled}
+                                                                    type="checkbox" checked={line.enabled} disabled={!canEdit}
                                                                     onChange={e => updateCalcLine(idx, 'enabled', e.target.checked)}
                                                                 />
                                                                 {line.isCustom ? (
                                                                     <input
-                                                                        value={line.position}
+                                                                        value={line.position} disabled={!canEdit}
                                                                         onChange={e => updateCalcLine(idx, 'position', e.target.value)}
                                                                         style={{ ...inputStyleSm, fontWeight: 500 }}
                                                                         placeholder="Positionsname"
@@ -1407,14 +1466,14 @@ const RenovationCalculatorDetail = () => {
                                                                 )}
                                                                 <input
                                                                     type="number" step="0.01" min="0"
-                                                                    value={line.qty || ''}
+                                                                    value={line.qty || ''} disabled={!canEdit}
                                                                     onChange={e => updateCalcLine(idx, 'qty', Number(e.target.value))}
                                                                     style={{ ...inputStyleSm, textAlign: 'right', fontWeight: 600 }}
                                                                 />
                                                                 {!isMobile && (
                                                                     line.isCustom ? (
                                                                         <select
-                                                                            value={line.unit}
+                                                                            value={line.unit} disabled={!canEdit}
                                                                             onChange={e => updateCalcLine(idx, 'unit', e.target.value)}
                                                                             style={{ ...inputStyleSm, fontSize: '0.75rem' }}
                                                                         >
@@ -1428,7 +1487,7 @@ const RenovationCalculatorDetail = () => {
                                                                 )}
                                                                 <input
                                                                     type="number" step="0.01" min="0"
-                                                                    value={line.ep || ''}
+                                                                    value={line.ep || ''} disabled={!canEdit}
                                                                     onChange={e => updateCalcLine(idx, 'ep', Number(e.target.value))}
                                                                     style={{ ...inputStyleSm, textAlign: 'right' }}
                                                                 />
@@ -1436,18 +1495,20 @@ const RenovationCalculatorDetail = () => {
                                                                     {fmt0(line.gp)}
                                                                 </span>
                                                                 {line.isCustom ? (
-                                                                    <button onClick={() => removeCalcLine(idx)} style={deleteBtnStyle} title="Eigene Position entfernen"><Trash2 size={12} /></button>
+                                                                    <button onClick={() => removeCalcLine(idx)} disabled={!canEdit} style={deleteBtnStyle} title="Eigene Position entfernen"><Trash2 size={12} /></button>
                                                                 ) : <span />}
                                                             </div>
                                                         );
                                                     })}
 
                                                     {/* Add custom position */}
-                                                    <div style={{ padding: '6px 4px 0' }}>
-                                                        <button onClick={() => addCalcLine(tradeName)} style={addBtnStyle}>
-                                                            <Plus size={12} /> Position
-                                                        </button>
-                                                    </div>
+                                                    {canEdit && (
+                                                        <div style={{ padding: '6px 4px 0' }}>
+                                                            <button onClick={() => addCalcLine(tradeName)} style={addBtnStyle}>
+                                                                <Plus size={12} /> Position
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </Card>
@@ -1484,9 +1545,11 @@ const RenovationCalculatorDetail = () => {
                             <Button variant="secondary" onClick={() => setStep(1)}>
                                 <ArrowLeft size={15} style={{ marginRight: '4px' }} /> Zurück
                             </Button>
-                            <Button onClick={handleSave} disabled={saving || saveSuccess}>
-                                {saving ? <Loader2 size={16} className="animate-spin" /> : saveSuccess ? <><CheckCircle2 size={15} style={{ marginRight: '4px', color: '#16a34a' }} /> Gespeichert</> : <><Save size={15} style={{ marginRight: '4px' }} /> Speichern</>}
-                            </Button>
+                            {canEdit && (
+                                <Button onClick={handleSave} disabled={saving || saveSuccess}>
+                                    {saving ? <Loader2 size={16} className="animate-spin" /> : saveSuccess ? <><CheckCircle2 size={15} style={{ marginRight: '4px', color: '#16a34a' }} /> Gespeichert</> : <><Save size={15} style={{ marginRight: '4px' }} /> Speichern</>}
+                                </Button>
+                            )}
                         </div>
                     </div>
                 );
@@ -1538,6 +1601,12 @@ const backBtnStyle = {
 
 const hintStyle = {
     display: 'block', fontSize: '0.7rem', color: '#f59e0b', marginTop: '4px', fontStyle: 'italic',
+};
+
+// Rahmenloses fieldset: sperrt im Lesemodus alle Eingaben eines Schritts, ohne das Layout zu ändern
+const readOnlyFieldset = {
+    border: 'none', padding: 0, margin: 0, minWidth: 0,
+    display: 'flex', flexDirection: 'column',
 };
 
 // Beim Wechsel der Route-ID (z. B. Browser-Zurück zwischen zwei Kalkulationen) die Seite komplett

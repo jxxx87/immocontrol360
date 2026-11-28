@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 import {
     FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
@@ -12,6 +14,8 @@ import {
 } from 'lucide-react';
 
 const BUCKET = 'announcements';
+const MAX_ATTACHMENTS = FILE_RULES.announcements.maxFiles;
+const READ_ONLY_HINT = 'Für dieses Objekt haben Sie nur Leserechte (Freigabe). Aushänge können nur mit Schreibrecht „Mieterportal“ angelegt, geändert oder gelöscht werden.';
 
 // Speicherpfade (nur Bucket-Pfade) einer Anhangsliste
 const storagePathsOf = (attachments) => (Array.isArray(attachments) ? attachments : [])
@@ -26,6 +30,8 @@ const removeStorageFiles = async (paths) => {
 
 const Announcements = () => {
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const [announcements, setAnnouncements] = useState([]);
     const [properties, setProperties] = useState([]);
     const [loading, setLoading] = useState(true); // nur beim ersten Laden
@@ -40,6 +46,20 @@ const Announcements = () => {
     const [formError, setFormError] = useState(null);
     const fileInputRef = useRef(null);
     const previewUrlsRef = useRef([]);
+    const requestRef = useRef(0);
+
+    // Schreibrecht „Mieterportal“ im Portfolio des Objekts (wie die RLS von announcements und dem Bucket).
+    // Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich.
+    const portfolioOfProperty = (propertyId) => properties.find(p => p.id === propertyId)?.portfolio_id || null;
+    const canWriteProperty = (propertyId, portfolioId = null) => {
+        if (!perm || perm.loadingPermissions) return true;
+        const pf = portfolioId || portfolioOfProperty(propertyId);
+        return !!pf && perm.canWrite('mieterportal', pf);
+    };
+    const canWriteAnnouncement = (a) => canWriteProperty(a.property_id, a.property?.portfolio_id);
+    const writableProperties = properties.filter(p => canWriteProperty(p.id, p.portfolio_id));
+    const canCreate = writableProperties.length > 0;
+    const attachmentCount = existingAttachments.length + uploadFiles.length;
 
     // Vorschau-URLs beim Verlassen der Seite freigeben
     useEffect(() => () => {
@@ -47,11 +67,21 @@ const Announcements = () => {
         previewUrlsRef.current = [];
     }, []);
 
+    // Aushänge und Objekt-Auswahl des gewählten Portfolios (ohne Auswahl: alles Lesbare)
     const fetchData = useCallback(async () => {
-        const [annRes, propRes] = await Promise.all([
-            supabase.from('announcements').select('*, property:properties(street, house_number, city)').order('created_at', { ascending: false }),
-            supabase.from('properties').select('id, street, house_number, city').order('street')
-        ]);
+        const reqId = ++requestRef.current;
+        let annQuery = supabase.from('announcements')
+            .select(selectedPortfolioID
+                ? '*, property:properties!inner(street, house_number, city, portfolio_id)'
+                : '*, property:properties(street, house_number, city, portfolio_id)')
+            .order('created_at', { ascending: false });
+        let propQuery = supabase.from('properties').select('id, street, house_number, city, portfolio_id').order('street');
+        if (selectedPortfolioID) {
+            annQuery = annQuery.eq('property.portfolio_id', selectedPortfolioID);
+            propQuery = propQuery.eq('portfolio_id', selectedPortfolioID);
+        }
+        const [annRes, propRes] = await Promise.all([annQuery, propQuery]);
+        if (reqId !== requestRef.current) return; // veraltete Antwort (Portfolio inzwischen gewechselt)
         const loadError = annRes.error || propRes.error;
         if (loadError) {
             console.error('Error loading announcements:', loadError);
@@ -62,7 +92,7 @@ const Announcements = () => {
             setProperties(propRes.data || []);
         }
         setLoading(false);
-    }, []);
+    }, [selectedPortfolioID]);
 
     useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -81,16 +111,27 @@ const Announcements = () => {
         const files = Array.from(fileList || []);
         if (files.length === 0) return;
         const errors = [];
-        const items = [];
+        const accepted = [];
         files.forEach(file => {
             const validationError = validateUploadFile(file, FILE_RULES.announcements);
             if (validationError) {
                 errors.push(validationError);
                 return;
             }
+            accepted.push(file);
+        });
+
+        // Höchstzahl je Aushang (vorhandene + neue Anhänge)
+        const free = MAX_ATTACHMENTS - existingAttachments.length - uploadFiles.length;
+        if (accepted.length > free) {
+            errors.push(`Es sind höchstens ${MAX_ATTACHMENTS} Anhänge je Aushang möglich.`);
+            accepted.splice(Math.max(free, 0));
+        }
+
+        const items = accepted.map(file => {
             const previewUrl = URL.createObjectURL(file);
             previewUrlsRef.current.push(previewUrl);
-            items.push({ file, previewUrl });
+            return { file, previewUrl };
         });
         setUploadFiles(prev => [...prev, ...items]);
         setFormError(errors.length > 0 ? errors.join('\n') : null);
@@ -110,6 +151,17 @@ const Announcements = () => {
     // werden wieder entfernt und der Nutzer sieht eine Meldung.
     const handleSave = async () => {
         if (!form.title.trim() || !form.content.trim() || !form.property_id || saving) return;
+        // Ziel-Objekt und beim Bearbeiten auch das bisherige Objekt brauchen Schreibrecht
+        const edited = editId ? announcements.find(a => a.id === editId) : null;
+        if (!canWriteProperty(form.property_id) || (edited && !canWriteAnnouncement(edited))) {
+            setFormError(READ_ONLY_HINT);
+            return;
+        }
+        // Nur beim Hinzufügen neuer Dateien begrenzen (ältere Aushänge mit mehr Anhängen bleiben bearbeitbar)
+        if (uploadFiles.length > 0 && existingAttachments.length + uploadFiles.length > MAX_ATTACHMENTS) {
+            setFormError(`Es sind höchstens ${MAX_ATTACHMENTS} Anhänge je Aushang möglich. Bitte entfernen Sie überzählige Dateien.`);
+            return;
+        }
         setSaving(true);
         setFormError(null);
 
@@ -189,6 +241,7 @@ const Announcements = () => {
     };
 
     const handleEdit = (a) => {
+        if (!canWriteAnnouncement(a)) { setPageError(READ_ONLY_HINT); return; }
         setForm({ title: a.title, content: a.content, property_id: a.property_id });
         const attachments = Array.isArray(a.attachments) ? a.attachments.filter(Boolean) : [];
         setExistingAttachments(attachments);
@@ -200,6 +253,7 @@ const Announcements = () => {
     };
 
     const handleDelete = async (announcement) => {
+        if (!canWriteAnnouncement(announcement)) { setPageError(READ_ONLY_HINT); return; }
         if (!window.confirm('Aushang wirklich löschen?')) return;
         setPageError(null);
         const { data: deleted, error } = await supabase
@@ -251,13 +305,17 @@ const Announcements = () => {
                 <div>
                     <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Aushänge</h1>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginTop: '4px' }}>
-                        Erstellen Sie Aushänge für Ihre Mieter.
+                        {canCreate || properties.length === 0
+                            ? 'Erstellen Sie Aushänge für Ihre Mieter.'
+                            : 'Sie haben für diese Objekte nur Leserechte (Freigabe) und können Aushänge nur ansehen.'}
                     </p>
                 </div>
-                <button onClick={() => { resetForm(); setShowForm(true); }}
-                    className="btn btn-primary btn-md" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Plus size={18} /> Neuer Aushang
-                </button>
+                {canCreate && (
+                    <button onClick={() => { resetForm(); setShowForm(true); }}
+                        className="btn btn-primary btn-md" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Plus size={18} /> Neuer Aushang
+                    </button>
+                )}
             </div>
 
             {pageError && (
@@ -328,16 +386,18 @@ const Announcements = () => {
                                         </div>
                                     )}
                                 </div>
-                                <div style={{ display: 'flex', gap: '8px', flexShrink: 0, marginLeft: '16px' }}>
-                                    <button onClick={() => handleEdit(a)}
-                                        style={{ color: 'var(--text-secondary)', cursor: 'pointer', background: 'none', border: 'none' }} title="Bearbeiten">
-                                        <Edit2 size={16} />
-                                    </button>
-                                    <button onClick={() => handleDelete(a)}
-                                        style={{ color: '#DC2626', cursor: 'pointer', background: 'none', border: 'none' }} title="Löschen">
-                                        <Trash2 size={16} />
-                                    </button>
-                                </div>
+                                {canWriteAnnouncement(a) && (
+                                    <div style={{ display: 'flex', gap: '8px', flexShrink: 0, marginLeft: '16px' }}>
+                                        <button onClick={() => handleEdit(a)}
+                                            style={{ color: 'var(--text-secondary)', cursor: 'pointer', background: 'none', border: 'none' }} title="Bearbeiten">
+                                            <Edit2 size={16} />
+                                        </button>
+                                        <button onClick={() => handleDelete(a)}
+                                            style={{ color: '#DC2626', cursor: 'pointer', background: 'none', border: 'none' }} title="Löschen">
+                                            <Trash2 size={16} />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}
@@ -376,7 +436,8 @@ const Announcements = () => {
                                         border: '1px solid var(--border-color)', outline: 'none', fontSize: '0.9rem'
                                     }}>
                                     <option value="">— Immobilie wählen —</option>
-                                    {properties.map(p => (
+                                    {/* nur Objekte mit Schreibrecht „Mieterportal“ (beim Bearbeiten zusätzlich das bisherige) */}
+                                    {properties.filter(p => canWriteProperty(p.id, p.portfolio_id) || p.id === form.property_id).map(p => (
                                         <option key={p.id} value={p.id}>{getPropertyLabel(p)}</option>
                                     ))}
                                 </select>
@@ -413,7 +474,7 @@ const Announcements = () => {
                             {/* ── FILE UPLOAD ── */}
                             <div>
                                 <label style={{ fontSize: '0.82rem', fontWeight: 500, marginBottom: '8px', display: 'block' }}>
-                                    Anhänge (Bilder & PDF)
+                                    Anhänge (Bilder & PDF) <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}>(max. {MAX_ATTACHMENTS})</span>
                                 </label>
                                 <input
                                     type="file"
@@ -480,18 +541,20 @@ const Announcements = () => {
                                         </div>
                                     ))}
 
-                                    <button
-                                        onClick={() => fileInputRef.current?.click()}
-                                        style={{
-                                            display: 'flex', alignItems: 'center', gap: '6px',
-                                            padding: '8px 14px', borderRadius: '8px',
-                                            border: '2px dashed var(--border-color)',
-                                            backgroundColor: 'var(--background-color)', cursor: 'pointer',
-                                            color: 'var(--text-secondary)', fontSize: '0.78rem'
-                                        }}
-                                    >
-                                        <Upload size={14} /> Datei hinzufügen
-                                    </button>
+                                    {attachmentCount < MAX_ATTACHMENTS && (
+                                        <button
+                                            onClick={() => fileInputRef.current?.click()}
+                                            style={{
+                                                display: 'flex', alignItems: 'center', gap: '6px',
+                                                padding: '8px 14px', borderRadius: '8px',
+                                                border: '2px dashed var(--border-color)',
+                                                backgroundColor: 'var(--background-color)', cursor: 'pointer',
+                                                color: 'var(--text-secondary)', fontSize: '0.78rem'
+                                            }}
+                                        >
+                                            <Upload size={14} /> Datei hinzufügen
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>

@@ -16,6 +16,7 @@
 // =============================================================================
 
 import { DEFAULT_TEMPLATES } from './defaultTemplates';
+import { compareMeterReadings, isMeterSwapStart } from './meterSwap';
 
 const DAY_MS = 86400000;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -655,35 +656,61 @@ export const computeLeasePrepayment = ({ lease, start, end, rentPeriods = null, 
 
 // ── Zählerstände ─────────────────────────────────────────────────────────────
 // Verbrauch je Einheit = Summe (Endstand − Anfangsstand) der Einheitenzähler der gewählten Art.
-// Als Stand gilt jeweils die Ablesung, die dem Stichtag am nächsten liegt (max. windowDays entfernt).
+// Als Stand gilt jeweils die Ablesung, die dem Stichtag am nächsten liegt (max. windowDays entfernt;
+// gleicher Abstand: früheres Datum; mehrere Stände am Tag: der letzte, nach einem Wechsel also der neue Zähler).
+// Zählerwechsel im Zeitraum: Teilstrecken getrennt (bis Endstand alt, ab Anfangsstand neu) summieren.
 export const computeMeterConsumption = ({ meters = [], readings = [], periodStart, periodEnd, meterType, windowDays = 45 }) => {
     const byUnit = {};
+    const num = (r) => parseFloat(r.reading_value) || 0;
     const pickClosest = (list, target) => {
         let best = null;
-        list.forEach(r => {
-            if (!isValidISODate(r.reading_date)) return;
+        list.forEach((r, idx) => {
             const dist = Math.abs(daysInclusive(target, r.reading_date) - 1);
             if (dist > windowDays) return;
-            if (!best || dist < best.dist) best = { ...r, dist };
+            if (!best || dist < best.dist || (dist === best.dist && isoPart(r.reading_date) === isoPart(best.reading_date))) best = { ...r, dist, idx };
         });
         return best;
     };
     meters.filter(m => m.unit_id && (m.meter_type || '') === (meterType || '')).forEach(m => {
-        const list = readings.filter(r => r.meter_id === m.id);
+        const list = readings.filter(r => r.meter_id === m.id && isValidISODate(r.reading_date)).sort(compareMeterReadings);
         const s = pickClosest(list, periodStart);
         const e = pickClosest(list, periodEnd);
         const entry = byUnit[m.unit_id] || { value: 0, complete: true, details: [] };
-        if (!s || !e || s.id === e.id || isoPart(e.reading_date) <= isoPart(s.reading_date)) {
+        const meterName = m.meter_number || m.meter_name || 'Zähler';
+        if (!s || !e || s.idx >= e.idx || isoPart(e.reading_date) <= isoPart(s.reading_date)) {
             entry.complete = false;
-            entry.details.push({ meter: m.meter_number || m.meter_name || 'Zähler', error: 'Ablesung am Anfang oder Ende des Zeitraums fehlt' });
+            entry.details.push({ meter: meterName, error: 'Ablesung am Anfang oder Ende des Zeitraums fehlt' });
         } else {
-            const diff = (parseFloat(e.reading_value) || 0) - (parseFloat(s.reading_value) || 0);
-            if (diff < 0) {
+            let diff = 0;
+            let error = '';
+            let from = s;
+            const swaps = [];
+            for (let i = s.idx + 1; i <= e.idx; i++) {
+                const r = list[i];
+                if (!isMeterSwapStart(r)) continue;
+                // Die Teilstrecke des alten Zählers endet mit seinem Endstand am Wechseltag
+                const prev = list[i - 1];
+                if (isMeterSwapStart(prev) || isoPart(prev.reading_date) !== isoPart(r.reading_date)) {
+                    error = `Endstand des alten Zählers beim Zählerwechsel am ${formatDateDE(r.reading_date)} fehlt`;
+                    break;
+                }
+                const part = num(prev) - num(from);
+                if (part < 0) { error = 'Endstand kleiner als Anfangsstand'; break; }
+                diff += part;
+                swaps.push({ date: r.reading_date, oldEnd: prev.reading_value, newStart: r.reading_value });
+                from = r;
+            }
+            if (!error) {
+                const part = num(e) - num(from);
+                if (part < 0) error = 'Endstand kleiner als Anfangsstand';
+                else diff += part;
+            }
+            if (error) {
                 entry.complete = false;
-                entry.details.push({ meter: m.meter_number || m.meter_name || 'Zähler', error: 'Endstand kleiner als Anfangsstand' });
+                entry.details.push({ meter: meterName, error });
             } else {
                 entry.value += diff;
-                entry.details.push({ meter: m.meter_number || m.meter_name || 'Zähler', start: { date: s.reading_date, value: s.reading_value }, end: { date: e.reading_date, value: e.reading_value }, consumption: diff });
+                entry.details.push({ meter: meterName, start: { date: s.reading_date, value: s.reading_value }, end: { date: e.reading_date, value: e.reading_value }, consumption: diff, ...(swaps.length ? { swaps } : {}) });
             }
         }
         byUnit[m.unit_id] = entry;

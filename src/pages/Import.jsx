@@ -741,9 +741,10 @@ const Import = () => {
             } else if (stats.outcome === 'unknown') {
                 addLog('Import-Ergebnis unklar – bitte die Daten prüfen, bevor der Import wiederholt wird.', 'error');
             } else {
+                // 'done' heißt: import_rows hat alles in einer Transaktion gespeichert (Fehler führen immer zu 'aborted'/'unknown')
                 addLog(
-                    `Import ${stats.errors.length > 0 ? 'mit Fehlern ' : ''}abgeschlossen: ${stats.portfolios} Portfolios, ${stats.properties} Immobilien, ${stats.units} Einheiten, ${stats.tenants} Mieter, ${stats.leases} Mietverträge angelegt.`,
-                    stats.errors.length > 0 ? 'error' : 'success'
+                    `Import abgeschlossen: ${stats.portfolios} Portfolios, ${stats.properties} Immobilien, ${stats.units} Einheiten, ${stats.tenants} Mieter, ${stats.leases} Mietverträge angelegt.`,
+                    'success'
                 );
             }
             if ((stats.portfolios > 0 || stats.outcome === 'unknown') && refreshPortfolios) refreshPortfolios();
@@ -936,7 +937,7 @@ const Import = () => {
                                 ? 'Import abgebrochen – es wurde nichts gespeichert'
                                 : importResult.outcome === 'unknown'
                                     ? 'Import-Ergebnis unklar'
-                                    : importResult.errors.length > 0 ? 'Import mit Fehlern abgeschlossen' : 'Import abgeschlossen'}
+                                    : 'Import abgeschlossen'}
                         </h3>
                         {importResult.outcome === 'aborted' && (
                             <p style={{ fontSize: '0.9rem' }}>Der Import läuft als Ganzes: Weil ein Datensatz nicht gespeichert werden konnte, wurde nichts übernommen. Bitte die Datei korrigieren und erneut importieren.</p>

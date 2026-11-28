@@ -5,7 +5,12 @@ import { usePortfolio } from '../context/PortfolioContext';
 import { sanitizeLogoUrl, normalizeHexColor } from './pdfGenerator';
 import { DEFAULT_ACCENT, DEFAULT_MARGIN, HEADER_H, FOOTER_H } from '../pages/pdf-template/constants';
 
-/** Default template shape (used when no data found) */
+/**
+ * Default template shape (used when no data found).
+ * isDefault: keine gespeicherte Vorlage – der Generator druckt dann das Standard-Layout des
+ * Vorlagen-Editors (eine gespeicherte Vorlage mit 0 Elementen bleibt dagegen leer).
+ * loadError: Meldung, wenn die Vorlage nicht geladen werden konnte (es gilt dann der Standard).
+ */
 const DEFAULT_TEMPLATE = {
     accentColor: DEFAULT_ACCENT,
     logoUrl: null,
@@ -15,11 +20,12 @@ const DEFAULT_TEMPLATE = {
     headerHeight: HEADER_H,
     footerHeight: FOOTER_H,
     orientationByReport: {},
-    elementsByReportOrientation: {},
+    isDefault: true,
+    loadError: null,
     loading: false,
 };
 
-/** Wird zurückgegeben, solange die Vorlage für die aktuelle Auswahl noch lädt. */
+/** Wird zurückgegeben, solange die Vorlage für die aktuelle Auswahl noch lädt (Export bis dahin sperren). */
 const LOADING_TEMPLATE = { ...DEFAULT_TEMPLATE, loading: true };
 
 const positiveNumber = (value, fallback) => {
@@ -38,7 +44,6 @@ const parseRow = (data, reportType) => {
     if (!data) return null;
     const subtitles = asObject(data.subtitles_by_report_type);
     const orientByReport = asObject(data.orientation_by_report_type);
-    const elsByReportOri = asObject(data.elements_by_report_orientation);
     const subtitle = subtitles['global'] || subtitles[reportType] || '';
 
     return {
@@ -50,7 +55,8 @@ const parseRow = (data, reportType) => {
         headerHeight: positiveNumber(data.header_height_mm, HEADER_H),
         footerHeight: positiveNumber(data.footer_height_mm, FOOTER_H),
         orientationByReport: orientByReport,
-        elementsByReportOrientation: elsByReportOri,
+        isDefault: false,
+        loadError: null,
         loading: false,
     };
 };
@@ -86,6 +92,12 @@ const loadOwnFallbackRow = async (ownPortfolioIds) => {
     return data || null;
 };
 
+/** Rückfall bei einem Ladefehler: Standard-Layout, aber mit sichtbarer Meldung für den Export. */
+const failedTemplate = (err) => {
+    console.warn('PDF-Vorlage konnte nicht geladen werden – Standard wird verwendet:', err?.message || err);
+    return { ...DEFAULT_TEMPLATE, loadError: err?.message || 'Unbekannter Fehler' };
+};
+
 /**
  * Hook to load the full PDF template settings from Supabase.
  *
@@ -95,7 +107,7 @@ const loadOwnFallbackRow = async (ownPortfolioIds) => {
  *
  * Returns all fields needed for pixel-perfect rendering:
  *   accentColor, logoUrl, subtitle, elements, margin, headerHeight, footerHeight,
- *   orientationByReport, elementsByReportOrientation, loading
+ *   orientationByReport, isDefault, loadError, loading
  *
  * Hat das gewählte Portfolio keine eigene Vorlage, gilt der Standard (wie im
  * Vorlagen-Editor angezeigt) – es wird keine Vorlage eines anderen Portfolios
@@ -128,8 +140,7 @@ export const usePdfTemplate = (reportType, overridePortfolioId) => {
                     : await loadOwnFallbackRow(ownPortfolioKey ? ownPortfolioKey.split(',') : []);
                 return parseRow(row, reportType) || { ...DEFAULT_TEMPLATE };
             } catch (err) {
-                console.warn('PDF-Vorlage konnte nicht geladen werden – Standard wird verwendet:', err?.message || err);
-                return { ...DEFAULT_TEMPLATE };
+                return failedTemplate(err);
             }
         };
         load().then(template => {
@@ -152,7 +163,8 @@ export const usePdfTemplate = (reportType, overridePortfolioId) => {
  *
  * @param {string} portfolioId
  * @param {string} [reportType]
- * @returns {Promise<object>} template object (same shape as usePdfTemplate)
+ * @returns {Promise<object>} template object (same shape as usePdfTemplate); wirft nie –
+ *   bei einem Ladefehler Standard mit loadError
  */
 export const fetchPdfTemplate = async (portfolioId, reportType = '') => {
     try {
@@ -160,7 +172,6 @@ export const fetchPdfTemplate = async (portfolioId, reportType = '') => {
         const row = await loadPortfolioTemplateRow(portfolioId);
         return parseRow(row, reportType) || { ...DEFAULT_TEMPLATE };
     } catch (err) {
-        console.warn('PDF-Vorlage konnte nicht geladen werden – Standard wird verwendet:', err?.message || err);
-        return { ...DEFAULT_TEMPLATE };
+        return failedTemplate(err);
     }
 };

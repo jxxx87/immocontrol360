@@ -3,8 +3,11 @@ import { useLocation } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { supabase } from '../lib/supabase';
 import { fetchAllRows, isMissingRelationError } from '../lib/rentArrears';
+import { translateError } from '../lib/errorTranslator';
 import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import {
     Mail, Send, CheckCircle2, Clock,
     X, Plus, Search, RefreshCw, Loader,
@@ -112,6 +115,9 @@ const readFunctionErrorMessage = async (err) => {
     return err?.message || String(err);
 };
 
+// Fehler von supabase.functions.invoke mit dem Text aus der Antwort (deutsche Meldungen der Edge Function)
+const toFunctionError = async (err) => new Error(await readFunctionErrorMessage(err));
+
 // Ergebnis von revoke_tenant_invite als Hinweistext
 const describeInviteRevocation = (result) => {
     if (!result) {
@@ -161,6 +167,8 @@ const copyTextToClipboard = async (text) => {
 const TenantManagement = () => {
     const { user } = useAuth();
     const { addNotification } = useNotifications();
+    const { portfolios, selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const location = useLocation();
 
     // Parse URL tab parameter
@@ -222,7 +230,7 @@ const TenantManagement = () => {
                 fetchAllRows('tenants', 'id, user_id, first_name, last_name, email, phone, street, house_number, postal_code, city',
                     q => q.order('last_name')),
                 fetchAllRows('units', 'id, unit_name, property_id, property:properties(street, house_number)', q => q.order('unit_name')),
-                fetchAllRows('properties', 'id, street, house_number, zip, city', q => q.order('street')),
+                fetchAllRows('properties', 'id, street, house_number, zip, city, portfolio_id', q => q.order('street')),
                 fetchAllRows('leases', 'id, tenant_id, unit_id, status, start_date, end_date'),
                 // Nur Links zu Mietern, die dieses Konto sehen darf (Inner Join auf tenants)
                 fetchAllRows('tenant_verification_links',
@@ -238,7 +246,7 @@ const TenantManagement = () => {
             results.forEach((res, i) => {
                 if (res.error) {
                     console.error(`Error fetching ${labels[i]}:`, res.error);
-                    failed.push(`${labels[i]}: ${res.error.message}`);
+                    failed.push(`${labels[i]}: ${translateError(res.error)}`);
                 } else {
                     setters[i](res.data || []);
                 }
@@ -250,7 +258,7 @@ const TenantManagement = () => {
                 setChangeLogSupported(false);
                 if (!isMissingRelationError(changeLogRes.error)) {
                     console.error('Error fetching Änderungsprotokoll:', changeLogRes.error);
-                    failed.push(`Änderungsprotokoll: ${changeLogRes.error.message}`);
+                    failed.push(`Änderungsprotokoll: ${translateError(changeLogRes.error)}`);
                 }
             } else {
                 setChangeLog(changeLogRes.data || []);
@@ -259,7 +267,7 @@ const TenantManagement = () => {
             setLoadErrors(failed);
         } catch (err) {
             console.error('Error fetching data:', err);
-            setLoadErrors([err.message || String(err)]);
+            setLoadErrors([translateError(err)]);
         } finally {
             setLoading(false);
             setRefreshing(false);
@@ -294,6 +302,42 @@ const TenantManagement = () => {
 
     const registeredTenantIds = useMemo(() => new Set(tenantRoles.map(r => r.tenant_id).filter(Boolean)), [tenantRoles]);
 
+    // Portfolio-Auswahl der Kopfzeile: Mieter mit einem Vertrag in einem Objekt dieses Portfolios;
+    // Mieter ohne Vertrag gehören zum Eigentümer des Portfolios. "Alle Portfolios" zeigt alles.
+    const selectedPortfolio = useMemo(
+        () => (portfolios || []).find(p => p.id === selectedPortfolioID) || null,
+        [portfolios, selectedPortfolioID]
+    );
+
+    const isTenantInScope = useCallback((tenantId) => {
+        if (!selectedPortfolioID) return true;
+        const propIds = propertyIdsByTenant.get(tenantId);
+        if (propIds && propIds.size > 0) {
+            return [...propIds].some(pid => propertyById.get(pid)?.portfolio_id === selectedPortfolioID);
+        }
+        const tenant = tenantById.get(tenantId);
+        return !!tenant && !!selectedPortfolio?.user_id && tenant.user_id === selectedPortfolio.user_id;
+    }, [selectedPortfolioID, selectedPortfolio, propertyIdsByTenant, propertyById, tenantById]);
+
+    // Schreibrecht je Mieter (wie has_tenant_access … 'mietverhaeltnisse', 'write' der RLS):
+    // eigener Mieter oder Vertrag in einem Portfolio mit Schreibrecht „Mietverhältnisse"
+    const canWriteTenant = useCallback((tenantId) => {
+        if (!tenantId || !user) return false;
+        if (tenantById.get(tenantId)?.user_id === user.id) return true;
+        const propIds = propertyIdsByTenant.get(tenantId);
+        if (!propIds || !perm?.canWrite) return false;
+        return [...propIds].some(pid => {
+            const portfolioId = propertyById.get(pid)?.portfolio_id;
+            return !!portfolioId && perm.canWrite('mietverhaeltnisse', portfolioId);
+        });
+    }, [user, perm, tenantById, propertyIdsByTenant, propertyById]);
+
+    // Endgültig löschen darf nur der Eigentümer des Mieters (delete_tenant_completely)
+    const isTenantOwner = (tenantId) => !!user && tenantById.get(tenantId)?.user_id === user.id;
+
+    // Einladen im aktuellen Bereich (gewähltes Portfolio bzw. "Alle Portfolios")
+    const canInvite = !!perm?.canWrite && perm.canWrite('mietverhaeltnisse');
+
     // Verlauf: Protokolleinträge mit Vorher/Nachher (Mieterdaten-Link und Selbständerung im Mieterportal);
     // verwendete Links ohne Protokoll (vor Einführung) wie bisher
     const updateHistory = useMemo(() => {
@@ -308,8 +352,10 @@ const TenantManagement = () => {
         verificationLinks
             .filter(l => l.is_updated && !loggedLinkIds.has(l.id))
             .forEach(l => entries.push({ key: `link-${l.id}`, tenantId: l.tenant_id, date: l.updated_at, source: 'token_link', changes: null }));
-        return entries.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-    }, [changeLog, verificationLinks]);
+        return entries
+            .filter(e => isTenantInScope(e.tenantId))
+            .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    }, [changeLog, verificationLinks, isTenantInScope]);
 
     // Zuletzt über den Mieterdaten-Link eingetragene E-Mail-Adresse des im Einladungsdialog gewählten Mieters
     const inviteEmailChangedByLink = useMemo(() => {
@@ -342,6 +388,10 @@ const TenantManagement = () => {
         }
         if (registeredTenantIds.has(tenantId)) {
             setStatusMessage({ type: 'error', text: 'Dieser Mieter hat bereits einen Portalzugang.' });
+            return;
+        }
+        if (!canWriteTenant(tenantId)) {
+            setStatusMessage({ type: 'error', text: 'Für diesen Mieter haben Sie nur Leserechte.' });
             return;
         }
 
@@ -399,18 +449,27 @@ const TenantManagement = () => {
                 }
             });
 
-            if (inviteErr) throw inviteErr;
+            if (inviteErr) throw await toFunctionError(inviteErr);
             if (inviteData?.error) throw new Error(inviteData.error);
 
             // Ältere offene Einladungen dieses Mieters an andere Adressen sind damit überholt
-            await supabase
+            const { error: staleErr } = await supabase
                 .from('tenant_invitations')
                 .delete()
                 .eq('tenant_id', tenantId)
                 .eq('status', 'pending')
                 .neq('email', email);
 
-            setStatusMessage({ type: 'success', text: `Einladung an ${email} gesendet!` });
+            if (staleErr) {
+                // Eine stehengebliebene Einladung an eine alte Adresse könnte sonst noch angenommen werden
+                console.error('Error removing outdated invitations:', staleErr);
+                setStatusMessage({
+                    type: 'warning',
+                    text: `Einladung an ${email} gesendet. Eine ältere Einladung an eine andere Adresse konnte nicht entfernt werden – bitte stornieren Sie diese manuell.`
+                });
+            } else {
+                setStatusMessage({ type: 'success', text: `Einladung an ${email} gesendet!` });
+            }
             setInviteForm({ email: '', tenant_id: '', unit_id: '', property_id: '' });
             setShowInvite(false);
             fetchData();
@@ -420,7 +479,7 @@ const TenantManagement = () => {
             if (createdInvitationId) {
                 await supabase.from('tenant_invitations').delete().eq('id', createdInvitationId);
             }
-            setStatusMessage({ type: 'error', text: `Fehler: ${err.message}` });
+            setStatusMessage({ type: 'error', text: `Fehler: ${translateError(err)}` });
         } finally {
             setSending(false);
         }
@@ -476,7 +535,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'Fehler beim Stornieren der Einladung: ' + err.message
+                body: 'Fehler beim Stornieren der Einladung: ' + translateError(err)
             });
         } finally {
             setBusyEntryKey(null);
@@ -525,7 +584,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'Portalzugang konnte nicht entzogen werden: ' + err.message
+                body: 'Portalzugang konnte nicht entzogen werden: ' + translateError(err)
             });
         } finally {
             setBusyEntryKey(null);
@@ -592,7 +651,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'Fehler beim Löschen des Mieters: ' + err.message
+                body: 'Fehler beim Löschen des Mieters: ' + translateError(err)
             });
         } finally {
             setBusyEntryKey(null);
@@ -631,7 +690,7 @@ const TenantManagement = () => {
                 }
             });
 
-            if (error) throw error;
+            if (error) throw await toFunctionError(error);
             if (data?.error) throw new Error(data.error);
             if (!data?.actionLink) throw new Error('Kein Link zurückgegeben');
 
@@ -640,7 +699,7 @@ const TenantManagement = () => {
             setQrModalData(prev => prev && ({ ...prev, link: data.actionLink, qrDataUrl, generating: false }));
         } catch (err) {
             console.error('Error fetching invite link:', err);
-            setQrModalData(prev => prev && ({ ...prev, generating: false, error: 'Fehler beim Abrufen des Einladungslinks: ' + err.message }));
+            setQrModalData(prev => prev && ({ ...prev, generating: false, error: 'Fehler beim Abrufen des Einladungslinks: ' + translateError(err) }));
         }
     };
 
@@ -681,20 +740,23 @@ const TenantManagement = () => {
         try {
             const nowIso = new Date().toISOString();
 
-            // Cleanup: delete old, expired, and unused links for this tenant to keep DB tidy
-            await supabase
+            // Aufräumen: abgelaufene, unbenutzte Links dieses Mieters löschen (nur Ordnung, kein Abbruch)
+            const { error: cleanupErr } = await supabase
                 .from('tenant_verification_links')
                 .delete()
                 .eq('tenant_id', tenantId)
                 .eq('is_updated', false)
                 .lt('expires_at', nowIso);
+            if (cleanupErr) console.warn('Abgelaufene Mieterdaten-Links konnten nicht gelöscht werden:', cleanupErr);
 
-            // Es gilt immer nur der neueste Link: noch laufende ältere Links dieses Mieters beenden
-            await supabase
+            // Es gilt immer nur der neueste Link: noch laufende ältere Links dieses Mieters beenden.
+            // Scheitert das, keinen neuen Link anlegen – sonst bliebe ein bereits versendeter Link gültig.
+            const { error: endErr } = await supabase
                 .from('tenant_verification_links')
                 .update({ expires_at: nowIso })
                 .eq('tenant_id', tenantId)
                 .gt('expires_at', nowIso);
+            if (endErr) throw endErr;
 
             const token = createLinkToken();
             const expiresAt = new Date();
@@ -729,7 +791,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'Der Link konnte nicht generiert werden: ' + err.message
+                body: 'Der Link konnte nicht generiert werden: ' + translateError(err)
             });
         } finally {
             setGeneratingLinkId(null);
@@ -792,7 +854,7 @@ const TenantManagement = () => {
                 }
             });
 
-            if (error) throw error;
+            if (error) throw await toFunctionError(error);
             if (data?.error) throw new Error(data.error);
 
             addNotification({
@@ -805,7 +867,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'E-Mail konnte nicht gesendet werden: ' + err.message
+                body: 'E-Mail konnte nicht gesendet werden: ' + translateError(err)
             });
         } finally {
             setSendingLinkTenantId(null);
@@ -838,7 +900,7 @@ const TenantManagement = () => {
             addNotification({
                 type: 'error',
                 title: 'Fehler',
-                body: 'Deaktivieren fehlgeschlagen: ' + err.message
+                body: 'Deaktivieren fehlgeschlagen: ' + translateError(err)
             });
         }
     };
@@ -927,6 +989,21 @@ const TenantManagement = () => {
         day: '2-digit', month: '2-digit', year: 'numeric'
     });
 
+    // Eintrag der Portal-Ansicht im gewählten Portfolio (unbekannter Mieter: über das Objekt der Einladung/Rolle)
+    const isEntryInScope = (entry) => {
+        if (!selectedPortfolioID) return true;
+        if (tenantById.has(entry.tenantId) || propertyIdsByTenant.has(entry.tenantId)) return isTenantInScope(entry.tenantId);
+        return !!entry.propertyId && propertyById.get(entry.propertyId)?.portfolio_id === selectedPortfolioID;
+    };
+
+    // Mieter und Objekte im gewählten Portfolio (Auswahllisten)
+    const scopedTenants = tenants.filter(t => isTenantInScope(t.id));
+    const scopedProperties = selectedPortfolioID
+        ? properties.filter(p => p.portfolio_id === selectedPortfolioID)
+        : properties;
+    // Objektfilter nur, solange das Objekt im gewählten Portfolio liegt
+    const effectivePropertyId = scopedProperties.some(p => p.id === tenantDataPropertyId) ? tenantDataPropertyId : '';
+
     // Combine invitations + registered tenants for Tab 1
     const allTenantEntries = [
         ...tenantRoles.map(r => {
@@ -956,16 +1033,16 @@ const TenantManagement = () => {
                 createdAt: inv.created_at,
                 lastSignIn: null
             }))
-    ];
+    ].filter(isEntryInScope);
 
     // Filter tenants for Tab 2
-    const filteredTenants = tenants.filter(t => {
+    const filteredTenants = scopedTenants.filter(t => {
         const isActive = activeLeaseByTenant.has(t.id);
 
         if (filterMode === 'active' && !isActive) return false;
         if (filterMode === 'old' && isActive) return false;
 
-        if (tenantDataPropertyId && !propertyIdsByTenant.get(t.id)?.has(tenantDataPropertyId)) {
+        if (effectivePropertyId && !propertyIdsByTenant.get(t.id)?.has(effectivePropertyId)) {
             return false;
         }
 
@@ -1016,10 +1093,18 @@ const TenantManagement = () => {
         transition: 'color 0.2s'
     });
 
+    const renderReadOnlyHint = () => (
+        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', alignSelf: 'center' }} title="Freigabe nur zum Lesen">
+            Nur lesen
+        </span>
+    );
+
     const renderPortalActions = (entry, compact = false) => {
         const iconSize = compact ? 16 : 14;
         const isBusy = busyEntryKey === entry.key;
         const isGenerating = qrModalData?.entry?.key === entry.key && qrModalData.generating;
+
+        if (!canWriteTenant(entry.tenantId)) return renderReadOnlyHint();
 
         if (entry.type === 'invited') {
             return (
@@ -1059,17 +1144,19 @@ const TenantManagement = () => {
                     {isBusy ? <Loader className="animate-spin" size={iconSize} /> : <UserX size={iconSize} />}
                     {!compact && 'Zugang entziehen'}
                 </button>
-                <button
-                    onClick={() => handleDeleteTenantCompletely(entry)}
-                    disabled={isBusy}
-                    style={actionButtonStyle('#EF4444', compact)}
-                    title="Mieter endgültig löschen"
-                    onMouseEnter={(e) => { e.currentTarget.style.color = '#B91C1C'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.color = '#EF4444'; }}
-                >
-                    <Trash2 size={iconSize} />
-                    {!compact && 'Mieter löschen'}
-                </button>
+                {isTenantOwner(entry.tenantId) && (
+                    <button
+                        onClick={() => handleDeleteTenantCompletely(entry)}
+                        disabled={isBusy}
+                        style={actionButtonStyle('#EF4444', compact)}
+                        title="Mieter endgültig löschen"
+                        onMouseEnter={(e) => { e.currentTarget.style.color = '#B91C1C'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = '#EF4444'; }}
+                    >
+                        <Trash2 size={iconSize} />
+                        {!compact && 'Mieter löschen'}
+                    </button>
+                )}
             </>
         );
     };
@@ -1089,7 +1176,7 @@ const TenantManagement = () => {
         </span>
     );
 
-    const renderGenerateLinkButton = (tenantId, label, fullWidth = false) => (
+    const renderGenerateLinkButton = (tenantId, label, fullWidth = false) => !canWriteTenant(tenantId) ? renderReadOnlyHint() : (
         <button
             onClick={() => handleGenerateLink(tenantId)}
             disabled={generatingLinkId === tenantId}
@@ -1150,7 +1237,7 @@ const TenantManagement = () => {
                     >
                         {refreshing ? <Loader size={16} className="animate-spin" /> : <RefreshCw size={16} />} Aktualisieren
                     </button>
-                    {activeTab === 'portal-access' && (
+                    {activeTab === 'portal-access' && canInvite && (
                         <button
                             onClick={() => setShowInvite(true)}
                             className="btn btn-primary btn-md"
@@ -1193,8 +1280,8 @@ const TenantManagement = () => {
                     padding: '12px 18px',
                     borderRadius: 'var(--radius-md)',
                     marginBottom: '16px',
-                    backgroundColor: statusMessage.type === 'success' ? '#D1FAE5' : '#FEE2E2',
-                    color: statusMessage.type === 'success' ? '#065F46' : '#991B1B',
+                    backgroundColor: statusMessage.type === 'success' ? '#D1FAE5' : statusMessage.type === 'warning' ? '#FEF3C7' : '#FEE2E2',
+                    color: statusMessage.type === 'success' ? '#065F46' : statusMessage.type === 'warning' ? '#92400E' : '#991B1B',
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between'
                 }}>
                     <span style={{ fontSize: '0.88rem' }}>{statusMessage.text}</span>
@@ -1230,7 +1317,7 @@ const TenantManagement = () => {
                                 {allTenantEntries.length === 0 ? (
                                     <tr>
                                         <td colSpan="7" style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
-                                            Noch keine Mieter eingeladen. Klicken Sie auf "Mieter einladen".
+                                            Noch keine Mieter eingeladen.{canInvite && ' Klicken Sie auf "Mieter einladen".'}
                                         </td>
                                     </tr>
                                 ) : (
@@ -1293,7 +1380,7 @@ const TenantManagement = () => {
                                 textAlign: 'center', padding: '40px 20px', color: 'var(--text-secondary)',
                                 backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)'
                             }}>
-                                Noch keine Mieter eingeladen. Klicken Sie auf "Mieter einladen".
+                                Noch keine Mieter eingeladen.{canInvite && ' Klicken Sie auf "Mieter einladen".'}
                             </div>
                         ) : (
                             allTenantEntries.map((entry) => (
@@ -1333,7 +1420,7 @@ const TenantManagement = () => {
 
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
                                         <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                            Geladen: {formatDate(entry.createdAt)}
+                                            Eingeladen am: {formatDate(entry.createdAt)}
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                             {renderPortalActions(entry, true)}
@@ -1451,7 +1538,7 @@ const TenantManagement = () => {
 
                         <div>
                             <select
-                                value={tenantDataPropertyId}
+                                value={effectivePropertyId}
                                 onChange={e => setTenantDataPropertyId(e.target.value)}
                                 style={{
                                     padding: '8px 12px',
@@ -1466,7 +1553,7 @@ const TenantManagement = () => {
                                 }}
                             >
                                 <option value="">Alle Immobilien</option>
-                                {properties.map(p => (
+                                {scopedProperties.map(p => (
                                     <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>
                                 ))}
                             </select>
@@ -1580,7 +1667,7 @@ const TenantManagement = () => {
                                                     )}
                                                 </td>
                                                 <td style={{ textAlign: 'right' }}>
-                                                    {activeLink ? (
+                                                    {activeLink && canWriteTenant(t.id) ? (
                                                         <button
                                                             onClick={() => handleDeactivateLink(activeLink.id)}
                                                             className="btn btn-secondary btn-sm"
@@ -1689,14 +1776,16 @@ const TenantManagement = () => {
                                                         ) : (
                                                             renderGenerateLinkButton(t.id, 'Neuer Link')
                                                         )}
-                                                        <button
-                                                            onClick={() => handleDeactivateLink(activeLink.id)}
-                                                            className="btn btn-secondary btn-sm"
-                                                            style={{ color: '#EF4444', borderColor: '#FEE2E2', backgroundColor: '#FEF2F2', padding: '6px' }}
-                                                            title="Link deaktivieren"
-                                                        >
-                                                            <Trash2 size={12} />
-                                                        </button>
+                                                        {canWriteTenant(t.id) && (
+                                                            <button
+                                                                onClick={() => handleDeactivateLink(activeLink.id)}
+                                                                className="btn btn-secondary btn-sm"
+                                                                style={{ color: '#EF4444', borderColor: '#FEE2E2', backgroundColor: '#FEF2F2', padding: '6px' }}
+                                                                title="Link deaktivieren"
+                                                            >
+                                                                <Trash2 size={12} />
+                                                            </button>
+                                                        )}
                                                     </div>
                                                     {!shareable && (
                                                         <div style={{ width: '100%' }}>{renderLinkHint(activeLink)}</div>
@@ -1842,11 +1931,15 @@ const TenantManagement = () => {
                                     }}
                                 >
                                     <option value="">— Mieter wählen —</option>
-                                    {tenants.map(t => (
-                                        <option key={t.id} value={t.id} disabled={registeredTenantIds.has(t.id)}>
-                                            {t.last_name}, {t.first_name}{registeredTenantIds.has(t.id) ? ' (bereits registriert)' : ''}
-                                        </option>
-                                    ))}
+                                    {scopedTenants.map(t => {
+                                        const registered = registeredTenantIds.has(t.id);
+                                        const readOnly = !canWriteTenant(t.id);
+                                        return (
+                                            <option key={t.id} value={t.id} disabled={registered || readOnly}>
+                                                {t.last_name}, {t.first_name}{registered ? ' (bereits registriert)' : readOnly ? ' (nur Leserecht)' : ''}
+                                            </option>
+                                        );
+                                    })}
                                 </select>
                             </div>
 

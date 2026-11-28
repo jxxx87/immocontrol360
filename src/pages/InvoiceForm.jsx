@@ -24,7 +24,9 @@ import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
 import Modal from '../components/ui/Modal';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
+import { useUnsavedChangesGuard } from '../lib/useUnsavedChangesGuard';
 import {
+    r2 as roundCent,
     printInvoice,
     downloadInvoicePdf,
     fetchNextInvoiceNumber,
@@ -47,6 +49,7 @@ import {
 } from '../lib/invoiceDocument';
 
 const READ_ONLY_NOTICE = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Rechnungen können nur mit Schreibrecht „Finanzen“ angelegt, geändert oder ausgestellt werden.';
+const UNSAVED_MESSAGE = 'Es gibt ungespeicherte Änderungen an der Rechnung. Trotzdem verlassen?';
 
 // Helpers
 const toNum = (v) => {
@@ -56,7 +59,9 @@ const toNum = (v) => {
     const n = s.includes(',') ? parseFloat(s.replace(/\./g, '').replace(',', '.')) : parseFloat(s);
     return Number.isFinite(n) ? n : 0;
 };
-const r2 = (num) => Math.round((toNum(num) + Number.EPSILON) * 100) / 100;
+// Kaufmännische Cent-Rundung wie im Rechnungsdokument (lib/invoiceDocument r2: 30,50 € × 7 % = 2,14 €;
+// Number.EPSILON reicht ab ca. 2 € nicht), mit deutschem Zahlenformat der Eingabefelder
+const r2 = (num) => roundCent(toNum(num));
 const r4 = (num) => Math.round((toNum(num) + Number.EPSILON) * 10000) / 10000;
 const fmt = (num) => new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num || 0);
 const fmtEur = (num) => fmt(num) + ' €';
@@ -167,11 +172,15 @@ const InvoiceForm = () => {
     const readOnly = lockedByStatus || noWriteAccess;
 
     // Derived
+    // Portfolio der geöffneten Rechnung: bestimmt Nummernkreis und Rechnungssteller und bleibt beim Bearbeiten
+    const invoicePortfolioId = isEdit ? (loadedInvoice?.portfolio_id || null) : null;
     const vacationUnits = useMemo(() => {
         let filtered = allUnits.filter(u => u.is_vacation_rental === true);
 
-        if (hasPortfolioSelection) {
-            const portfolioProps = properties.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id);
+        // Bearbeiten: nur Wohnungen aus dem Portfolio der Rechnung; Neuanlage: aus dem gewählten Portfolio
+        const scopePortfolioId = isEdit ? invoicePortfolioId : (hasPortfolioSelection ? selectedPortfolioID : null);
+        if (scopePortfolioId) {
+            const portfolioProps = properties.filter(p => p.portfolio_id === scopePortfolioId).map(p => p.id);
             filtered = filtered.filter(u => portfolioProps.includes(u.property_id));
         }
         // Neuanlage nur für Ferienwohnungen aus Portfolios mit Schreibrecht „Finanzen“
@@ -180,7 +189,7 @@ const InvoiceForm = () => {
             filtered = filtered.filter(u => canWriteInvoices(portfolioOf.get(u.property_id) || null));
         }
         return filtered;
-    }, [allUnits, properties, selectedPortfolioID, hasPortfolioSelection, isEdit, canWriteInvoices]);
+    }, [allUnits, properties, selectedPortfolioID, hasPortfolioSelection, isEdit, invoicePortfolioId, canWriteInvoices]);
     const selectedUnit = useMemo(() => allUnits.find(u => u.id === selectedUnitId), [allUnits, selectedUnitId]);
     const senderPortfolio = useMemo(() => portfolios.find(p => p.id === senderPortfolioId) || null, [portfolios, senderPortfolioId]);
 
@@ -426,6 +435,26 @@ const InvoiceForm = () => {
 
     const touchStay = () => { stayTouchedRef.current = true; };
 
+    // ===== UNGESPEICHERTE ÄNDERUNGEN =====
+    // Der Vergleichsstand wird bei der ersten Eingabe gemerkt (davor laufen nur die automatischen
+    // Vorbelegungen: Absender, Ferienwohnung, Position 1) und nach dem Speichern neu gesetzt.
+    const formSnapshot = useMemo(() => JSON.stringify({
+        senderPortfolioId, senderName, senderStreet, senderZip, senderCity,
+        recipientContactId, recipientName, recipientStreet, recipientZip, recipientCity,
+        invoiceDate, selectedUnitId, moveIn, moveOut, persons, positions, smallBusiness
+    }), [senderPortfolioId, senderName, senderStreet, senderZip, senderCity,
+        recipientContactId, recipientName, recipientStreet, recipientZip, recipientCity,
+        invoiceDate, selectedUnitId, moveIn, moveOut, persons, positions, smallBusiness]);
+    const [baselineSnapshot, setBaselineSnapshot] = useState(null);
+    // Aufruf vor der Änderung (bzw. im Bubbling des onChange: der Render-Stand ist noch der alte)
+    const markEdited = () => {
+        if (loading || readOnly) return;
+        setBaselineSnapshot(prev => prev ?? formSnapshot);
+    };
+    const isDirty = !readOnly && baselineSnapshot !== null && formSnapshot !== baselineSnapshot;
+    // Zurück-Pfeil, „Schließen", Seitenleiste, Neuladen: Rückfrage bei ungespeicherten Eingaben
+    useUnsavedChangesGuard(isDirty ? UNSAVED_MESSAGE : null);
+
     // ===== CALCULATIONS =====
     const updatePosition = (idx, field, value) => {
         const updated = [...positions];
@@ -450,6 +479,7 @@ const InvoiceForm = () => {
     };
 
     const addPosition = () => {
+        markEdited();
         setPositions([...positions, {
             pos: positions.length + 1,
             description: '',
@@ -465,6 +495,7 @@ const InvoiceForm = () => {
 
     const removePosition = (idx) => {
         if (idx === 0) return;
+        markEdited();
         const updated = positions.filter((_, i) => i !== idx).map((p, i) => ({ ...p, pos: i + 1 }));
         setPositions(updated);
     };
@@ -534,6 +565,7 @@ const InvoiceForm = () => {
     }, [contacts, contactSearch]);
 
     const selectContact = (contact) => {
+        markEdited();
         setRecipientName(contact.name || '');
         setRecipientStreet(contact.street || '');
         setRecipientZip(contact.zip || '');
@@ -546,6 +578,7 @@ const InvoiceForm = () => {
     const saveAsContact = async () => {
         const name = recipientName.trim();
         if (!name) return alert('Bitte Name eingeben.');
+        markEdited(); // verknüpft ggf. einen (neuen) Kontakt mit der Rechnung
         try {
             const fields = {
                 name,
@@ -677,6 +710,11 @@ const InvoiceForm = () => {
     const validate = () => {
         const errors = [];
         if (!senderPortfolioId) errors.push('Bitte eine Ferienwohnung wählen (sie bestimmt Portfolio und Rechnungssteller).');
+        // Wohnung und Rechnung müssen zum selben Portfolio gehören (Nummernkreis, Absender, Rechte)
+        const unitPortfolioId = selectedUnit ? properties.find(p => p.id === selectedUnit.property_id)?.portfolio_id : null;
+        if (senderPortfolioId && unitPortfolioId && unitPortfolioId !== senderPortfolioId) {
+            errors.push('Die gewählte Ferienwohnung gehört zu einem anderen Portfolio als die Rechnung. Bitte eine Ferienwohnung aus dem Portfolio der Rechnung wählen.');
+        }
         if (!senderName.trim()) errors.push('Absender fehlt.');
         if (!recipientName.trim()) errors.push('Empfänger fehlt.');
         if (!invoiceDate || !parseLocalDate(invoiceDate)) errors.push('Rechnungsdatum fehlt.');
@@ -757,6 +795,8 @@ const InvoiceForm = () => {
                 setInvoiceNumber(result.invoice_number || '');
             }
             setSavedInvoice(result);
+            // Gespeicherter Stand = neuer Vergleichsstand („Schließen" im Dialog fragt nicht nach)
+            setBaselineSnapshot(formSnapshot);
             setSuccessModal(true);
         } catch (err) {
             alert('Fehler: ' + (err.message || 'Die Rechnung konnte nicht gespeichert werden.'));
@@ -828,7 +868,9 @@ const InvoiceForm = () => {
     const savedStatus = savedInvoice ? getInvoiceStatus(savedInvoice) : null;
     const headerSubtitle = isEdit
         ? `Rechnungs-Nr. ${invoiceNumber || '–'} · ${INVOICE_STATUS_LABELS[invoiceStatus] || invoiceStatus}`
-        : 'Neue Rechnung – die fortlaufende Nummer wird beim Speichern vergeben';
+        : (readOnly
+            ? 'Ohne Schreibrecht „Finanzen“ können in diesem Portfolio keine Rechnungen angelegt werden'
+            : 'Neue Rechnung – die fortlaufende Nummer wird beim Speichern vergeben');
 
     return (
         <div style={{ position: 'relative' }}>
@@ -842,7 +884,9 @@ const InvoiceForm = () => {
                 </button>
                 <div>
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>
-                        {!isEdit ? 'Rechnung erstellen' : (readOnly ? (invoiceStatus === INVOICE_STATUS.CREDIT_NOTE ? 'Gutschrift ansehen' : 'Rechnung ansehen') : 'Rechnung bearbeiten')}
+                        {!isEdit
+                            ? (readOnly ? 'Neue Rechnung – nur lesen' : 'Rechnung erstellen')
+                            : (readOnly ? (invoiceStatus === INVOICE_STATUS.CREDIT_NOTE ? 'Gutschrift ansehen' : 'Rechnung ansehen') : 'Rechnung bearbeiten')}
                     </h1>
                     <p style={{ color: 'var(--text-secondary)' }}>{headerSubtitle}</p>
                 </div>
@@ -900,7 +944,8 @@ const InvoiceForm = () => {
                 </div>
             )}
 
-            <fieldset disabled={readOnly} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+            {/* onChange bubbelt aus allen Eingabefeldern: erste Eingabe merkt den Vergleichsstand */}
+            <fieldset disabled={readOnly} onChange={markEdited} onPaste={markEdited} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
                 {/* Main Layout */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-lg)', marginBottom: 'var(--spacing-lg)' }}>
                     {/* LEFT: Sender */}

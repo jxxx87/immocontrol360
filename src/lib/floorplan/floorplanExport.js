@@ -10,13 +10,13 @@ import { getFurnitureItem } from './furnitureCatalog';
 // ─── Helpers (Formatierung, Dateinamen) ─────────────────────────
 
 /** Zahl mit Dezimalkomma (deutsches Excel/PDF); nicht endliche Werte → '0,00'. */
-const de = (value, digits = 2) => {
+export const de = (value, digits = 2) => {
     const n = Number(value);
     return (Number.isFinite(n) ? n : 0).toFixed(digits).replace('.', ',');
 };
 
-/** Bereits als Text (toFixed) vorliegende Zahl ins deutsche Format bringen. */
-const deText = (value) => String(value ?? '').replace('.', ',');
+/** Bereits als Text (toFixed) vorliegende Zahl ins deutsche Format bringen (auch Massen-Panel im Editor). */
+export const deText = (value) => String(value ?? '').replace('.', ',');
 
 /**
  * Textfeld für CSV: CSV-Injection entschärfen (führendes = + - @ wird als Text

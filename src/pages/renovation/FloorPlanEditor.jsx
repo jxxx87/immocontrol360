@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import {
     TOOLS, TOOL_HINTS, WALL_THICKNESS, STOREY_HEIGHT,
@@ -38,7 +39,7 @@ import {
 } from '../../lib/floorplan/planBackgrounds';
 import { stripBackgrounds, createVersionEntry, addVersionEntry } from '../../lib/floorplan/planVersions';
 import { FURNITURE_CATEGORIES, FURNITURE_ITEMS, getItemsByCategory, getFurnitureItem, clampDimensions } from '../../lib/floorplan/furnitureCatalog';
-import { exportToPNG, exportToPDF, exportQuantityListCSV, exportQuantityListPDF, generateQuantityList, downloadBlob } from '../../lib/floorplan/floorplanExport';
+import { exportToPNG, exportToPDF, exportQuantityListCSV, exportQuantityListPDF, generateQuantityList, downloadBlob, de, deText } from '../../lib/floorplan/floorplanExport';
 
 // Lazy load 3D viewer to avoid loading Three.js unless needed
 const FloorPlan3DView = lazy(() => import('./FloorPlan3DView'));
@@ -337,8 +338,26 @@ const FloorPlanEditor = () => {
     const { user } = useAuth();
     const userId = user?.id || null;
     const { isMobile } = useViewMode();
+    const perm = usePermission();
+
+    // Schreibrecht wie die RLS von floor_plans: mit Objekt/Einheit Schreibrecht „Immobilien“ oder
+    // „Investorportal“ im Portfolio des Objekts, ohne Zuordnung nur das eigene Konto.
+    // Solange die Freigaben laden, nicht sperren (die Datenbank prüft zusätzlich).
+    const canEditPlan = (access) => {
+        if (!access) return true;
+        if (!access.linked) return !access.ownerId || access.ownerId === userId;
+        if (!perm || perm.loadingPermissions) return true;
+        if (!access.portfolioId) return false;
+        return perm.canWrite('immobilien', access.portfolioId) || perm.canWrite('investorportal', access.portfolioId);
+    };
+    const canEditPlanRef = useRef(canEditPlan);
+    canEditPlanRef.current = canEditPlan;
 
     // ─── State ──────────────────────────────────────────────────
+    // Zuordnung des geladenen Plans (für den Lesemodus): { linked, portfolioId, ownerId }
+    const [planAccess, setPlanAccess] = useState(null);
+    // Speicherkonflikt: Plan wurde inzwischen an anderer Stelle gespeichert (anderer Tab/Bearbeiter)
+    const [saveConflict, setSaveConflict] = useState(false);
     const [planName, setPlanName] = useState('Neuer Grundriss');
     const [storeys, setStoreys] = useState(() => [createStorey('EG', 2600)]);
     const [activeStoreyIdx, setActiveStoreyIdx] = useState(0);
@@ -442,6 +461,12 @@ const FloorPlanEditor = () => {
     const saveRef = useRef(null);             // immer aktuelle handleSave-Funktion (für Timer/Listener)
     const loadedOkRef = useRef(isNew);        // Speichern erst nach erfolgreichem Laden erlaubt
     const savedIdRef = useRef(null);
+    // Optimistische Sperre: updated_at des zuletzt geladenen/gespeicherten Stands. Gespeichert wird
+    // nur, wenn der Plan in der Datenbank noch diesen Stand hat (sonst Konflikt statt Überschreiben).
+    const lastUpdatedAtRef = useRef(null);
+    const conflictRef = useRef(false);
+    // Nur Ansicht (kein Schreibrecht): keine Änderungen, kein Autosave
+    const readOnlyRef = useRef(false);
     // Versionierung: beim ersten Speichern einer Sitzung den geladenen Stand ablegen
     const versionHistoryRef = useRef([]);     // version_history wie geladen/zuletzt gespeichert
     const pendingVersionRef = useRef(null);   // { json, stand, name } – noch abzulegender Ladestand
@@ -489,6 +514,10 @@ const FloorPlanEditor = () => {
     const drawPointsRef = useRef(drawPoints);
     drawPointsRef.current = drawPoints;
 
+    // Lesemodus: Plan mit Objekt/Einheit ohne Schreibrecht bzw. fremder Plan ohne Zuordnung
+    const readOnly = !isNew && !!planAccess && !canEditPlan(planAccess);
+    readOnlyRef.current = readOnly;
+
     // ─── Load ───────────────────────────────────────────────────
     useEffect(() => {
         if (isNew) { loadedOkRef.current = true; setLoading(false); return; }
@@ -496,11 +525,17 @@ const FloorPlanEditor = () => {
         let cancelled = false;
         loadedOkRef.current = false;
         savedIdRef.current = null;
+        lastUpdatedAtRef.current = null;
+        conflictRef.current = false;
+        setSaveConflict(false);
         setLoading(true);
         setLoadError(null);
         (async () => {
             try {
-                const { data, error } = await supabase.from('floor_plans').select('*').eq('id', planId).single();
+                // Portfolio des Objekts bzw. der Einheit mitladen (Schreibrecht für den Lesemodus)
+                const { data, error } = await supabase.from('floor_plans')
+                    .select('*, property:properties(portfolio_id), unit:units(property:properties(portfolio_id))')
+                    .eq('id', planId).single();
                 if (cancelled) return;
                 if (error || !data) {
                     const notFound = !data && (!error || error.code === 'PGRST116');
@@ -524,8 +559,19 @@ const FloorPlanEditor = () => {
                     setActiveStoreyIdx(0);
                 }
                 savedIdRef.current = data.id;
+                lastUpdatedAtRef.current = data.updated_at || null;
+                const access = {
+                    linked: !!(data.property_id || data.unit_id),
+                    portfolioId: data.property?.portfolio_id || data.unit?.property?.portfolio_id || null,
+                    ownerId: data.user_id || null,
+                };
+                setPlanAccess(access);
+                // Sofort setzen (nicht erst beim nächsten Rendern), damit die Bild-Migration unten es sieht
+                readOnlyRef.current = !canEditPlanRef.current(access);
                 loadedOkRef.current = true;
                 isDirtyRef.current = false;
+                saveFailedRef.current = false;
+                setSaveError(null);
                 cmdStackRef.current.clear();
                 setSaveState('idle');
                 setLoading(false);
@@ -545,6 +591,13 @@ const FloorPlanEditor = () => {
     const handleSave = useCallback((silent = false) => {
         const currentUser = userRef.current;
         if (!currentUser || !loadedOkRef.current) return Promise.resolve(false);
+        // Nur Ansicht: nichts speichern (die Datenbank würde ablehnen)
+        if (readOnlyRef.current) return Promise.resolve(false);
+        // Offener Speicherkonflikt: erst „Neu laden“ oder „Trotzdem überschreiben“ wählen
+        if (conflictRef.current) {
+            if (!silent) alert('Der Grundriss wurde inzwischen an anderer Stelle gespeichert. Bitte im Hinweis oben „Neu laden“ oder „Trotzdem überschreiben“ wählen.');
+            return Promise.resolve(false);
+        }
         if (saveInFlightRef.current) {
             // Läuft bereits ein Speichervorgang: danach mit dem dann aktuellen Stand erneut speichern
             pendingSaveRef.current = true;
@@ -590,21 +643,36 @@ const FloorPlanEditor = () => {
                         );
                         payload.version_history = nextHistory;
                     }
-                    // user_id bleibt beim Update unverändert (kein Besitzerwechsel bei geteiltem Zugriff)
-                    const { data, error } = await supabase.from('floor_plans').update(payload).eq('id', savedIdRef.current).select('id');
+                    // user_id bleibt beim Update unverändert (kein Besitzerwechsel bei geteiltem Zugriff).
+                    // Nur schreiben, wenn der Plan seit dem Laden/letzten Speichern unverändert ist.
+                    const planRowId = savedIdRef.current;
+                    const expectedStand = lastUpdatedAtRef.current;
+                    let query = supabase.from('floor_plans').update(payload).eq('id', planRowId);
+                    query = expectedStand ? query.eq('updated_at', expectedStand) : query.is('updated_at', null);
+                    const { data, error } = await query.select('id, updated_at');
                     if (error) throw error;
                     if (!data || data.length === 0) {
+                        // Keine Zeile geändert: anderer Stand in der Datenbank (Konflikt) oder keine Schreibrechte
+                        const { data: current } = await supabase.from('floor_plans').select('updated_at').eq('id', planRowId).maybeSingle();
+                        const stamp = (v) => (v ? Date.parse(v) : null);
+                        if (current && stamp(current.updated_at) !== stamp(expectedStand)) {
+                            const conflict = new Error('Der Grundriss wurde inzwischen an anderer Stelle gespeichert (anderer Tab oder anderer Bearbeiter). Ihre Änderungen wurden nicht gespeichert.');
+                            conflict.isConflict = true;
+                            throw conflict;
+                        }
                         throw new Error('Der Grundriss wurde nicht gefunden oder Sie haben keine Berechtigung, ihn zu ändern.');
                     }
+                    lastUpdatedAtRef.current = data[0]?.updated_at || payload.updated_at;
                     if (nextHistory) {
                         versionHistoryRef.current = nextHistory;
                         pendingVersionRef.current = null;
                     }
                 } else {
-                    const { data, error } = await supabase.from('floor_plans').insert({ ...payload, user_id: currentUser.id }).select('id').single();
+                    const { data, error } = await supabase.from('floor_plans').insert({ ...payload, user_id: currentUser.id }).select('id, updated_at').single();
                     if (error) throw error;
                     if (!data?.id) throw new Error('Der Grundriss konnte nicht angelegt werden.');
                     savedIdRef.current = data.id;
+                    lastUpdatedAtRef.current = data.updated_at || payload.updated_at;
                     window.history.replaceState(window.history.state, '', `/renovation/floorplan/${data.id}`);
                 }
 
@@ -625,6 +693,11 @@ const FloorPlanEditor = () => {
                 const msg = err?.message || String(err);
                 console.error('Grundriss speichern fehlgeschlagen:', err);
                 saveFailedRef.current = true;
+                if (err?.isConflict) {
+                    // Autosave anhalten, bis der Nutzer im Hinweis entscheidet
+                    conflictRef.current = true;
+                    setSaveConflict(true);
+                }
                 setSaveError(msg);
                 setSaveState('error');
                 if (!silent) alert('Fehler beim Speichern: ' + msg);
@@ -648,6 +721,7 @@ const FloorPlanEditor = () => {
 
     // Autosave: jede Änderung erhöht die Revision; gespeichert wird 2 s nach der letzten Änderung
     const markDirty = useCallback(() => {
+        if (readOnlyRef.current) return; // Nur Ansicht: kein Autosave, keine Rückfrage beim Verlassen
         revisionRef.current += 1;
         isDirtyRef.current = true;
         setSaveState(prev => (prev === 'saving' || prev === 'error' ? prev : 'dirty'));
@@ -810,7 +884,7 @@ const FloorPlanEditor = () => {
     // in dieser Sitzung.
     const migrateInlineBackgrounds = async () => {
         const planId = savedIdRef.current;
-        if (!planId || !loadedOkRef.current || bgMigrationRunningRef.current || bgMigrationFailedRef.current) return;
+        if (!planId || !loadedOkRef.current || readOnlyRef.current || bgMigrationRunningRef.current || bgMigrationFailedRef.current) return;
         const pending = storeysRef.current.filter(s => isInlineBackground(s?.bgImage));
         if (pending.length === 0) return;
         bgMigrationRunningRef.current = true;
@@ -982,17 +1056,24 @@ const FloorPlanEditor = () => {
         if (!storey || before == null) return null;
         const after = snapshotStorey(storey);
         if (after === before) return null;
+        if (readOnlyRef.current) {
+            // Nur Ansicht: Änderung verwerfen (nicht in Historie/Autosave)
+            applyStoreySnapshot(storey.id, before);
+            forceRender(v => v + 1);
+            requestRender();
+            return null;
+        }
         pushHistory(label, storey.id, before, after);
         markDirty();
         forceRender(v => v + 1);
         requestRender();
         return after;
-    }, [pushHistory, markDirty, requestRender]);
+    }, [pushHistory, markDirty, requestRender, applyStoreySnapshot]);
 
     // Mutation am aktiven Geschoss ausführen und als ein Undo-Schritt erfassen
     const applyChange = useCallback((label, mutate) => {
         const storey = activeStoreyRef.current;
-        if (!storey) return null;
+        if (!storey || readOnlyRef.current) return null;
         const before = snapshotStorey(storey);
         mutate(storey);
         return commitChange(label, storey, before);
@@ -1385,6 +1466,8 @@ const FloorPlanEditor = () => {
         }
 
         if (e.button !== 0) return;
+        // Nur Ansicht: nur Auswählen (Messen läuft über handleMeasureClick)
+        if (readOnlyRef.current && activeTool !== TOOLS.SELECT) return;
 
         const world = screenToWorld(vpRef.current, sx, sy);
         const wx = snapToGrid(world.x);
@@ -1416,6 +1499,7 @@ const FloorPlanEditor = () => {
             const before = snapshotStorey(activeStorey);
             dragStartRef.current = null;
             handleSelectClick(wx, wy, sx, sy);
+            if (readOnlyRef.current) dragStartRef.current = null; // Nur Ansicht: nichts verschieben
             if (dragStartRef.current) {
                 dragStartRef.current.before = before;
                 dragStartRef.current.storeyId = activeStorey.id;
@@ -2838,6 +2922,7 @@ const FloorPlanEditor = () => {
 
     // Schwebende Längeneingabe öffnen (seq erzwingt ein frisches Eingabefeld je Wand)
     const openLengthEditor = (info) => {
+        if (readOnlyRef.current) return; // Nur Ansicht: keine Längeneingabe (Änderung würde verworfen)
         lengthEditDoneRef.current = false;
         setEditingLength({ ...info, seq: Date.now() });
     };
@@ -3341,6 +3426,8 @@ const FloorPlanEditor = () => {
 
             // Alle weiteren Kürzel nicht in Eingabefeldern (Entf, Strg+Z/C/V gehören dort dem Feld)
             if (inField) return;
+            // Nur Ansicht: keine Bearbeitungskürzel (Rückgängig, Entf, Einfügen …)
+            if (readOnlyRef.current) return;
 
             if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo(); return; }
             if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); handleRedo(); return; }
@@ -3561,6 +3648,48 @@ const FloorPlanEditor = () => {
         setViewNotice(`Die 3D-Ansicht konnte nicht angezeigt werden${error?.message ? ` (${error.message})` : ''}. Es wird wieder die 2D-Ansicht gezeigt.`);
     }, []);
 
+    // Nur Ansicht: Zeichenwerkzeuge zurücksetzen (z. B. wenn die Freigaben erst nach dem Laden feststehen)
+    useEffect(() => {
+        if (!readOnly) return;
+        cancelDrawing();
+        setActiveTool(TOOLS.SELECT);
+        setPlacingFurniture(null);
+    }, [readOnly, cancelDrawing]);
+
+    // ─── Speicherkonflikt (Plan inzwischen an anderer Stelle gespeichert) ───
+    // „Neu laden“: gespeicherten Stand laden, eigene ungespeicherte Änderungen verwerfen
+    const handleConflictReload = () => {
+        if (!window.confirm('Den gespeicherten Stand neu laden?\n\nIhre nicht gespeicherten Änderungen gehen dabei verloren.')) return;
+        if (autosaveTimerRef.current) { clearTimeout(autosaveTimerRef.current); autosaveTimerRef.current = null; }
+        isDirtyRef.current = false;
+        pendingSaveRef.current = false;
+        const savedId = savedIdRef.current;
+        // Neu angelegter Plan: die Route steht noch auf „new“ → auf die gespeicherte ID wechseln
+        if (savedId && planId !== savedId) navigate(`/renovation/floorplan/${savedId}`, { replace: true });
+        else setLoadAttempt(a => a + 1);
+    };
+
+    // „Trotzdem überschreiben“: den inzwischen gespeicherten Stand vorher als Version sichern
+    // (wiederherstellbar über „Frühere Stände“ in der Übersicht), dann den eigenen Stand speichern
+    const handleConflictOverwrite = async () => {
+        if (!window.confirm('Den inzwischen gespeicherten Stand mit Ihrem Stand überschreiben?\n\nDer überschriebene Stand wird als früherer Stand gesichert.')) return;
+        const { data, error } = await supabase.from('floor_plans')
+            .select('name, plan_data, version_history, updated_at').eq('id', savedIdRef.current).maybeSingle();
+        if (error || !data) {
+            alert('Der aktuelle Stand konnte nicht geladen werden' + (error?.message ? ` (${error.message})` : '') + '. Bitte später erneut versuchen.');
+            return;
+        }
+        versionHistoryRef.current = Array.isArray(data.version_history) ? data.version_history : [];
+        pendingVersionRef.current = Array.isArray(data.plan_data) && data.plan_data.length > 0
+            ? { json: JSON.stringify(stripBackgrounds(data.plan_data)), stand: data.updated_at || null, name: data.name || null }
+            : null;
+        lastUpdatedAtRef.current = data.updated_at || null;
+        conflictRef.current = false;
+        saveFailedRef.current = false;
+        setSaveConflict(false);
+        await handleSave(false);
+    };
+
     // ─── Selected Element Details ───────────────────────────────
     const selectedWall = selectedType === 'wall' ? activeStorey.walls.find(w => w.id === selectedId) : null;
     const selectedOpening = selectedType === 'opening' ? activeStorey.openings.find(o => o.id === selectedId) : null;
@@ -3619,6 +3748,7 @@ const FloorPlanEditor = () => {
                 <input
                     type="text"
                     value={planName}
+                    readOnly={readOnly}
                     onChange={e => setPlanName(e.target.value)}
                     onBlur={() => { if (planNameFocusRef.current !== planName) markDirty(); }}
                     style={{
@@ -3654,7 +3784,7 @@ const FloorPlanEditor = () => {
                         ))}
                     </select>
                     <div style={{ position: 'relative' }}>
-                        <button onClick={() => setShowStoreyDialog(!showStoreyDialog)} title="Geschoss hinzufügen" style={topBtnStyle}><Plus size={14} /></button>
+                        <button onClick={() => setShowStoreyDialog(!showStoreyDialog)} disabled={readOnly} title="Geschoss hinzufügen" style={{ ...topBtnStyle, opacity: readOnly ? 0.4 : 1 }}><Plus size={14} /></button>
                         {showStoreyDialog && (
                             <div style={{
                                 position: 'absolute', top: '100%', left: 0, marginTop: '4px',
@@ -3681,12 +3811,12 @@ const FloorPlanEditor = () => {
                             </div>
                         )}
                     </div>
-                    <button onClick={duplicateCurrentStorey} title="Geschoss duplizieren" style={topBtnStyle}><Copy size={14} /></button>
+                    <button onClick={duplicateCurrentStorey} disabled={readOnly} title="Geschoss duplizieren" style={{ ...topBtnStyle, opacity: readOnly ? 0.4 : 1 }}><Copy size={14} /></button>
                     <button
                         onClick={deleteCurrentStorey}
-                        disabled={storeys.length <= 1}
+                        disabled={storeys.length <= 1 || readOnly}
                         title="Geschoss entfernen"
-                        style={{ ...topBtnStyle, color: storeys.length > 1 ? '#ef4444' : '#d1d5db', opacity: storeys.length <= 1 ? 0.4 : 1 }}
+                        style={{ ...topBtnStyle, color: storeys.length > 1 && !readOnly ? '#ef4444' : '#d1d5db', opacity: storeys.length <= 1 || readOnly ? 0.4 : 1 }}
                     >
                         <Trash2 size={14} />
                     </button>
@@ -3700,7 +3830,7 @@ const FloorPlanEditor = () => {
                 <button onClick={handleRedo} disabled={!cmdStackRef.current.canRedo()} style={topBtnStyle} title="Wiederholen (Strg+Y / Strg+Umschalt+Z)">
                     <Redo2 size={16} />
                 </button>
-                <button onClick={() => handleSave(false)} disabled={saving} style={{ ...topBtnStyle, color: '#0ea5e9', fontWeight: 600 }} title="Speichern (Strg+S)">
+                <button onClick={() => handleSave(false)} disabled={saving || readOnly} style={{ ...topBtnStyle, color: '#0ea5e9', fontWeight: 600, opacity: readOnly ? 0.4 : 1 }} title={readOnly ? 'Nur Ansicht – Speichern nicht möglich' : 'Speichern (Strg+S)'}>
                     {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                     {!isMobile && <span style={{ marginLeft: '4px', fontSize: '0.82rem' }}>Speichern</span>}
                 </button>
@@ -3717,8 +3847,8 @@ const FloorPlanEditor = () => {
                 />
                 <button
                     onClick={() => bgFileRef.current?.click()}
-                    disabled={bgUploading}
-                    style={topBtnStyle}
+                    disabled={bgUploading || readOnly}
+                    style={{ ...topBtnStyle, opacity: readOnly ? 0.4 : 1 }}
                     title={bgUploading ? 'Hintergrundbild wird hochgeladen …' : 'Hintergrundbild hochladen (PNG/JPG)'}
                 >
                     {bgUploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
@@ -3748,13 +3878,14 @@ const FloorPlanEditor = () => {
                                 setActiveTool(TOOLS.CALIBRATE);
                                 setCalibPoints([]);
                             }}
+                            disabled={readOnly}
                             style={{ ...topBtnStyle, color: activeTool === TOOLS.CALIBRATE ? '#ef4444' : 'var(--text-secondary)', background: activeTool === TOOLS.CALIBRATE ? '#fef2f2' : 'transparent' }}
                             title="Referenzmaß setzen (2 Punkte klicken, Strecke eingeben)"
                         >
                             <Scaling size={16} />
                             {!isMobile && <span style={{ marginLeft: '4px', fontSize: '0.82rem' }}>Maßstab</span>}
                         </button>
-                        <button onClick={removeBgImage} style={{ ...topBtnStyle, color: '#ef4444' }} title="Hintergrund entfernen">
+                        <button onClick={removeBgImage} disabled={readOnly} style={{ ...topBtnStyle, color: '#ef4444', opacity: readOnly ? 0.4 : 1 }} title="Hintergrund entfernen">
                             <X size={14} />
                         </button>
                     </>
@@ -3853,7 +3984,19 @@ const FloorPlanEditor = () => {
                 </div>
             </div>
 
-            {/* ── Hinweise: Speicherfehler / 3D nicht verfügbar ── */}
+            {/* ── Hinweise: Nur Ansicht / Speicherfehler / 3D nicht verfügbar ── */}
+            {readOnly && (
+                <div role="status" style={{
+                    display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
+                    padding: '8px 16px', background: '#eff6ff', borderBottom: '1px solid #bfdbfe',
+                    color: '#1e40af', fontSize: '0.8rem',
+                }}>
+                    <Eye size={15} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1, minWidth: '200px' }}>
+                        <strong>Nur Ansicht.</strong> Für diesen Grundriss haben Sie kein Schreibrecht (Freigabe „Immobilien“ bzw. „Investorportal“ nur lesend). Ansehen, Messen, 3D-Ansicht und Export sind möglich, Änderungen nicht.
+                    </span>
+                </div>
+            )}
             {saveState === 'error' && (
                 <div role="alert" style={{
                     display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
@@ -3864,9 +4007,20 @@ const FloorPlanEditor = () => {
                     <span style={{ flex: 1, minWidth: '200px' }}>
                         <strong>Änderungen nicht gespeichert.</strong> {saveError || 'Unbekannter Fehler.'}
                     </span>
-                    <button onClick={() => handleSave(false)} disabled={saving} style={{ ...topBtnStyle, color: '#dc2626', borderColor: '#fecaca', gap: '6px', fontSize: '0.78rem' }}>
-                        <RefreshCw size={13} /> Erneut speichern
-                    </button>
+                    {saveConflict ? (
+                        <>
+                            <button onClick={handleConflictReload} disabled={saving} style={{ ...topBtnStyle, color: '#dc2626', borderColor: '#fecaca', gap: '6px', fontSize: '0.78rem' }}>
+                                <RefreshCw size={13} /> Neu laden
+                            </button>
+                            <button onClick={handleConflictOverwrite} disabled={saving} style={{ ...topBtnStyle, color: '#dc2626', borderColor: '#fecaca', gap: '6px', fontSize: '0.78rem' }}>
+                                <Save size={13} /> Trotzdem überschreiben
+                            </button>
+                        </>
+                    ) : (
+                        <button onClick={() => handleSave(false)} disabled={saving} style={{ ...topBtnStyle, color: '#dc2626', borderColor: '#fecaca', gap: '6px', fontSize: '0.78rem' }}>
+                            <RefreshCw size={13} /> Erneut speichern
+                        </button>
+                    )}
                 </div>
             )}
             {viewNotice && (
@@ -3959,7 +4113,11 @@ const FloorPlanEditor = () => {
                         { tool: TOOLS.ANNOTATE_CIRCLE, icon: CircleDot, label: 'Kreis' },
                         { tool: TOOLS.ANNOTATE_AREA, icon: Pentagon, label: 'Fläche' },
                         { tool: TOOLS.ANNOTATE_TEXT, icon: Type, label: 'Textfeld' },
-                    ].map((t, idx) => t.separator ? (
+                    ]
+                        // Nur Ansicht: nur Auswahl und Messen
+                        .map(t => (readOnly && !t.separator && t.tool !== TOOLS.SELECT && t.tool !== 'measure'
+                            ? { ...t, disabled: true, label: `${t.label} (nur Ansicht)` } : t))
+                        .map((t, idx) => t.separator ? (
                         <div key={`sep-${idx}`} style={{ width: '30px', height: '1px', background: 'var(--border-color)', margin: '4px 0' }} />
                     ) : (
                         <button
@@ -4384,7 +4542,8 @@ const FloorPlanEditor = () => {
                     </div>
 
                     <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
-                        {rightPanel === 'properties' && (<>
+                        {/* Nur Ansicht: alle Eingaben des Eigenschaften-Panels gesperrt */}
+                        {rightPanel === 'properties' && (<fieldset disabled={readOnly} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
                             <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
                                 Eigenschaften
                             </div>
@@ -4897,7 +5056,7 @@ const FloorPlanEditor = () => {
                                     Wähle ein Element aus um seine Eigenschaften zu bearbeiten.
                                 </div>
                             )}
-                        </>)}
+                        </fieldset>)}
 
                         {/* Quantities Panel */}
                         {rightPanel === 'quantities' && (
@@ -5062,15 +5221,18 @@ const QuantitiesPanel = ({ storeys, activeStoreyIdx }) => {
     const data = generateQuantityList(storeys);
     const activeSt = data.storeys[activeStoreyIdx];
 
+    // Anzeige wie im CSV-/PDF-Export: Dezimalkomma, Summen mit zwei Nachkommastellen,
+    // Wandfläche brutto (Länge × Höhe) und netto (abzüglich Türen/Fenster)
     return (
         <div>
             {/* Totals */}
             <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: '8px' }}>Gesamtübersicht</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '16px' }}>
                 <QStatCard label="Räume" value={data.totals.roomCount} />
-                <QStatCard label="Fläche" value={`${data.totals.floorArea_m2} m²`} />
-                <QStatCard label="Wandlänge" value={`${data.totals.wallLength_m} m`} />
-                <QStatCard label="Wandfläche" value={`${data.totals.wallArea_m2} m²`} />
+                <QStatCard label="Fläche" value={`${de(data.totals.floorArea_m2)} m²`} />
+                <QStatCard label="Wandlänge" value={`${de(data.totals.wallLength_m)} m`} />
+                <QStatCard label="Wandfläche brutto" value={`${de(data.totals.wallArea_m2)} m²`} />
+                <QStatCard label="Wandfläche netto" value={`${de(data.totals.wallAreaNet_m2)} m²`} />
                 <QStatCard label="Türen" value={data.totals.doorCount} />
                 <QStatCard label="Fenster" value={data.totals.windowCount} />
             </div>
@@ -5086,7 +5248,7 @@ const QuantitiesPanel = ({ storeys, activeStoreyIdx }) => {
                             {activeSt.rooms.map((r, i) => (
                                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', padding: '2px 0', borderBottom: '1px solid #f1f5f9' }}>
                                     <span>{r.name}</span>
-                                    <span style={{ fontWeight: 600 }}>{r.area_m2} m²</span>
+                                    <span style={{ fontWeight: 600 }}>{deText(r.area_m2)} m²</span>
                                 </div>
                             ))}
                         </div>
@@ -5099,10 +5261,10 @@ const QuantitiesPanel = ({ storeys, activeStoreyIdx }) => {
                                 <div key={i} style={{ fontSize: '0.75rem', padding: '3px 0', borderBottom: '1px solid #f1f5f9' }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                         <span>{w.type}</span>
-                                        <span style={{ fontWeight: 600 }}>{w.length_m} m</span>
+                                        <span style={{ fontWeight: 600 }}>{deText(w.length_m)} m</span>
                                     </div>
                                     <div style={{ fontSize: '0.68rem', color: '#94a3b8' }}>
-                                        {w.thickness_cm} cm × {w.height_m} m = {w.area_m2} m²
+                                        {deText(w.thickness_cm)} cm × {deText(w.height_m)} m = {deText(w.area_m2)} m² brutto
                                     </div>
                                 </div>
                             ))}
@@ -5115,7 +5277,7 @@ const QuantitiesPanel = ({ storeys, activeStoreyIdx }) => {
                             {activeSt.openings.map((o, i) => (
                                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', padding: '2px 0', borderBottom: '1px solid #f1f5f9' }}>
                                     <span>{o.type}</span>
-                                    <span style={{ fontWeight: 600 }}>{o.width_cm}×{o.height_cm} cm</span>
+                                    <span style={{ fontWeight: 600 }}>{deText(o.width_cm)}×{deText(o.height_cm)} cm</span>
                                 </div>
                             ))}
                         </div>

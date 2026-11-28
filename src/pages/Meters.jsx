@@ -13,9 +13,11 @@ import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
+// Kennzeichnung des Anfangsstands nach einem Zählerwechsel (Notiz-Präfix, ohne Schemaänderung);
+// gemeinsam mit der Nebenkostenabrechnung (computeMeterConsumption)
+import { METER_SWAP_NOTE, isMeterSwapStart as isSwapStart } from '../lib/meterSwap';
 
-// Kennzeichnung des Anfangsstands nach einem Zählerwechsel (Notiz-Präfix, ohne Schemaänderung)
-const METER_SWAP_NOTE = 'Zählerwechsel:';
+const SWAP_PREFIX_HINT = `Die Notiz darf nicht mit „${METER_SWAP_NOTE}“ beginnen – damit werden nur Zählerwechsel gekennzeichnet. Für einen Zählerwechsel nutzen Sie bitte die Option „Zählerwechsel“.`;
 const READ_ONLY_HINT = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Zähler und Zählerstände können nur mit Schreibrecht „Zähler“ angelegt, geändert oder gelöscht werden.';
 const HISTORY_PAGE = 50;
 
@@ -42,7 +44,6 @@ const parseNumber = (v) => {
     const n = Number(s);
     return Number.isFinite(n) ? n : null;
 };
-const isSwapStart = (r) => typeof r?.note === 'string' && r.note.startsWith(METER_SWAP_NOTE);
 const sortReadingsDesc = (a, b) => b.reading_date.localeCompare(a.reading_date) || String(b.created_at || '').localeCompare(String(a.created_at || ''));
 const emptyReadingForm = () => ({ value: '', date: localToday(), note: '', isSwap: false, oldFinalValue: '', newMeterNumber: '' });
 
@@ -61,25 +62,9 @@ const readingWarnings = (readings, date, value, unit, excludeId) => {
     return warnings;
 };
 
-// Der Live-Trigger setzt meters.last_reading_* nur beim Einfügen (und nur vorwärts). Nach Korrektur
-// oder Löschung eines Stands wird der letzte Stand hier aus der Historie neu ermittelt; ein künftiger
-// Trigger, der das selbst erledigt, kommt zum gleichen Ergebnis.
-const recalcLastReading = async (meterId) => {
-    const { data, error } = await supabase
-        .from('meter_readings')
-        .select('reading_value, reading_date')
-        .eq('meter_id', meterId)
-        .order('reading_date', { ascending: false })
-        .order('created_at', { ascending: false, nullsFirst: false })
-        .limit(1);
-    if (error) return error;
-    const top = data?.[0] || null;
-    const { error: updateError } = await supabase
-        .from('meters')
-        .update({ last_reading_value: top ? top.reading_value : null, last_reading_date: top ? top.reading_date : null, updated_at: new Date().toISOString() })
-        .eq('id', meterId);
-    return updateError || null;
-};
+// meters.last_reading_* pflegt der Live-Trigger on_reading_change (AFTER INSERT OR DELETE OR UPDATE OF
+// meter_id, reading_value, reading_date → update_meter_last_reading): Er ermittelt den jüngsten Stand bei
+// Erfassen, Korrigieren und Löschen selbst neu. Die Seite lädt danach nur neu (fetchData).
 
 // onReading/onEdit/onDelete fehlen bei Freigabe nur zum Lesen (dann nur „Historie“)
 const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
@@ -273,7 +258,7 @@ const Meters = () => {
     const [loadingHistory, setLoadingHistory] = useState(false);
     const [historyBusy, setHistoryBusy] = useState(false);
     const [editingReadingId, setEditingReadingId] = useState(null);
-    const [readingEdit, setReadingEdit] = useState({ value: '', date: '', note: '' });
+    const [readingEdit, setReadingEdit] = useState({ value: '', date: '', note: '', isSwap: false });
 
     // --- DATA FETCHING ---
     const fetchData = React.useCallback(async () => {
@@ -538,6 +523,8 @@ const Meters = () => {
         }
         const newMeterNumber = isSwap ? String(readingForm.newMeterNumber || '').trim() : '';
         const note = String(readingForm.note || '').trim();
+        // Das Präfix kennzeichnet allein den Zählerwechsel; von Hand getippt würde ein normaler Stand zum Wechsel
+        if (!isSwap && isSwapStart({ note })) return alert(SWAP_PREFIX_HINT);
 
         try {
             setIsSaving(true);
@@ -672,7 +659,10 @@ const Meters = () => {
     const handleStartEditReading = (r) => {
         if (!canWriteMeters(detailMeter?.portfolio_id)) return alert(READ_ONLY_HINT);
         setEditingReadingId(r.id);
-        setReadingEdit({ value: r.reading_value != null ? String(r.reading_value) : '', date: r.reading_date || '', note: r.note || '' });
+        // Beim Wechsel-Anfangsstand ist das Präfix fest (nicht editierbar) und wird beim Speichern wieder vorangestellt
+        const isSwap = isSwapStart(r);
+        const note = isSwap ? r.note.slice(METER_SWAP_NOTE.length).trim() : (r.note || '');
+        setReadingEdit({ value: r.reading_value != null ? String(r.reading_value) : '', date: r.reading_date || '', note, isSwap });
     };
 
     const handleSaveReadingEdit = async (r) => {
@@ -683,10 +673,12 @@ const Meters = () => {
         if (value < 0) return alert('Der Zählerstand darf nicht negativ sein.');
         if (!isIsoDate(readingEdit.date)) return alert('Bitte ein gültiges Ablesedatum eingeben.');
         if (readingEdit.date > localToday()) return alert('Das Ablesedatum darf nicht in der Zukunft liegen.');
-        const note = String(readingEdit.note || '').trim();
+        const noteText = String(readingEdit.note || '').trim();
+        if (!readingEdit.isSwap && isSwapStart({ note: noteText })) return alert(SWAP_PREFIX_HINT);
+        const note = readingEdit.isSwap ? `${METER_SWAP_NOTE} ${noteText}`.trim() : noteText;
 
         const known = historyOlder ? [...readingsHistory, historyOlder] : readingsHistory;
-        const warnings = isSwapStart({ note }) ? [] : readingWarnings(known, readingEdit.date, value, detailMeter.unit || '', r.id);
+        const warnings = readingEdit.isSwap ? [] : readingWarnings(known, readingEdit.date, value, detailMeter.unit || '', r.id);
         if (known.some(x => x.id !== r.id && x.reading_date === readingEdit.date)) {
             warnings.unshift(`Für den ${fmtDate(readingEdit.date)} ist bereits ein weiterer Stand erfasst.`);
         }
@@ -701,8 +693,6 @@ const Meters = () => {
                 .select('id');
             if (error) throw error;
             if (!data?.length) return alert('Der Zählerstand konnte nicht geändert werden (keine Berechtigung).');
-            const recalcError = await recalcLastReading(detailMeter.id);
-            if (recalcError) alert(`Der Zählerstand wurde geändert, der „letzte Stand“ des Zählers konnte aber nicht aktualisiert werden: ${translateError(recalcError)}`);
             setEditingReadingId(null);
             await loadHistory(detailMeter.id, historyLimit);
             fetchData();
@@ -722,8 +712,6 @@ const Meters = () => {
             const { error, count } = await supabase.from('meter_readings').delete({ count: 'exact' }).eq('id', r.id);
             if (error) throw error;
             if (!count) return alert('Der Zählerstand konnte nicht gelöscht werden (keine Berechtigung).');
-            const recalcError = await recalcLastReading(detailMeter.id);
-            if (recalcError) alert(`Der Zählerstand wurde gelöscht, der „letzte Stand“ des Zählers konnte aber nicht aktualisiert werden: ${translateError(recalcError)}`);
             if (editingReadingId === r.id) setEditingReadingId(null);
             await loadHistory(detailMeter.id, historyLimit);
             fetchData();
@@ -846,9 +834,17 @@ const Meters = () => {
         {
             header: 'Notiz',
             accessor: 'note',
-            render: r => editingReadingId === r.id
-                ? <input type="text" style={inlineInputStyle} value={readingEdit.note} onChange={(e) => setReadingEdit({ ...readingEdit, note: e.target.value })} />
-                : (r.note || '-')
+            render: r => {
+                if (editingReadingId !== r.id) return r.note || '-';
+                const input = <input type="text" style={inlineInputStyle} value={readingEdit.note} onChange={(e) => setReadingEdit({ ...readingEdit, note: e.target.value })} />;
+                // Wechsel-Kennzeichnung bleibt fest stehen
+                return readingEdit.isSwap ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }} title="Kennzeichnung des Zählerwechsels (bleibt erhalten)">
+                        <span style={{ whiteSpace: 'nowrap', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{METER_SWAP_NOTE}</span>
+                        {input}
+                    </div>
+                ) : input;
+            }
         },
         // Bearbeiten/Löschen von Ständen nur mit Schreibrecht „Zähler“
         ...(!historyWritable ? [] : [{

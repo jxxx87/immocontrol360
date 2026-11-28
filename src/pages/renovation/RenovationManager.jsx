@@ -10,6 +10,7 @@ import Button from '../../components/ui/Button';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { translateError } from '../../lib/errorTranslator';
 import { fmtEUR, fmtEUR0, formatDateDE, assertWrite } from '../../components/renovation/renovationUtils';
@@ -32,9 +33,28 @@ const TAB_KEYS = ['projects', 'calculator', 'floorplan', 'tasks', 'settings'];
 const RenovationManager = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
     const navigate = useNavigate();
     const location = useLocation();
+
+    // Schreibrecht wie die RLS der Sanierungs-Tabellen (Freigabe „Immobilien“ oder „Investorportal“
+    // mit Schreibrecht); ohne Portfolio: aktueller Bereich. Die Datenbank prüft zusätzlich.
+    const canWriteReno = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId
+            ? perm.canWrite('immobilien', portfolioId) || perm.canWrite('investorportal', portfolioId)
+            : perm.canWrite('immobilien') || perm.canWrite('investorportal');
+    };
+    // Neues Projekt: Schreibrecht im gewählten Bereich (der Assistent bietet nur beschreibbare Objekte an)
+    const canCreateProject = canWriteReno(selectedPortfolioID || null);
+    // Neue Kalkulation / neuer Grundriss können ohne Objekt angelegt werden (gehören dem eigenen
+    // Konto); nicht anbieten, wenn das gewählte Portfolio nur lesend freigegeben ist
+    const canCreateDraft = !selectedPortfolioID || canWriteReno(selectedPortfolioID);
+    // Projekt löschen: Schreibrecht am Objekt des Projekts
+    const canDeleteProject = (p) => (p.property?.portfolio_id
+        ? canWriteReno(p.property.portfolio_id)
+        : !perm || perm.loadingPermissions);
 
     // Tab direkt aus der URL ableiten (Browser-Zurück und Links wechseln den Tab mit)
     const queryTab = new URLSearchParams(location.search).get('tab');
@@ -47,7 +67,6 @@ const RenovationManager = () => {
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState('all');
     const [openTasksByProject, setOpenTasksByProject] = useState({});
-    const [openTaskCount, setOpenTaskCount] = useState(0);
     const requestRef = useRef(0);
 
     // Offene Aufgaben je Projekt (Badge + Export). Sichtbarkeit entscheidet die RLS –
@@ -58,8 +77,14 @@ const RenovationManager = () => {
         const byProject = {};
         (data || []).forEach(t => { byProject[t.project_id] = (byProject[t.project_id] || 0) + 1; });
         setOpenTasksByProject(byProject);
-        setOpenTaskCount((data || []).length);
     };
+
+    // Badge am Reiter „Aufgaben“: nur Aufgaben der Projekte im gewählten Portfolio
+    // (die Projektliste ist bereits danach gefiltert; ohne Auswahl: alle sichtbaren Projekte)
+    const openTaskCount = useMemo(
+        () => projects.reduce((sum, p) => sum + (openTasksByProject[p.id] || 0), 0),
+        [projects, openTasksByProject]
+    );
 
     const fetchData = async () => {
         const reqId = ++requestRef.current;
@@ -149,6 +174,7 @@ const RenovationManager = () => {
 
     /* ─── Delete ──────────── */
     const handleDelete = async (p) => {
+        if (!canDeleteProject(p)) return;
         const transferred = Number(p.gik_transferred_amount || 0);
         let msg = `Projekt „${p.name}" endgültig löschen?\n\nAlle Gewerke, Untergewerke, Rechnungen, Meilensteine und Aufgaben dieses Projekts werden mitgelöscht.`;
         if (p.istBezahlt > 0) msg += `\nErfasste Rechnungen: ${fmtEUR(p.istBezahlt)}.`;
@@ -212,17 +238,19 @@ const RenovationManager = () => {
                             allData={enrichedProjects.map(toExportRow)}
                             totalRows={filtered.length}
                         />
-                        <Button icon={Plus} onClick={() => navigate('/renovation/new')}>
-                            {isMobile ? 'Neu' : 'Neues Projekt'}
-                        </Button>
+                        {canCreateProject && (
+                            <Button icon={Plus} onClick={() => navigate('/renovation/new')}>
+                                {isMobile ? 'Neu' : 'Neues Projekt'}
+                            </Button>
+                        )}
                     </div>
                 )}
-                {activeTab === 'calculator' && (
+                {activeTab === 'calculator' && canCreateDraft && (
                     <Button icon={Plus} onClick={() => navigate('/renovation/calculator/new')}>
                         {isMobile ? 'Neu' : 'Neue Kalkulation'}
                     </Button>
                 )}
-                {activeTab === 'floorplan' && (
+                {activeTab === 'floorplan' && canCreateDraft && (
                     <Button icon={Plus} onClick={() => navigate('/renovation/floorplan/new')}>
                         {isMobile ? 'Neu' : 'Neuer Grundriss'}
                     </Button>
@@ -303,7 +331,7 @@ const RenovationManager = () => {
                                     <HardHat size={40} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
                                     <p style={{ fontWeight: 600 }}>Keine Projekte gefunden</p>
                                     <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>
-                                        {projects.length > 0 ? 'Für die gewählten Filter gibt es keine Treffer.' : 'Erstelle dein erstes Sanierungsprojekt.'}
+                                        {projects.length > 0 ? 'Für die gewählten Filter gibt es keine Treffer.' : canCreateProject ? 'Erstelle dein erstes Sanierungsprojekt.' : 'In diesem Bereich haben Sie nur Leserecht.'}
                                     </p>
                                 </div>
                             </Card>
@@ -361,13 +389,15 @@ const RenovationManager = () => {
                                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Fortschritt</div>
                                                     <div style={{ fontSize: '0.95rem', fontWeight: 700, color: p.progress === 100 ? '#16a34a' : '#0ea5e9' }}>{p.progress}%</div>
                                                 </div>
-                                                <button
-                                                    onClick={e => { e.stopPropagation(); handleDelete(p); }}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '6px' }}
-                                                    title="Löschen"
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
+                                                {canDeleteProject(p) && (
+                                                    <button
+                                                        onClick={e => { e.stopPropagation(); handleDelete(p); }}
+                                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '6px' }}
+                                                        title="Löschen"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
 

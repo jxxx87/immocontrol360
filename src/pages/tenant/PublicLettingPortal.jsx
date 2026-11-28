@@ -23,10 +23,6 @@ const DOC_CONFIG = {
 };
 const DOC_ORDER = ['schufa', 'income_proof', 'id_copy', 'previous_landlord'];
 
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-  !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
 const isDuplicateUpload = (error) =>
   !!error && (String(error.statusCode) === '409' || /exist|duplicate/i.test(error.message || ''));
 
@@ -66,9 +62,9 @@ const PublicLettingPortal = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [newApplicantId, setNewApplicantId] = useState(null);
-  // Upload-Pfad: 'secure' = <process_id>/<applicant_id>/... (neue Datenbank), 'legacy' = <applicant_id>/...
-  const [uploadMode, setUploadMode] = useState('secure');
   const [failedDocs, setFailedDocs] = useState([]);
+  // Eingangsbestätigung (mit persönlichem Buchungslink) konnte nicht versendet werden
+  const [confirmationMailFailed, setConfirmationMailFailed] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
 
   // Form State
@@ -207,10 +203,11 @@ const PublicLettingPortal = () => {
     setStep(prev => prev - 1);
   };
 
-  // Unterlagen hochladen; liefert die Dokumenttypen, deren Upload fehlgeschlagen ist
-  const uploadDocuments = async (applicantId, mode, docs) => {
+  // Unterlagen hochladen; liefert die Dokumenttypen, deren Upload fehlgeschlagen ist.
+  // Pfad <process_id>/<applicant_id>/<typ>.<ext> (Storage-Regel applicant_document_upload_allowed)
+  const uploadDocuments = async (applicantId, docs) => {
     const failed = [];
-    const folder = mode === 'secure' ? `${processInfo.id}/${applicantId}` : `${applicantId}`;
+    const folder = `${processInfo.id}/${applicantId}`;
     for (const [docType, fileObj] of Object.entries(docs)) {
       if (!fileObj) continue;
       const mime = detectMime(fileObj);
@@ -242,10 +239,12 @@ const PublicLettingPortal = () => {
   // (die Unterlagen bleiben im geschützten Speicher und sind im Vermietungscockpit abrufbar).
   const syncDocuments = async (applicantId) => {
     try {
-      const { error: syncErr } = await supabase.functions.invoke('sync-applicant-files', {
+      const { data: syncData, error: syncErr } = await supabase.functions.invoke('sync-applicant-files', {
         body: { applicantId, applicant_id: applicantId, process_token: token }
       });
       if (syncErr) console.warn('Cloud sync of applicant documents failed:', syncErr);
+      // Fachliche Fehler/Teilergebnisse kommen mit success: false
+      else if (syncData?.success === false) console.warn('Cloud sync of applicant documents incomplete:', syncData.error || syncData.message || syncData);
     } catch (syncErr) {
       console.warn('Cloud sync of applicant documents failed:', syncErr);
     }
@@ -313,61 +312,45 @@ const PublicLettingPortal = () => {
         has_pets: formData.has_pets,
       };
 
-      // 1. Bewerbung über die geprüfte Datenbank-Funktion anlegen
-      let applicantId = null;
-      let mode = 'secure';
-      const { data: rpcId, error: rpcErr, status: rpcStatus } = await supabase.rpc('submit_rental_application', {
+      // 1. Bewerbung über die geprüfte Datenbank-Funktion anlegen (nicht angemeldete
+      //    Besucher haben keine Tabellenrechte)
+      const { data: applicantId, error: rpcErr } = await supabase.rpc('submit_rental_application', {
         p_token: token,
         p_application: application
       });
-
-      if (rpcErr && !isMissingRpc(rpcErr, rpcStatus)) throw rpcErr;
-
-      if (!rpcErr) {
-        applicantId = rpcId;
-      } else {
-        // Bisheriger Weg, solange die Datenbank-Funktion noch nicht eingespielt ist
-        mode = 'legacy';
-        const { data: appData, error: appErr } = await supabase
-          .from('rental_applicants')
-          .insert([{
-            process_id: processInfo.id,
-            user_id: processInfo.user_id, // Landlord's user_id (nur alte Datenbank-Version liefert sie)
-            status: 'applied',
-            ...application
-          }])
-          .select('id')
-          .single();
-
-        if (appErr) throw appErr;
-        applicantId = appData.id;
-      }
+      if (rpcErr) throw rpcErr;
 
       if (!applicantId) throw new Error('Die Bewerbung konnte nicht gespeichert werden.');
       setNewApplicantId(applicantId);
-      setUploadMode(mode);
 
       // 2. Unterlagen hochladen (Fehler werden gesammelt und dem Bewerber angezeigt)
-      const failed = await uploadDocuments(applicantId, mode, files);
+      const failed = await uploadDocuments(applicantId, files);
       setFailedDocs(failed);
 
       // 3. Übertragung in die Cloud des Vermieters
       await syncDocuments(applicantId);
 
-      // 4. Eingangsbestätigung (Empfänger ermittelt die Function aus der Datenbank)
+      // 4. Eingangsbestätigung (Empfänger ermittelt die Function aus der Datenbank). Fachliche
+      //    Fehler (z. B. kein Postfach eingerichtet) meldet sie mit HTTP 200 und success: false.
+      let mailSent = false;
       try {
-        const { error: emailErr } = await supabase.functions.invoke('send-letting-email', {
+        const { data: emailData, error: emailErr } = await supabase.functions.invoke('send-letting-email', {
           body: {
             action: 'application_received',
             applicantId,
             applicant_id: applicantId,
-            process_token: token
+            process_token: token,
+            // Nur für den Mailtext: keine Erfolgsmeldung für nicht übertragene Unterlagen
+            failed_documents: failed
           }
         });
         if (emailErr) console.error('Failed to trigger confirmation email:', emailErr);
+        else if (emailData?.success === false) console.warn('Confirmation email not sent:', emailData.error || emailData.warning);
+        else mailSent = true;
       } catch (emailErr) {
         console.error('Failed to trigger confirmation email:', emailErr);
       }
+      setConfirmationMailFailed(!mailSent);
 
       setSubmitSuccess(true);
     } catch (err) {
@@ -384,7 +367,7 @@ const PublicLettingPortal = () => {
       setIsRetrying(true);
       const docs = {};
       failedDocs.forEach(docType => { docs[docType] = files[docType]; });
-      const stillFailed = await uploadDocuments(newApplicantId, uploadMode, docs);
+      const stillFailed = await uploadDocuments(newApplicantId, docs);
       setFailedDocs(stillFailed);
       if (stillFailed.length < failedDocs.length) await syncDocuments(newApplicantId);
       if (stillFailed.length === 0) alert('Alle Unterlagen wurden übertragen.');
@@ -449,6 +432,15 @@ const PublicLettingPortal = () => {
             </div>
           )}
 
+          {confirmationMailFailed && (
+            <div style={{ textAlign: 'left', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', borderRadius: 'var(--radius-md)', padding: '14px 16px', marginBottom: '24px', fontSize: '0.85rem', lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 700, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <AlertCircle size={16} /> Keine Eingangsbestätigung per E-Mail
+              </div>
+              Die Bestätigungs-E-Mail mit Ihrem persönlichen Buchungslink konnte nicht versendet werden. Bitte buchen Sie Ihren Besichtigungstermin direkt über den Button unten oder speichern Sie die nächste Seite als Lesezeichen.
+            </div>
+          )}
+
           <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '24px' }}>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
               Sie können jetzt direkt online Ihren Wunsch-Besichtigungstermin auswählen:
@@ -472,7 +464,7 @@ const PublicLettingPortal = () => {
       <div style={{ maxWidth: '700px', margin: '0 auto' }}>
         {/* Exposé / Header */}
         <Card style={{ padding: '24px', marginBottom: '24px', background: 'linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%)', color: '#ffffff' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', tracking: '0.1em', fontWeight: 700, color: 'rgba(255, 255, 255, 0.9)' }}>Bewerbungsportal</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, color: 'rgba(255, 255, 255, 0.9)' }}>Bewerbungsportal</span>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#ffffff', marginTop: '6px' }}>{processInfo.listing_title}</h1>
           <p style={{ fontSize: '0.9rem', color: 'rgba(255, 255, 255, 0.85)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <MapPin size={14} /> {processInfo.street} {processInfo.house_number}, {processInfo.zip} {processInfo.city}

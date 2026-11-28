@@ -734,6 +734,68 @@ describe('computeMeterConsumption', () => {
         });
         expect(res.W1.value).toBe(0.3);
     });
+
+    // Zählerwechsel: Endstand alt + Anfangsstand neu (Notiz „Zählerwechsel:“) am selben Tag
+    describe('Zählerwechsel im Zeitraum', () => {
+        const m = [meters[0]];
+        const calc = (r) => computeMeterConsumption({ meters: m, readings: r, periodStart: P_START, periodEnd: P_END, meterType: 'heat' });
+        const rd = (id, date, value, extra = {}) => ({ id, meter_id: 'm1', reading_date: date, reading_value: value, ...extra });
+        const swapAt = (date, oldEnd, newStart, oldId = 'old', newId = 'new') => [
+            rd(oldId, date, oldEnd, { note: 'Endstand alter Zähler Nr. H-1', created_at: `${date}T10:00:00+00:00` }),
+            rd(newId, date, newStart, { note: 'Zählerwechsel: neuer Zähler Nr. H-1b', created_at: `${date}T10:00:01+00:00` })
+        ];
+
+        it('alter Zähler hoch, neuer ab 0: Teilstrecken werden summiert', () => {
+            // (1500 − 1000) + (400 − 0) = 900
+            const res = calc([rd('a', P_START, 1000), ...swapAt('2025-06-30', 1500, 0), rd('z', P_END, 400)]);
+            expect(res.W1).toMatchObject({ complete: true, value: 900 });
+            expect(res.W1.details[0].swaps).toEqual([{ date: '2025-06-30', oldEnd: 1500, newStart: 0 }]);
+        });
+
+        it('positives Ergebnis über den Wechsel hinweg wird nicht still falsch übernommen', () => {
+            // (300 − 100) + (250 − 0) = 450 (ohne Wechsel-Logik: 250 − 100 = 150)
+            expect(calc([rd('a', P_START, 100), ...swapAt('2025-06-30', 300, 0), rd('z', P_END, 250)]).W1).toMatchObject({ complete: true, value: 450 });
+        });
+
+        it('Wechsel am letzten Tag: unabhängig von der Reihenfolge (ids) der Stände', () => {
+            // (600 − 100) + (0 − 0) = 500
+            const a = calc([rd('a', P_START, 100), ...swapAt(P_END, 600, 0, 'zz-old', 'aa-new')]);
+            const b = calc([...swapAt(P_END, 600, 0, 'aa-old', 'zz-new').reverse(), rd('a', P_START, 100)]);
+            expect(a.W1).toMatchObject({ complete: true, value: 500 });
+            expect(b.W1).toMatchObject({ complete: true, value: 500 });
+        });
+
+        it('Wechsel am ersten Tag: Anfangsstand ist der des neuen Zählers', () => {
+            // 400 − 50 = 350 (nicht 400 − 20)
+            expect(calc([...swapAt(P_START, 20, 50), rd('z', P_END, 400)]).W1).toMatchObject({ complete: true, value: 350 });
+        });
+
+        it('Endstand des alten Zählers fehlt -> unvollständig', () => {
+            const res = calc([
+                rd('a', P_START, 100),
+                rd('new', '2025-06-30', 0, { note: 'Zählerwechsel: neuer Zähler', created_at: '2025-06-30T10:00:00+00:00' }),
+                rd('z', P_END, 250)
+            ]);
+            expect(res.W1.complete).toBe(false);
+            expect(res.W1.details[0].error).toBe('Endstand des alten Zählers beim Zählerwechsel am 30.06.2025 fehlt');
+        });
+
+        it('Endstand alt nachträglich erfasst (jünger als der Anfangsstand neu) zählt trotzdem als Endstand alt', () => {
+            const res = calc([
+                rd('a', P_START, 100),
+                rd('new', '2025-06-30', 0, { note: 'Zählerwechsel: neuer Zähler', created_at: '2025-06-30T10:00:00+00:00' }),
+                rd('old', '2025-06-30', 300, { created_at: '2025-07-15T08:00:00+00:00' }),
+                rd('z', P_END, 250)
+            ]);
+            expect(res.W1).toMatchObject({ complete: true, value: 450 });
+        });
+
+        it('Wechsel außerhalb des Zeitraums bleibt ohne Einfluss', () => {
+            const res = calc([...swapAt('2024-12-20', 900, 0), rd('a', P_START, 10), rd('z', P_END, 110)]);
+            expect(res.W1).toMatchObject({ complete: true, value: 100 });
+            expect(res.W1.details[0].swaps).toBeUndefined();
+        });
+    });
 });
 
 // ── Gesamtberechnung ─────────────────────────────────────────────────────────

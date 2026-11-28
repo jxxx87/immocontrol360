@@ -19,7 +19,8 @@ const TenantDocuments = () => {
     useEffect(() => {
         let cancelled = false;
         const fetchDocuments = async () => {
-            if (!propertyId) {
+            // Persönliche Dokumente brauchen nur die Mieter-ID – nicht abbrechen, wenn die Rolle kein Objekt hat
+            if (!propertyId && !tenantId) {
                 setLoading(false);
                 return;
             }
@@ -28,12 +29,14 @@ const TenantDocuments = () => {
                 // Allgemein: Dokumente des Objekts ohne Mieterbezug (wie die Freigabe in der
                 // Datenbank: tenant_id IS NULL). Persönlich: genau die eigenen (tenant_id),
                 // nicht nach Einheit – sonst fehlen Dokumente nach Umzug/ohne Einheit.
-                const generalPromise = supabase
-                    .from('documents')
-                    .select('*')
-                    .eq('property_id', propertyId)
-                    .is('tenant_id', null)
-                    .order('created_at', { ascending: false });
+                const generalPromise = propertyId
+                    ? supabase
+                        .from('documents')
+                        .select('*')
+                        .eq('property_id', propertyId)
+                        .is('tenant_id', null)
+                        .order('created_at', { ascending: false })
+                    : Promise.resolve({ data: [], error: null });
 
                 const personalPromise = tenantId
                     ? supabase
@@ -192,7 +195,9 @@ const TenantDocuments = () => {
                     <Folder size={48} color="var(--border-color)" />
                     <p style={{ color: 'var(--text-secondary)', marginTop: '12px' }}>
                         {activeTab === 'general'
-                            ? 'Keine allgemeinen Dokumente vorhanden.'
+                            ? (propertyId
+                                ? 'Keine allgemeinen Dokumente vorhanden.'
+                                : 'Ihrem Konto ist noch kein Objekt zugeordnet. Allgemeine Hausdokumente erscheinen hier, sobald Ihr Vermieter die Zuordnung ergänzt hat.')
                             : 'Keine persönlichen Dokumente vorhanden.'
                         }
                     </p>

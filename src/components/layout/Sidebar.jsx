@@ -117,12 +117,12 @@ const Sidebar = ({ mobileOpen, onClose }) => {
             navKey: 'mieterportal',
             subItems: [
                 { path: '/letting', label: 'Neuvermietung' },
-                { path: '/tenant-management', label: 'Mieter-Verwaltung' },
-                { path: '/tenant-management?tab=tenant-data', label: 'Mieterdaten' },
+                { path: '/tenant-management', label: 'Mieter-Verwaltung', category: 'mietverhaeltnisse' },
+                { path: '/tenant-management?tab=tenant-data', label: 'Mieterdaten', category: 'mietverhaeltnisse' },
                 { path: '/ticket-board', label: 'Ticket-Board' },
                 { path: '/announcements', label: 'Aushänge' },
                 { path: '/investor-messages', label: 'Nachrichten' },
-                { path: '/documents', label: 'Dokumente', category: 'immobilien' },
+                { path: '/documents', label: 'Dokumente', category: ['immobilien', 'mieterportal'] },
                 { path: '/object-calendar', label: 'Objektkalender', category: 'immobilien' }
             ]
         },
@@ -134,16 +134,20 @@ const Sidebar = ({ mobileOpen, onClose }) => {
                 { path: '/investor-portal', label: 'Cockpit' },
                 { path: '/investor-portal?tab=deals', label: 'Neue Deals' },
                 { path: '/investor-portal?tab=calculator', label: 'Rechner' },
-                { path: '/loans', label: 'Finanzierungen', category: 'finanzen' },
-                { path: '/renovation', label: 'Sanierungsmanager', category: 'immobilien' }
+                { path: '/loans', label: 'Finanzierungen', category: ['finanzen', 'investorportal'] },
+                { path: '/renovation', label: 'Sanierungsmanager', category: ['immobilien', 'investorportal'] }
             ]
         },
         { path: '/settings', label: 'Einstellungen', icon: Settings },
         { path: '/cloud-documents', label: 'Dokumente', icon: Folder, navKey: 'cloud-documents' }
     ];
 
-    const { hasFeature, checkFeatureAccess, paywallReason, subscription } = useSubscription();
+    const { hasFeature, checkFeatureAccess, paywallReason, subscription, subscriptionLoading } = useSubscription();
     const { canRead } = usePermission();
+
+    // Leserecht für eine Kategorie bzw. – bei einer Liste – für mindestens eine davon
+    // (gleiche Regel wie InvestorRoute in ProtectedRoute.jsx und die Routen in App.jsx)
+    const canReadAny = (category) => (Array.isArray(category) ? category : [category]).some(c => canRead(c));
 
     const mapNavKeyToCategory = (navKey) => {
         const mapping = {
@@ -164,27 +168,27 @@ const Sidebar = ({ mobileOpen, onClose }) => {
     const investorNavItems = allInvestorNavItems.filter(item => {
         if (item.type === 'divider') return true;
         if (!item.navKey) return true; // always show items without navKey (e.g. Einstellungen)
-        if (!isVisible(item.navKey)) return false;
+        return isVisible(item.navKey);
+    }).map(item => {
+        if (!item.navKey) return item;
 
         // Check portfolio share permissions
         const category = mapNavKeyToCategory(item.navKey);
-        if (category !== 'dashboard' && !canRead(category)) {
-            return false;
-        }
+        const groupReadable = category === 'dashboard' || canRead(category);
+        if (!item.subItems) return groupReadable ? item : null;
 
-        return true;
-    }).map(item => {
-        // Untermenüpunkte mit eigener Kategorie (z. B. Finanzierungen -> finanzen) zusätzlich prüfen
-        if (!item.subItems) return item;
-        return { ...item, subItems: item.subItems.filter(sub => !sub.category || canRead(sub.category)) };
-    }).filter(item => !item.subItems || item.subItems.length > 0);
+        // Gruppen: Unterpunkte ohne eigene Kategorie verlangen das Leserecht der Gruppe, Unterpunkte mit
+        // eigener Kategorie (z. B. Finanzierungen) nur ihr eigenes – wie ihre Route in App.jsx.
+        // Die Gruppe erscheint, sobald mindestens ein Unterpunkt übrig bleibt.
+        return { ...item, subItems: item.subItems.filter(sub => (sub.category ? canReadAny(sub.category) : groupReadable)) };
+    }).filter(item => item && (!item.subItems || item.subItems.length > 0));
 
     // ── TENANT NAV ITEMS ────────────────────────────────────────────
     const tenantNavItems = [
         { path: '/tenant', label: 'Dashboard', icon: Home },
         { path: '/tenant/tickets', label: 'Tickets', icon: TicketCheck },
         { path: '/tenant/messages', label: 'Nachrichten', icon: MessageSquare },
-        { path: '/tenant/announcements', label: 'Aushang', icon: Pin },
+        { path: '/tenant/announcements', label: 'Aushänge', icon: Pin },
         { path: '/tenant/documents', label: 'Dokumente', icon: Files },
         { path: '/object-calendar', label: 'Objektkalender', icon: CalendarDays },
         { path: '/tenant/stammdaten', label: 'Stammdaten', icon: User },
@@ -322,7 +326,8 @@ const Sidebar = ({ mobileOpen, onClose }) => {
 
                         // Tenants never see paywalls — their portal access is free.
                         // Einstellungen (inkl. Abo-Verwaltung) bleiben immer erreichbar.
-                        const isLocked = (userRole === 'tenant' || item.path === '/settings')
+                        // Solange das Abo noch lädt, nichts sperren (sonst kurz Schlösser und Paywall beim Klick).
+                        const isLocked = (userRole === 'tenant' || item.path === '/settings' || subscriptionLoading)
                             ? false
                             : (!hasFeature(featureKey) || isTrialExpired);
 

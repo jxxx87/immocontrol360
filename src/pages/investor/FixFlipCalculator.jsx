@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
-import { Save, Info, ChevronLeft, ChevronRight, Calculator, FileText, Trash2, Loader2 } from 'lucide-react';
+import { Save, Info, ChevronLeft, ChevronRight, Calculator, FileText, Trash2, Loader2, Lock } from 'lucide-react';
 import { generateClientPdf } from '../../lib/pdfGenerator';
 import { usePdfTemplate } from '../../lib/usePdfTemplate';
 import { useNavigate } from 'react-router-dom';
@@ -9,162 +9,12 @@ import { useViewMode } from '../../context/ViewModeContext';
 import { supabase } from '../../lib/supabase';
 import { translateError } from '../../lib/errorTranslator';
 import { TRANSFER_TAX_RATES, TRANSFER_TAX_RATES_AS_OF } from './transferTaxRates';
+// Rechenlogik gemeinsam mit dem Deal-Ranking im Investorportal
+import { buildFixFlipInputs, sanitizeInitialData, computeFixFlip } from './fixFlipCalc';
 
 const formatCurrency = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(val);
 const formatCurrency2 = (val) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val);
 const formatPercent = (val) => new Intl.NumberFormat('de-DE', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val / 100);
-
-const DEFAULT_INPUTS = {
-    purchasePrice: 0,
-    size: 0,
-    notaryPercent: 2,
-    brokerPercent: 3.6,
-    taxPercent: 5,
-    financing: 0,
-    interestRate: 5.5,
-    duration: 8,
-    houseMoney: 0,
-    electricity: 0,
-    heating: 0,
-    renovation: 0,
-    kitchen: 0,
-    staging: 0,
-    misc: 0,
-    priceLowSqm: 3500,
-    priceHighSqm: 3900,
-    // Szenario: Verkauf als Kapitalanlage
-    coldRentIst: 0,
-    coldRentSoll: 0,
-    targetYield: 5,
-    name: 'Neuer Fix & Flip Deal',
-    address: ''
-};
-
-const NUMERIC_FIELDS = Object.keys(DEFAULT_INPUTS).filter(k => typeof DEFAULT_INPUTS[k] === 'number');
-
-/**
- * Geladene Deal-Daten bereinigen: Zahlenfelder als Zahl übernehmen (leere/ungültige
- * Werte → Standardwert), damit z. B. ein leerer Kaufpreis ('') nicht als Text in die
- * Summen eingeht.
- */
-const sanitizeInitialData = (data) => {
-    if (!data) return {};
-    const out = { ...data };
-    for (const k of NUMERIC_FIELDS) {
-        if (k in out) {
-            const n = parseFloat(out[k]);
-            out[k] = Number.isFinite(n) ? Math.max(0, n) : DEFAULT_INPUTS[k];
-        }
-    }
-    if ('name' in out) out.name = out.name == null ? DEFAULT_INPUTS.name : String(out.name);
-    if ('address' in out) out.address = out.address == null ? '' : String(out.address);
-    return out;
-};
-
-/* ─── Berechnung (rein, ohne State) ─── */
-const computeFixFlip = (inputs) => {
-    const {
-        purchasePrice, size, notaryPercent, brokerPercent, taxPercent,
-        financing, interestRate, duration,
-        houseMoney, electricity, heating,
-        renovation, kitchen, staging, misc,
-        priceLowSqm, priceHighSqm
-    } = inputs;
-
-    // 1. Kaufnebenkosten (ohne Finanzierung)
-    const notary = purchasePrice * (notaryPercent / 100);
-    const broker = purchasePrice * (brokerPercent / 100);
-    const tax = purchasePrice * (taxPercent / 100);
-    const sideCostsTotal = notary + broker + tax;
-
-    // Gesamtsumme Ankauf (Kaufpreis + Nebenkosten, OHNE Finanzierung)
-    const acquisitionTotal = purchasePrice + sideCostsTotal;
-
-    // Finanzierungskosten (Zins auf Finanzierungsbetrag)
-    const financingCosts = (financing * (interestRate / 100) / 12) * duration;
-
-    // 2. Holding Costs
-    const holdingTotal = (houseMoney + electricity + heating) * duration;
-
-    // 3. Aufbereitung
-    const prepTotal = renovation + kitchen + staging + misc;
-
-    // 4. Gesamtinvestment (GIK)
-    const totalInvest = acquisitionTotal + financingCosts + holdingTotal + prepTotal;
-
-    // 5. Verkauf
-    const sellPriceLow = size * priceLowSqm;
-    const sellPriceHigh = size * priceHighSqm;
-
-    const profitLow = sellPriceLow - totalInvest;
-    const profitHigh = sellPriceHigh - totalInvest;
-
-    const marginLow = sellPriceLow > 0 ? (profitLow / sellPriceLow) * 100 : 0;
-    const marginHigh = sellPriceHigh > 0 ? (profitHigh / sellPriceHigh) * 100 : 0;
-
-    const breakEven = size > 0 ? totalInvest / size : 0;
-
-    // 6. Szenario: Verkauf als Kapitalanlage
-    const { coldRentIst, coldRentSoll, targetYield } = inputs;
-    const yieldDecimal = targetYield > 0 ? targetYield / 100 : 0;
-
-    const kapSellIst = yieldDecimal > 0 ? (coldRentIst * 12) / yieldDecimal : 0;
-    const kapSellSoll = yieldDecimal > 0 ? (coldRentSoll * 12) / yieldDecimal : 0;
-
-    const kapSqmIst = size > 0 ? kapSellIst / size : 0;
-    const kapSqmSoll = size > 0 ? kapSellSoll / size : 0;
-
-    const kapProfitIst = kapSellIst - totalInvest;
-    const kapProfitSoll = kapSellSoll - totalInvest;
-
-    const kapMarginIst = kapSellIst > 0 ? (kapProfitIst / kapSellIst) * 100 : 0;
-    const kapMarginSoll = kapSellSoll > 0 ? (kapProfitSoll / kapSellSoll) * 100 : 0;
-
-    const results = {
-        acquisitionTotal,
-        sideCostsTotal,
-        notary, broker, tax, financingCosts,
-        holdingTotal,
-        prepTotal,
-        totalInvest,
-        sellPriceLow, sellPriceHigh,
-        profitLow, profitHigh,
-        marginLow, marginHigh,
-        breakEven,
-        // Kapitalanlage
-        kapSellIst, kapSellSoll,
-        kapSqmIst, kapSqmSoll,
-        kapProfitIst, kapProfitSoll,
-        kapMarginIst, kapMarginSoll
-    };
-
-    // Ankaufs-Matrix (Finanzierungsbetrag bleibt unverändert; GIK wie im Hauptergebnis inkl. Finanzierungskosten)
-    const steps = [5, 10, 15, 20, 25, 30];
-    const table = steps.map(discount => {
-        const discountedPrice = purchasePrice * (1 - discount / 100);
-        const d_notary = discountedPrice * (notaryPercent / 100);
-        const d_broker = discountedPrice * (brokerPercent / 100);
-        const d_tax = discountedPrice * (taxPercent / 100);
-
-        // GIK inkl. Finanzierungskosten – identisch zur Berechnung von „Gesamtinvestment (GIK)"
-        const d_totalInvest = discountedPrice + d_notary + d_broker + d_tax + financingCosts + holdingTotal + prepTotal;
-        const d_profitLow = sellPriceLow - d_totalInvest;
-        const d_marginLow = sellPriceLow > 0 ? (d_profitLow / sellPriceLow) * 100 : 0;
-
-        const d_profitHigh = sellPriceHigh - d_totalInvest;
-        const d_marginHigh = sellPriceHigh > 0 ? (d_profitHigh / sellPriceHigh) * 100 : 0;
-
-        return {
-            discount,
-            gik: d_totalInvest,
-            profitLow: d_profitLow,
-            marginLow: d_marginLow,
-            profitHigh: d_profitHigh,
-            marginHigh: d_marginHigh
-        };
-    });
-    return { results, negotiationTable: table };
-};
 
 /* ─── Bewertung: monoton – mehr Marge und mehr Gewinn verschlechtern die Einstufung nie ─── */
 const getBadge = (margin, profit) => {
@@ -173,18 +23,32 @@ const getBadge = (margin, profit) => {
     return <span style={{ backgroundColor: 'var(--danger-color)', color: '#fff', padding: '4px 8px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700 }}>RISIKO</span>;
 };
 
-const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, dealId }) => {
+// onLeave(pfad): Navigation ohne Rückfrage (nach dem Speichern bzw. nach eigener Bestätigung);
+// onDirtyChange(bool): meldet ungespeicherte Eingaben an das Investorportal (Rückfrage beim Verlassen);
+// readOnly: Lesemodus ohne Schreibrecht – rechnen ja, speichern/löschen nein
+const FixFlipCalculator = ({ initialData, onSave, onBack, onLeave, onDelete, onDirtyChange, readOnly = false, isSaving, dealId }) => {
     const navigate = useNavigate();
+    const leave = (to) => (onLeave ? onLeave(to) : navigate(to));
 
     // Geladene Deal-Daten nur übernehmen, wenn sich ihr INHALT ändert (neuer/anderer Deal) –
     // nicht bei jedem Neu-Rendern des Elternteils mit einem neu erzeugten, gleichen Objekt.
     const initialKey = JSON.stringify(initialData || null);
-    const [inputs, setInputs] = useState(() => ({ ...DEFAULT_INPUTS, ...sanitizeInitialData(initialData) }));
+    const [inputs, setInputs] = useState(() => buildFixFlipInputs(initialData));
+    // Zuletzt geladener bzw. gespeicherter Stand (Vergleich für „ungespeicherte Eingaben“)
+    const [savedKey, setSavedKey] = useState(() => JSON.stringify(buildFixFlipInputs(initialData)));
     const [appliedKey, setAppliedKey] = useState(initialKey);
     if (appliedKey !== initialKey) {
         setAppliedKey(initialKey);
-        if (initialData) setInputs(prev => ({ ...prev, ...sanitizeInitialData(initialData) }));
+        if (initialData) {
+            const next = { ...inputs, ...sanitizeInitialData(initialData) };
+            setInputs(next);
+            setSavedKey(JSON.stringify(next));
+        }
     }
+    const dirty = !readOnly && JSON.stringify(inputs) !== savedKey;
+    useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+    // Beim Aushängen (Tab-/Seitenwechsel) gibt es nichts mehr zu schützen
+    useEffect(() => () => { onDirtyChange?.(false); }, [onDirtyChange]);
 
     const [showTaxInfo, setShowTaxInfo] = useState(false);
     const [flipStep, setFlipStep] = useState(0);
@@ -231,15 +95,18 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, de
             );
             if (!proceed) return;
             const ret = encodeURIComponent('/investor-portal?tab=deals');
-            navigate(`/renovation/calculator/new?dealName=${currentName}&returnTo=${ret}`);
+            // Verlassen wurde eben bestätigt – keine zweite Rückfrage
+            leave(`/renovation/calculator/new?dealName=${currentName}&returnTo=${ret}`);
             return;
         }
 
         setOpeningRenovation(true);
         try {
             if (onSave) {
+                const savedInputsKey = JSON.stringify(inputs);
                 const saved = await onSave(inputs, results, { skipNavigate: true });
                 if (saved === false) return;
+                setSavedKey(savedInputsKey);
             }
             const ret = encodeURIComponent(`/investor-portal?tab=audit&dealId=${dealId}`);
             const { data, error } = await supabase
@@ -248,10 +115,11 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, de
                 .contains('building_config', { dealId })
                 .limit(1);
             if (error) throw error;
+            // Gerade gespeichert – ohne erneute Rückfrage wechseln
             if (data && data.length > 0) {
-                navigate(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
+                leave(`/renovation/calculator/${data[0].id}?returnTo=${ret}`);
             } else {
-                navigate(`/renovation/calculator/new?dealId=${dealId}&dealName=${currentName}&returnTo=${ret}`);
+                leave(`/renovation/calculator/new?dealId=${dealId}&dealName=${currentName}&returnTo=${ret}`);
             }
         } catch (err) {
             console.error('Open renovation calculator error:', err);
@@ -267,10 +135,22 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, de
         try {
             const deleted = await onDelete();
             // Nur wenn das Elternteil das Löschen ausdrücklich bestätigt, zur Übersicht wechseln
-            if (deleted === true && onBack) onBack();
+            // (der Deal ist weg – keine Rückfrage wegen ungespeicherter Eingaben)
+            if (deleted === true) {
+                if (onLeave) onLeave('/investor-portal?tab=deals');
+                else if (onBack) onBack();
+            }
         } finally {
             setDeleting(false);
         }
+    };
+
+    // Speichern; den Vergleichsstand nur bei Erfolg auf die gespeicherten Eingaben setzen
+    const handleSave = async () => {
+        if (!onSave || readOnly) return;
+        const savedInputsKey = JSON.stringify(inputs);
+        const saved = await onSave(inputs, results);
+        if (saved === true) setSavedKey(savedInputsKey);
     };
 
     // Print as PDF
@@ -345,14 +225,20 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, de
                 <Button variant="secondary" icon={FileText} onClick={handlePrint}>
                     PDF
                 </Button>
-                {onDelete && (
+                {onDelete && !readOnly && (
                     <Button variant="secondary" icon={deleting ? Loader2 : Trash2} onClick={handleDelete} disabled={deleting || isSaving} title="Deal löschen">
                         Löschen
                     </Button>
                 )}
-                <Button icon={Save} onClick={() => onSave(inputs, results)} disabled={isSaving}>
-                    {isSaving ? 'Speichert...' : 'Aktualisieren'}
-                </Button>
+                {readOnly ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)' }} title="Für dieses Portfolio haben Sie im Investorportal kein Schreibrecht – Eingaben werden nicht gespeichert.">
+                        <Lock size={14} /> Nur Lesezugriff
+                    </span>
+                ) : (
+                    <Button icon={Save} onClick={handleSave} disabled={isSaving}>
+                        {isSaving ? 'Speichert...' : 'Aktualisieren'}
+                    </Button>
+                )}
             </div>
 
             {/* Mobile Stepper Progress */}
@@ -465,7 +351,7 @@ const FixFlipCalculator = ({ initialData, onSave, onBack, onDelete, isSaving, de
                                 label={
                                     <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                         Sanierung/Renovierung
-                                        {openingRenovation ? (
+                                        {readOnly ? null : openingRenovation ? (
                                             <Loader2 size={15} className="animate-spin" style={{ color: '#f97316', flexShrink: 0 }} />
                                         ) : (
                                             <Calculator

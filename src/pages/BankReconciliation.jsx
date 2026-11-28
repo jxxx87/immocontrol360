@@ -10,8 +10,10 @@ import {
     Trash2, HelpCircle, Save, Settings, FlaskConical, RotateCcw, TriangleAlert, Info
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { filterExpensesByPortfolio } from '../lib/rentArrears';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
+import { useViewMode } from '../context/ViewModeContext';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEMO-MODUS
@@ -435,7 +437,8 @@ const TOAST_COLORS = { info: '#38bdf8', success: '#4ade80', error: '#f87171', le
 
 const BankReconciliation = () => {
     const { user } = useAuth();
-    const { selectedPortfolioID } = usePortfolio();
+    const { selectedPortfolioID, portfolios } = usePortfolio();
+    const { isMobile } = useViewMode();
     const userId = user?.id;
 
     const [todayStr] = useState(() => toDateStr(new Date()));
@@ -551,17 +554,28 @@ const BankReconciliation = () => {
 
     // Stammdaten auf das gewählte Portfolio eingrenzen ('' = alle Portfolios)
     const scoped = useMemo(() => {
-        if (!selectedPortfolioID) return { properties, units, leases, rentPayments };
+        if (!selectedPortfolioID) return { properties, units, leases, rentPayments, expenses };
         const propIds = new Set(properties.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id));
         const scopedLeases = leases.filter(l => propIds.has(l.unit?.property_id));
         const leaseIds = new Set(scopedLeases.map(l => l.id));
+        // Ausgaben über ihr Objekt (bzw. das Objekt der Einheit); ohne Objekt wie in Finanzen/Dashboard
+        // nur, wenn das gewählte Portfolio das einzige eigene ist (filterExpensesByPortfolio)
+        const propertyPortfolio = new Map(properties.map(p => [p.id, p.portfolio_id]));
+        const unitProperty = new Map(units.map(u => [u.id, u.property_id]));
+        const ownPortfolioIds = (portfolios || []).filter(p => p.user_id === userId).map(p => p.id);
+        const includeUnassigned = ownPortfolioIds.length === 1 && ownPortfolioIds[0] === selectedPortfolioID;
+        const { list: scopedExpenses } = filterExpensesByPortfolio(
+            expenses.map(e => (e.property_id || !e.unit_id ? e : { ...e, property_id: unitProperty.get(e.unit_id) || null })),
+            { selectedPortfolioID, propertyPortfolio, includeUnassigned }
+        );
         return {
             properties: properties.filter(p => propIds.has(p.id)),
             units: units.filter(u => propIds.has(u.property_id)),
             leases: scopedLeases,
-            rentPayments: rentPayments.filter(p => leaseIds.has(p.lease_id))
+            rentPayments: rentPayments.filter(p => leaseIds.has(p.lease_id)),
+            expenses: scopedExpenses
         };
-    }, [selectedPortfolioID, properties, units, leases, rentPayments]);
+    }, [selectedPortfolioID, properties, units, leases, rentPayments, expenses, portfolios, userId]);
 
     const scopedLeaseById = useMemo(() => new Map(scoped.leases.map(l => [l.id, l])), [scoped.leases]);
     const scopedPropertyById = useMemo(() => new Map(scoped.properties.map(p => [p.id, p])), [scoped.properties]);
@@ -588,7 +602,7 @@ const BankReconciliation = () => {
             categories,
             categoryById,
             rentPayments: scoped.rentPayments,
-            expenses,
+            expenses: scoped.expenses,
             linkedKeys,
             isValidRule: (rule) => rule.target_type === 'income'
                 ? scopedLeaseById.has(rule.target_id)
@@ -599,7 +613,7 @@ const BankReconciliation = () => {
             if (tx.status === 'pending' && (tx.allocations || []).length === 0) map.set(tx.id, recommendFor(tx, ctx));
         });
         return map;
-    }, [transactions, allRules, scoped, scopedLeaseById, scopedPropertyById, categories, categoryById, expenses]);
+    }, [transactions, allRules, scoped, scopedLeaseById, scopedPropertyById, categories, categoryById]);
 
     // ── Lokale Aktionen (Vorschau, nichts wird gespeichert) ─────────────────
 
@@ -1166,8 +1180,8 @@ const BankReconciliation = () => {
                 </div>
             )}
 
-            {/* Main Layout Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: '24px', alignItems: 'start' }}>
+            {/* Main Layout Grid – am Handy einspaltig (Seitenspalte unter der Liste) */}
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) 320px', gap: isMobile ? '16px' : '24px', alignItems: 'start' }}>
 
                 {/* Left Area - Tabs & Lists */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
@@ -1363,7 +1377,7 @@ const BankReconciliation = () => {
                 </div>
 
                 {/* Right Area - Demo-Konto */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
 
                     <Card style={{ padding: '16px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>

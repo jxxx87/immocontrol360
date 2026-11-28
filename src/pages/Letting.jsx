@@ -17,24 +17,6 @@ import {
 
 const APPLICANT_BUCKET = 'applicant-documents';
 
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-  !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
-// Anrede aus dem Bewerbungsportal ("Herr"/"Frau") als tenants.salutation für Einzelschritte und Nachtragen;
-// "Divers"/leer -> null (nichts senden, neutrale Briefanrede). Die Datenbank-Funktion convert_rental_applicant_to_tenant
-// bildet seit Welle-5-Migration applicant_salutation selbst ab (Frau -> female, Herr -> male, Divers -> diverse,
-// sonst NULL); 'diverse' ergibt in den Schreibvorlagen ebenfalls die neutrale Briefanrede.
-const applicantSalutation = (app) => {
-  const s = String(app?.salutation || '').trim().toLowerCase();
-  if (s === 'frau') return 'female';
-  if (s === 'herr') return 'male';
-  return null;
-};
-
-// Spalte tenants.salutation fehlt (Migration noch nicht eingespielt): PostgREST-Schema-Cache bzw. Postgres
-const isMissingSalutationColumn = (error) => !!error && (error.code === 'PGRST204' || error.code === '42703') && /salutation/i.test(error.message || '');
-
 // Lokales Datum (nicht UTC) als YYYY-MM-DD
 const localDateString = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -56,6 +38,9 @@ const toAmount = (v) => {
   const n = typeof v === 'number' ? v : parseFloat(v);
   return isNaN(n) ? 0 : n;
 };
+
+// Fehlertext ohne abschließenden Punkt (für zusammengesetzte Meldungen)
+const errorText = (err) => String(err?.message || 'Unbekannter Fehler').replace(/\.\s*$/, '');
 
 // Optionaler Betrag (Kaution): leeres Feld = keine Angabe (NULL), eine bewusst eingegebene 0 bleibt 0 (G03-16)
 const toOptionalAmount = (v) => (v === '' || v === null || v === undefined ? null : toAmount(v));
@@ -234,6 +219,11 @@ const Letting = () => {
     checkSmtpSettings();
   }, [user, selectedPortfolioID]);
 
+  // Objektfilter beim Portfoliowechsel zurücksetzen (das gewählte Objekt gehört sonst evtl. nicht mehr dazu)
+  useEffect(() => {
+    setFilterPropertyId('');
+  }, [selectedPortfolioID]);
+
   // Handle Action selection
   const handleOpenStartModal = (unit) => {
     setSelectedUnit(unit);
@@ -308,22 +298,14 @@ const Letting = () => {
         return;
       }
 
-      // 1. Update rents on unit
-      const { data: updatedUnits, error: unitErr } = await supabase.from('units').update({
-        target_rent: toAmount(startForm.target_rent),
-        service_charge_soll: toAmount(startForm.service_charge_soll),
-        heating_cost_soll: toAmount(startForm.heating_cost_soll),
-        deposit_soll: toOptionalAmount(startForm.deposit_soll)
-      }).eq('id', startForm.unit_id).select('id');
-      if (unitErr) throw unitErr;
-      if (!updatedUnits || updatedUnits.length === 0) {
-        throw new Error('Die Mietkonditionen der Einheit konnten nicht gespeichert werden (keine Berechtigung).');
-      }
+      // Reihenfolge so gewählt, dass bei einem Fehler nichts halb gestartet bleibt: erst Prozess, dann
+      // Besichtigungstage, zuletzt die Mietkonditionen der Einheit. Scheitert ein Folgeschritt, wird der eben
+      // angelegte Prozess wieder gelöscht (die Kaskade entfernt eventuelle Besichtigungstage).
 
-      // 2. Generate random unique token (volle 128-Bit-UUID)
+      // 1. Generate random unique token (volle 128-Bit-UUID)
       const token = crypto.randomUUID().replace(/-/g, '');
 
-      // 3. Create process
+      // 2. Create process
       const { data: processData, error: processErr } = await supabase.from('rental_processes').insert([
         {
           user_id: user.id,
@@ -337,10 +319,41 @@ const Letting = () => {
         }
       ]).select().single();
 
-      if (processErr) throw processErr;
+      if (processErr) {
+        // Zweiter Tab o. Ä. hat inzwischen einen Prozess gestartet (eindeutiger Index je Einheit)
+        if (processErr.code === '23505' && /one_running_per_unit/.test(processErr.message || '')) {
+          alert('Für diese Einheit läuft bereits ein Vermietungsprozess.');
+          setIsStartModalOpen(false);
+          fetchData();
+          return;
+        }
+        throw processErr;
+      }
 
-      // 4. Create Viewing slots if viewing_slots are provided and valid
-      let viewingWarning = '';
+      // Angelegten Prozess wieder löschen und mit Meldung abbrechen (wirft immer)
+      const rollbackProcess = async (message) => {
+        let removed = false;
+        try {
+          const { data: deleted, error: deleteErr } = await supabase
+            .from('rental_processes')
+            .delete()
+            .eq('id', processData.id)
+            .select('id');
+          removed = !deleteErr && !!deleted && deleted.length > 0;
+        } catch (deleteErr) {
+          console.error('Error removing incomplete process:', deleteErr);
+        }
+        if (!removed) {
+          // Prozess besteht weiter: Liste neu laden, damit er über „Prozess löschen“ erreichbar ist
+          setIsStartModalOpen(false);
+          fetchData();
+        }
+        throw new Error(message + (removed
+          ? ' Der Vermietungsprozess wurde daher nicht gestartet.'
+          : ' Der bereits angelegte Vermietungsprozess konnte nicht wieder entfernt werden – bitte über „Prozess löschen“ entfernen und neu starten.'));
+      };
+
+      // 3. Create Viewing slots if viewing_slots are provided and valid
       if (validSlots.length > 0) {
         const slotsToInsert = validSlots.map(s => ({
           user_id: user.id,
@@ -354,8 +367,22 @@ const Letting = () => {
         const { error: viewingErr } = await supabase.from('rental_viewings').insert(slotsToInsert);
         if (viewingErr) {
           console.error('Error creating viewings:', viewingErr);
-          viewingWarning = viewingErr.message || 'Unbekannter Fehler';
+          await rollbackProcess('Die Besichtigungstermine konnten nicht gespeichert werden: ' + errorText(viewingErr) + '.');
         }
+      }
+
+      // 4. Update rents on unit
+      const { data: updatedUnits, error: unitErr } = await supabase.from('units').update({
+        target_rent: toAmount(startForm.target_rent),
+        service_charge_soll: toAmount(startForm.service_charge_soll),
+        heating_cost_soll: toAmount(startForm.heating_cost_soll),
+        deposit_soll: toOptionalAmount(startForm.deposit_soll)
+      }).eq('id', startForm.unit_id).select('id');
+      if (unitErr) {
+        await rollbackProcess('Die Mietkonditionen der Einheit konnten nicht gespeichert werden: ' + errorText(unitErr) + '.');
+      }
+      if (!updatedUnits || updatedUnits.length === 0) {
+        await rollbackProcess('Die Mietkonditionen der Einheit konnten nicht gespeichert werden (keine Berechtigung).');
       }
 
       // Hinweis: Der Cloud-Ordner für Bewerberunterlagen wird beim ersten Unterlagen-Eingang
@@ -364,11 +391,7 @@ const Letting = () => {
 
       setIsStartModalOpen(false);
       fetchData();
-      if (viewingWarning) {
-        alert('Der Vermietungsprozess wurde gestartet, aber die Besichtigungstermine konnten nicht gespeichert werden: ' + viewingWarning);
-      } else {
-        alert('Der Vermietungsprozess wurde erfolgreich gestartet!');
-      }
+      alert('Der Vermietungsprozess wurde erfolgreich gestartet!');
     } catch (err) {
       alert('Fehler beim Starten des Prozesses: ' + err.message);
     } finally {
@@ -541,109 +564,8 @@ const Letting = () => {
     });
   };
 
-  // Bisheriger Weg (falls die Datenbank-Funktion noch nicht eingespielt ist): Einzelschritte
-  const convertApplicantLegacy = async (dialog) => {
-    const { app } = dialog;
-
-    // Prozess frisch prüfen (Doppelklick / zweiter Tab)
-    const { data: freshProcess, error: freshErr } = await supabase
-      .from('rental_processes')
-      .select('id, status, unit_id')
-      .eq('id', selectedProcess.id)
-      .maybeSingle();
-    if (freshErr) throw freshErr;
-    if (!freshProcess || freshProcess.status !== 'in_vermietung') {
-      throw new Error('Für diesen Vermietungsprozess wurde bereits ein Mieter angenommen.');
-    }
-
-    // Überschneidung mit bestehendem aktiven Vertrag verhindern
-    const { data: overlapping, error: overlapErr } = await supabase
-      .from('leases')
-      .select('id, end_date')
-      .eq('unit_id', freshProcess.unit_id)
-      .eq('status', 'active');
-    if (overlapErr) throw overlapErr;
-    if ((overlapping || []).some(l => !l.end_date || l.end_date >= dialog.start_date)) {
-      throw new Error('Für diese Einheit besteht bereits ein aktiver Mietvertrag, der den gewählten Mietbeginn überschneidet.');
-    }
-
-    // 1. Create tenant row
-    const tenantRow = {
-      user_id: user.id,
-      first_name: app.first_name,
-      last_name: app.last_name,
-      email: app.email,
-      phone: app.phone,
-      occupants: app.additional_persons_count ? app.additional_persons_count + 1 : 1
-    };
-    // Anrede (für die Briefanrede in Schreibvorlagen) nur mitsenden, wenn im Portal "Herr"/"Frau" gewählt
-    const salutation = applicantSalutation(app);
-    if (salutation) tenantRow.salutation = salutation;
-    let { data: tenantData, error: tenantErr } = await supabase
-      .from('tenants')
-      .insert([tenantRow])
-      .select()
-      .single();
-    if (tenantErr && tenantRow.salutation && isMissingSalutationColumn(tenantErr)) {
-      // Datenbank kennt die Spalte noch nicht: ohne Anrede speichern (neutrale Briefanrede)
-      const { salutation: _salutation, ...withoutSalutation } = tenantRow;
-      ({ data: tenantData, error: tenantErr } = await supabase
-        .from('tenants')
-        .insert([withoutSalutation])
-        .select()
-        .single());
-    }
-
-    if (tenantErr) throw tenantErr;
-
-    // 2. Create lease
-    const { error: leaseErr } = await supabase
-      .from('leases')
-      .insert([{
-        user_id: user.id,
-        tenant_id: tenantData.id,
-        unit_id: freshProcess.unit_id,
-        start_date: dialog.start_date,
-        cold_rent: toAmount(dialog.cold_rent),
-        service_charge: toAmount(dialog.service_charge),
-        heating_cost: toAmount(dialog.heating_cost),
-        deposit: toOptionalAmount(dialog.deposit),
-        payment_due_day: dialog.payment_due_day,
-        lease_type: 'normal',
-        status: 'active'
-      }]);
-
-    if (leaseErr) {
-      // Angelegten Mieter wieder entfernen, damit kein verwaister Datensatz bleibt
-      await supabase.from('tenants').delete().eq('id', tenantData.id);
-      throw leaseErr;
-    }
-
-    // 3. Mark process as vermietet
-    const { error: processErr } = await supabase
-      .from('rental_processes')
-      .update({
-        status: 'vermietet',
-        lease_start_date: dialog.start_date,
-        rented_at: new Date().toISOString()
-      })
-      .eq('id', freshProcess.id);
-
-    if (processErr) {
-      throw new Error('Mieter und Mietvertrag wurden angelegt, aber der Vermietungsprozess konnte nicht abgeschlossen werden: ' + processErr.message);
-    }
-
-    // 4. Update applicant status to accepted
-    const { error: appErr } = await supabase
-      .from('rental_applicants')
-      .update({ status: 'accepted' })
-      .eq('id', app.id);
-    if (appErr) {
-      throw new Error('Mieter und Mietvertrag wurden angelegt, aber der Bewerberstatus konnte nicht aktualisiert werden: ' + appErr.message);
-    }
-  };
-
-  // Schritt 2: Umwandlung durchführen (eine Transaktion über die Datenbank-Funktion, sonst Einzelschritte)
+  // Schritt 2: Umwandlung durchführen (eine Transaktion über die Datenbank-Funktion; sie übernimmt auch die Anrede
+  // aus der Bewerbung: Frau -> female, Herr -> male, Divers -> diverse, sonst keine Angabe)
   const handleConfirmConvert = async () => {
     if (isSaving || !convertDialog) return;
     const dialog = convertDialog;
@@ -654,7 +576,7 @@ const Letting = () => {
 
     try {
       setIsSaving(true);
-      const { data: rpcResult, error, status } = await supabase.rpc('convert_rental_applicant_to_tenant', {
+      const { error } = await supabase.rpc('convert_rental_applicant_to_tenant', {
         p_applicant_id: dialog.app.id,
         p_start_date: dialog.start_date,
         p_cold_rent: toAmount(dialog.cold_rent),
@@ -664,27 +586,12 @@ const Letting = () => {
         p_payment_due_day: dueDay
       });
 
-      if (error && !isMissingRpc(error, status)) throw error;
-      if (error) await convertApplicantLegacy({ ...dialog, payment_due_day: dueDay });
-
-      // Anrede nachtragen (Mieter und Vertrag sind bereits angelegt): Die Datenbank-Funktion übernimmt sie seit
-      // Welle-5-Migration applicant_salutation selbst, ältere Fassungen nicht. Für "Herr"/"Frau" wird hier derselbe
-      // Wert erneut geschrieben (unschädlich); "Divers" wird nicht gesendet, die Funktion speichert dafür 'diverse'.
-      let salutationHint = '';
-      const salutation = applicantSalutation(dialog.app);
-      const newTenantId = !error ? rpcResult?.tenant_id : null;
-      if (salutation && newTenantId) {
-        const { data: salRows, error: salErr } = await supabase.from('tenants').update({ salutation }).eq('id', newTenantId).select('id');
-        if (salErr ? !isMissingSalutationColumn(salErr) : !(salRows && salRows.length)) {
-          console.warn('Anrede konnte nicht übernommen werden:', salErr || 'keine Zeile aktualisiert');
-          salutationHint = '\n\nHinweis: Die Anrede aus der Bewerbung konnte nicht übernommen werden – bitte beim Mieter ergänzen.';
-        }
-      }
+      if (error) throw error;
 
       setConvertDialog(null);
       setIsDetailModalOpen(false);
       fetchData();
-      alert('Der Mieter wurde erfolgreich angelegt und das Mietverhältnis gestartet!' + salutationHint);
+      alert('Der Mieter wurde erfolgreich angelegt und das Mietverhältnis gestartet!');
     } catch (err) {
       alert('Fehler beim Erstellen des Mietverhältnisses: ' + err.message);
     } finally {
@@ -721,9 +628,12 @@ const Letting = () => {
   };
 
   const handleDeleteProcess = async (process) => {
-    if (!process) return;
+    // Sperre gegen Doppelausführung (das Löschen der Unterlagen dauert je Bewerber mehrere Abfragen)
+    if (!process || isSaving) return;
     if (!window.confirm('Möchten Sie diesen Vermietungsprozess wirklich löschen? Alle Bewerbungen, hochgeladenen Unterlagen und Termine dazu werden gelöscht.')) return;
+    setOpenActionMenuId(null);
     try {
+      setIsSaving(true);
       // Erst die Unterlagen aller Bewerber entfernen (die Datenbank-Kaskade erfasst den Speicher nicht)
       const { data: apps, error: appsErr } = await supabase
         .from('rental_applicants')
@@ -746,10 +656,11 @@ const Letting = () => {
 
       if (error) throw error;
       if (!data || data.length === 0) throw new Error('Keine Berechtigung oder Prozess nicht gefunden.');
-      setOpenActionMenuId(null);
       fetchData();
     } catch (err) {
       alert('Fehler beim Löschen des Prozesses: ' + err.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -761,6 +672,9 @@ const Letting = () => {
       window.prompt(`${label} konnte nicht automatisch kopiert werden. Bitte manuell kopieren:`, link);
     }
   };
+
+  // Objekt-Auswahl wie die Einheitenliste auf das gewählte Portfolio beschränken ('' = alle Portfolios)
+  const propertyOptions = properties.filter(p => !selectedPortfolioID || p.portfolio_id === selectedPortfolioID);
 
   // Filter vacant units
   const filteredUnits = vacantUnits.filter(u => {
@@ -909,7 +823,7 @@ const Letting = () => {
             style={{ padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)', fontSize: '0.9rem' }}
           >
             <option value="">Alle Immobilien</option>
-            {properties.map(p => (
+            {propertyOptions.map(p => (
               <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>
             ))}
           </select>
@@ -1021,7 +935,8 @@ const Letting = () => {
                         {row.process && (
                           <button
                             onClick={() => handleDeleteProcess(row.process)}
-                            style={{ padding: '8px 16px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--danger-color)' }}
+                            disabled={isSaving}
+                            style={{ padding: '8px 16px', background: 'none', border: 'none', textAlign: 'left', cursor: isSaving ? 'not-allowed' : 'pointer', opacity: isSaving ? 0.5 : 1, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--danger-color)' }}
                           >
                             <Trash2 size={14} /> Prozess löschen
                           </button>
@@ -1319,7 +1234,7 @@ const Letting = () => {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
                         <div>
                           <h5 style={{ fontWeight: 700, fontSize: '0.95rem' }}>{app.last_name}, {app.first_name}</h5>
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eingegangen am: {new Date(app.created_at).toLocaleDateString()}</span>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Eingegangen am: {new Date(app.created_at).toLocaleDateString('de-DE')}</span>
                         </div>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                           <select

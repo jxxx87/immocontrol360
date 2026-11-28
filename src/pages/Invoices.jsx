@@ -210,6 +210,18 @@ const Invoices = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user, selectedPortfolioID]);
 
+    // Objekt-Filter gehört zum Portfolio: beim Wechsel zurücksetzen
+    useEffect(() => {
+        setFilterUnit('');
+    }, [selectedPortfolioID]);
+
+    // Auswahl im Objekt-Filter: nur Ferienwohnungen, zu denen geladene Rechnungen existieren
+    // (die Rechnungen sind serverseitig auf das gewählte Portfolio gefiltert)
+    const unitFilterOptions = useMemo(() => {
+        const unitIdsInList = new Set(invoices.map(i => i.unit_id).filter(Boolean));
+        return units.filter(u => unitIdsInList.has(u.id) || u.id === filterUnit);
+    }, [units, invoices, filterUnit]);
+
     // Rechnungen, zu denen bereits ein eigener Gutschrift-Beleg existiert
     const creditedWithDocument = useMemo(() => {
         const ids = new Set();
@@ -480,7 +492,7 @@ const Invoices = () => {
                             }}
                         >
                             <option value="">Alle Objekte</option>
-                            {units.map(u => {
+                            {unitFilterOptions.map(u => {
                                 const prop = properties.find(p => p.id === u.property_id);
                                 return <option key={u.id} value={u.id}>{u.unit_name}{prop ? ` – ${prop.street}` : ''}</option>;
                             })}

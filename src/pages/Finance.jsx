@@ -1647,7 +1647,7 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, can
                                                     ) : (
                                                         <OverdueActionMenu
                                                             onMarkPaid={(customAmount) => onMarkPaid(entry.lease, entry.monthStr, customAmount !== undefined ? customAmount : entry.open, entry.beforeBookingStart)}
-                                                            onCreateClaim={() => navigate('/forderungen')}
+                                                            onCreateClaim={() => navigate('/forderungen', { state: { openCreate: true, defaultLeaseId: entry.leaseId || entry.lease?.id || null, defaultMonth: entry.monthStr || null } })}
                                                             isProcessing={processingPaymentId === `${entry.leaseId}-${entry.monthStr}`}
                                                             dueAmount={entry.open}
                                                         />

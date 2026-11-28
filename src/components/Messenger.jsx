@@ -12,7 +12,10 @@ const ATTACHMENT_BUCKET = 'chat-attachments';
 // Anzahl Nachrichten je Ladevorgang (PostgREST liefert ohnehin höchstens 1000 Zeilen)
 const PAGE_SIZE = 200;
 
-const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, onBack }) => {
+// readOnly: kein Schreibrecht für diesen Gesprächspartner (z. B. nur Leserecht „Mieterportal“).
+//           Eingabe und Anhang werden dann ausgeblendet – außer der Partner hat mir schon
+//           geschrieben (die Antwort erlaubt die Datenbank, rls_message_allowed).
+const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, onBack, readOnly = false }) => {
     const { user, userRole } = useAuth();
     const [messages, setMessages] = useState([]);
     const [newMessage, setNewMessage] = useState('');
@@ -23,11 +26,33 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
     const [sending, setSending] = useState(false);
     const [sendError, setSendError] = useState(null);
     const [attachmentFile, setAttachmentFile] = useState(null);
+    const [partnerHasWritten, setPartnerHasWritten] = useState(false);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const skipNextAutoScroll = useRef(false);
 
     const userId = user?.id;
+
+    // Nur im Lesemodus: Hat der Partner mir schon einmal geschrieben? Dann ist die Antwort erlaubt.
+    useEffect(() => {
+        if (!readOnly || !userId || !conversationUserId) return;
+        let cancelled = false;
+        supabase
+            .from('messages')
+            .select('id')
+            .eq('sender_id', conversationUserId)
+            .eq('receiver_id', userId)
+            .limit(1)
+            .then(({ data, error }) => {
+                if (cancelled) return;
+                if (error) console.error('Error checking reply permission:', error);
+                else if ((data || []).length > 0) setPartnerHasWritten(true);
+            });
+        return () => { cancelled = true; };
+    }, [readOnly, userId, conversationUserId]);
+
+    const inputLocked = readOnly && !partnerHasWritten &&
+        !messages.some(m => m.sender_id === conversationUserId && m.receiver_id === userId);
 
     // Abfrage aller Nachrichten dieses Gesprächs (optional nur eines Tickets)
     const buildConversationQuery = useCallback(() => {
@@ -208,7 +233,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
     // Fehler bleiben sie erhalten und der Nutzer sieht eine Meldung.
     const handleSend = async () => {
         const messageText = newMessage.trim();
-        if ((!messageText && !attachmentFile) || sending) return;
+        if ((!messageText && !attachmentFile) || sending || inputLocked) return;
         setSending(true);
         setSendError(null);
 
@@ -404,7 +429,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
                     }}>
                         <MessageCircleIcon />
                         <p style={{ fontSize: '0.9rem' }}>Noch keine Nachrichten</p>
-                        <p style={{ fontSize: '0.8rem' }}>Schreiben Sie die erste Nachricht!</p>
+                        {!inputLocked && <p style={{ fontSize: '0.8rem' }}>Schreiben Sie die erste Nachricht!</p>}
                     </div>
                 ) : (
                     Object.entries(groupedMessages).map(([date, msgs]) => (
@@ -515,7 +540,7 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
             )}
 
             {/* ── ATTACHMENT PREVIEW ── */}
-            {attachmentFile && (
+            {!inputLocked && attachmentFile && (
                 <div style={{
                     padding: '8px 20px',
                     borderTop: '1px solid var(--border-color)',
@@ -537,72 +562,86 @@ const Messenger = ({ conversationUserId, conversationUserName, ticketId = null, 
             )}
 
             {/* ── INPUT BAR (fixed at bottom) ── */}
-            <div style={{
-                padding: '12px 20px',
-                paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
-                borderTop: '1px solid var(--border-color)',
-                backgroundColor: 'var(--surface-color)',
-                display: 'flex',
-                alignItems: 'flex-end',
-                gap: '10px',
-                flexShrink: 0
-            }}>
-                <input
-                    type="file"
-                    ref={fileInputRef}
-                    accept={acceptAttribute(FILE_RULES.chat)}
-                    style={{ display: 'none' }}
-                    onChange={(e) => handleAttachmentSelected(e.target.files?.[0])}
-                />
-                <button
-                    onClick={() => fileInputRef.current?.click()}
-                    style={{
-                        width: '38px', height: '38px',
-                        borderRadius: '50%', backgroundColor: 'var(--background-color)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        color: 'var(--text-secondary)', cursor: 'pointer',
-                        border: '1px solid var(--border-color)',
-                        transition: 'all 0.2s', flexShrink: 0
-                    }}
-                    title="Datei anhängen"
-                >
-                    <Paperclip size={18} />
-                </button>
+            {inputLocked ? (
+                <div style={{
+                    padding: '12px 20px',
+                    paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
+                    borderTop: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--surface-color)',
+                    color: 'var(--text-secondary)', fontSize: '0.8rem',
+                    textAlign: 'center', flexShrink: 0
+                }}>
+                    Nur Leserecht: Sie haben für dieses Objekt kein Schreibrecht im Mieterportal.
+                    Antworten können Sie, sobald der Mieter Ihnen geschrieben hat.
+                </div>
+            ) : (
+                <div style={{
+                    padding: '12px 20px',
+                    paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
+                    borderTop: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--surface-color)',
+                    display: 'flex',
+                    alignItems: 'flex-end',
+                    gap: '10px',
+                    flexShrink: 0
+                }}>
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        accept={acceptAttribute(FILE_RULES.chat)}
+                        style={{ display: 'none' }}
+                        onChange={(e) => handleAttachmentSelected(e.target.files?.[0])}
+                    />
+                    <button
+                        onClick={() => fileInputRef.current?.click()}
+                        style={{
+                            width: '38px', height: '38px',
+                            borderRadius: '50%', backgroundColor: 'var(--background-color)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            color: 'var(--text-secondary)', cursor: 'pointer',
+                            border: '1px solid var(--border-color)',
+                            transition: 'all 0.2s', flexShrink: 0
+                        }}
+                        title="Datei anhängen"
+                    >
+                        <Paperclip size={18} />
+                    </button>
 
-                <textarea
-                    value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Schreiben..."
-                    rows={1}
-                    style={{
-                        flex: 1, padding: '8px 12px', minHeight: '40px',
-                        borderRadius: '20px',
-                        border: '1px solid var(--border-color)',
-                        outline: 'none', resize: 'none',
-                        fontFamily: 'inherit', fontSize: '0.88rem',
-                        lineHeight: 1.5, maxHeight: '100px',
-                        backgroundColor: 'var(--background-color)'
-                    }}
-                />
+                    <textarea
+                        value={newMessage}
+                        onChange={(e) => setNewMessage(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Schreiben..."
+                        rows={1}
+                        style={{
+                            flex: 1, padding: '8px 12px', minHeight: '40px',
+                            borderRadius: '20px',
+                            border: '1px solid var(--border-color)',
+                            outline: 'none', resize: 'none',
+                            fontFamily: 'inherit', fontSize: '0.88rem',
+                            lineHeight: 1.5, maxHeight: '100px',
+                            backgroundColor: 'var(--background-color)'
+                        }}
+                    />
 
-                <button
-                    onClick={handleSend}
-                    disabled={(!newMessage.trim() && !attachmentFile) || sending}
-                    style={{
-                        width: '38px', height: '38px',
-                        borderRadius: '50%',
-                        backgroundColor: 'var(--primary-color)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        color: 'white', cursor: 'pointer',
-                        border: 'none', transition: 'all 0.2s', flexShrink: 0,
-                        opacity: (!newMessage.trim() && !attachmentFile) ? 0.7 : 1
-                    }}
-                    title="Senden"
-                >
-                    <Send size={16} />
-                </button>
-            </div>
+                    <button
+                        onClick={handleSend}
+                        disabled={(!newMessage.trim() && !attachmentFile) || sending}
+                        style={{
+                            width: '38px', height: '38px',
+                            borderRadius: '50%',
+                            backgroundColor: 'var(--primary-color)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            color: 'white', cursor: 'pointer',
+                            border: 'none', transition: 'all 0.2s', flexShrink: 0,
+                            opacity: (!newMessage.trim() && !attachmentFile) ? 0.7 : 1
+                        }}
+                        title="Senden"
+                    >
+                        <Send size={16} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 };

@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
@@ -13,7 +14,7 @@ import { useAuth } from '../context/AuthContext';
 import ExportDropdown from '../components/ExportDropdown';
 import {
     num, round2, toLocalDateString, parseLocalDate, formatDateDE, getDelayDays,
-    shiftToBusinessDay, daysBetween, translateClaimError
+    shiftToBusinessDay, daysBetween, translateClaimError, cancelClaim
 } from '../lib/claimPdfGenerator';
 
 // Eine Tabelle für Status-Badge und Export
@@ -138,7 +139,9 @@ const cleanManualItems = (rows) => {
 const Claims = () => {
     const { user } = useAuth();
     const navigate = useNavigate();
-    const { selectedPortfolioID } = usePortfolio();
+    const location = useLocation();
+    const { selectedPortfolioID, portfolios } = usePortfolio();
+    const perm = usePermission();
     const [claims, setClaims] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -146,8 +149,27 @@ const Claims = () => {
     const [activeDropdownClaim, setActiveDropdownClaim] = useState(null);
     const [menuPos, setMenuPos] = useState({ top: 0, left: 0, openUp: false });
     const loadRequestRef = useRef(0);
+    // Erledigte Akten (settled) standardmäßig ausblenden; Zugang zu ihnen über den Schalter
+    const [showSettled, setShowSettled] = useState(false);
 
-    const [kpis, setKpis] = useState({ totalUrsprung: 0, totalGetilgt: 0, totalOffen: 0 });
+    // Schreibrecht „Finanzen“ wie die RLS (has_lease_access … 'finanzen','write'): im aktuellen Bereich
+    // (Neuanlage) bzw. je Forderung über das Portfolio des Objekts. Während die Rechte laden, optimistisch;
+    // die Datenbank prüft zusätzlich.
+    const canWriteFinance = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return perm.canWrite('finanzen', portfolioId || undefined);
+    };
+    const canCreateClaims = canWriteFinance(selectedPortfolioID || null);
+    const canWriteClaim = (claim) => canWriteFinance(claim?.leases?.units?.properties?.portfolio_id || null);
+
+    // Portal-Einstellungen liegen im Profil des angemeldeten Kontos; das Portal liest sie aber beim
+    // Eigentümer der Forderung. Für freigegebene Portfolios gelten sie daher nicht.
+    const ownPortfolios = (portfolios || []).filter(p => user && p.user_id === user.id);
+    const portalSettingsOwnerOnly = selectedPortfolioID
+        ? !!perm?.isSharedPortfolio?.(selectedPortfolioID)
+        : ownPortfolios.length === 0 && (perm?.sharedPortfolioIds || []).length > 0;
+    const portalSettingsMixedScope = !selectedPortfolioID && ownPortfolios.length > 0 && (perm?.sharedPortfolioIds || []).length > 0;
+    const ownPortfoliosWithIban = ownPortfolios.filter(p => String(p.iban || '').trim());
 
     // Create Modal States
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -178,7 +200,8 @@ const Claims = () => {
         deadline: '',
         interest_rate: 0,
         accumulated_unpaid_interest: 0,
-        accumulated_unpaid_fees: 0
+        accumulated_unpaid_fees: 0,
+        rate_retroactive: false
     });
 
     // Storno Modal
@@ -197,6 +220,11 @@ const Claims = () => {
     const [portalSettingsOriginal, setPortalSettingsOriginal] = useState(null);
     const [portalSettingsError, setPortalSettingsError] = useState(null);
     const [loadingSettings, setLoadingSettings] = useState(false);
+
+    // Aufruf aus Mieterakte bzw. Buchhaltung: navigate('/forderungen', { state: { openCreate, defaultLeaseId, defaultMonth } })
+    const pendingCreateRef = useRef(null);
+    const handledLocationKeyRef = useRef(null);
+    const [createHint, setCreateHint] = useState(null);
 
     const loadPortalSettings = async () => {
         setLoadingSettings(true);
@@ -230,8 +258,14 @@ const Claims = () => {
         }
     };
 
+    const openPortalSettings = () => {
+        setIsSettingsModalOpen(true);
+        // Für freigegebene Portfolios nur Hinweis (Werte gelten nur beim Eigentümer der Forderung)
+        if (!portalSettingsOwnerOnly) loadPortalSettings();
+    };
+
     const handleSavePortalSettings = async () => {
-        if (isSubmitting || loadingSettings) return;
+        if (isSubmitting || loadingSettings || portalSettingsOwnerOnly) return;
         if (portalSettingsError || !portalSettingsOriginal) {
             alert('Die Einstellungen wurden nicht vollständig geladen und können daher nicht gespeichert werden.');
             return;
@@ -274,14 +308,15 @@ const Claims = () => {
             return;
         }
         if (payload.iban === '' && normalizeIban(original.iban) &&
-            !window.confirm('Die IBAN wurde geleert. Ohne Bankverbindung erscheint auf Mahnschreiben und im Mieterportal keine Kontoverbindung. Trotzdem speichern?')) {
+            !window.confirm('Die IBAN wurde geleert. Für Forderungen aus Portfolios ohne eigene Bankverbindung erscheint dann auf Mahnschreiben und im Forderungsportal keine Kontoverbindung (eine im Portfolio hinterlegte IBAN hat Vorrang und bleibt gültig). Trotzdem speichern?')) {
             return;
         }
 
         setIsSubmitting(true);
         try {
-            const { error } = await supabase.from('profiles').update(payload).eq('id', user.id);
+            const { data: savedRows, error } = await supabase.from('profiles').update(payload).eq('id', user.id).select('id');
             if (error) throw error;
+            if (!savedRows || savedRows.length === 0) throw new Error('Die Einstellungen konnten nicht gespeichert werden (Profil nicht gefunden).');
             setIsSettingsModalOpen(false);
             alert('Einstellungen gespeichert.');
         } catch (err) {
@@ -325,19 +360,61 @@ const Claims = () => {
         return () => window.removeEventListener('click', handleClickOutside);
     }, []);
 
-    const calculateKpis = (activeClaims) => {
+    // „Neue Forderung“ aus Mieterakte/Buchhaltung: Dialog öffnen, Vertrag (und Monat) nach dem Laden vorwählen.
+    // Der State wird danach gelöscht, damit ein Neuladen den Dialog nicht erneut öffnet.
+    useEffect(() => {
+        const state = location.state;
+        if (!state?.openCreate || perm?.loadingPermissions) return;
+        if (handledLocationKeyRef.current === location.key) return;
+        handledLocationKeyRef.current = location.key;
+        navigate(location.pathname, { replace: true, state: null });
+        if (!canCreateClaims) {
+            alert('Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Forderungen können nur mit Schreibrecht „Finanzen“ angelegt werden.');
+            return;
+        }
+        pendingCreateRef.current = { leaseId: state.defaultLeaseId || null, month: state.defaultMonth || null };
+        openCreateModal();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.key, location.state, perm?.loadingPermissions]);
+
+    useEffect(() => {
+        const pending = pendingCreateRef.current;
+        if (!pending || !isCreateModalOpen || loadingLedgers) return;
+        pendingCreateRef.current = null;
+        if (!pending.leaseId) return;
+        const leaseLedgers = openLedgers.filter(l => l.leases?.id === pending.leaseId);
+        if (leaseLedgers.length > 0) {
+            const monthKey = pending.month ? String(pending.month).substring(0, 7) : '';
+            const inMonth = monthKey ? leaseLedgers.filter(l => String(l.period_month || '').startsWith(monthKey)) : [];
+            setSelectedLeaseId('');
+            setSelectedLedgerIds((inMonth.length > 0 ? inMonth : leaseLedgers).map(l => l.id));
+            setExpandedTenant(pending.leaseId);
+        } else if (allLeases.some(l => l.id === pending.leaseId)) {
+            // Keine offenen, fälligen Mieten: freie Forderung für diesen Vertrag vorwählen
+            setSelectedLedgerIds([]);
+            setSelectedLeaseId(pending.leaseId);
+        } else {
+            setCreateHint('Der Mietvertrag aus der vorherigen Seite ist in der aktuellen Auswahl nicht enthalten (anderes Portfolio gewählt oder Vertrag nicht aktiv). Bitte Mieter bzw. Mietvertrag hier auswählen.');
+        }
+    }, [isCreateModalOpen, loadingLedgers, openLedgers, allLeases]);
+
+    // Erledigte Akten nur auf Wunsch; Kennzahlen immer aus der angezeigten Liste
+    const settledCount = claims.filter(c => c.status === 'settled').length;
+    const visibleClaims = useMemo(
+        () => (showSettled ? claims : claims.filter(c => c.status !== 'settled')),
+        [claims, showSettled]
+    );
+    const kpis = useMemo(() => {
         let totalUrsprung = 0;
         let totalGetilgt = 0;
         let totalOffen = 0;
-
-        activeClaims.forEach(claim => {
+        visibleClaims.forEach(claim => {
             totalUrsprung += num(claim.totalUrsprung);
             totalGetilgt += num(claim.totalGetilgt);
             totalOffen += num(claim.totalOffen);
         });
-
-        setKpis({ totalUrsprung: round2(totalUrsprung), totalGetilgt: round2(totalGetilgt), totalOffen: round2(totalOffen) });
-    };
+        return { totalUrsprung: round2(totalUrsprung), totalGetilgt: round2(totalGetilgt), totalOffen: round2(totalOffen) };
+    }, [visibleClaims]);
 
     // Summen ausschließlich aus claim_totals_view (gleiche Quelle wie Forderungsakte und Mieterportal)
     const fetchAndMergeClaims = async (requestId) => {
@@ -345,8 +422,8 @@ const Claims = () => {
             let claimsQuery = supabase
                 .from('claims')
                 .select(`
-                    id, user_id, status, escalation_level, deadline, next_action_at, created_at,
-                    interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
+                    id, user_id, status, escalation_level, deadline, next_action_at, created_at, updated_at,
+                    interest_rate, interest_start_date, accumulated_unpaid_interest, accumulated_unpaid_fees,
                     tenants ( first_name, last_name ),
                     leases!inner (
                         id,
@@ -397,7 +474,6 @@ const Claims = () => {
         });
 
         setClaims(merged);
-        calculateKpis(merged);
     };
 
     const loadData = async () => {
@@ -530,6 +606,7 @@ const Claims = () => {
         setManualItems([]);
         setExpandedTenant(null);
         setExistingClaim(null);
+        setCreateHint(null);
         autoAdjustedFormRef.current = false;
         setForm(DEFAULT_FORM);
         setIsCreateModalOpen(true);
@@ -686,13 +763,25 @@ const Claims = () => {
             deadline: claim.deadline ? claim.deadline.split('T')[0] : '',
             interest_rate: claim.interest_rate ?? '',
             accumulated_unpaid_interest: claim.accumulated_unpaid_interest ?? 0,
-            accumulated_unpaid_fees: claim.accumulated_unpaid_fees ?? 0
+            accumulated_unpaid_fees: claim.accumulated_unpaid_fees ?? 0,
+            rate_retroactive: false
         });
         setIsEditModalOpen(true);
     };
 
+    // Zinssatz geändert? (Vergleich auf 4 Nachkommastellen wie das Eingabefeld)
+    const isRateChanged = (claim, rateValue) => {
+        const next = parseFloat(rateValue);
+        return !!claim && Number.isFinite(next)
+            && Math.round(next * 10000) !== Math.round(num(claim.interest_rate) * 10000);
+    };
+
     const handleEditClaim = async () => {
         if (!editingClaim || isSubmitting) return;
+        if (!canWriteClaim(editingClaim)) {
+            alert('Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Forderungen können nur mit Schreibrecht „Finanzen“ bearbeitet werden.');
+            return;
+        }
         const rate = parseFloat(editForm.interest_rate);
         const interest = parseFloat(editForm.accumulated_unpaid_interest);
         const fees = parseFloat(editForm.accumulated_unpaid_fees);
@@ -708,18 +797,44 @@ const Claims = () => {
 
         setIsSubmitting(true);
         try {
-            const { error } = await supabase
-                .from('claims')
-                .update({
-                    deadline: editForm.deadline || null,
-                    interest_rate: rate,
-                    accumulated_unpaid_interest: round2(interest),
-                    accumulated_unpaid_fees: round2(fees),
-                    updated_at: new Date().toISOString()
-                })
-                .eq('id', editingClaim.id);
+            const todayStr = toLocalDateString(new Date());
+            const payload = {
+                deadline: editForm.deadline || null,
+                interest_rate: rate,
+                accumulated_unpaid_interest: round2(interest),
+                accumulated_unpaid_fees: round2(fees),
+                updated_at: new Date().toISOString()
+            };
+            let updateQuery = supabase.from('claims').update(payload).eq('id', editingClaim.id);
 
+            // Neuer Zinssatz gilt ab heute: die bis heute zum bisherigen Satz aufgelaufenen Zinsen festschreiben
+            // (wie beim Anhängen an eine Akte, capitalizeRunningInterest). Sonst rechnet claim_totals_view den
+            // neuen Satz rückwirkend ab dem alten Zinsbeginn. Rückwirkend nur bewusst (Tippfehler korrigieren).
+            const startDate = editingClaim.interest_start_date || null;
+            if (isRateChanged(editingClaim, rate) && !editForm.rate_retroactive && startDate && startDate < todayStr) {
+                const { data: t, error: totalsError } = await supabase
+                    .from('claim_totals_view')
+                    .select('live_interest_since_start')
+                    .eq('claim_id', editingClaim.id)
+                    .maybeSingle();
+                if (totalsError) throw totalsError;
+                if (!t) throw new Error('Die laufenden Zinsen konnten nicht ermittelt werden. Bitte laden Sie die Seite neu.');
+                payload.accumulated_unpaid_interest = round2(interest + num(t.live_interest_since_start));
+                payload.interest_start_date = todayStr;
+                // Schutz gegen gleichzeitige Änderung (Zinsbeginn + updated_at, wie capitalizeRunningInterest)
+                updateQuery = supabase.from('claims').update(payload)
+                    .eq('id', editingClaim.id)
+                    .eq('interest_start_date', startDate);
+                updateQuery = editingClaim.updated_at
+                    ? updateQuery.eq('updated_at', editingClaim.updated_at)
+                    : updateQuery.is('updated_at', null);
+            }
+
+            const { data: updated, error } = await updateQuery.select('id');
             if (error) throw error;
+            if (!updated || updated.length === 0) {
+                throw new Error('Die Forderung wurde nicht gespeichert: keine Schreibberechtigung für „Finanzen“ oder die Forderung wurde zwischenzeitlich geändert. Bitte laden Sie die Seite neu.');
+            }
 
             setIsEditModalOpen(false);
             setEditingClaim(null);
@@ -738,7 +853,8 @@ const Claims = () => {
         setCancelReason('');
     };
 
-    // Storno: Ratenplan beenden, Portal-Link sperren, Forderung mit Grund stornieren, Ereignis protokollieren.
+    // Storno: Ratenplan beenden, Portal-Link sperren, Forderung mit Grund stornieren, Ereignis protokollieren –
+    // über die Datenbank-Funktion cancel_claim in einer Transaktion (Rückfall: bisherige Einzelschritte).
     // Bereits gebuchte Zahlungen bleiben gebucht.
     const handleConfirmCancel = async () => {
         if (!cancelTarget || isSubmitting) return;
@@ -747,82 +863,17 @@ const Claims = () => {
             alert('Bitte geben Sie einen Stornierungsgrund an.');
             return;
         }
+        if (!canWriteClaim(cancelTarget)) {
+            alert('Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Forderungen können nur mit Schreibrecht „Finanzen“ storniert werden.');
+            return;
+        }
         setIsSubmitting(true);
-        const claimId = cancelTarget.id;
-        const nowIso = new Date().toISOString();
         try {
-            const { data: plans, error: planError } = await supabase
-                .from('payment_plans')
-                .select('id')
-                .eq('claim_id', claimId)
-                .eq('status', 'active');
-            if (planError) throw planError;
-
-            for (const plan of plans || []) {
-                const { error: instError } = await supabase
-                    .from('payment_plan_installments')
-                    .update({ status: 'cancelled', updated_at: nowIso })
-                    .eq('payment_plan_id', plan.id)
-                    .in('status', ['open', 'partial', 'overdue']);
-                let planError = instError;
-                if (!planError) {
-                    const { error: planUpdateError } = await supabase
-                        .from('payment_plans')
-                        .update({ status: 'cancelled', cancelled_at: nowIso, cancelled_by: user?.id || null, cancellation_reason: reason, updated_at: nowIso })
-                        .eq('id', plan.id);
-                    planError = planUpdateError;
-                }
-                if (planError) {
-                    // Künftiger DB-Stand: Ratenpläne sind nur noch per RPC änderbar -> Plan über reverse_payment_plan beenden
-                    if (/Ratenpläne können nur über/i.test(String(planError.message || ''))) {
-                        const { error: reverseError } = await supabase.rpc('reverse_payment_plan', { p_claim_id: claimId });
-                        if (reverseError && !String(reverseError.message || '').includes('Kein aktiver Ratenplan')) throw reverseError;
-                        break; // reverse_payment_plan beendet den aktiven Plan der Forderung
-                    }
-                    throw planError;
-                }
-            }
-
-            // Portal-Link sperren (nur für den Portfolio-Eigentümer erlaubt; Fehler hier sind nicht kritisch)
-            const { error: linkError } = await supabase
-                .from('claim_access_links')
-                .update({ is_active: false, revoked_at: nowIso })
-                .eq('claim_id', claimId)
-                .eq('is_active', true);
-            if (linkError) console.warn('Portal-Link konnte nicht deaktiviert werden:', linkError);
-
-            const { data: updated, error } = await supabase
-                .from('claims')
-                .update({
-                    status: 'cancelled',
-                    cancelled_at: nowIso,
-                    cancelled_by: user?.id || null,
-                    cancellation_reason: reason,
-                    updated_at: nowIso
-                })
-                .eq('id', claimId)
-                .select('id');
-
-            if (error) throw error;
-            if (!updated || updated.length === 0) throw new Error('Sie haben keine Berechtigung, diese Forderung zu stornieren.');
-
-            const { error: eventError } = await supabase.from('claim_events').insert([{
-                user_id: cancelTarget.user_id || user?.id,
-                claim_id: claimId,
-                event_type: 'cancelled',
-                description: 'Forderung storniert',
-                event_metadata: {
-                    old_status: cancelTarget.status,
-                    new_status: 'cancelled',
-                    reason,
-                    cancelled_payment_plan_ids: (plans || []).map(p => p.id)
-                }
-            }]);
-            if (eventError) console.warn('Storno-Ereignis konnte nicht gespeichert werden:', eventError);
+            const result = await cancelClaim({ claim: cancelTarget, reason, writeOff: false, userId: user?.id || null });
 
             setCancelTarget(null);
             loadData();
-            alert(eventError
+            alert(!result.historySaved
                 ? 'Forderung wurde storniert. Hinweis: Der Historien-Eintrag konnte nicht gespeichert werden.'
                 : 'Forderung wurde storniert.');
         } catch (err) {
@@ -912,7 +963,7 @@ const Claims = () => {
                 <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                     <ExportDropdown
                         reportType="mahnwesen"
-                        data={claims.map(claim => {
+                        data={visibleClaims.map(claim => {
                             const propData = claim.leases?.units?.properties;
                             const prop = propData ? `${propData.street} ${propData.house_number}`.trim() : '';
                             const unit = claim.leases?.units?.unit_name || '';
@@ -932,25 +983,36 @@ const Claims = () => {
                                 _propertyLabel: prop || '–',
                             };
                         })}
-                        properties={Array.from(new Set(claims.map(c => c.leases?.units?.properties).filter(Boolean).map(p => p.id)))
+                        properties={Array.from(new Set(visibleClaims.map(c => c.leases?.units?.properties).filter(Boolean).map(p => p.id)))
                             .map(id => {
-                                const p = claims.find(c => c.leases?.units?.properties?.id === id)?.leases?.units?.properties;
+                                const p = visibleClaims.find(c => c.leases?.units?.properties?.id === id)?.leases?.units?.properties;
                                 return { id: p?.id, label: `${p?.street || ''} ${p?.house_number || ''}`.trim() };
                             })}
-                        totalRows={claims.length}
+                        totalRows={visibleClaims.length}
                     />
-                    <Button
-                        variant="secondary"
-                        onClick={() => { loadPortalSettings(); setIsSettingsModalOpen(true); }}
-                        style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-                    >
-                        <SettingsIcon size={18} />
-                        Portal-Einstellungen
-                    </Button>
-                    <Button onClick={openCreateModal} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Plus size={18} />
-                        Forderung erstellen
-                    </Button>
+                    {canCreateClaims ? (
+                        <>
+                            <Button
+                                variant="secondary"
+                                onClick={openPortalSettings}
+                                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                            >
+                                <SettingsIcon size={18} />
+                                Portal-Einstellungen
+                            </Button>
+                            <Button onClick={openCreateModal} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Plus size={18} />
+                                Forderung erstellen
+                            </Button>
+                        </>
+                    ) : (
+                        <span
+                            style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}
+                            title="Freigabe nur zum Lesen: Forderungen anlegen, bearbeiten und stornieren erfordert Schreibrecht „Finanzen“."
+                        >
+                            Nur lesen
+                        </span>
+                    )}
                 </div>
             </div>
 
@@ -974,8 +1036,16 @@ const Claims = () => {
 
             {/* Claims Table */}
             <Card style={{ overflow: 'visible' }}>
-                <div style={{ padding: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color)' }}>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Aktive Forderungen</h2>
+                <div style={{ padding: 'var(--spacing-lg)', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>{showSettled ? 'Aktive und erledigte Forderungen' : 'Aktive Forderungen'}</h2>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={showSettled}
+                            onChange={(e) => setShowSettled(e.target.checked)}
+                        />
+                        Erledigte anzeigen{settledCount > 0 ? ` (${settledCount})` : ''}
+                    </label>
                 </div>
 
                 {error && (
@@ -987,9 +1057,11 @@ const Claims = () => {
 
                 {loading ? (
                     <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center', color: 'var(--text-secondary)' }}>Lade Daten...</div>
-                ) : claims.length === 0 ? (
+                ) : visibleClaims.length === 0 ? (
                     <div style={{ padding: 'var(--spacing-xl)', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                        Noch keine Forderungen vorhanden.
+                        {claims.length === 0
+                            ? 'Noch keine Forderungen vorhanden.'
+                            : `Keine aktiven Forderungen. ${settledCount} erledigte ${settledCount === 1 ? 'Forderung ist' : 'Forderungen sind'} ausgeblendet („Erledigte anzeigen“).`}
                     </div>
                 ) : (
                     <div style={{ overflow: 'visible' }}>
@@ -1007,7 +1079,7 @@ const Claims = () => {
                                 </tr>
                             </thead>
                             <tbody>
-                                {claims.map((claim) => (
+                                {visibleClaims.map((claim) => (
                                     <tr
                                         key={claim.id}
                                         onClick={() => navigate(`/forderungen/${claim.id}`)}
@@ -1092,6 +1164,21 @@ const Claims = () => {
                                         value={editForm.interest_rate}
                                         onChange={e => setEditForm({...editForm, interest_rate: e.target.value})}
                                     />
+                                    {isRateChanged(editingClaim, editForm.interest_rate) && (
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                            {editForm.rate_retroactive
+                                                ? 'Der neue Satz gilt rückwirkend ab Zinsbeginn – nur zur Korrektur eines Eingabefehlers.'
+                                                : 'Der neue Satz gilt ab heute; die bis heute aufgelaufenen Zinsen werden zum bisherigen Satz unter „Verbuchte Zinsen“ festgeschrieben.'}
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', cursor: 'pointer' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!editForm.rate_retroactive}
+                                                    onChange={e => setEditForm({ ...editForm, rate_retroactive: e.target.checked })}
+                                                />
+                                                Rückwirkend ab Zinsbeginn korrigieren (Tippfehler)
+                                            </label>
+                                        </div>
+                                    )}
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Verbuchte Zinsen (€)</label>
@@ -1178,6 +1265,13 @@ const Claims = () => {
                                 <div style={{ display: 'flex', gap: '8px', padding: '12px', marginBottom: '16px', backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', fontSize: '0.85rem', color: '#991B1B' }}>
                                     <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
                                     <div>{ledgerLoadError}</div>
+                                </div>
+                            )}
+
+                            {createHint && !loadingLedgers && (
+                                <div style={{ display: 'flex', gap: '8px', padding: '12px', marginBottom: '16px', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '8px', fontSize: '0.85rem', color: '#92400E' }}>
+                                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                    <div>{createHint}</div>
                                 </div>
                             )}
 
@@ -1540,23 +1634,31 @@ const Claims = () => {
                         >
                             <Eye size={16} /> Akte öffnen
                         </button>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(activeDropdownClaim); }}
-                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
-                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <Edit size={16} /> Bearbeiten
-                        </button>
-                        <div style={{ height: '1px', backgroundColor: 'var(--border-color, #E5E7EB)', margin: '4px 0' }} />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openCancelModal(activeDropdownClaim); }}
-                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B', borderRadius: '6px' }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.06)'}
-                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                        >
-                            <Trash2 size={16} /> Stornieren
-                        </button>
+                        {canWriteClaim(activeDropdownClaim) ? (
+                            <>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openEditModal(activeDropdownClaim); }}
+                                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: 'var(--text-primary)', borderRadius: '6px' }}
+                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--background-color, #F3F4F6)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                >
+                                    <Edit size={16} /> Bearbeiten
+                                </button>
+                                <div style={{ height: '1px', backgroundColor: 'var(--border-color, #E5E7EB)', margin: '4px 0' }} />
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); setActiveDropdown(null); openCancelModal(activeDropdownClaim); }}
+                                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.9rem', color: '#991B1B', borderRadius: '6px' }}
+                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.06)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                                >
+                                    <Trash2 size={16} /> Stornieren
+                                </button>
+                            </>
+                        ) : (
+                            <div style={{ padding: '8px 16px', fontSize: '0.8rem', color: 'var(--text-secondary)' }} title="Freigabe nur zum Lesen">
+                                Nur lesen (Schreibrecht „Finanzen“ fehlt)
+                            </div>
+                        )}
                     </div>
                 </>,
                 document.body
@@ -1565,7 +1667,20 @@ const Claims = () => {
             {/* Portal Settings Modal */}
             <Modal isOpen={isSettingsModalOpen} onClose={() => !isSubmitting && setIsSettingsModalOpen(false)} title="Forderungsportal Einstellungen">
                 <div style={{ padding: 'var(--spacing-lg)' }}>
-                    {loadingSettings ? (
+                    {portalSettingsOwnerOnly ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '0.9rem', color: '#1E3A8A' }}>
+                                <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                <div>
+                                    Ratenoptionen und Bankverbindung des Forderungsportals legt der Eigentümer des Portfolios fest.
+                                    Für Forderungen aus freigegebenen Portfolios gelten immer seine Einstellungen (bzw. die im Portfolio hinterlegte Bankverbindung).
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                                <Button variant="secondary" onClick={() => setIsSettingsModalOpen(false)}>Schließen</Button>
+                            </div>
+                        </div>
+                    ) : loadingSettings ? (
                         <div style={{ textAlign: 'center', padding: '20px' }}>Lade Einstellungen...</div>
                     ) : portalSettingsError ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1580,6 +1695,12 @@ const Claims = () => {
                         </div>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-lg)' }}>
+                            {portalSettingsMixedScope && (
+                                <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '0.85rem', color: '#1E3A8A' }}>
+                                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                    <div>Diese Einstellungen gelten nur für Forderungen Ihrer eigenen Portfolios. Für freigegebene Portfolios legt sie der jeweilige Eigentümer fest.</div>
+                                </div>
+                            )}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '16px', backgroundColor: '#F9FAFB', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                                 <input
                                     type="checkbox"
@@ -1645,7 +1766,13 @@ const Claims = () => {
                                 </div>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
                                     Geben Sie Ihre Bankdaten an, damit der Mieter offene Beträge direkt per Überweisung begleichen und einen QR-Code (GiroCode) für schnelles Bezahlen nutzen kann.
+                                    {' '}Ist im Portfolio (Einstellungen › Portfolios) eine eigene IBAN hinterlegt, nennen Mahnschreiben und Forderungsportal für dessen Forderungen diese Bankverbindung (Kontoinhaber: Firmenname des Portfolios) – sie hat Vorrang vor den Angaben hier.
                                 </p>
+                                {ownPortfoliosWithIban.length > 0 && (
+                                    <p style={{ fontSize: '0.8rem', color: '#1E3A8A', marginTop: '-8px', marginBottom: '16px' }}>
+                                        Eigene Bankverbindung hinterlegt in: {ownPortfoliosWithIban.map(p => p.name).join(', ')}.
+                                    </p>
+                                )}
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                                     <div>
                                         <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Kontoinhaber</label>

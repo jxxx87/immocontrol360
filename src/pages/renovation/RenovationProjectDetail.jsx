@@ -11,6 +11,7 @@ import Input from '../../components/ui/Input';
 import GanttChart from '../../components/renovation/GanttChart';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { translateError } from '../../lib/errorTranslator';
 import {
@@ -67,6 +68,7 @@ const RenovationProjectDetail = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     const { user } = useAuth();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
 
     const [project, setProject] = useState(null);
@@ -102,7 +104,7 @@ const RenovationProjectDetail = () => {
             .from('renovation_projects')
             .select(`
                 *,
-                property:properties(street, house_number, city, zip, user_id, portfolio:portfolios(user_id)),
+                property:properties(street, house_number, city, zip, user_id, portfolio_id, portfolio:portfolios(user_id)),
                 unit:units(unit_name),
                 trades:renovation_project_trades(
                     *, milestones:renovation_milestones(*),
@@ -159,6 +161,15 @@ const RenovationProjectDetail = () => {
     // Neue DB-Spalte renovation_projects.gik_transferred_amount (bereits in die GIK übernommener
     // Betrag) wird nur genutzt, wenn sie vorhanden ist – sonst bisheriges Verhalten mit Warnhinweis.
     const hasGikTracking = !!project && Object.prototype.hasOwnProperty.call(project, 'gik_transferred_amount');
+
+    // Schreibrecht wie die RLS: Projekt selbst (Status, Ziel-Datum, Abschluss) braucht Schreibrecht
+    // „Immobilien“ oder „Investorportal“ am Objekt; Gewerke, Meilensteine, Untergewerke und Rechnungen
+    // zusätzlich für das Konto, dem das Projekt gehört (has_renovation_project_access).
+    // Solange die Freigaben laden, nicht sperren – die Datenbank prüft ohnehin.
+    const projectPortfolioId = project?.property?.portfolio_id || null;
+    const canEditProject = !perm || perm.loadingPermissions || (!!projectPortfolioId
+        && (perm.canWrite('immobilien', projectPortfolioId) || perm.canWrite('investorportal', projectPortfolioId)));
+    const canEdit = canEditProject || (!!project && project.user_id === user?.id);
     const gikTransferred = hasGikTracking ? round2(project.gik_transferred_amount) : 0;
 
     /* ─── Computed Stats ─────── */
@@ -204,6 +215,19 @@ const RenovationProjectDetail = () => {
         // If completion trigger → set trade status to completed
         if (is_completed && milestone.is_completion_trigger) {
             assertWrite(await supabase.from('renovation_project_trades').update({ status: 'completed' }).eq('id', milestone.project_trade_id).select('id'), 'Gewerk-Status speichern');
+        }
+
+        // Abschluss-Meilenstein zurückgenommen: Gewerk wieder „In Arbeit“, sofern kein anderer
+        // abgehakter Abschluss-Meilenstein im Gewerk bleibt. Nur wenn das Gewerk noch „Fertig“ ist
+        // (ein inzwischen von Hand gesetzter Status bleibt unverändert).
+        if (!is_completed && milestone.is_completion_trigger) {
+            const trade = (project?.trades || []).find(t => t.id === milestone.project_trade_id);
+            const otherTriggerDone = (trade?.milestones || []).some(m => m.id !== milestone.id && m.is_completion_trigger && m.is_completed);
+            if (trade?.status === 'completed' && !otherTriggerDone) {
+                const { error: tradeErr } = await supabase.from('renovation_project_trades')
+                    .update({ status: 'in_progress' }).eq('id', milestone.project_trade_id).eq('status', 'completed');
+                if (tradeErr) throw tradeErr;
+            }
         }
     }, 'Fehler beim Speichern des Meilensteins');
 
@@ -395,6 +419,9 @@ const RenovationProjectDetail = () => {
             return;
         }
         if (amount >= INVOICE_CONFIRM_LIMIT && !window.confirm(`Der Betrag ${fmtEUR(amount)} ist ungewöhnlich hoch. Trotzdem speichern?`)) return;
+        // Abgeschlossenes/archiviertes Projekt: neue Kosten fehlen in den GIK, bis erneut abgeschlossen wird
+        if ((project?.status === 'completed' || project?.status === 'archived')
+            && !window.confirm(`${invoiceGikHint}\n\nRechnung trotzdem speichern?`)) return;
         const date = invoiceForm.date || localDateStr();
         if (!parseLocalDate(date)) {
             alert('Bitte ein gültiges Rechnungsdatum eingeben.');
@@ -417,6 +444,11 @@ const RenovationProjectDetail = () => {
             setInvoiceForm({ amount: '', date: '', note: '' });
         }
     };
+
+    // Hinweis für Rechnungen in abgeschlossenen/archivierten Projekten (Erfassen-Dialog und Rückfrage)
+    const invoiceGikHint = hasGikTracking
+        ? 'Hinweis: Das Projekt ist bereits abgeschlossen bzw. archiviert. Die Rechnung wird erst beim erneuten Abschließen des Projekts („Reaktivieren“, dann „Abschließen“) in die Gesamtinvestitionskosten (GIK) der Immobilie übernommen.'
+        : 'Hinweis: Das Projekt ist bereits abgeschlossen bzw. archiviert. Eine bereits erfolgte Übernahme in die Gesamtinvestitionskosten (GIK) der Immobilie wird um diese Rechnung nicht automatisch ergänzt.';
 
     const deleteInvoice = (inv) => {
         let msg = `Rechnung über ${fmtEUR(inv.amount)} vom ${formatDateDE(inv.date)}${inv.note ? ` („${inv.note}")` : ''} wirklich löschen?\nDies kann nicht rückgängig gemacht werden.`;
@@ -474,6 +506,13 @@ const RenovationProjectDetail = () => {
                 </div>
             )}
 
+            {!canEdit && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 14px', marginBottom: '12px', borderRadius: 'var(--radius-md)', background: 'rgba(14,165,233,0.08)', border: '1px solid rgba(14,165,233,0.3)', color: '#0284c7', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+                    <AlertTriangle size={15} />
+                    <span style={{ flex: 1 }}>Nur Leserecht: Für dieses Projekt haben Sie kein Schreibrecht („Immobilien“ bzw. „Investorportal“). Status, Budget, Meilensteine, Zeiträume und Rechnungen sind nicht änderbar.</span>
+                </div>
+            )}
+
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '12px' }}>
                 <div>
@@ -488,11 +527,13 @@ const RenovationProjectDetail = () => {
                     </div>
                 </div>
                 {/* Status-Aktionen abhängig vom aktuellen Status */}
-                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                    {!isClosed && <Button size="sm" onClick={() => updateProjectStatus('completed')} disabled={statusBusy} style={{ background: '#16a34a' }}>Abschließen</Button>}
-                    {isClosed && <Button variant="secondary" size="sm" onClick={() => updateProjectStatus('active')} disabled={statusBusy}>Reaktivieren</Button>}
-                    {project.status !== 'archived' && <Button variant="secondary" size="sm" onClick={() => updateProjectStatus('archived')} disabled={statusBusy}>Archivieren</Button>}
-                </div>
+                {canEditProject && (
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        {!isClosed && <Button size="sm" onClick={() => updateProjectStatus('completed')} disabled={statusBusy} style={{ background: '#16a34a' }}>Abschließen</Button>}
+                        {isClosed && <Button variant="secondary" size="sm" onClick={() => updateProjectStatus('active')} disabled={statusBusy}>Reaktivieren</Button>}
+                        {project.status !== 'archived' && <Button variant="secondary" size="sm" onClick={() => updateProjectStatus('archived')} disabled={statusBusy}>Archivieren</Button>}
+                    </div>
+                )}
             </div>
 
             {/* View Tabs: Cockpit / Gantt */}
@@ -556,6 +597,7 @@ const RenovationProjectDetail = () => {
                                         key={`target-${zielSoll || ''}`}
                                         type="date"
                                         defaultValue={zielSoll || ''}
+                                        disabled={!canEditProject}
                                         onBlur={e => commitTargetDate(e.target.value, e.target)}
                                         onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                         style={{ fontSize: '0.95rem', fontWeight: 700, color: '#0ea5e9', border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', outline: 'none', width: '100%' }}
@@ -574,8 +616,8 @@ const RenovationProjectDetail = () => {
                         isMobile={isMobile}
                     />
                     <div style={{ marginTop: '16px' }}>
-                        <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>Zeiträume bearbeiten</h3>
-                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>Änderungen werden beim Verlassen des Datumsfelds gespeichert.</p>
+                        <h3 style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>{canEdit ? 'Zeiträume bearbeiten' : 'Zeiträume'}</h3>
+                        {canEdit && <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>Änderungen werden beim Verlassen des Datumsfelds gespeichert.</p>}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                             {(project.trades || []).map(t => {
                                 const invalid = t.start_date && t.end_date && t.end_date < t.start_date;
@@ -585,6 +627,7 @@ const RenovationProjectDetail = () => {
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                             <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Start:</label>
                                             <input type="date" key={`${t.id}-start-${t.start_date || ''}`} defaultValue={t.start_date || ''}
+                                                disabled={!canEdit}
                                                 onBlur={e => commitTradeDate(t, 'start_date', e.target.value, e.target)}
                                                 onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                                 style={{ padding: '4px 6px', borderRadius: '4px', border: '1px solid var(--border-color)', fontSize: '0.8rem' }} />
@@ -592,6 +635,7 @@ const RenovationProjectDetail = () => {
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                             <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Ende:</label>
                                             <input type="date" key={`${t.id}-end-${t.end_date || ''}`} defaultValue={t.end_date || ''} min={t.start_date || undefined}
+                                                disabled={!canEdit}
                                                 onBlur={e => commitTradeDate(t, 'end_date', e.target.value, e.target)}
                                                 onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                                 style={{ padding: '4px 6px', borderRadius: '4px', border: '1px solid var(--border-color)', fontSize: '0.8rem' }} />
@@ -651,9 +695,10 @@ const RenovationProjectDetail = () => {
                                                     <button
                                                         key={m.id}
                                                         onClick={() => toggleMilestone(m)}
+                                                        disabled={!canEdit}
                                                         style={{
                                                             display: 'flex', alignItems: 'center', gap: '5px',
-                                                            padding: '6px 12px', borderRadius: '20px', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer',
+                                                            padding: '6px 12px', borderRadius: '20px', fontSize: '0.78rem', fontWeight: 600, cursor: canEdit ? 'pointer' : 'default',
                                                             background: m.is_completed ? '#dcfce7' : 'var(--surface-color)',
                                                             color: m.is_completed ? '#16a34a' : 'var(--text-secondary)',
                                                             border: m.is_completed ? '1px solid #16a34a' : '1px solid var(--border-color)',
@@ -671,8 +716,9 @@ const RenovationProjectDetail = () => {
                                         <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
                                             {Object.entries(TRADE_STATUS).map(([k, v]) => (
                                                 <button key={k} onClick={() => updateTradeStatus(trade.id, k)}
+                                                    disabled={!canEdit}
                                                     style={{
-                                                        padding: '4px 10px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                                                        padding: '4px 10px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600, cursor: canEdit ? 'pointer' : 'default',
                                                         background: trade.status === k ? v.bg : 'transparent',
                                                         color: trade.status === k ? v.color : 'var(--text-secondary)',
                                                         border: trade.status === k ? `1px solid ${v.color}` : '1px solid var(--border-color)',
@@ -686,7 +732,7 @@ const RenovationProjectDetail = () => {
                                         <h4 style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '8px' }}>Untergewerke & Budget</h4>
                                         {(trade.subtrades || []).length === 0 && (
                                             <p style={{ fontSize: '0.78rem', color: '#b45309', marginBottom: '8px' }}>
-                                                Noch keine Untergewerke – lege unten eines an, um Budget und Rechnungen zu erfassen.
+                                                {canEdit ? 'Noch keine Untergewerke – lege unten eines an, um Budget und Rechnungen zu erfassen.' : 'Noch keine Untergewerke.'}
                                             </p>
                                         )}
                                         <div style={{ overflowX: 'auto' }}>
@@ -715,7 +761,7 @@ const RenovationProjectDetail = () => {
                                                                                 onKeyDown={e => e.key === 'Enter' && saveBudget(st.id, e.target.value)}
                                                                                 autoFocus style={{ width: '100px', textAlign: 'right', padding: '4px', borderRadius: '4px', border: '1px solid var(--border-color)' }} />
                                                                         ) : (
-                                                                            <span onClick={() => setEditBudget({ subtradeId: st.id })} style={{ cursor: 'pointer' }} title="Klicken zum Bearbeiten">
+                                                                            <span onClick={() => { if (canEdit) setEditBudget({ subtradeId: st.id }); }} style={{ cursor: canEdit ? 'pointer' : 'default' }} title={canEdit ? 'Klicken zum Bearbeiten' : undefined}>
                                                                                 {fmtEUR(st.budget_soll)}
                                                                             </span>
                                                                         )}
@@ -724,7 +770,7 @@ const RenovationProjectDetail = () => {
                                                                         {fmtEUR(stIst)}
                                                                     </td>
                                                                     <td style={{ padding: '8px' }}>
-                                                                        <select value={st.responsible_contact_id || ''} onChange={e => updateResponsible(st.id, e.target.value)}
+                                                                        <select value={st.responsible_contact_id || ''} onChange={e => updateResponsible(st.id, e.target.value)} disabled={!canEdit}
                                                                             style={{ padding: '4px 6px', borderRadius: '4px', border: '1px solid var(--border-color)', fontSize: '0.78rem', background: 'var(--surface-color)', maxWidth: '130px' }}>
                                                                             <option value="">—</option>
                                                                             {/* Zugewiesener Kontakt bleibt sichtbar, auch wenn er nicht in der Liste ist */}
@@ -735,10 +781,12 @@ const RenovationProjectDetail = () => {
                                                                         </select>
                                                                     </td>
                                                                     <td style={{ padding: '8px', textAlign: 'center' }}>
-                                                                        <button onClick={() => { setInvoiceModal({ subtradeId: st.id }); setInvoiceForm({ amount: '', date: localDateStr(), note: '' }); }}
-                                                                            style={{ background: 'none', border: '1px solid #0ea5e9', borderRadius: '4px', color: '#0ea5e9', fontSize: '0.72rem', padding: '3px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                                                            <Plus size={12} /> RE
-                                                                        </button>
+                                                                        {canEdit && (
+                                                                            <button onClick={() => { setInvoiceModal({ subtradeId: st.id }); setInvoiceForm({ amount: '', date: localDateStr(), note: '' }); }}
+                                                                                style={{ background: 'none', border: '1px solid #0ea5e9', borderRadius: '4px', color: '#0ea5e9', fontSize: '0.72rem', padding: '3px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                                                                <Plus size={12} /> RE
+                                                                            </button>
+                                                                        )}
                                                                     </td>
                                                                 </tr>
                                                                 {/* Invoice sub-rows */}
@@ -751,10 +799,12 @@ const RenovationProjectDetail = () => {
                                                                         <td style={{ padding: '4px 8px', textAlign: 'right' }}>{fmtEUR(inv.amount)}</td>
                                                                         <td></td>
                                                                         <td style={{ textAlign: 'center', padding: '4px' }}>
-                                                                            <button onClick={() => deleteInvoice(inv)} title="Rechnung löschen"
-                                                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '2px' }}>
-                                                                                <Trash2 size={12} />
-                                                                            </button>
+                                                                            {canEdit && (
+                                                                                <button onClick={() => deleteInvoice(inv)} title="Rechnung löschen"
+                                                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '2px' }}>
+                                                                                    <Trash2 size={12} />
+                                                                                </button>
+                                                                            )}
                                                                         </td>
                                                                     </tr>
                                                                 ))}
@@ -766,7 +816,7 @@ const RenovationProjectDetail = () => {
                                         </div>
 
                                         {/* Untergewerk nachtragen */}
-                                        <div style={{ display: 'flex', gap: '6px', marginTop: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                        {canEdit && <div style={{ display: 'flex', gap: '6px', marginTop: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                                             <input
                                                 value={newSubtradeNames[trade.id] || ''}
                                                 onChange={e => setNewSubtradeNames(prev => ({ ...prev, [trade.id]: e.target.value }))}
@@ -781,7 +831,7 @@ const RenovationProjectDetail = () => {
                                             >
                                                 <Plus size={12} /> Untergewerk
                                             </button>
-                                        </div>
+                                        </div>}
                                     </div>
                                 )}
                             </div>
@@ -793,6 +843,12 @@ const RenovationProjectDetail = () => {
             {/* Invoice Modal */}
             <Modal isOpen={!!invoiceModal} onClose={() => { if (!invoiceSaving) setInvoiceModal(null); }} title="Rechnung erfassen"
                 footer={<><Button variant="secondary" onClick={() => setInvoiceModal(null)} disabled={invoiceSaving}>Abbrechen</Button><Button onClick={addInvoice} disabled={invoiceSaving}>{invoiceSaving ? <Loader2 size={16} className="animate-spin" /> : 'Speichern'}</Button></>}>
+                {isClosed && (
+                    <p style={{ display: 'flex', gap: '6px', alignItems: 'flex-start', fontSize: '0.8rem', color: '#b45309', marginBottom: '12px', lineHeight: 1.5 }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+                        {invoiceGikHint}
+                    </p>
+                )}
                 <Input label="Betrag (€)" type="number" min="0.01" step="0.01" value={invoiceForm.amount} onChange={e => setInvoiceForm({ ...invoiceForm, amount: e.target.value })} placeholder="0,00" />
                 <Input label="Datum" type="date" value={invoiceForm.date} onChange={e => setInvoiceForm({ ...invoiceForm, date: e.target.value })} />
                 <Input label="Notiz (optional)" value={invoiceForm.note} onChange={e => setInvoiceForm({ ...invoiceForm, note: e.target.value })} placeholder="z.B. Abschlagszahlung 1" />

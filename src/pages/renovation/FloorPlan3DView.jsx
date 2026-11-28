@@ -424,10 +424,14 @@ const RoofMesh = ({ storey, yOffset = 0 }) => {
         if (roofType === 'gable') {
             const kneeH = Math.max(0, num(kneeWallMm, typeDefaults.kneeWall_mm ?? 0)) * MM;
             const pitch = num(pitchDeg, typeDefaults.pitch_deg ?? 35) * Math.PI / 180;
-            const halfSpan = W / 2 + overhang;
+            // First entlang der längeren Grundrissseite (wie im 2D-Plan, canvasRenderer: bw >= bh):
+            // Spannweite = kurze Seite, Firstlänge = lange Seite. Gebaut wird mit First entlang z,
+            // bei ridgeAlongX wird die fertige Geometrie um 90° gedreht.
+            const ridgeAlongX = W >= D;
+            const halfSpan = (ridgeAlongX ? D : W) / 2 + overhang;
             const ridgeH = Math.tan(pitch) * halfSpan;
             const totalH = kneeH + ridgeH;
-            const depth = D + overhang * 2;
+            const depth = (ridgeAlongX ? W : D) + overhang * 2;
 
             // Build a custom geometry with two triangular prism halves
             const geo = new THREE.BufferGeometry();
@@ -467,6 +471,8 @@ const RoofMesh = ({ storey, yOffset = 0 }) => {
             ];
             geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
             geo.setIndex(indices);
+            // Echte Drehung (keine Spiegelung) – die Dreiecks-Orientierung bleibt erhalten
+            if (ridgeAlongX) geo.rotateY(Math.PI / 2);
             geo.computeVertexNormals();
             return { geo, cx, cz, baseY: yOffset + wallH };
         }

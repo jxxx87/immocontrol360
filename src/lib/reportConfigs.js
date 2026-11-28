@@ -1,5 +1,7 @@
 // ─── PDF Report Configurations ──────────────────────────────────────
 // Central config for all report types: columns, presets, defaults
+// Nur Berichtstypen mit Aufrufer (die nie genutzten 'einheiten', 'kpi', 'offene_mieten' und 'deals' sind entfallen;
+// 'bankaufstellung' hängt an der Entscheidung zu generate-report-pdf).
 
 export const REPORT_CONFIGS = {
     immobilien: {
@@ -29,25 +31,6 @@ export const REPORT_CONFIGS = {
             { key: 'dscr', label: 'DSCR', detail: true, format: 'decimal' },
         ],
     },
-    einheiten: {
-        label: 'Einheitenübersicht',
-        defaultOrientation: 'landscape',
-        sumsEnabled: true,
-        groupByProperty: true,
-        dsgvoRelevant: false,
-        sumColumns: ['flaeche', 'kaltmiete_soll'],
-        columns: [
-            { key: 'immobilie', label: 'Immobilie', always: true },
-            { key: 'einheit', label: 'Einheit', always: true },
-            { key: 'etage', label: 'Etage', compact: true },
-            { key: 'flaeche', label: 'Fläche (m²)', compact: true, format: 'area' },
-            { key: 'zimmer', label: 'Zimmer', compact: true },
-            { key: 'kaltmiete_soll', label: 'Kaltmiete Soll', compact: true, format: 'currency' },
-            { key: 'status', label: 'Status', compact: true },
-            { key: 'balkon', label: 'Balkon', detail: true },
-            { key: 'einbaukueche', label: 'Einbauküche', detail: true },
-        ],
-    },
     mietverhaeltnisse: {
         label: 'Mietverhältnisse',
         defaultOrientation: 'portrait',
@@ -66,24 +49,6 @@ export const REPORT_CONFIGS = {
             { key: 'wohnflaeche', label: 'Wohnfläche', detail: true, format: 'area' },
             { key: 'kaution', label: 'Kaution', detail: true, format: 'currency' },
             { key: 'status', label: 'Status', detail: true },
-        ],
-    },
-    kpi: {
-        label: 'KPI Summary',
-        defaultOrientation: 'portrait',
-        sumsEnabled: false,
-        groupByProperty: false,
-        dsgvoRelevant: false,
-        singlePage: true,
-        columns: [
-            { key: 'mieteinnahmen_monat', label: 'Mieteinnahmen (Monat)', compact: true, format: 'currency' },
-            { key: 'cashflow_monat', label: 'Cashflow (Monat)', compact: true, format: 'currency' },
-            { key: 'restschuld_gesamt', label: 'Restschuld gesamt', compact: true, format: 'currency' },
-            { key: 'dscr_avg', label: 'DSCR Ø', compact: true, format: 'decimal' },
-            { key: 'ltv_avg', label: 'LTV Ø', compact: true, format: 'percent' },
-            { key: 'leerstand_pct', label: 'Leerstand %', compact: true, format: 'percent' },
-            { key: 'chart_cashflow', label: 'Cashflow Verlauf (Chart)', detail: true, isChart: true },
-            { key: 'chart_miete', label: 'Miete Verlauf (Chart)', detail: true, isChart: true },
         ],
     },
     bankaufstellung: {
@@ -118,24 +83,6 @@ export const REPORT_CONFIGS = {
             { key: 'ltv', label: 'LTV', detail: true, format: 'percent' },
         ],
     },
-    offene_mieten: {
-        label: 'Offene Mieten',
-        defaultOrientation: 'portrait',
-        sumsEnabled: true,
-        groupByProperty: true,
-        dsgvoRelevant: true,
-        sumColumns: ['offen_gesamt'],
-        dsgvoFields: ['mieter'],
-        columns: [
-            { key: 'mieter', label: 'Mieter', always: true, dsgvo: true },
-            { key: 'immobilie_einheit', label: 'Immobilie + Einheit', compact: true },
-            { key: 'offen_gesamt', label: 'Offen gesamt', compact: true, format: 'currency' },
-            { key: 'aeltester_monat', label: 'Ältester offener Monat', compact: true },
-            { key: 'offene_monate', label: 'Offene Monate', compact: true },
-            { key: 'letzte_zahlung', label: 'Letzte Zahlung', compact: true },
-            { key: 'warmmiete', label: 'Warmmiete (Monat)', detail: true, format: 'currency' },
-        ],
-    },
     buchhaltung: {
         label: 'Buchhaltungsreport',
         defaultOrientation: 'landscape',
@@ -145,6 +92,7 @@ export const REPORT_CONFIGS = {
         sumColumns: ['betrag'],
         // Keine extraOptions: "Einnahmen/Ausgaben getrennt" und ein zweites "Gruppieren nach Immobilie" wurden nie
         // ausgewertet; Gruppieren bietet der Dialog bereits über groupByProperty an.
+        // Keine Spalte 'Rechnung': Buchungen haben kein erfasstes Belegfeld, sie wäre immer leer.
         columns: [
             { key: 'datum', label: 'Datum', always: true, format: 'date' },
             { key: 'empfaenger', label: 'Empfänger/Absender', compact: true },
@@ -152,7 +100,6 @@ export const REPORT_CONFIGS = {
             { key: 'betrag', label: 'Betrag', compact: true, format: 'currency' },
             { key: 'kategorie', label: 'Kategorie', detail: true },
             { key: 'immobilie', label: 'Immobilie', detail: true },
-            { key: 'rechnung', label: 'Rechnung', detail: true },
         ],
     },
     finanzierungen: {
@@ -173,24 +120,6 @@ export const REPORT_CONFIGS = {
             { key: 'beginn', label: 'Beginn', detail: true, format: 'date' },
             { key: 'zinsbindung_bis', label: 'Zinsbindung bis', detail: true, format: 'date' },
             { key: 'konto_nr', label: 'Kontonummer', detail: true },
-        ],
-    },
-    deals: {
-        label: 'Deal-Übersicht',
-        defaultOrientation: 'landscape',
-        sumsEnabled: false,
-        groupByProperty: false,
-        dsgvoRelevant: false,
-        columns: [
-            { key: 'dealname', label: 'Dealname', always: true },
-            { key: 'kaufpreis', label: 'Kaufpreis', compact: true, format: 'currency' },
-            { key: 'ek', label: 'EK', compact: true, format: 'currency' },
-            { key: 'rendite', label: 'Rendite', compact: true, format: 'percent' },
-            { key: 'cashflow', label: 'Cashflow', compact: true, format: 'currency' },
-            { key: 'dscr', label: 'DSCR', compact: true, format: 'decimal' },
-            { key: 'status', label: 'Status', compact: true },
-            { key: 'sanierungsbudget', label: 'Sanierungsbudget', detail: true, format: 'currency' },
-            { key: 'exit_preis', label: 'Exit-Preis', detail: true, format: 'currency' },
         ],
     },
     deal_kalkulation: {

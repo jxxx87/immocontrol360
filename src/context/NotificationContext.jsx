@@ -80,7 +80,9 @@ const storageSet = (key, value) => {
 };
 
 export const NotificationProvider = ({ children }) => {
-    const { user, userRole } = useAuth();
+    const { user, userRole, roleData } = useAuth();
+    // Einheit eines Mieter-Kontos (Kalender-Erinnerungen nur für die eigene Einheit bzw. das ganze Haus)
+    const tenantUnitId = roleData?.unit_id || null;
     const navigate = useNavigate();
     const navigateRef = useRef(navigate);
     const [notifications, setNotifications] = useState([]);
@@ -433,10 +435,11 @@ export const NotificationProvider = ({ children }) => {
                         debugLog('[Notifications] Checking renovation deadlines for', todayStr);
 
                         // 1. Tasks with due_date <= today, not completed
+                        // Ohne user_id-Filter: neue Aufgaben gehören dem Portfolio-Eigentümer, nicht dem
+                        // anlegenden Mitnutzer – gezählt wird wie im Sanierungsmanager alles Sichtbare (RLS)
                         const { data: dueTasks, error: taskErr } = await supabase
                             .from('renovation_tasks')
                             .select('id, title, due_date, project:renovation_projects(name)')
-                            .eq('user_id', user.id)
                             .eq('is_completed', false)
                             .lte('due_date', todayStr);
 
@@ -465,7 +468,6 @@ export const NotificationProvider = ({ children }) => {
                         const { data: dueProjects, error: projErr } = await supabase
                             .from('renovation_projects')
                             .select('id, name, target_end_date')
-                            .eq('user_id', user.id)
                             .neq('status', 'completed')
                             .lte('target_end_date', todayStr);
 
@@ -514,13 +516,21 @@ export const NotificationProvider = ({ children }) => {
                 (async () => {
                     try {
                         debugLog('[Notifications] Checking Objektkalender tasks for', todayStr);
+                        // Mieter: nur Termine der eigenen Einheit und solche ohne Einheit (ganzes Haus) –
+                        // die RLS gibt Mietern alle Termine ihres Objekts frei (z. B. Reinigung anderer Einheiten)
+                        const forTenantUnit = (q) => {
+                            if (!isTenant) return q;
+                            return tenantUnitId
+                                ? q.or(`assigned_unit_id.is.null,assigned_unit_id.eq.${tenantUnitId}`)
+                                : q.is('assigned_unit_id', null);
+                        };
                         // Events due today
-                        const { data: todayEvents, error: todayErr } = await supabase
+                        const { data: todayEvents, error: todayErr } = await forTenantUnit(supabase
                             .from('objektkalender_events')
                             .select('id, title, event_date, event_type, assigned_unit_name, push_enabled')
                             .eq('status', 'pending')
                             .eq('event_date', todayStr)
-                            .eq('push_enabled', true);
+                            .eq('push_enabled', true));
                         if (todayErr) console.warn('[Notifications] Objektkalender query error:', todayErr.message);
 
                         notifyBundled(
@@ -542,17 +552,20 @@ export const NotificationProvider = ({ children }) => {
                             }),
                         );
 
-                        // Overdue events — only check last 2 days to avoid notification flood
+                        // Überfällige Termine – Regel wie im Kalender (isOverdue in ObjectCalendar.jsx): überfällig
+                        // ab dem zweiten Tag nach dem Termin; nur zwei Tage zurück, um eine Meldungsflut zu vermeiden.
+                        // Der Schalter „Push-Erinnerung“ gilt auch hier.
+                        const threeDaysAgo = new Date(localToday);
+                        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
                         const twoDaysAgo = new Date(localToday);
                         twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-                        const yesterday = new Date(localToday);
-                        yesterday.setDate(yesterday.getDate() - 1);
-                        const { data: overdueEvents, error: overdueErr } = await supabase
+                        const { data: overdueEvents, error: overdueErr } = await forTenantUnit(supabase
                             .from('objektkalender_events')
                             .select('id, title, event_date, event_type, assigned_unit_name')
                             .eq('status', 'pending')
-                            .gte('event_date', toDateStr(twoDaysAgo))
-                            .lte('event_date', toDateStr(yesterday));
+                            .eq('push_enabled', true)
+                            .gte('event_date', toDateStr(threeDaysAgo))
+                            .lte('event_date', toDateStr(twoDaysAgo)));
                         if (overdueErr) console.warn('[Notifications] Objektkalender query error:', overdueErr.message);
 
                         notifyBundled(
@@ -625,7 +638,7 @@ export const NotificationProvider = ({ children }) => {
             removePushListeners();
             channels.forEach(ch => supabase.removeChannel(ch));
         };
-    }, [user, userRole, addNotification, notifyBundled]);
+    }, [user, userRole, tenantUnitId, addNotification, notifyBundled]);
 
     const value = {
         notifications,

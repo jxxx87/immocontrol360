@@ -7,15 +7,86 @@ import { translateError } from '../lib/errorTranslator';
 import Messenger from '../components/Messenger';
 import { MessageSquare, Users, Circle, Search } from 'lucide-react';
 import { useViewMode } from '../context/ViewModeContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 
 // Wie viele der jüngsten eigenen Nachrichten für "letzte Nachricht"/"ungelesen" in
 // EINER Abfrage geladen werden. Nur für Gespräche ohne Treffer wird einzeln nachgefragt.
 const RECENT_MESSAGES_LIMIT = 1000;
 
+// Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+const tenantName = (t) => (t && (t.first_name || t.last_name))
+    ? `${t.last_name || ''}, ${t.first_name || ''}`
+    : 'Unbekannt';
+
+const unitLabel = (street, houseNumber, unitName) =>
+    unitName ? `${street || ''} ${houseNumber || ''} / ${unitName}` : '';
+
+// Gesprächspartner = Mieter-Konten in Objekten, für die ich Recht „Mieterportal“ habe.
+// Über die Datenbank-Funktion get_message_partners (liefert auch Portfolio und Schreibrecht).
+// Fehlt sie noch, direkt aus user_roles (dort sieht man Mieter nur mit Recht „Mietverhältnisse“);
+// das Schreibrecht wird dann aus den Freigaben berechnet (canWrite: null).
+const loadMessagePartners = async (userId) => {
+    const { data, error, status } = await supabase.rpc('get_message_partners');
+    if (!error) {
+        return (data || []).map(r => ({
+            userId: r.user_id,
+            portfolioId: r.portfolio_id || null,
+            name: tenantName(r),
+            unit: unitLabel(r.street, r.house_number, r.unit_name),
+            canWrite: r.can_write === true
+        }));
+    }
+    if (!isMissingRpc(error, status)) throw error;
+
+    const { data: tenantRoles, error: rolesError } = await supabase
+        .from('user_roles')
+        .select('user_id, tenant_id, unit_id, property_id')
+        .eq('role', 'tenant');
+    if (rolesError) throw rolesError;
+
+    const roles = (tenantRoles || []).filter(r => r.user_id !== userId);
+    if (roles.length === 0) return [];
+
+    const tenantIds = roles.map(r => r.tenant_id).filter(Boolean);
+    const unitIds = roles.map(r => r.unit_id).filter(Boolean);
+
+    const [tenantRes, unitRes] = await Promise.all([
+        tenantIds.length > 0
+            ? supabase.from('tenants').select('id, first_name, last_name').in('id', tenantIds)
+            : Promise.resolve({ data: [], error: null }),
+        unitIds.length > 0
+            ? supabase.from('units').select('id, unit_name, property:properties(street, house_number, portfolio_id)').in('id', unitIds)
+            : Promise.resolve({ data: [], error: null })
+    ]);
+    if (tenantRes.error) throw tenantRes.error;
+    if (unitRes.error) throw unitRes.error;
+
+    const tenantData = tenantRes.data || [];
+    const unitData = unitRes.data || [];
+
+    return roles.map((role) => {
+        const tenant = tenantData.find(t => t.id === role.tenant_id);
+        const unit = unitData.find(u => u.id === role.unit_id);
+        return {
+            userId: role.user_id,
+            portfolioId: unit?.property?.portfolio_id || null,
+            name: tenantName(tenant),
+            unit: unit ? unitLabel(unit.property?.street, unit.property?.house_number, unit.unit_name) : '',
+            canWrite: null
+        };
+    });
+};
+
 const InvestorMessages = () => {
     const { user } = useAuth();
     const { clearByType } = useNotifications();
     const { isMobile } = useViewMode();
+    const { selectedPortfolioID } = usePortfolio();
+    const { canWrite } = usePermission() || {};
     const location = useLocation();
     const [conversations, setConversations] = useState([]);
     const [selectedConvo, setSelectedConvo] = useState(null);
@@ -42,33 +113,8 @@ const InvestorMessages = () => {
 
         const fetchConversations = async () => {
             try {
-                // Get all tenant roles with tenant info
-                const { data: tenantRoles, error: rolesError } = await supabase
-                    .from('user_roles')
-                    .select('user_id, tenant_id, unit_id, property_id')
-                    .eq('role', 'tenant');
-
-                if (rolesError) throw rolesError;
-
-                if (!tenantRoles || tenantRoles.length === 0) {
-                    if (!cancelled) {
-                        setConversations([]);
-                        setListError(null);
-                    }
-                    return;
-                }
-
-                // Fetch tenant names
-                const tenantIds = tenantRoles.map(r => r.tenant_id).filter(Boolean);
-                const unitIds = tenantRoles.map(r => r.unit_id).filter(Boolean);
-
-                const [tenantRes, unitRes, recentRes] = await Promise.all([
-                    tenantIds.length > 0
-                        ? supabase.from('tenants').select('id, first_name, last_name').in('id', tenantIds)
-                        : Promise.resolve({ data: [], error: null }),
-                    unitIds.length > 0
-                        ? supabase.from('units').select('id, unit_name, property:properties(street, house_number)').in('id', unitIds)
-                        : Promise.resolve({ data: [], error: null }),
+                const [partners, recentRes] = await Promise.all([
+                    loadMessagePartners(userId),
                     // Jüngste Nachrichten (gesendet und empfangen) in einer Abfrage
                     supabase
                         .from('messages')
@@ -78,12 +124,16 @@ const InvestorMessages = () => {
                         .limit(RECENT_MESSAGES_LIMIT)
                 ]);
 
-                if (tenantRes.error) throw tenantRes.error;
-                if (unitRes.error) throw unitRes.error;
+                if (partners.length === 0) {
+                    if (!cancelled) {
+                        setConversations([]);
+                        setListError(null);
+                    }
+                    return;
+                }
+
                 if (recentRes.error) throw recentRes.error;
 
-                const tenantData = tenantRes.data || [];
-                const unitData = unitRes.data || [];
                 const recent = recentRes.data || [];
 
                 const lastByPartner = {};
@@ -108,29 +158,25 @@ const InvestorMessages = () => {
                 // Nur Gespräche ohne Treffer unter den jüngsten Nachrichten einzeln nachladen
                 const missing = recent.length < RECENT_MESSAGES_LIMIT
                     ? []
-                    : tenantRoles.filter(r => !lastByPartner[r.user_id]);
-                await Promise.all(missing.map(async (role) => {
+                    : partners.filter(p => !lastByPartner[p.userId]);
+                await Promise.all(missing.map(async (partner) => {
                     const { data: lastMsg } = await supabase
                         .from('messages')
                         .select('text, created_at, sender_id, receiver_id')
-                        .or(`and(sender_id.eq.${userId},receiver_id.eq.${role.user_id}),and(sender_id.eq.${role.user_id},receiver_id.eq.${userId})`)
+                        .or(`and(sender_id.eq.${userId},receiver_id.eq.${partner.userId}),and(sender_id.eq.${partner.userId},receiver_id.eq.${userId})`)
                         .order('created_at', { ascending: false })
                         .limit(1);
-                    if (lastMsg?.[0]) lastByPartner[role.user_id] = lastMsg[0];
+                    if (lastMsg?.[0]) lastByPartner[partner.userId] = lastMsg[0];
                 }));
 
-                const convos = tenantRoles.map((role) => {
-                    const tenant = tenantData.find(t => t.id === role.tenant_id);
-                    const unit = unitData.find(u => u.id === role.unit_id);
-                    const lastMsg = lastByPartner[role.user_id];
+                const convos = partners.map((partner) => {
+                    const lastMsg = lastByPartner[partner.userId];
 
                     return {
-                        userId: role.user_id,
-                        name: tenant ? `${tenant.last_name}, ${tenant.first_name}` : 'Unbekannt',
-                        unit: unit ? `${unit.property?.street || ''} ${unit.property?.house_number || ''} / ${unit.unit_name}` : '',
+                        ...partner,
                         lastMessage: lastMsg?.text || null,
                         lastMessageTime: lastMsg?.created_at || null,
-                        unread: unreadMap[role.user_id] || 0
+                        unread: unreadMap[partner.userId] || 0
                     };
                 });
 
@@ -201,10 +247,35 @@ const InvestorMessages = () => {
         }
     }, [loading, conversations, location.state, preSelectDone]);
 
-    const filteredConvos = conversations.filter(c =>
+    // Oben gewähltes Portfolio: nur Mieter aus Objekten dieses Portfolios
+    const portfolioConvos = selectedPortfolioID
+        ? conversations.filter(c => c.portfolioId === selectedPortfolioID)
+        : conversations;
+
+    const filteredConvos = portfolioConvos.filter(c =>
         c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         c.unit.toLowerCase().includes(searchTerm.toLowerCase())
     );
+
+    // Gespräch eines anderen Portfolios nach dem Portfolio-Wechsel nicht weiter anzeigen
+    const activeConvo = selectedConvo && selectedPortfolioID && selectedConvo.portfolioId &&
+        selectedConvo.portfolioId !== selectedPortfolioID
+        ? null
+        : selectedConvo;
+
+    // Senden nur mit Schreibrecht „Mieterportal“ auf das Objekt des Mieters (wie rls_message_allowed);
+    // die Antwort an einen Mieter, der mir geschrieben hat, erlaubt Messenger trotzdem.
+    const canSendTo = (convo) => {
+        const current = conversations.find(c => c.userId === convo.userId) || convo;
+        if (typeof current.canWrite === 'boolean') return current.canWrite;
+        return !!canWrite?.('mieterportal', current.portfolioId || undefined);
+    };
+
+    const emptyListText = conversations.length === 0
+        ? 'Keine Mieter registriert'
+        : portfolioConvos.length === 0
+            ? 'Keine Mieter in diesem Portfolio registriert'
+            : `Keine Treffer für „${searchTerm.trim()}“`;
 
     // Kalendertage vergleichen (nicht 24-Stunden-Differenz): gestern 23 Uhr = "Gestern"
     const formatTime = (d) => {
@@ -240,7 +311,7 @@ const InvestorMessages = () => {
                 {/* ── LEFT: CONVERSATION LIST ── */}
                 <div style={{
                     borderRight: isMobile ? 'none' : '1px solid var(--border-color)',
-                    display: (!isMobile || !selectedConvo) ? 'flex' : 'none', flexDirection: 'column'
+                    display: (!isMobile || !activeConvo) ? 'flex' : 'none', flexDirection: 'column'
                 }}>
                     {/* Search */}
                     <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
@@ -284,7 +355,7 @@ const InvestorMessages = () => {
                         ) : filteredConvos.length === 0 ? (
                             <div style={{ padding: '30px 16px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                                 <Users size={32} color="var(--border-color)" style={{ marginBottom: '8px' }} />
-                                <p>Keine Mieter registriert</p>
+                                <p>{emptyListText}</p>
                             </div>
                         ) : (
                             filteredConvos.map(convo => (
@@ -295,7 +366,7 @@ const InvestorMessages = () => {
                                         padding: '14px 16px',
                                         cursor: 'pointer',
                                         borderBottom: '1px solid var(--border-color)',
-                                        backgroundColor: selectedConvo?.userId === convo.userId ? '#EFF6FF' : 'transparent',
+                                        backgroundColor: activeConvo?.userId === convo.userId ? '#EFF6FF' : 'transparent',
                                         transition: 'background 0.15s'
                                     }}
                                 >
@@ -363,14 +434,15 @@ const InvestorMessages = () => {
                 </div>
 
                 {/* ── RIGHT: MESSENGER ── */}
-                <div style={{ display: (!isMobile || selectedConvo) ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-                    {selectedConvo ? (
+                <div style={{ display: (!isMobile || activeConvo) ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+                    {activeConvo ? (
                         // key: beim Mieterwechsel neu aufbauen, damit Entwurf und Anhang
                         // nicht an den falschen Mieter gehen
                         <Messenger
-                            key={selectedConvo.userId}
-                            conversationUserId={selectedConvo.userId}
-                            conversationUserName={selectedConvo.name}
+                            key={activeConvo.userId}
+                            conversationUserId={activeConvo.userId}
+                            conversationUserName={activeConvo.name}
+                            readOnly={!canSendTo(activeConvo)}
                             onBack={isMobile ? () => setSelectedConvo(null) : undefined}
                         />
                     ) : (

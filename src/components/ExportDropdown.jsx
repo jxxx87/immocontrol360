@@ -30,6 +30,8 @@ const ExportDropdown = ({
     const { selectedPortfolioID, portfolios } = usePortfolio();
     const portfolio = portfolios?.find(p => p.id === selectedPortfolioID);
     const pdfTemplate = usePdfTemplate(reportType);
+    // Schnell-Export erst nach dem Laden der Vorlage (sonst still Standard-Kopf ohne Logo)
+    const templateLoading = !!pdfTemplate?.loading;
 
     // Close on outside click
     useEffect(() => {
@@ -49,6 +51,7 @@ const ExportDropdown = ({
 
     // Quick export handlers – gleiche Voreinstellungen wie im Dialog (REPORT_CONFIGS)
     const handleQuickExport = (preset) => {
+        if (templateLoading) return;
         setOpen(false);
         const config = REPORT_CONFIGS[reportType];
         // Berichte mit personenbezogenen Daten: Dialog öffnen, damit über die DSGVO-Pseudonymisierung entschieden wird
@@ -102,6 +105,8 @@ const ExportDropdown = ({
         textAlign: 'left', transition: 'background 0.1s',
     };
     const dividerStyle = { height: '1px', background: 'var(--border-color)', margin: '2px 0' };
+    const quickItemStyle = templateLoading ? { ...itemStyle, cursor: 'wait', opacity: 0.6 } : itemStyle;
+    const quickHint = (text) => (templateLoading ? 'PDF-Vorlage wird geladen…' : text);
 
     return (
         <div ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
@@ -113,8 +118,14 @@ const ExportDropdown = ({
 
             {open && (
                 <div style={dropdownStyle}>
+                    {pdfTemplate?.loadError && (
+                        <div role="status" style={{ padding: '8px 14px', fontSize: '0.72rem', color: '#d97706', background: 'rgba(245,158,11,0.08)', borderBottom: '1px solid var(--border-color)' }}>
+                            PDF-Vorlage konnte nicht geladen werden – es wird das Standard-Layout verwendet.
+                        </div>
+                    )}
                     <button
-                        style={itemStyle}
+                        style={quickItemStyle}
+                        disabled={templateLoading}
                         onMouseEnter={e => e.currentTarget.style.background = 'var(--background-color)'}
                         onMouseLeave={e => e.currentTarget.style.background = 'none'}
                         onClick={() => handleQuickExport('compact')}
@@ -122,11 +133,12 @@ const ExportDropdown = ({
                         <FileText size={15} color="var(--primary-color)" />
                         <div>
                             <div style={{ fontWeight: 500 }}>PDF (Kompakt)</div>
-                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Wesentliche Spalten</div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{quickHint('Wesentliche Spalten')}</div>
                         </div>
                     </button>
                     <button
-                        style={itemStyle}
+                        style={quickItemStyle}
+                        disabled={templateLoading}
                         onMouseEnter={e => e.currentTarget.style.background = 'var(--background-color)'}
                         onMouseLeave={e => e.currentTarget.style.background = 'none'}
                         onClick={() => handleQuickExport('detail')}
@@ -134,7 +146,7 @@ const ExportDropdown = ({
                         <FileText size={15} color="var(--text-secondary)" />
                         <div>
                             <div style={{ fontWeight: 500 }}>PDF (Detailliert)</div>
-                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Alle verfügbaren Spalten</div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{quickHint('Alle verfügbaren Spalten')}</div>
                         </div>
                     </button>
                     <div style={dividerStyle} />

@@ -322,7 +322,8 @@ export const CloudSettings = ({ portfolios }) => {
                                         <tr key={p.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                                             <td style={{ padding: '12px 16px', fontWeight: 500 }}>
                                                 {p.name}
-                                                {p.owner_id !== user?.id && (
+                                                {/* Eigentümer eines Portfolios = portfolios.user_id (eine Spalte owner_id gibt es nicht). */}
+                                                {p.user_id && user?.id && p.user_id !== user.id && (
                                                     <Badge variant="secondary" style={{ marginLeft: '10px' }}>Geteilt</Badge>
                                                 )}
                                             </td>

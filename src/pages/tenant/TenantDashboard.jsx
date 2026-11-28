@@ -40,6 +40,9 @@ const TenantDashboard = () => {
     const [nextCleaning, setNextCleaning] = useState(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(null);
+    // Teilfehler (Tickets/Kalender) – die übrige Seite bleibt sichtbar
+    const [ticketsError, setTicketsError] = useState(false);
+    const [calendarError, setCalendarError] = useState(false);
     const [noTenancy, setNoTenancy] = useState(false);
     const [reloadKey, setReloadKey] = useState(0);
 
@@ -54,6 +57,8 @@ const TenantDashboard = () => {
             try {
                 setLoading(true);
                 setLoadError(null);
+                setTicketsError(false);
+                setCalendarError(false);
                 setNoTenancy(false);
 
                 let unitId = roleData?.unit_id;
@@ -95,11 +100,12 @@ const TenantDashboard = () => {
                 setProperty(primaryUnit?.property || null);
                 setTenant(tenantRow);
 
-                // Objekt/Einheit für den Kalender bevorzugt aus dem aktuellen Vertrag
-                if (primaryUnit?.id) unitId = primaryUnit.id;
-                if (primaryUnit?.property?.id || primaryUnit?.property_id) {
-                    propertyId = primaryUnit.property?.id || primaryUnit.property_id;
-                }
+                // Objekt/Einheit für den Kalender aus der Mieterrolle (wie Objektkalender-Seite und die
+                // Kalender-Freigabe in der Datenbank, die das Objekt der Rolle prüft – nicht das des
+                // Vertrags, z. B. nach einem Umzug). Vertragsobjekt/-einheit nur, wenn die Rolle keins hat.
+                const leasePropertyId = primaryUnit?.property?.id || primaryUnit?.property_id || null;
+                if (!propertyId) propertyId = leasePropertyId;
+                if (!unitId && primaryUnit?.id && leasePropertyId === propertyId) unitId = primaryUnit.id;
 
                 // Fetch recent tickets
                 const { data: ticketData, error: ticketError } = await supabase
@@ -108,14 +114,25 @@ const TenantDashboard = () => {
                     .eq('tenant_user_id', user.id)
                     .order('created_at', { ascending: false })
                     .limit(5);
-                if (ticketError) console.error('Tickets konnten nicht geladen werden:', ticketError);
+                if (ticketError) {
+                    console.error('Tickets konnten nicht geladen werden:', ticketError);
+                    setTicketsError(true);
+                }
                 setTickets(ticketData || []);
 
                 // Fetch next calendar events
                 const todayStr = localDateString();
+                setNextWaste(null);
+                setNextCleaning(null);
+                setNextTask(null);
                 if (propertyId) {
+                    const reportCalendarError = (err) => {
+                        console.error('Objektkalender konnte nicht geladen werden:', err);
+                        setCalendarError(true);
+                    };
+
                     // Next waste pickup
-                    const { data: wasteData } = await supabase
+                    const { data: wasteData, error: wasteError } = await supabase
                         .from('objektkalender_events')
                         .select('title, event_date, waste_type, color, assigned_unit_name')
                         .eq('property_id', propertyId)
@@ -124,10 +141,11 @@ const TenantDashboard = () => {
                         .gte('event_date', todayStr)
                         .order('event_date')
                         .limit(1);
+                    if (wasteError) reportCalendarError(wasteError);
                     setNextWaste(wasteData?.[0] || null);
 
                     // Next cleaning
-                    const { data: cleanData } = await supabase
+                    const { data: cleanData, error: cleanError } = await supabase
                         .from('objektkalender_events')
                         .select('title, event_date, color, assigned_unit_name')
                         .eq('property_id', propertyId)
@@ -136,11 +154,12 @@ const TenantDashboard = () => {
                         .gte('event_date', todayStr)
                         .order('event_date')
                         .limit(1);
+                    if (cleanError) reportCalendarError(cleanError);
                     setNextCleaning(cleanData?.[0] || null);
 
                     // Next assigned task for this unit
                     if (unitId) {
-                        const { data: taskData } = await supabase
+                        const { data: taskData, error: taskError } = await supabase
                             .from('objektkalender_events')
                             .select('title, event_date, event_type, color, assigned_unit_name')
                             .eq('property_id', propertyId)
@@ -149,6 +168,7 @@ const TenantDashboard = () => {
                             .gte('event_date', todayStr)
                             .order('event_date')
                             .limit(1);
+                        if (taskError) reportCalendarError(taskError);
                         setNextTask(taskData?.[0] || null);
                     }
                 }
@@ -269,10 +289,26 @@ const TenantDashboard = () => {
                 </div>
             )}
 
+            {/* Hinweis bei Fehler im Objektkalender (sonst fehlen die Kacheln kommentarlos) */}
+            {calendarError && (
+                <div role="alert" style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '10px',
+                    padding: '10px 14px', borderRadius: 'var(--radius-md)', marginBottom: '20px',
+                    border: '1px solid #FECACA', backgroundColor: 'var(--surface-color)',
+                    color: '#B91C1C', fontSize: '0.85rem', lineHeight: 1.5
+                }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                    <div>
+                        Die nächsten Termine aus dem Objektkalender konnten nicht geladen werden.
+                        Sie finden sie auch unter <Link to="/object-calendar" style={{ color: '#B91C1C', fontWeight: 600, textDecoration: 'underline' }}>Objektkalender</Link>.
+                    </div>
+                </div>
+            )}
+
             {/* Objektkalender Quick-Info */}
             {(nextWaste || nextTask || nextCleaning) && (() => {
-                const cardCount = [nextCleaning, nextWaste, nextTask].filter(Boolean).length;
-                const cols = cardCount >= 3 ? 'repeat(3, 1fr)' : cardCount === 2 ? '1fr 1fr' : '1fr';
+                // Umbrechendes Raster: am Handy eine Kachel je Zeile statt drei gequetschter Spalten
+                const cols = 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))';
                 return (
                     <div style={{ display: 'grid', gridTemplateColumns: cols, gap: '12px', marginBottom: '20px' }}>
                         {nextCleaning && (
@@ -325,7 +361,7 @@ const TenantDashboard = () => {
                                     <Sparkles size={22} color={nextTask.event_type === 'cleaning' ? '#3B82F6' : '#8B5CF6'} />
                                 </div>
                                 <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Deine nächste Aufgabe</div>
+                                    <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Ihre nächste Aufgabe</div>
                                     <div style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-primary)' }}>
                                         {nextTask.title}
                                     </div>
@@ -442,7 +478,8 @@ const TenantDashboard = () => {
                                 <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
                                 <DetailRow label="Mietbeginn" value={formatDate(lease.start_date)} />
                                 <DetailRow label="Mietende" value={lease.end_date ? formatDate(lease.end_date) : 'Unbefristet'} />
-                                <DetailRow label="Kaution" value={lease.deposit ? formatCurrency(lease.deposit) : '—'} />
+                                {/* Kaution: keine Angabe ('—') und 0 (0,00 €) unterscheiden */}
+                                <DetailRow label="Kaution" value={lease.deposit === null || lease.deposit === undefined || lease.deposit === '' ? '—' : formatCurrency(lease.deposit)} />
                             </div>
                         );
                     })}
@@ -459,7 +496,11 @@ const TenantDashboard = () => {
                         <TicketCheck size={18} color="var(--primary-color)" />
                         Letzte Tickets
                     </h3>
-                    {tickets.length === 0 ? (
+                    {ticketsError && tickets.length === 0 ? (
+                        <div role="alert" style={{ color: '#B91C1C', fontSize: '0.88rem', padding: '20px 0', textAlign: 'center' }}>
+                            Tickets konnten nicht geladen werden. Bitte versuchen Sie es später erneut oder öffnen Sie <Link to="/tenant/tickets" style={{ color: '#B91C1C', fontWeight: 600, textDecoration: 'underline' }}>Tickets</Link>.
+                        </div>
+                    ) : tickets.length === 0 ? (
                         <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', padding: '20px 0', textAlign: 'center' }}>
                             Keine Tickets vorhanden
                         </div>

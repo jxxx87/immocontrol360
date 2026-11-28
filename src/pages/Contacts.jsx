@@ -12,12 +12,37 @@ import { usePortfolio } from '../context/PortfolioContext';
 import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 import { hasSmtpSettings } from '../lib/smtpSettings';
+import { fetchAllRows } from '../lib/rentArrears';
 
 // E-Mail-Anhänge: Grenzen für Anzahl, Gesamtgröße und Dateitypen
 const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_TOTAL = 10 * 1024 * 1024; // 10 MB
 const ALLOWED_ATTACHMENT_EXT = ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'txt', 'csv', 'doc', 'docx', 'xls', 'xlsx', 'odt', 'ods'];
-const CONTACT_PAGE_LIMIT = 1000; // Standard-Obergrenze der API je Abfrage
+
+// ===== TYPE LABEL + COLOR MAP ===== (Modulebene: wird auch in der Suche gebraucht)
+const typeConfig = {
+    tenant: { label: 'Mieter', color: '#10b981', bg: 'rgba(16,185,129,0.1)' },
+    vendor: { label: 'Dienstleister', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' },
+    guest: { label: 'Gast', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' },
+    other: { label: 'Sonstiges', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' }
+};
+
+// Fehlertext von supabase.functions.invoke (FunctionsHttpError trägt die Response)
+const readFunctionErrorMessage = async (err) => {
+    try {
+        if (err?.context && typeof err.context.json === 'function') {
+            const body = await err.context.json();
+            if (body?.error) return String(body.error);
+        }
+    } catch {
+        // Antwort ohne JSON-Inhalt
+    }
+    return err?.message || String(err);
+};
+
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+const PORTAL_RIGHTS_HINT = 'Für den Mieterportal-Chat mit diesem Mieter fehlt Ihnen die Freigabe „Mietverhältnisse“ und „Mieterportal“.';
 
 const escapeHtml = (str) => String(str)
     .replace(/&/g, '&amp;')
@@ -146,6 +171,7 @@ const Contacts = () => {
     const [filterType, setFilterType] = useState('all');
     const [filterPropertyId, setFilterPropertyId] = useState('');
     const [properties, setProperties] = useState([]);
+    const [propertiesError, setPropertiesError] = useState(null);
     const [editingContact, setEditingContact] = useState(null);
     const [invitePrompt, setInvitePrompt] = useState(null); // { contactName, tenantId }
 
@@ -173,9 +199,8 @@ const Contacts = () => {
         try {
             setLoading(true);
             setLoadError(null);
-            const { data, error } = await supabase
-                .from('contacts')
-                .select(`
+            // Seitenweise laden: die API liefert je Abfrage höchstens 1000 Zeilen (Suche/Filter laufen clientseitig)
+            const { data, error } = await fetchAllRows('contacts', `
                     *,
                     tenant:tenants (
                         id,
@@ -188,8 +213,7 @@ const Contacts = () => {
                             )
                         )
                     )
-                `)
-                .order('name', { ascending: true });
+                `, q => q.order('name', { ascending: true }));
 
             if (error) throw error;
             setContacts(data || []);
@@ -203,15 +227,17 @@ const Contacts = () => {
 
     const fetchProperties = async () => {
         try {
+            setPropertiesError(null);
             const { data, error } = await supabase
                 .from('properties')
                 .select('id, street, house_number, portfolio_id')
                 .order('street', { ascending: true });
-            if (!error && data) {
-                setProperties(data);
-            }
+            if (error) throw error;
+            setProperties(data || []);
         } catch (error) {
+            // Ohne Objekte fehlen Objektfilter und die Portfolio-Zuordnung für Bearbeitungsrechte
             console.error('Error fetching properties:', error);
+            setPropertiesError(translateError(error));
         }
     };
 
@@ -260,7 +286,7 @@ const Contacts = () => {
                 ${contact.street || ''} 
                 ${contact.city || ''} 
                 ${contact.zip || ''}
-                ${contact.contact_type || ''}
+                ${(typeConfig[contact.contact_type] || typeConfig.other).label}
             `.toLowerCase();
             return searchStr.includes(lowerTerm);
         });
@@ -277,6 +303,14 @@ const Contacts = () => {
         return portfolio;
     }, [user, selectedPortfolioID, portfolios, perm]);
     const newContactOwnerId = sharedContactPortfolio?.user_id || user?.id;
+    // Freigegebenes Portfolio nur mit Leserecht „kontakte“: Neue Kontakte landen im eigenen Bestand und sind
+    // für den Eigentümer unsichtbar – darauf wird im Anlege-Dialog hingewiesen.
+    const readOnlySharedPortfolio = useMemo(() => {
+        if (!user || !selectedPortfolioID || !perm || perm.loadingPermissions) return null;
+        const portfolio = (portfolios || []).find(p => p.id === selectedPortfolioID);
+        if (!portfolio?.user_id || portfolio.user_id === user.id) return null;
+        return perm.canWrite('kontakte', portfolio.id) ? null : portfolio;
+    }, [user, selectedPortfolioID, portfolios, perm]);
 
     // Bearbeiten/Löschen je Kontakt (wie die RLS von contacts): eigene Kontakte immer; Kontakte eines
     // anderen Eigentümers nur mit Schreibrecht „Kontakte" für eines seiner Portfolios. Mit einem Mieter
@@ -301,6 +335,22 @@ const Contacts = () => {
     };
     // Verknüpfte Mieter-Kontakte werden nie direkt gelöscht (Hinweis in handleDelete)
     const canDeleteContact = (contact) => isLinkedTenantContact(contact) || canEditContact(contact);
+
+    // Mieterportal-Chat: Registrierungsstatus (user_roles) und Einladungen sind laut RLS nur mit der Freigabe
+    // „Mietverhältnisse“ lesbar, der Chat selbst braucht „Mieterportal“. Ohne diese Rechte liefe die Prüfung
+    // leer und meldete fälschlich „nicht registriert“. Eigene Mieter: immer erlaubt.
+    const canUseTenantPortal = (ownerId, leases) => {
+        if (!user || !perm || perm.loadingPermissions) return true;
+        if (ownerId === user.id) return true;
+        return (leases || []).some(l => {
+            const portfolioId = propertyPortfolioById[l.unit?.property_id];
+            return !!portfolioId && perm.canRead('mietverhaeltnisse', portfolioId) && perm.canRead('mieterportal', portfolioId);
+        });
+    };
+    // Mit einem Mieter verknüpfte Kontakte vorab prüfen (der Mieter ist mit seinen Verträgen mitgeladen;
+    // fehlt er, ist er für dieses Konto nicht sichtbar). Nicht verknüpfte Kontakte prüft der Versand.
+    const portalBlockedForContact = (contact) =>
+        !!contact?.tenant_id && !canUseTenantPortal(contact.user_id, contact.tenant?.leases);
 
     const handleOpenAdd = () => {
         setEditingContact(null);
@@ -481,12 +531,23 @@ const Contacts = () => {
         setEmailContent('');
         setAttachments([]);
         // For tenants, support portal channel, else only email
-        if (contact.contact_type === 'tenant') {
+        if (contact.contact_type === 'tenant' && !portalBlockedForContact(contact)) {
             setMessageChannel('portal');
         } else {
             setMessageChannel('email');
         }
     };
+
+    // E-Mail ohne eigenes Postfach: Die Edge Function nimmt das System-Postfach nur für eigene Mieter/Kontakte
+    // des Absenders (gleiche E-Mail-Adresse); an Kontakte anderer Eigentümer lehnt sie den Versand ab.
+    const isOwnEmailRecipient = (contact) => {
+        if (!contact?.email || !user) return false;
+        if (contact.user_id === user.id) return true;
+        const email = normalizeEmail(contact.email);
+        return contacts.some(c => c.user_id === user.id && normalizeEmail(c.email) === email);
+    };
+    const emailBlocked = !!activeContactForMessage && !smtpConfigured && !isOwnEmailRecipient(activeContactForMessage);
+    const portalAvailable = activeContactForMessage?.contact_type === 'tenant' && !portalBlockedForContact(activeContactForMessage);
 
     const handleSendMessageSubmit = async () => {
         if (!activeContactForMessage) return;
@@ -497,12 +558,16 @@ const Contacts = () => {
                 // Mieter bevorzugt über die Verknüpfung tenant_id bestimmen
                 let matchedTenant = null;
                 if (activeContactForMessage.tenant_id) {
+                    if (portalBlockedForContact(activeContactForMessage)) {
+                        alert(PORTAL_RIGHTS_HINT);
+                        return;
+                    }
                     matchedTenant = { id: activeContactForMessage.tenant_id };
                 } else if (activeContactForMessage.email) {
                     // Ohne Verknüpfung nur bei eindeutiger E-Mail-Adresse zuordnen
                     const { data: emailMatches, error: tenantsErr } = await supabase
                         .from('tenants')
-                        .select('id')
+                        .select('id, user_id, leases (id, unit:units (id, property_id))')
                         .ilike('email', activeContactForMessage.email.trim().replace(/[\\%_]/g, '\\$&'));
                     if (tenantsErr) throw tenantsErr;
                     if ((emailMatches || []).length > 1) {
@@ -510,6 +575,10 @@ const Contacts = () => {
                         return;
                     }
                     matchedTenant = emailMatches?.[0] || null;
+                    if (matchedTenant && !canUseTenantPortal(matchedTenant.user_id, matchedTenant.leases)) {
+                        alert(PORTAL_RIGHTS_HINT);
+                        return;
+                    }
                 }
 
                 if (!matchedTenant) {
@@ -558,6 +627,10 @@ const Contacts = () => {
                 alert('Dieser Kontakt hat keine E-Mailadresse hinterlegt.');
                 return;
             }
+            if (emailBlocked) {
+                alert('Ohne eigenes E-Mail-Postfach können Sie nur an Ihre eigenen Kontakte und Mieter schreiben. Bitte richten Sie Ihr Postfach unter Einstellungen > E-Mail ein.');
+                return;
+            }
             if (!emailSubject.trim() || !emailContent.trim()) {
                 alert('Bitte Betreff und Nachricht eingeben.');
                 return;
@@ -588,7 +661,8 @@ const Contacts = () => {
                     }
                 });
 
-                if (error) throw error;
+                // Server-Meldung (z. B. fehlendes Postfach) statt „non-2xx status code“ anzeigen
+                if (error) throw new Error(await readFunctionErrorMessage(error));
                 if (data?.error) throw new Error(data.error);
 
                 alert('E-Mail wurde erfolgreich versendet!');
@@ -604,14 +678,6 @@ const Contacts = () => {
         if (messageChannel === 'epost') {
             alert('Der Briefversand per E-Post ist noch nicht verfügbar.');
         }
-    };
-
-    // ===== TYPE LABEL + COLOR MAP =====
-    const typeConfig = {
-        tenant: { label: 'Mieter', color: '#10b981', bg: 'rgba(16,185,129,0.1)' },
-        vendor: { label: 'Dienstleister', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' },
-        guest: { label: 'Gast', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' },
-        other: { label: 'Sonstiges', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' }
     };
 
     const getInitials = (name) => {
@@ -646,7 +712,7 @@ const Contacts = () => {
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Kontakte</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Dienstleister, Mieter und Partner verwalten</p>
                 </div>
-                <Button icon={Plus} onClick={handleOpenAdd}>Kontakt erstellen</Button>
+                <Button icon={Plus} onClick={handleOpenAdd} disabled={!!perm?.loadingPermissions}>Kontakt erstellen</Button>
             </div>
 
             {/* Search and Count */}
@@ -757,9 +823,11 @@ const Contacts = () => {
                     <Button variant="secondary" size="sm" onClick={fetchContacts}>Erneut laden</Button>
                 </div>
             )}
-            {!loadError && contacts.length >= CONTACT_PAGE_LIMIT && (
-                <div style={{ padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', fontSize: '0.82rem' }}>
-                    Es werden höchstens {CONTACT_PAGE_LIMIT.toLocaleString('de-DE')} Kontakte angezeigt. Bitte nutzen Sie Suche und Filter, um weitere Kontakte zu finden.
+            {propertiesError && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', fontSize: '0.82rem', flexWrap: 'wrap' }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>Die Immobilien konnten nicht geladen werden – Objektfilter und das Bearbeiten freigegebener Mieter-Kontakte stehen deshalb nicht zur Verfügung. ({propertiesError})</span>
+                    <Button variant="secondary" size="sm" onClick={fetchProperties}>Erneut laden</Button>
                 </div>
             )}
 
@@ -935,6 +1003,15 @@ const Contacts = () => {
                         </span>
                     </div>
                 )}
+                {!editingContact && readOnlySharedPortfolio && (
+                    <div style={{ display: 'flex', gap: '8px', padding: '10px 12px', marginBottom: 'var(--spacing-md)', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '8px', color: '#92400E', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                        <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                        <span>
+                            Im freigegebenen Portfolio „{readOnlySharedPortfolio.name}“ haben Sie bei Kontakten nur Leserecht. Der Kontakt wird
+                            deshalb in Ihrem eigenen Bestand angelegt und ist für den Eigentümer dieses Portfolios nicht sichtbar.
+                        </span>
+                    </div>
+                )}
                 <div style={{ marginBottom: 'var(--spacing-md)' }}>
                     <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>
                         Typ
@@ -1039,7 +1116,7 @@ const Contacts = () => {
                         <Button variant="secondary" onClick={() => setActiveContactForMessage(null)}>Abbrechen</Button>
                         <Button 
                             onClick={handleSendMessageSubmit} 
-                            disabled={sendingMessage || (messageChannel === 'email' && !activeContactForMessage?.email)}
+                            disabled={sendingMessage || (messageChannel === 'email' && (!activeContactForMessage?.email || emailBlocked))}
                         >
                             {sendingMessage ? 'Sendet...' : (messageChannel === 'portal' ? 'Weiter' : 'Nachricht senden')}
                         </Button>
@@ -1077,7 +1154,7 @@ const Contacts = () => {
                             
                             <button
                                 type="button"
-                                disabled={activeContactForMessage?.contact_type !== 'tenant'}
+                                disabled={!portalAvailable}
                                 onClick={() => setMessageChannel('portal')}
                                 style={{
                                     display: 'flex',
@@ -1089,12 +1166,12 @@ const Contacts = () => {
                                     border: `2px solid ${messageChannel === 'portal' ? 'var(--primary-color)' : 'var(--border-color)'}`,
                                     backgroundColor: messageChannel === 'portal' ? 'rgba(14,165,233,0.04)' : 'var(--surface-color)',
                                     color: messageChannel === 'portal' ? 'var(--primary-color)' : 'var(--text-secondary)',
-                                    cursor: activeContactForMessage?.contact_type === 'tenant' ? 'pointer' : 'not-allowed',
-                                    opacity: activeContactForMessage?.contact_type === 'tenant' ? 1 : 0.4,
+                                    cursor: portalAvailable ? 'pointer' : 'not-allowed',
+                                    opacity: portalAvailable ? 1 : 0.4,
                                     transition: 'all 0.2s',
                                     gap: '6px'
                                 }}
-                                title={activeContactForMessage?.contact_type !== 'tenant' ? 'Nur für Mieter verfügbar' : ''}
+                                title={activeContactForMessage?.contact_type !== 'tenant' ? 'Nur für Mieter verfügbar' : (portalAvailable ? '' : PORTAL_RIGHTS_HINT)}
                             >
                                 <MessageSquare size={20} />
                                 <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>Mieterportal</span>
@@ -1157,7 +1234,11 @@ const Contacts = () => {
                                             fontSize: '0.8rem'
                                         }}>
                                             <AlertCircle size={16} style={{ flexShrink: 0 }} />
-                                            <span>Hinweis: Kein eigener E-Mail-Server in den Einstellungen eingerichtet. Versand erfolgt über System-Fallback.</span>
+                                            <span>
+                                                {emailBlocked
+                                                    ? 'Kein eigenes E-Mail-Postfach eingerichtet: Dieser Kontakt gehört nicht zu Ihrem eigenen Bestand, der Versand ist daher nicht möglich. Bitte richten Sie Ihr Postfach unter Einstellungen > E-Mail ein.'
+                                                    : 'Hinweis: Kein eigenes E-Mail-Postfach eingerichtet. Ohne eigenes Postfach können E-Mails nur an Ihre eigenen Kontakte und Mieter über das System-Postfach versendet werden; Antworten gehen an Ihre Anmelde-E-Mail-Adresse.'}
+                                            </span>
                                         </div>
                                     )}
 

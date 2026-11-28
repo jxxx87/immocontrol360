@@ -35,8 +35,9 @@
 --
 -- Idempotent (add column if not exists / create or replace). Neue Funktion, keine bestehende
 -- Signatur geändert, notify_push unberührt. Verträglich mit der heute ausgelieferten App (ruft die
--- Funktion nicht auf). Die neue Import.jsx ruft sie auf und fällt ohne diese Migration
--- (PGRST202 „Funktion nicht gefunden") auf den bisherigen Weg zurück.
+-- Funktion nicht auf). Import.jsx ruft seit Welle 4 ausschließlich import_rows auf; fehlt die
+-- Funktion (PGRST202 „Funktion nicht gefunden“ / 42883), bricht der Import ohne Speichern ab
+-- (kein Rückfall auf den früheren Weg über einzelne REST-Anfragen).
 -- Fehlermeldungen: SQLSTATE des ursprünglichen Fehlers bleibt erhalten (Hinweis/HINT ebenso,
 -- z. B. 'lease_overlap'); Text = „Zeile …: <Datensatz> konnte nicht angelegt werden: <Grund>“,
 -- englische Standardtexte (RLS, Pflichtfeld, Eindeutigkeit …) als deutscher Grund, der

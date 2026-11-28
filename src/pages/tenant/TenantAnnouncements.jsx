@@ -69,7 +69,7 @@ const TenantAnnouncements = () => {
     return (
         <div>
             <div style={{ marginBottom: '24px' }}>
-                <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Pinnwand</h1>
+                <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Aushänge</h1>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginTop: '4px' }}>
                     Aushänge und Mitteilungen Ihrer Hausverwaltung
                 </p>

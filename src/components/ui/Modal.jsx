@@ -47,7 +47,20 @@ const getFocusableElements = (container) =>
     Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR))
         .filter(el => el.getClientRects().length > 0 && el.getAttribute('aria-hidden') !== 'true');
 
-const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px' }) => {
+const DEFAULT_CONFIRM_CLOSE_MESSAGE = 'Ungespeicherte Änderungen verwerfen?';
+
+// Schließen per Esc/X: bei gesetztem confirmCloseWhen (true bzw. Funktion, die true liefert) erst nachfragen
+const runGuardedClose = (onCloseFn, guard) => {
+    if (typeof onCloseFn !== 'function') return;
+    const when = guard?.when;
+    const dirty = typeof when === 'function' ? !!when() : !!when;
+    if (dirty && !window.confirm(guard?.message || DEFAULT_CONFIRM_CLOSE_MESSAGE)) return;
+    onCloseFn();
+};
+
+// confirmCloseWhen (optional, opt-in): z. B. ungespeicherte Formulareingaben – Esc und X fragen dann vor onClose nach.
+// Eigene „Abbrechen“-Knöpfe im Inhalt/Footer prüfen selbst (die Seite kennt ihren Formularstand).
+const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px', confirmCloseWhen = false, confirmCloseMessage = DEFAULT_CONFIRM_CLOSE_MESSAGE }) => {
     // Gleiche Mobil-Erkennung wie Card/Layout (reagiert auf Größenänderung und native App)
     const viewMode = useViewMode();
     const isMobileView = viewMode
@@ -57,11 +70,16 @@ const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px' })
     const dialogRef = useRef(null);
     const stackTokenRef = useRef(null);
     const onCloseRef = useRef(onClose);
+    const closeGuardRef = useRef({ when: confirmCloseWhen, message: confirmCloseMessage });
     const titleId = useId();
 
     useEffect(() => {
         onCloseRef.current = onClose;
     }, [onClose]);
+
+    useEffect(() => {
+        closeGuardRef.current = { when: confirmCloseWhen, message: confirmCloseMessage };
+    }, [confirmCloseWhen, confirmCloseMessage]);
 
     useEffect(() => {
         if (!isOpen) return undefined;
@@ -81,7 +99,7 @@ const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px' })
         const handleKeyDown = (e) => {
             if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
             if (openModalStack[openModalStack.length - 1] !== token) return;
-            if (typeof onCloseRef.current === 'function') onCloseRef.current();
+            runGuardedClose(onCloseRef.current, closeGuardRef.current);
         };
         document.addEventListener('keydown', handleKeyDown);
 
@@ -175,7 +193,7 @@ const Modal = ({ isOpen, onClose, title, children, footer, maxWidth = '500px' })
                     <h3 id={titleId} style={{ fontSize: isMobileView ? '1.05rem' : '1.25rem', fontWeight: 600 }}>{title}</h3>
                     <button
                         type="button"
-                        onClick={onClose}
+                        onClick={() => runGuardedClose(onClose, { when: confirmCloseWhen, message: confirmCloseMessage })}
                         aria-label="Schließen"
                         title="Schließen"
                         style={{

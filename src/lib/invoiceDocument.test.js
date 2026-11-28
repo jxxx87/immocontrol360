@@ -65,6 +65,7 @@ import {
     hasSmallBusinessColumn,
     getInvoiceDocumentInfo,
     getInvoiceMissingFields,
+    getInvoiceSender,
     generateInvoiceHtml,
     fetchNextInvoiceNumber,
     insertInvoiceWithNumber,
@@ -552,6 +553,52 @@ describe('getInvoiceMissingFields', () => {
     });
 });
 
+// ─── Absender-Snapshot (beim Ausstellen eingefroren, invoices.sender_snapshot) ─
+describe('getInvoiceSender – eingefrorene Absenderdaten', () => {
+    const SNAPSHOT = {
+        name: 'Fewo Seeblick', company_name: '', street: 'Seestraße', house_number: '5', zip: '23743', city: 'Grömitz',
+        email: 'alt@seeblick.example', phone: '04562 9999', bank_name: 'Altbank', iban: 'DE89370400440532013000',
+        bic: 'COBADEFFXXX', tax_number: '11/111/11111', vat_id: '', frozen_at: '2026-03-15T10:00:00Z',
+    };
+
+    it('ausgestellte Rechnung: Bank, Steuernummer und Kontakt aus dem Snapshot, nicht aus dem geänderten Portfolio', () => {
+        const s = getInvoiceSender(baseInvoice({ sender_snapshot: SNAPSHOT }), PORTFOLIO);
+        expect(s).toMatchObject({
+            iban: 'DE89370400440532013000', bic: 'COBADEFFXXX', bankName: 'Altbank',
+            taxNumber: '11/111/11111', vatId: '', email: 'alt@seeblick.example', phone: '04562 9999',
+        });
+        const html = render(baseInvoice({ sender_snapshot: SNAPSHOT, positions: [pos(1, 'Übernachtung', 300, 21, 321, 7)] }));
+        expect(html).toContain('DE89370400440532013000');
+        expect(html).not.toContain(PORTFOLIO.iban);
+        expect(html).toContain('11/111/11111');
+    });
+
+    it('Gutschrift und stornierte Rechnung nutzen den Snapshot ebenfalls', () => {
+        [INVOICE_STATUS.CREDIT_NOTE, INVOICE_STATUS.CREDITED].forEach(status => {
+            expect(getInvoiceSender(baseInvoice({ status, sender_snapshot: SNAPSHOT }), PORTFOLIO).iban).toBe('DE89370400440532013000');
+        });
+    });
+
+    it('Entwurf und Altbestand ohne Snapshot: aktuelles Portfolio', () => {
+        expect(getInvoiceSender(baseInvoice({ status: INVOICE_STATUS.DRAFT, sender_snapshot: SNAPSHOT }), PORTFOLIO).iban).toBe(PORTFOLIO.iban);
+        expect(getInvoiceSender(baseInvoice(), PORTFOLIO).iban).toBe(PORTFOLIO.iban);
+        expect(getInvoiceSender(baseInvoice({ sender_snapshot: null }), PORTFOLIO).taxNumber).toBe(PORTFOLIO.tax_number);
+    });
+
+    it('Name/Anschrift: in der Rechnung gespeicherte Werte vor Snapshot', () => {
+        const s = getInvoiceSender(baseInvoice({ sender_name: 'Eigener Name', sender_street: 'Weg 2', sender_zip: '12345', sender_city: 'Ort', sender_snapshot: SNAPSHOT }), PORTFOLIO);
+        expect(s).toMatchObject({ name: 'Eigener Name', street: 'Weg 2', zip: '12345', city: 'Ort' });
+        const fromSnap = getInvoiceSender(baseInvoice({ sender_snapshot: SNAPSHOT }), { ...PORTFOLIO, street: 'Neue Straße', name: 'Neu' });
+        expect(fromSnap).toMatchObject({ name: 'Fewo Seeblick', street: 'Seestraße 5', zip: '23743', city: 'Grömitz' });
+    });
+
+    it('Pflichtangaben einer ausgestellten Rechnung werden am Snapshot geprüft', () => {
+        expect(getInvoiceMissingFields(baseInvoice({ sender_snapshot: SNAPSHOT }), { ...PORTFOLIO, iban: '' })).toEqual([]);
+        expect(getInvoiceMissingFields(baseInvoice({ sender_snapshot: { ...SNAPSHOT, iban: '' } }), PORTFOLIO))
+            .toEqual(['Bankverbindung/IBAN (im Portfolio hinterlegen)']);
+    });
+});
+
 // ─── Datum (lokal, nicht UTC) ────────────────────────────────────────
 describe('Datumshilfen', () => {
     it('parst JJJJ-MM-TT als lokales Datum (kein UTC-Versatz am Monats-/Jahresanfang)', () => {
@@ -817,6 +864,16 @@ describe('createCreditNote', () => {
         expect(p.invoice_date).toBe('2027-01-05');
         expect(p.invoice_number).toBe('2027-001');
         expect(db.state.queries[0].filters).toContainEqual(['like', 'invoice_number', '2027-%']);
+    });
+
+    it('übernimmt den Absender-Snapshot der Rechnung; ohne Spalte (vor der Migration) kein Feld', async () => {
+        const snap = { iban: 'DE89370400440532013000', tax_number: '11/111/11111' };
+        await createCreditNote({ ...original(), sender_snapshot: snap });
+        expect(insertedPayload().sender_snapshot).toEqual(snap);
+
+        db.reset();
+        await createCreditNote(original());
+        expect(Object.prototype.hasOwnProperty.call(insertedPayload(), 'sender_snapshot')).toBe(false);
     });
 
     it('Kleinunternehmer-Rechnung: Gutschrift bleibt § 19 (0 %, Merkmal je Position)', async () => {

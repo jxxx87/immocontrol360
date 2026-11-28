@@ -282,7 +282,12 @@ export default function ClaimPortal() {
 
     const formatDate = (dateString) => {
         if (!dateString) return '-';
-        return new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(dateString));
+        // Reine Datumswerte (JJJJ-MM-TT, z. B. Fälligkeit) als lokales Datum lesen, sonst kann die Zeitzone den Tag verschieben
+        const date = typeof dateString === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateString)
+            ? new Date(`${dateString}T00:00:00`)
+            : new Date(dateString);
+        if (Number.isNaN(date.getTime())) return '-';
+        return new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(date);
     };
 
     const paymentOptions = useMemo(
@@ -443,6 +448,12 @@ export default function ClaimPortal() {
             ? claimData.payment_plan_request_allowed
             : REQUESTABLE_STATUSES.includes(claimData.status));
 
+    // Fälligkeit der Position; ältere Datenbank-Fassungen liefern nur das Anlagedatum
+    const itemDate = (item) => item.due_date || item.created_at;
+    const openItems = (claimData.items || [])
+        .filter(i => i.open_amount > 0)
+        .sort((a, b) => String(itemDate(a) || '').localeCompare(String(itemDate(b) || '')));
+
     return (
         <div style={{ minHeight: '100vh', backgroundColor: '#F3F4F6', padding: 'var(--spacing-xl) 16px' }}>
             <div style={{ maxWidth: '800px', margin: '0 auto' }}>
@@ -533,8 +544,23 @@ export default function ClaimPortal() {
                         </Card>
                     )}
 
-                    {/* Action Area (Banküberweisung & GiroCode) */}
-                    {!requestPending && totalDue > 0 && (
+                    {requestPending && totalDue > 0 && (
+                        <Card style={{ padding: '24px', backgroundColor: '#ECFDF5', border: '1px solid #10B981' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
+                                <CheckCircle2 size={24} color="#059669" style={{ marginTop: '2px' }} />
+                                <div>
+                                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#065F46', marginBottom: '4px' }}>Ratenzahlung angefragt</h3>
+                                    <p style={{ color: '#064E3B', fontSize: '0.95rem' }}>
+                                        Ihre Anfrage zur Ratenzahlung wurde erfolgreich übermittelt. Wir prüfen Ihren Vorschlag und werden uns in Kürze mit Ihnen in Verbindung setzen.
+                                        {showBankTransfer && ' Bis zu unserer Entscheidung können Sie weiterhin per Überweisung zahlen (Bankverbindung unten).'}
+                                    </p>
+                                </div>
+                            </div>
+                        </Card>
+                    )}
+
+                    {/* Action Area (Banküberweisung & GiroCode) – auch bei offener Ratenanfrage, nur der Anfrage-Knopf entfällt */}
+                    {totalDue > 0 && (
                         showBankTransfer ? (
                             <Card style={{ padding: '24px', backgroundColor: 'white' }}>
                                 <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -627,20 +653,6 @@ export default function ClaimPortal() {
                         )
                     )}
 
-                    {requestPending && totalDue > 0 && (
-                        <Card style={{ padding: '24px', backgroundColor: '#ECFDF5', border: '1px solid #10B981' }}>
-                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
-                                <CheckCircle2 size={24} color="#059669" style={{ marginTop: '2px' }} />
-                                <div>
-                                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#065F46', marginBottom: '4px' }}>Ratenzahlung angefragt</h3>
-                                    <p style={{ color: '#064E3B', fontSize: '0.95rem' }}>
-                                        Ihre Anfrage zur Ratenzahlung wurde erfolgreich übermittelt. Wir prüfen Ihren Vorschlag und werden uns in Kürze mit Ihnen in Verbindung setzen.
-                                    </p>
-                                </div>
-                            </div>
-                        </Card>
-                    )}
-                    
                     {/* Positionen Detail */}
                     <Card style={{ padding: '24px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
@@ -652,15 +664,15 @@ export default function ClaimPortal() {
                                 <thead>
                                     <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--text-secondary)' }}>
                                         <th style={{ padding: '12px 0', textAlign: 'left', fontWeight: 600 }}>Beschreibung</th>
-                                        <th style={{ padding: '12px 0', textAlign: 'right', fontWeight: 600 }}>Datum</th>
+                                        <th style={{ padding: '12px 0', textAlign: 'right', fontWeight: 600 }}>Fällig</th>
                                         <th style={{ padding: '12px 0', textAlign: 'right', fontWeight: 600 }}>Offen</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {claimData.items?.filter(i => i.open_amount > 0).map((item, idx) => (
-                                        <tr key={idx} style={{ borderBottom: '1px solid #F3F4F6' }}>
+                                    {openItems.map((item, idx) => (
+                                        <tr key={item.id || idx} style={{ borderBottom: '1px solid #F3F4F6' }}>
                                             <td style={{ padding: '12px 0', color: 'var(--text-primary)' }}>{item.description || item.item_type}</td>
-                                            <td style={{ padding: '12px 0', textAlign: 'right', color: 'var(--text-secondary)' }}>{formatDate(item.created_at)}</td>
+                                            <td style={{ padding: '12px 0', textAlign: 'right', color: 'var(--text-secondary)' }}>{formatDate(itemDate(item))}</td>
                                             <td style={{ padding: '12px 0', textAlign: 'right', fontWeight: 500 }}>{formatCurrency(item.open_amount)}</td>
                                         </tr>
                                     ))}

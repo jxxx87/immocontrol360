@@ -14,6 +14,8 @@
 //
 // Zusatzangaben je Position (positions jsonb, rückwärtskompatibel):
 //   vatRate (0/7/19), smallBusiness (true = § 19 UStG), refInvoiceId/-Number/-Date (Gutschrift)
+// Absenderdaten des Portfolios (Kontakt, Bank, Steuernummer/USt-IdNr.) friert die Datenbank beim
+// Ausstellen in invoices.sender_snapshot ein (siehe getInvoiceSenderSource).
 
 import { supabase } from './supabase';
 import { openSansFontFaceCss, fontOrigin } from './fontFaces';
@@ -216,21 +218,32 @@ const missingMark = (text) => `<span class="ic-missing">[${escapeHtml(text)}]</s
 const joinNonEmpty = (parts, sep) => parts.map(s => String(s ?? '').trim()).filter(Boolean).join(sep);
 
 // ─── Stammdaten ──────────────────────────────────────────────────────
-// Absender: die in der Rechnung gespeicherte Anschrift hat Vorrang (eingefroren), sonst das Portfolio.
+// Beim Ausstellen eingefrorene Portfolio-Daten (Spalte invoices.sender_snapshot, gesetzt vom DB-Trigger
+// trg_invoices_sender_snapshot; Gutschriften übernehmen den Snapshot der Rechnung). Nachdrucke
+// ausgestellter Belege zeigen so dieselbe Bankverbindung und Steuernummer wie das versendete Exemplar.
+// Entwürfe und Altbestand ohne Snapshot: aktuelles Portfolio.
+export const getInvoiceSenderSource = (inv, portfolio) => {
+    const snap = inv?.sender_snapshot;
+    const frozen = getInvoiceStatus(inv) !== INVOICE_STATUS.DRAFT && !!snap && typeof snap === 'object' && !Array.isArray(snap);
+    return frozen ? snap : portfolio;
+};
+
+// Absender: die in der Rechnung gespeicherte Anschrift hat Vorrang (eingefroren), sonst der Snapshot bzw. das Portfolio.
 export const getInvoiceSender = (inv, portfolio) => {
+    const src = getInvoiceSenderSource(inv, portfolio);
     const hasInvoiceAddress = !!(inv?.sender_street || inv?.sender_zip || inv?.sender_city);
     return {
-        name: String(inv?.sender_name || portfolio?.company_name || portfolio?.name || '').trim(),
-        street: hasInvoiceAddress ? String(inv?.sender_street || '').trim() : joinNonEmpty([portfolio?.street, portfolio?.house_number], ' '),
-        zip: hasInvoiceAddress ? String(inv?.sender_zip || '').trim() : String(portfolio?.zip || '').trim(),
-        city: hasInvoiceAddress ? String(inv?.sender_city || '').trim() : String(portfolio?.city || '').trim(),
-        email: String(portfolio?.email || '').trim(),
-        phone: String(portfolio?.phone || '').trim(),
-        bankName: String(portfolio?.bank_name || '').trim(),
-        iban: String(portfolio?.iban || '').trim(),
-        bic: String(portfolio?.bic || '').trim(),
-        taxNumber: String(portfolio?.tax_number || '').trim(),
-        vatId: String(portfolio?.vat_id || '').trim()
+        name: String(inv?.sender_name || src?.company_name || src?.name || '').trim(),
+        street: hasInvoiceAddress ? String(inv?.sender_street || '').trim() : joinNonEmpty([src?.street, src?.house_number], ' '),
+        zip: hasInvoiceAddress ? String(inv?.sender_zip || '').trim() : String(src?.zip || '').trim(),
+        city: hasInvoiceAddress ? String(inv?.sender_city || '').trim() : String(src?.city || '').trim(),
+        email: String(src?.email || '').trim(),
+        phone: String(src?.phone || '').trim(),
+        bankName: String(src?.bank_name || '').trim(),
+        iban: String(src?.iban || '').trim(),
+        bic: String(src?.bic || '').trim(),
+        taxNumber: String(src?.tax_number || '').trim(),
+        vatId: String(src?.vat_id || '').trim()
     };
 };
 
@@ -849,7 +862,9 @@ const createCreditNoteInApp = async (original) => {
         net_amount: negate(original.net_amount),
         vat_amount: negate(original.vat_amount),
         gross_amount: negate(original.gross_amount),
-        status: INVOICE_STATUS.CREDIT_NOTE
+        status: INVOICE_STATUS.CREDIT_NOTE,
+        // Absenderdaten der Rechnung übernehmen (nur wenn die Spalte existiert; ohne Snapshot füllt ihn der DB-Trigger)
+        ...(Object.prototype.hasOwnProperty.call(original, 'sender_snapshot') ? { sender_snapshot: original.sender_snapshot ?? null } : {})
     };
     const creditNote = await insertInvoiceWithNumber(payload);
 

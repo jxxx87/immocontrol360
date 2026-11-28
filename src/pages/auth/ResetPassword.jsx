@@ -5,6 +5,7 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { useAuth } from '../../context/AuthContext';
 import { AlertCircle, CheckCircle } from 'lucide-react';
+import { translateError } from '../../lib/errorTranslator';
 
 const ResetPassword = () => {
     const [email, setEmail] = useState('');
@@ -23,7 +24,7 @@ const ResetPassword = () => {
             if (error) throw error;
             setMessage('Anweisungen zum Zurücksetzen wurden gesendet.');
         } catch (error) {
-            setError('Fehler: ' + error.message);
+            setError(translateError(error));
         } finally {
             setLoading(false);
         }

@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
-import Table from '../components/ui/Table';
 import Modal from '../components/ui/Modal';
 import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
@@ -967,6 +966,8 @@ const Properties = () => {
     const [busyMessage, setBusyMessage] = useState(null); // Fortschrittsanzeige außerhalb der Modals (Löschen)
     const [returnTo, setReturnTo] = useState(null); // Track where to redirect after save
     const [searchTerm, setSearchTerm] = useState('');
+    // Einheit aus einem Deep-Link (?unitId=…) hervorheben
+    const [highlightUnitId, setHighlightUnitId] = useState(null);
     const [viewMode, setViewMode] = useState(() => localStorage.getItem('properties_view_mode') || 'grid');
     const [newPropertyImages, setNewPropertyImages] = useState([]);
     const [newUnitImages, setNewUnitImages] = useState([]);
@@ -1030,6 +1031,9 @@ const Properties = () => {
     const [openPropertyActionMenuId, setOpenPropertyActionMenuId] = useState(null);
     const [propertyMenuPos, setPropertyMenuPos] = useState({ top: 0, left: 0 });
     const [editingPropertyId, setEditingPropertyId] = useState(null);
+    // Formularstand beim Öffnen der Dialoge: Rückfrage, bevor Esc/X/Abbrechen geänderte Eingaben verwirft
+    const [propertyFormInitial, setPropertyFormInitial] = useState(null);
+    const [unitFormInitial, setUnitFormInitial] = useState(null);
 
     useEffect(() => {
         localStorage.setItem('properties_view_mode', viewMode);
@@ -1665,12 +1669,14 @@ const Properties = () => {
 
         await updateUnitProvider(property.portfolio_id);
 
-        setUnitForm({
+        const initialUnitForm = {
             unit_name: '', floor: '', sqm: '', rooms: '', target_rent: '',
             bathrooms: 1, bedrooms: 1, balcony: false, fitted_kitchen: false, is_vacation_rental: false,
             cold_rent_ist: '', service_charge_soll: '', heating_cost_soll: '', other_costs_soll: '', deposit_soll: '',
             thumbnail_image: ''
-        });
+        };
+        setUnitForm(initialUnitForm);
+        setUnitFormInitial(initialUnitForm);
         setIsUnitModalOpen(true);
     };
 
@@ -1836,7 +1842,7 @@ const Properties = () => {
 
         await updateUnitProvider(property.portfolio_id);
 
-        setUnitForm({
+        const initialUnitForm = {
             unit_name: unit.unit_name || '',
             floor: unit.floor ?? '',
             sqm: unit.sqm ?? '',
@@ -1853,7 +1859,9 @@ const Properties = () => {
             other_costs_soll: unit.other_costs_soll || '',
             deposit_soll: unit.deposit_soll || '',
             thumbnail_image: unit.thumbnail_image || ''
-        });
+        };
+        setUnitForm(initialUnitForm);
+        setUnitFormInitial(initialUnitForm);
         setIsUnitModalOpen(true);
     };
 
@@ -1893,7 +1901,7 @@ const Properties = () => {
         if (blockers.length > 0) {
             const reasons = [];
             if (deps.leases > 0 || deps.payments > 0) {
-                reasons.push('Beim Löschen würden die Mietverträge samt Mietkonto, Sollstellungen und Zahlungshistorie unwiderruflich mitgelöscht. Diese Daten unterliegen Aufbewahrungspflichten – die Einheit bleibt daher bestehen.');
+                reasons.push('Mietverträge samt Mietkonto, Sollstellungen und Zahlungshistorie unterliegen Aufbewahrungspflichten und verhindern das Löschen – die Einheit bleibt daher bestehen.');
             }
             if (deps.documents > 0) {
                 reasons.push('Dokumente müssen vorher gelöscht oder einer anderen Einheit zugeordnet werden.');
@@ -1972,7 +1980,7 @@ const Properties = () => {
         if (blockers.length > 0) {
             const reasons = [];
             if (deps.leases > 0 || deps.payments > 0 || deps.settlements > 0) {
-                reasons.push('Mietverträge, Mietkonto, Zahlungen und Nebenkostenabrechnungen würden beim Löschen unwiderruflich mitgelöscht. Diese Daten unterliegen Aufbewahrungspflichten – die Immobilie bleibt daher bestehen.');
+                reasons.push('Mietverträge, Mietkonto, Zahlungen und Nebenkostenabrechnungen unterliegen Aufbewahrungspflichten und verhindern das Löschen – die Immobilie bleibt daher bestehen.');
             }
             if (deps.loans > 0 || deps.documents > 0) {
                 reasons.push('Darlehen und Dokumente müssen vorher gelöscht oder einer anderen Immobilie zugeordnet werden.');
@@ -2048,7 +2056,7 @@ const Properties = () => {
 
         await updatePropertyProvider(property.portfolio_id);
 
-        setPropertyForm({
+        const initialPropertyForm = {
             portfolio_id: property.portfolio_id || '',
             street: property.street || '',
             house_number: property.house_number || '',
@@ -2065,7 +2073,9 @@ const Properties = () => {
             _we_prefill: wePrefill,
             _add_member_values: true,
             thumbnail_image: property.thumbnail_image || ''
-        });
+        };
+        setPropertyForm(initialPropertyForm);
+        setPropertyFormInitial(initialPropertyForm);
 
         setIsPropertyModalOpen(true);
     };
@@ -2083,7 +2093,7 @@ const Properties = () => {
 
         await updatePropertyProvider(defaultPortfolioId || writablePortfolios[0]?.id);
 
-        setPropertyForm({
+        const initialPropertyForm = {
             portfolio_id: defaultPortfolioId,
             street: '',
             house_number: '',
@@ -2098,8 +2108,27 @@ const Properties = () => {
             _we_prefill: null,
             _add_member_values: true,
             thumbnail_image: ''
-        });
+        };
+        setPropertyForm(initialPropertyForm);
+        setPropertyFormInitial(initialPropertyForm);
         setIsPropertyModalOpen(true);
+    };
+
+    // Geänderte Eingaben (Formular oder neu ausgewählte Bilder) seit dem Öffnen des Dialogs?
+    const isPropertyFormDirty = isPropertyModalOpen && (
+        (propertyFormInitial !== null && JSON.stringify(propertyForm) !== JSON.stringify(propertyFormInitial))
+        || newPropertyImages.length > 0);
+    const isUnitFormDirty = isUnitModalOpen && (
+        (unitFormInitial !== null && JSON.stringify(unitForm) !== JSON.stringify(unitFormInitial))
+        || newUnitImages.length > 0);
+    // „Abbrechen“ wie Esc/X (Modal confirmCloseWhen): nur nach Rückfrage verwerfen
+    const closePropertyModalGuarded = () => {
+        if (isPropertyFormDirty && !window.confirm('Ungespeicherte Änderungen verwerfen?')) return;
+        setIsPropertyModalOpen(false);
+    };
+    const closeUnitModalGuarded = () => {
+        if (isUnitFormDirty && !window.confirm('Ungespeicherte Änderungen verwerfen?')) return;
+        setIsUnitModalOpen(false);
     };
 
     // Objekt in der Tabellenansicht mit Einheiten öffnen (Kachelansicht hat keine Einheitenliste)
@@ -2127,6 +2156,41 @@ const Properties = () => {
             }
         }
     }, [location.search, properties, sharesLoaded, portfoliosLoading]);
+
+    // Deep-Link aus der Mieterakte: ?propertyId=…&unitId=… – Objekt filtern, in der Tabelle aufklappen, Einheit hervorheben
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        if (params.get('editPropertyId')) return;
+        const linkPropertyId = params.get('propertyId');
+        const linkUnitId = params.get('unitId');
+        if (!linkPropertyId && !linkUnitId) return;
+        if (properties.length === 0) return;
+        let cancelled = false;
+        (async () => {
+            let prop = linkPropertyId ? properties.find(p => p.id === linkPropertyId) : null;
+            if (!prop && linkUnitId) {
+                // Ältere Links nur mit unitId: Objekt über die Einheit bestimmen
+                const { data: unitRow, error: unitError } = await supabase
+                    .from('units')
+                    .select('property_id')
+                    .eq('id', linkUnitId)
+                    .maybeSingle();
+                if (unitError) console.warn('Einheit aus dem Link nicht ladbar:', unitError);
+                if (unitRow?.property_id) prop = properties.find(p => p.id === unitRow.property_id) || null;
+            }
+            if (cancelled) return;
+            navigate(location.pathname, { replace: true });
+            if (!prop) {
+                alert('Die verlinkte Immobilie ist in der aktuellen Auswahl nicht enthalten (ggf. anderes Portfolio gewählt).');
+                return;
+            }
+            setSearchTerm(prop.id);
+            openPropertyInTable(prop);
+            setHighlightUnitId(linkUnitId || null);
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.search, properties]);
 
     // Filter properties by selected property
     const filteredProperties = properties.filter(p => {
@@ -2372,7 +2436,7 @@ const Properties = () => {
         const canLet = canRent && unit.status === 'vacant';
         const hasActions = canEdit || canLet;
         return (
-            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)' }}>
+            <tr key={unit.id} className="table-row" style={{ borderTop: '1px solid var(--border-color)', ...(highlightUnitId === unit.id ? { backgroundColor: 'rgba(59, 130, 246, 0.08)', boxShadow: 'inset 3px 0 0 var(--primary-color)' } : {}) }}>
                 <td style={{ padding: '8px' }}>{unit.unit_name}</td>
                 <td style={{ padding: '8px' }}>{unit.floor}</td>
                 <td style={{ padding: '8px' }}>{unit.sqm ? (parseFloat(unit.sqm) || 0).toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '—'} m²</td>
@@ -2916,8 +2980,9 @@ const Properties = () => {
             <Modal
                 isOpen={isPropertyModalOpen}
                 onClose={() => setIsPropertyModalOpen(false)}
+                confirmCloseWhen={isPropertyFormDirty}
                 title={editingPropertyId ? "Immobilie bearbeiten" : "Neue Immobilie anlegen"}
-                footer={<><Button variant="secondary" onClick={() => setIsPropertyModalOpen(false)}>Abbrechen</Button><Button onClick={handleSaveProperty} disabled={isSaving}>Speichern</Button></>}
+                footer={<><Button variant="secondary" onClick={closePropertyModalGuarded}>Abbrechen</Button><Button onClick={handleSaveProperty} disabled={isSaving}>Speichern</Button></>}
             >
                 {isSaving && <LoadingOverlay message="Speichere Immobilie..." />}
                 <div style={{ marginBottom: 'var(--spacing-md)' }}>
@@ -3097,8 +3162,9 @@ const Properties = () => {
             <Modal
                 isOpen={isUnitModalOpen}
                 onClose={() => setIsUnitModalOpen(false)}
+                confirmCloseWhen={isUnitFormDirty}
                 title={editingUnitId ? "Einheit bearbeiten" : `Neue Einheit in ${currentPropertyForUnit?.street} ${currentPropertyForUnit?.house_number}`}
-                footer={<><Button variant="secondary" onClick={() => setIsUnitModalOpen(false)}>Abbrechen</Button><Button onClick={handleSaveUnit} disabled={isSaving}>Speichern</Button></>}
+                footer={<><Button variant="secondary" onClick={closeUnitModalGuarded}>Abbrechen</Button><Button onClick={handleSaveUnit} disabled={isSaving}>Speichern</Button></>}
             >
                 {isSaving && <LoadingOverlay message="Speichere Einheit..." />}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>

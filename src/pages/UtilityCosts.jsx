@@ -26,6 +26,7 @@ import {
     toCents, validatePeriod
 } from '../lib/utilitySettlement';
 import { loadHtml2Pdf } from '../lib/htmlToPdf';
+import { useUnsavedChangesGuard } from '../lib/useUnsavedChangesGuard';
 
 // Zeitstempel (created_at, finalized_at) als lokales Datum
 const formatTimestamp = (ts) => (ts ? formatDateDE(localISODate(new Date(ts))) : '–');
@@ -235,6 +236,14 @@ const StepIndicator = ({ steps, currentStep, onStepClick }) => (
 
 const EMPTY_OPTIONS = { includeHeatingPrepay: null, vacancyPersons: 1 };
 
+// Rückfrage, wenn der Assistent mit ungespeicherten Eingaben verlassen oder geschlossen wird
+const UNSAVED_WIZARD_MESSAGE = 'Die Abrechnung im Assistenten enthält ungespeicherte Änderungen. Sie gehen verloren, wenn Sie den Assistenten jetzt verlassen.\n\nTrotzdem verlassen?';
+// Vergleichswert des Arbeitsstands (Zeitraum, Einheiten, Kosten, Korrekturen, Vorauszahlungen, Optionen)
+const wizardStateKey = (s) => JSON.stringify([
+    s.periodStart, s.periodEnd, [...(s.selectedUnitIds || [])].sort(), s.costItems, s.unitOverrides,
+    s.customRows, s.prepayOverrides, s.settlementOptions
+]);
+
 // ========== MAIN COMPONENT ==========
 const UtilityCosts = () => {
     const { user } = useAuth();
@@ -297,6 +306,8 @@ const UtilityCosts = () => {
     const [prepayData, setPrepayData] = useState(null);
     const [reviewUnit, setReviewUnit] = useState(null);
     const [step3SelectedUnit, setStep3SelectedUnit] = useState(null);
+    // Arbeitsstand beim Öffnen des Assistenten (wizardStateKey) – Grundlage für „ungespeicherte Änderungen“
+    const [wizardBaseline, setWizardBaseline] = useState(null);
 
     const stepLabels = ['Einheiten', 'Kosten', 'Verteilung', 'Abschluss'];
 
@@ -380,6 +391,13 @@ const UtilityCosts = () => {
         || (s?.economic_unit_id ? properties.find(p => p.economic_unit_id === s.economic_unit_id)?.portfolio_id : null)
         || null;
     const canWriteSettlement = (s) => canWriteNk(settlementPortfolioId(s));
+    // Portfolio der Abrechnung im Assistenten (Wirtschaftseinheit: erste zugehörige Liegenschaft, wie beim Speichern)
+    const wizardPortfolioId = () => {
+        const pid = wizardPropertyId?.startsWith('we_')
+            ? properties.find(p => p.economic_unit_id === wizardPropertyId.replace('we_', ''))?.id
+            : wizardPropertyId;
+        return propertiesById[pid]?.portfolio_id || null;
+    };
     const READ_ONLY_NOTICE = 'Für dieses Objekt haben Sie nur Leserechte (Freigabe). Nebenkostenabrechnungen können nur mit Schreibrecht „Nebenkosten“ angelegt, geändert oder gelöscht werden.';
 
     const houseUnitsFor = (propKey) => {
@@ -433,6 +451,17 @@ const UtilityCosts = () => {
         });
     }, [wizardOpen, periodStart, periodEnd, propertyUnits, selectedUnitIds, leases, tenantsById, distributionKeys,
         costItems, unitOverrides, customRows, prepayOverrides, settlementOptions, prepayData, prepayKey, today]);
+
+    // Ungespeicherte Eingaben im Assistenten: App-Navigation (Seitenleiste, Topbar) und Neuladen/Schließen
+    // des Tabs fragen nach (useUnsavedChangesGuard), die Schließen-Knöpfe des Assistenten über closeWizard
+    const wizardDirty = useMemo(() => wizardOpen && wizardBaseline !== null && wizardBaseline !== wizardStateKey({
+        periodStart, periodEnd, selectedUnitIds, costItems, unitOverrides, customRows, prepayOverrides, settlementOptions
+    }), [wizardOpen, wizardBaseline, periodStart, periodEnd, selectedUnitIds, costItems, unitOverrides, customRows, prepayOverrides, settlementOptions]);
+    useUnsavedChangesGuard(wizardDirty ? UNSAVED_WIZARD_MESSAGE : null);
+    const closeWizard = () => {
+        if (wizardDirty && !window.confirm(UNSAVED_WIZARD_MESSAGE)) return;
+        setWizardOpen(false);
+    };
 
     // Group properties into groupedProperties (including standalone properties)
     const groupedProperties = React.useMemo(() => {
@@ -515,9 +544,16 @@ const UtilityCosts = () => {
         resetWizardState();
         setWizardPropertyId(propertyId);
         const year = new Date().getFullYear() - 1;
-        setPeriodStart(`${year}-01-01`);
-        setPeriodEnd(`${year}-12-31`);
-        setSelectedUnitIds(houseUnitsFor(propertyId).map(u => u.id));
+        const start = `${year}-01-01`;
+        const end = `${year}-12-31`;
+        const unitIds = houseUnitsFor(propertyId).map(u => u.id);
+        setPeriodStart(start);
+        setPeriodEnd(end);
+        setSelectedUnitIds(unitIds);
+        setWizardBaseline(wizardStateKey({
+            periodStart: start, periodEnd: end, selectedUnitIds: unitIds, costItems: [], unitOverrides: {},
+            customRows: {}, prepayOverrides: {}, settlementOptions: EMPTY_OPTIONS
+        }));
         setEditingSettlement(null);
         setWizardStep(0);
         setWizardOpen(true);
@@ -570,12 +606,18 @@ const UtilityCosts = () => {
         setWizardPropertyId(propKey);
         setPeriodStart(settlement.period_start);
         setPeriodEnd(settlement.period_end);
+        const prepayOverridesLoaded = data.prepayOverrides || {};
+        const optionsLoaded = { ...EMPTY_OPTIONS, ...(data.options || {}) };
         setSelectedUnitIds(prepared.selectedUnitIds);
         setCostItems(prepared.costItems);
         setUnitOverrides(prepared.unitOverrides);
         setCustomRows(prepared.customRows);
-        setPrepayOverrides(data.prepayOverrides || {});
-        setSettlementOptions({ ...EMPTY_OPTIONS, ...(data.options || {}) });
+        setPrepayOverrides(prepayOverridesLoaded);
+        setSettlementOptions(optionsLoaded);
+        setWizardBaseline(wizardStateKey({
+            periodStart: settlement.period_start, periodEnd: settlement.period_end, ...prepared,
+            prepayOverrides: prepayOverridesLoaded, settlementOptions: optionsLoaded
+        }));
         setLoadedFor(data.loadedFor || { key: propKey, start: settlement.period_start, end: settlement.period_end });
         setWizardStep(0);
         setWizardOpen(true);
@@ -697,8 +739,9 @@ const UtilityCosts = () => {
                 const from = addDaysISO(start, -60);
                 const to = addDaysISO(end, 60);
                 for (const ids of chunk(unitMeters.map(m => m.id), 100)) {
+                    // note/created_at: Zählerwechsel erkennen und Stände am selben Tag eindeutig ordnen
                     readings.push(...await fetchAllRows(() => supabase.from('meter_readings')
-                        .select('id, meter_id, reading_value, reading_date')
+                        .select('id, meter_id, reading_value, reading_date, note, created_at')
                         .in('meter_id', ids).gte('reading_date', from).lte('reading_date', to).order('id')));
                 }
             }
@@ -772,13 +815,14 @@ const UtilityCosts = () => {
             if (!c) return;
             value_sources[u.id] = c.details.map(d => (d.error
                 ? `${d.meter}: ${d.error}`
-                : `${d.meter}: ${formatDateDE(d.start.date)} ${formatNumberDE(d.start.value, 3)} → ${formatDateDE(d.end.date)} ${formatNumberDE(d.end.value, 3)}`)).join('; ');
+                : `${d.meter}: ${formatDateDE(d.start.date)} ${formatNumberDE(d.start.value, 3)} → ${formatDateDE(d.end.date)} ${formatNumberDE(d.end.value, 3)}`
+                    + (d.swaps?.length ? ` (inkl. Zählerwechsel am ${d.swaps.map(sw => formatDateDE(sw.date)).join(', ')})` : ''))).join('; ');
             if (c.complete) { unit_values[u.id] = c.value; applied += 1; } else { incomplete += 1; }
         });
         updateCostItem(itemId, ci => ({ ...ci, unit_values, value_sources, meter_type: meterType, consumption_unit: unitLabel || ci.consumption_unit || '' }));
         const missing = propertyUnits.length - applied;
         if (missing > 0) {
-            alert(`Verbrauch aus Zählerständen für ${applied} von ${propertyUnits.length} Einheiten übernommen.${incomplete ? ` Bei ${incomplete} Einheit(en) fehlen Ablesungen am Anfang oder Ende des Zeitraums.` : ''} Fehlende Werte bitte manuell eintragen.`);
+            alert(`Verbrauch aus Zählerständen für ${applied} von ${propertyUnits.length} Einheiten übernommen.${incomplete ? ` Bei ${incomplete} Einheit(en) sind die Ablesungen unvollständig oder unplausibel (z. B. Stand am Anfang/Ende des Zeitraums oder Endstand beim Zählerwechsel fehlt).` : ''} Fehlende Werte bitte manuell eintragen.`);
         }
     };
 
@@ -807,9 +851,13 @@ const UtilityCosts = () => {
             alert('Bitte eine Bezeichnung für den Schlüssel eingeben.');
             return;
         }
+        // Wie die Abrechnung selbst unter dem Portfolio-Inhaber anlegen (sonst sähe der Inhaber den
+        // Schlüssel eines Mitnutzers nicht und könnte ihn weder umbenennen noch löschen)
+        const portfolioId = wizardPortfolioId();
+        const ownerId = canWriteNk(portfolioId) ? (portfoliosById[portfolioId]?.user_id || user.id) : user.id;
         try {
             const { data, error } = await supabase.from('distribution_keys').insert([{
-                user_id: user.id,
+                user_id: ownerId,
                 name: newKeyName.trim(),
                 calculation_type: 'custom',
                 description: newKeyDescription || 'In Nebenkostenabrechnung erstellt'
@@ -1353,7 +1401,7 @@ const UtilityCosts = () => {
             <>
                 <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: 'var(--spacing-lg)' }}>
-                        <button onClick={() => setWizardOpen(false)} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
+                        <button onClick={closeWizard} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
                             <ArrowLeft size={20} />
                         </button>
                         <div>
@@ -2082,7 +2130,7 @@ const UtilityCosts = () => {
                                         <Button variant="secondary" icon={ArrowLeft} onClick={goBack} disabled={busy} style={{ width: '100%' }}>Zurück</Button>
                                     )}
                                     {wizardStep === 0 && (
-                                        <Button variant="secondary" onClick={() => setWizardOpen(false)} disabled={saving} style={{ width: '100%' }}>Abbrechen</Button>
+                                        <Button variant="secondary" onClick={closeWizard} disabled={saving} style={{ width: '100%' }}>Abbrechen</Button>
                                     )}
                                 </div>
                                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -2108,7 +2156,7 @@ const UtilityCosts = () => {
                                         <Button variant="secondary" icon={ArrowLeft} onClick={goBack} disabled={busy}>Zurück</Button>
                                     )}
                                     {wizardStep === 0 && (
-                                        <Button variant="secondary" onClick={() => setWizardOpen(false)} disabled={saving}>Abbrechen</Button>
+                                        <Button variant="secondary" onClick={closeWizard} disabled={saving}>Abbrechen</Button>
                                     )}
                                 </div>
                                 <div style={{ display: 'flex', gap: '10px' }}>

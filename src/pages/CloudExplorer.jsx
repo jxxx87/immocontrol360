@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { useViewMode } from '../context/ViewModeContext';
 import { Folder, Loader2, ChevronRight, FileText, Image as ImageIcon, Building2, HardDrive, Cloud, UploadCloud, FolderPlus, Trash2, AlertTriangle } from 'lucide-react';
 import Card from '../components/ui/Card';
 
@@ -47,6 +49,8 @@ const cloudFolderSegment = (value) => String(value ?? '').replace(/[\\/]/g, '-')
 const CloudExplorer = () => {
     const { user } = useAuth();
     const userId = user?.id;
+    const { selectedPortfolioID } = usePortfolio();
+    const { isMobile } = useViewMode();
     const navigate = useNavigate();
     const [groupedProperties, setGroupedProperties] = useState([]);
     const [status, setStatus] = useState('loading'); // loading, checking, creating, ready, no_connection, error
@@ -73,6 +77,14 @@ const CloudExplorer = () => {
         const init = async () => {
             setStatus('loading');
             setStatusMessage('Überprüfe Cloud-Verbindung...');
+            // Neu laden (z. B. Portfolio-Wechsel): Auswahl und offene Ordneransicht verwerfen,
+            // noch laufende Dateiabfragen nicht mehr übernehmen
+            requestSeqRef.current += 1;
+            setSelectedProperty(null);
+            setCurrentPath([]);
+            setFiles([]);
+            setFetchError(null);
+            setIsLoadingFiles(false);
 
             // 1. Eigene Cloud-Verbindungen (ohne Tokens)
             const { data: connections, error: connError } = await supabase
@@ -118,11 +130,13 @@ const CloudExplorer = () => {
 
             setStatusMessage('Lade Immobilien...');
 
-            // 2. Objekte
-            const { data: props, error: propsError } = await supabase
+            // 2. Objekte (nur das oben gewählte Portfolio; "Alle Portfolios" = alle lesbaren)
+            let propsQuery = supabase
                 .from('properties')
                 .select('id, street, house_number, city, portfolio_id, economic_unit_id')
                 .order('street');
+            if (selectedPortfolioID) propsQuery = propsQuery.eq('portfolio_id', selectedPortfolioID);
+            const { data: props, error: propsError } = await propsQuery;
             if (cancelled) return;
             if (propsError) {
                 console.error('Error loading properties:', propsError);
@@ -209,7 +223,7 @@ const CloudExplorer = () => {
         });
 
         return () => { cancelled = true; };
-    }, [userId, reloadKey]);
+    }, [userId, reloadKey, selectedPortfolioID]);
 
     const fetchFiles = useCallback(async (property, pathArray) => {
         const requestId = ++requestSeqRef.current;
@@ -405,7 +419,8 @@ const CloudExplorer = () => {
         e.stopPropagation();
         const connection = selectedProperty?.cloud_connection;
         if (!connection) return;
-        const confirmDelete = window.confirm(`Möchten Sie '${item.name}' wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.`);
+        // cloud-drive verschiebt bei beiden Anbietern in den Papierkorb (kein endgültiges Löschen)
+        const confirmDelete = window.confirm(`Möchten Sie '${item.name}' löschen? ${item.isFolder ? 'Der Ordner wird samt Inhalt' : 'Die Datei wird'} in den Papierkorb von ${providerLabel(connection.provider)} verschoben und kann dort wiederhergestellt werden.`);
         if (!confirmDelete) return;
 
         setIsLoadingFiles(true);
@@ -523,15 +538,21 @@ const CloudExplorer = () => {
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '24px', alignItems: 'flex-start' }}>
+            {/* Am Handy untereinander: Objektliste oben (begrenzte Höhe), Dateien darunter */}
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? '16px' : '24px', alignItems: isMobile ? 'stretch' : 'flex-start' }}>
 
                 {/* Left Sidebar: Properties */}
-                <Card style={{ width: '300px', flexShrink: 0, padding: 0, overflow: 'hidden' }}>
+                <Card style={{ width: isMobile ? '100%' : '300px', flexShrink: 0, padding: 0, overflow: 'hidden' }}>
                     <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--input-bg)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <Building2 size={18} color="var(--text-secondary)" />
                         Immobilien
                     </div>
-                    <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                    <div style={{ maxHeight: isMobile ? '240px' : '600px', overflowY: 'auto' }}>
+                        {groupedProperties.length === 0 && (
+                            <div style={{ padding: '16px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                {selectedPortfolioID ? 'In diesem Portfolio gibt es keine Immobilien.' : 'Keine Immobilien vorhanden.'}
+                            </div>
+                        )}
                         {groupedProperties.map((item) => {
                             const isSelected = selectedProperty?.id === item.id;
                             const notAssigned = !item.cloud_connection && (
@@ -596,11 +617,11 @@ const CloudExplorer = () => {
                 </Card>
 
                 {/* Right Area: File Explorer */}
-                <Card style={{ flex: 1, padding: 0, minHeight: '600px', display: 'flex', flexDirection: 'column' }}>
+                <Card style={{ flex: 1, minWidth: 0, width: isMobile ? '100%' : undefined, padding: 0, minHeight: isMobile ? '400px' : '600px', display: 'flex', flexDirection: 'column' }}>
                     {!selectedProperty ? (
                         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
                             <HardDrive size={48} color="var(--border-color)" style={{ marginBottom: '16px' }} />
-                            <p>Bitte wählen Sie links eine Immobilie aus.</p>
+                            <p>Bitte wählen Sie {isMobile ? 'oben' : 'links'} eine Immobilie aus.</p>
                         </div>
                     ) : !selectedConnection ? (
                         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '14px', padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -646,7 +667,7 @@ const CloudExplorer = () => {
                                     </span>
                                 </div>
 
-                                <div style={{ display: 'flex', gap: '10px' }}>
+                                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                                     <button
                                         className="btn btn-outline"
                                         onClick={handleCreateFolder}
@@ -676,7 +697,7 @@ const CloudExplorer = () => {
                             </div>
 
                             {/* File Grid */}
-                            <div style={{ padding: '24px', flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '20px', alignContent: 'start', position: 'relative' }}>
+                            <div style={{ padding: isMobile ? '12px' : '24px', flex: 1, display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${isMobile ? '96px' : '120px'}, 1fr))`, gap: isMobile ? '12px' : '20px', alignContent: 'start', position: 'relative' }}>
                                 {isLoadingFiles && (
                                     <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.7)', zIndex: 10, gap: '12px' }}>
                                         <Loader2 size={32} color="var(--primary-color)" className="animate-spin" />

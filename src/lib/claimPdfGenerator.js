@@ -145,8 +145,10 @@ const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 export const translateClaimError = (err, fallback = 'Die Aktion konnte nicht ausgeführt werden.') => {
     const raw = String(err?.message || err?.details || (typeof err === 'string' ? err : '') || '').trim();
     if (!raw) return fallback;
-    if (/gehört Owner|RLS verhindert/i.test(raw)) {
-        return 'Forderungen können derzeit nur vom Eigentümer des Mietvertrags angelegt werden.';
+    // Forderungs-RPCs (record_claim_payment, create_payment_plan, create_claim_advanced, cancel_claim …)
+    // melden fehlendes Schreibrecht als "… nicht gefunden oder keine Berechtigung."
+    if (/keine Berechtigung/i.test(raw)) {
+        return 'Keine Schreibberechtigung für „Finanzen“ in diesem Portfolio (oder der Datensatz ist nicht mehr vorhanden).';
     }
     if (/invalid input syntax for type (numeric|integer|date)/i.test(raw)) {
         return 'Ein eingegebener Betrag oder ein Datum ist ungültig. Bitte prüfen Sie die Eingaben.';
@@ -161,6 +163,114 @@ export const translateClaimError = (err, fallback = 'Die Aktion konnte nicht aus
     let msg = raw.replace(/(\d+(?:\.\d+)?)\.2f/g, (m, n) => formatCurrencyDE(Number(n)));
     msg = msg.replace(UUID_RE, '…');
     return msg;
+};
+
+// ── Forderung stornieren / Forderungsausfall buchen ─────────────────────────
+// Datenbank-Funktion (noch) nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+export const isMissingRpcError = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404
+        || /could not find the function/i.test(String(error.message || '')));
+
+export const WRITE_OFF_ACTIVE_PLAN_MESSAGE = 'Für diese Forderung läuft ein Ratenplan. Bitte beenden Sie den Ratenplan zuerst in der Forderungsakte (Details), bevor Sie einen Forderungsausfall buchen.';
+
+/**
+ * Forderung stornieren (writeOff = false, Forderungsliste) bzw. als Forderungsausfall stornieren
+ * (writeOff = true, Mieterakte). Bevorzugt die Datenbank-Funktion cancel_claim: Ratenplan beenden,
+ * Portal-Link sperren, Status setzen und Historie schreiben in EINER Transaktion. Fehlt die Funktion
+ * (Datenbank noch nicht aktualisiert), läuft der bisherige Ablauf mit Einzelaufrufen.
+ * Bereits gebuchte Zahlungen bleiben gebucht. Ein Forderungsausfall bei laufendem Ratenplan wird abgelehnt.
+ *
+ * Rückgabe: { viaRpc, historySaved, historyError }
+ */
+export const cancelClaim = async ({ claim, reason, writeOff = false, userId = null }) => {
+    if (!claim?.id) throw new Error('Die Forderung ist nicht geladen.');
+    const cleanReason = String(reason || '').trim();
+    if (!cleanReason) {
+        throw new Error(writeOff ? 'Bitte geben Sie einen Grund für den Forderungsausfall an.' : 'Bitte geben Sie einen Stornierungsgrund an.');
+    }
+
+    const { error: rpcError, status } = await supabase.rpc('cancel_claim', {
+        p_claim_id: claim.id,
+        p_reason: cleanReason,
+        p_write_off: !!writeOff
+    });
+    if (!rpcError) return { viaRpc: true, historySaved: true, historyError: null };
+    if (!isMissingRpcError(rpcError, status)) throw rpcError;
+
+    // ── Bisheriger Ablauf (Datenbank ohne cancel_claim) ──
+    const claimId = claim.id;
+    const nowIso = new Date().toISOString();
+    const { data: plans, error: planError } = await supabase
+        .from('payment_plans')
+        .select('id')
+        .eq('claim_id', claimId)
+        .eq('status', 'active');
+    if (planError) throw planError;
+    if (writeOff && (plans || []).length > 0) throw new Error(WRITE_OFF_ACTIVE_PLAN_MESSAGE);
+
+    for (const plan of plans || []) {
+        const { error: instError } = await supabase
+            .from('payment_plan_installments')
+            .update({ status: 'cancelled', updated_at: nowIso })
+            .eq('payment_plan_id', plan.id)
+            .in('status', ['open', 'partial', 'overdue']);
+        let stepError = instError;
+        if (!stepError) {
+            const { error: planUpdateError } = await supabase
+                .from('payment_plans')
+                .update({ status: 'cancelled', cancelled_at: nowIso, cancelled_by: userId, cancellation_reason: cleanReason, updated_at: nowIso })
+                .eq('id', plan.id);
+            stepError = planUpdateError;
+        }
+        if (stepError) {
+            // Ratenpläne nur noch per RPC änderbar -> Plan über reverse_payment_plan beenden
+            if (/Ratenpläne können nur über/i.test(String(stepError.message || ''))) {
+                const { error: reverseError } = await supabase.rpc('reverse_payment_plan', { p_claim_id: claimId });
+                if (reverseError && !String(reverseError.message || '').includes('Kein aktiver Ratenplan')) throw reverseError;
+                break; // reverse_payment_plan beendet den aktiven Plan der Forderung
+            }
+            throw stepError;
+        }
+    }
+
+    const { data: updated, error: claimError } = await supabase
+        .from('claims')
+        .update({
+            status: 'cancelled',
+            cancelled_at: nowIso,
+            cancelled_by: userId,
+            cancellation_reason: writeOff ? `Forderungsausfall: ${cleanReason}` : cleanReason,
+            updated_at: nowIso
+        })
+        .eq('id', claimId)
+        .select('id');
+    if (claimError) throw claimError;
+    if (!updated || updated.length === 0) throw new Error('Forderung nicht gefunden oder keine Berechtigung.');
+
+    // Portal-Link sperren (Fehler hier sind nicht kritisch: das Portal lehnt stornierte Forderungen ab)
+    const { error: linkError } = await supabase
+        .from('claim_access_links')
+        .update({ is_active: false, revoked_at: nowIso })
+        .eq('claim_id', claimId)
+        .eq('is_active', true);
+    if (linkError) console.warn('Portal-Link konnte nicht deaktiviert werden:', linkError);
+
+    const { error: eventError } = await supabase.from('claim_events').insert([{
+        user_id: claim.user_id || userId,
+        claim_id: claimId,
+        event_type: writeOff ? 'status_changed' : 'cancelled',
+        description: writeOff ? 'Forderungsausfall gebucht' : 'Forderung storniert',
+        event_metadata: {
+            old_status: claim.status,
+            new_status: 'cancelled',
+            reason: cleanReason,
+            write_off: !!writeOff,
+            cancelled_payment_plan_ids: (plans || []).map(p => p.id)
+        }
+    }]);
+    if (eventError) console.warn('Storno-Ereignis konnte nicht gespeichert werden:', eventError);
+
+    return { viaRpc: false, historySaved: !eventError, historyError: eventError || null };
 };
 
 // ── HTML-Schutz für das Mahnschreiben ───────────────────────────────────────
@@ -463,7 +573,9 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         .sort((a, b) => a - b);
     const verzugstage = openDueDates.length > 0 ? getDelayDays(openDueDates[0], docDate) : liveDays;
 
-    // 5. Bankverbindung: konsistent aus EINER Quelle (Portfolio vor Profil)
+    // 5. Bankverbindung: konsistent aus EINER Quelle (Portfolio vor Profil). Dieselbe Regel nutzt das
+    //    Forderungsportal (Datenbank: claim_portal_bank_details) für Anzeige und GiroCode – bei
+    //    Änderungen beide Stellen gleich halten.
     let bank = null;
     if ((portfolio?.iban || '').trim()) {
         bank = { name: portfolio.bank_name, iban: portfolio.iban, bic: portfolio.bic, holder: (portfolio.company_name || '').trim() || senderName };
@@ -475,7 +587,11 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     const bankDetailsStr = bank
         ? `Inhaber: ${bank.holder}, ${bank.name ? 'Bank: ' + bank.name + ', ' : ''}IBAN: ${bank.iban}${bank.bic ? ', BIC: ' + bank.bic : ''}, Verwendungszweck: ${paymentReference}`
         : 'das Ihnen bekannte Bankkonto';
-    if (!bank) warnings.push('Es ist keine Bankverbindung (IBAN) im Portfolio oder Profil hinterlegt – im Schreiben steht „das Ihnen bekannte Bankkonto“.');
+    if (!bank) {
+        warnings.push(profile
+            ? 'Es ist keine Bankverbindung (IBAN) im Portfolio oder Profil hinterlegt – im Schreiben steht „das Ihnen bekannte Bankkonto“.'
+            : 'Im Portfolio ist keine Bankverbindung (IBAN) hinterlegt – im Schreiben steht „das Ihnen bekannte Bankkonto“. Das Forderungsportal nennt ggf. die Bankverbindung aus dem Profil des Eigentümers; bitte die IBAN im Portfolio hinterlegen lassen.');
+    }
 
     const leaseStart = claim.leases?.start_date ? formatDate(claim.leases.start_date) : 'Mietbeginn';
 

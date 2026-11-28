@@ -80,7 +80,7 @@ const Billing = () => {
             const { data, error } = await supabase.functions.invoke('create-portal-session', {
                 body: {
                     user_id: session.user.id,
-                    return_url: `${origin}/settings`,
+                    return_url: `${origin}/settings?tab=billing`,
                 },
             });
 

@@ -5,8 +5,9 @@ import AuthLayout from './AuthLayout';
 import Button from '../ui/Button';
 import Input from '../ui/Input';
 import ResetPassword from '../../pages/auth/ResetPassword';
-import { supabase } from '../../lib/supabase';
+import { supabase, readRecoveryFlag, writeRecoveryFlag, initialLinkError } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { translateError } from '../../lib/errorTranslator';
 
 // Route /reset-password (und /update-password):
 //   - nicht angemeldet            -> Formular "Link anfordern" (ResetPassword)
@@ -14,36 +15,10 @@ import { useAuth } from '../../context/AuthContext';
 //   - sonst angemeldet            -> zur App
 // Der Reset-Link erzeugt eine Sitzung; deshalb darf diese Route nicht hinter
 // AuthRoute liegen (die sofort auf '/' umleitet).
+// Die Erkennung des Reset-Links (URL-Hash, Ereignis PASSWORD_RECOVERY) läuft beim App-Start in
+// lib/supabase.js – diese Seite wird nachgeladen und käme dafür zu spät.
 
-const RECOVERY_KEY = 'passwordRecoveryPending';
 const MIN_PASSWORD_LENGTH = 10;
-
-const readRecoveryFlag = () => {
-    try { return sessionStorage.getItem(RECOVERY_KEY) === '1'; } catch { return false; }
-};
-const writeRecoveryFlag = (on) => {
-    try {
-        if (on) sessionStorage.setItem(RECOVERY_KEY, '1');
-        else sessionStorage.removeItem(RECOVERY_KEY);
-    } catch { /* ignore */ }
-};
-
-// Beim Laden der App auswerten, bevor der Supabase-Client den URL-Hash entfernt.
-const initialHash = typeof window !== 'undefined' ? (window.location.hash || '') : '';
-if (/(^#|&)type=recovery(&|$)/.test(initialHash)) {
-    writeRecoveryFlag(true);
-}
-const initialLinkError = /(^#|&)error(_code)?=/.test(initialHash);
-
-// PKCE- und Implicit-Flow melden die Wiederherstellung als PASSWORD_RECOVERY.
-supabase.auth.onAuthStateChange((event) => {
-    if (event === 'PASSWORD_RECOVERY') {
-        writeRecoveryFlag(true);
-        window.dispatchEvent(new Event('password-recovery'));
-    } else if (event === 'SIGNED_OUT') {
-        writeRecoveryFlag(false);
-    }
-});
 
 const PasswordRecovery = () => {
     const { session } = useAuth();
@@ -95,12 +70,13 @@ const PasswordRecovery = () => {
         }
         try {
             setSaving(true);
-            const { error: updateError } = await supabase.auth.updateUser({ password });
+            // password_set: Kennzeichen des Mieterportals („Passwort fehlt“), wird nur dort gelesen
+            const { error: updateError } = await supabase.auth.updateUser({ password, data: { password_set: true } });
             if (updateError) throw updateError;
             writeRecoveryFlag(false);
             setDone(true);
         } catch (err) {
-            setError('Das Passwort konnte nicht geändert werden: ' + (err?.message || 'Unbekannter Fehler'));
+            setError('Das Passwort konnte nicht geändert werden: ' + translateError(err));
         } finally {
             setSaving(false);
         }

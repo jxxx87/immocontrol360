@@ -9,6 +9,8 @@ import Card from '../../components/ui/Card';
 import Modal from '../../components/ui/Modal';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { translateError } from '../../lib/errorTranslator';
 import { assertWrite } from '../../components/renovation/renovationUtils';
@@ -24,9 +26,14 @@ import {
 // Für die Liste nur Kennzahlen laden: room_count, total_area_mm2 und storey_labels berechnet
 // die Datenbank aus plan_data (generierte Spalten). plan_data selbst (Geometrie, ältere
 // Pläne mit eingebetteten Hintergrundbildern) wird nur beim Öffnen/Duplizieren geladen.
-const PLAN_LIST_COLUMNS = 'id, user_id, name, status, property_id, unit_id, room_count, total_area_mm2, storey_labels, created_at, updated_at, property:properties(street, house_number, city), unit:units(unit_name)';
+// Portfolio des Objekts bzw. der Einheit: Filter nach gewähltem Portfolio und Schreibrecht je Plan.
+const PLAN_LIST_COLUMNS = 'id, user_id, name, status, property_id, unit_id, room_count, total_area_mm2, storey_labels, created_at, updated_at, property:properties(street, house_number, city, portfolio_id), unit:units(unit_name, property:properties(portfolio_id))';
 // Rückfall, solange die Kennzahl-Spalten in der Datenbank noch fehlen
-const PLAN_LIST_COLUMNS_LEGACY = 'id, user_id, name, status, property_id, unit_id, plan_data, created_at, updated_at, property:properties(street, house_number, city), unit:units(unit_name)';
+const PLAN_LIST_COLUMNS_LEGACY = 'id, user_id, name, status, property_id, unit_id, plan_data, created_at, updated_at, property:properties(street, house_number, city, portfolio_id), unit:units(unit_name, property:properties(portfolio_id))';
+
+// Portfolio eines Plans (über Objekt oder Einheit); null = ohne Zuordnung
+const planPortfolioId = (p) => p?.property?.portfolio_id || p?.unit?.property?.portfolio_id || null;
+const isLinkedPlan = (p) => !!(p?.property_id || p?.unit_id);
 const isMissingColumnError = (err) => err?.code === '42703' || /room_count|total_area_mm2|storey_labels/.test(err?.message || '');
 
 const formatDateTimeDE = (value) => {
@@ -44,8 +51,28 @@ const withoutBackground = (storey) => {
 
 const FloorPlanLibrary = () => {
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
     const navigate = useNavigate();
+
+    // Schreibrecht wie die RLS von floor_plans (Freigabe „Immobilien“ oder „Investorportal“ mit
+    // Schreibrecht); ohne Portfolio: aktueller Bereich. Die Datenbank prüft zusätzlich.
+    const canWriteReno = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId
+            ? perm.canWrite('immobilien', portfolioId) || perm.canWrite('investorportal', portfolioId)
+            : perm.canWrite('immobilien') || perm.canWrite('investorportal');
+    };
+    // Plan mit Objekt/Einheit: Schreibrecht im Portfolio; ohne Zuordnung: nur das eigene Konto
+    const canEditPlan = (p) => {
+        if (!isLinkedPlan(p)) return p.user_id === user?.id;
+        const pid = planPortfolioId(p);
+        return pid ? canWriteReno(pid) : !perm || perm.loadingPermissions;
+    };
+    // Neuer Grundriss (ohne Zuordnung, gehört dem eigenen Konto): nicht anbieten, wenn das
+    // gewählte Portfolio nur lesend freigegeben ist
+    const canCreatePlan = !selectedPortfolioID || canWriteReno(selectedPortfolioID);
 
     const [plans, setPlans] = useState([]);
     const [properties, setProperties] = useState([]);
@@ -70,7 +97,7 @@ const FloorPlanLibrary = () => {
         const [firstPlansRes, propsRes, unitsRes] = await Promise.all([
             loadPlans(PLAN_LIST_COLUMNS),
             supabase.from('properties')
-                .select('id, street, house_number, city')
+                .select('id, street, house_number, city, portfolio_id')
                 .order('street'),
             supabase.from('units')
                 .select('id, unit_name, property_id')
@@ -98,11 +125,20 @@ const FloorPlanLibrary = () => {
         if (user) fetchData();
     }, [user]);
 
+    // Portfolio gewechselt: Objekt-Filter passt nicht mehr
+    useEffect(() => { setPropertyFilter('all'); }, [selectedPortfolioID]);
+
+    // Objekte im gewählten Portfolio (Filter-Auswahl) bzw. davon beschreibbare (Zuordnung)
+    const scopedProperties = useMemo(
+        () => (selectedPortfolioID ? properties.filter(pr => pr.portfolio_id === selectedPortfolioID) : properties),
+        [properties, selectedPortfolioID]
+    );
+
     // Duplizieren: plan_data wird erst hier geladen (nicht in der Liste). Hintergrundbilder im
     // Dateispeicher werden in den Ordner der Kopie kopiert; eingebettete (ältere) Bilder
     // gehen wie bisher mit plan_data mit.
     const handleDuplicate = async (plan) => {
-        if (busyPlanId) return;
+        if (busyPlanId || !canEditPlan(plan)) return;
         setBusyPlanId(plan.id);
         try {
             const { data: source, error: sourceError } = await supabase
@@ -151,6 +187,7 @@ const FloorPlanLibrary = () => {
     };
 
     const handleDelete = async (plan) => {
+        if (!canEditPlan(plan)) return;
         if (!window.confirm(`Grundriss „${plan.name}" endgültig löschen?`)) return;
         try {
             // Hintergrundbilder im Dateispeicher zuerst entfernen (danach erlaubt der Speicher
@@ -186,7 +223,7 @@ const FloorPlanLibrary = () => {
 
     const restoreVersion = async (entry) => {
         const dlg = versionDialog;
-        if (!dlg?.current || dlg.restoring) return;
+        if (!dlg?.current || dlg.restoring || !canEditPlan(dlg.plan)) return;
         const label = formatDateTimeDE(entry.stand || entry.archived_at);
         if (!window.confirm(`Stand vom ${label} wiederherstellen?\nDer aktuelle Stand wird vorher als Version gesichert. Hintergrundbilder bleiben erhalten.`)) return;
         setVersionDialog(prev => (prev ? { ...prev, restoring: true } : prev));
@@ -219,7 +256,7 @@ const FloorPlanLibrary = () => {
     // Zuordnung zur Immobilie bzw. Status direkt in der Bibliothek ändern
     // (der Editor speichert diese Felder nicht).
     const updatePlan = async (plan, fields, what) => {
-        if (busyPlanId) return;
+        if (busyPlanId || !canEditPlan(plan)) return;
         setBusyPlanId(plan.id);
         try {
             assertWrite(await supabase.from('floor_plans').update(fields).eq('id', plan.id).select('id'), what);
@@ -280,8 +317,16 @@ const FloorPlanLibrary = () => {
         });
     }, [plans]);
 
+    // Gewähltes Portfolio: dessen Pläne plus eigene Pläne ohne Zuordnung. Diese gehören zu keinem
+    // Portfolio (nur das eigene Konto sieht sie) und würden sonst nach dem Anlegen im Editor
+    // – der Editor legt Pläne immer ohne Objekt an – aus der Liste verschwinden.
+    const scopedPlans = useMemo(() => {
+        if (!selectedPortfolioID) return enriched;
+        return enriched.filter(p => !isLinkedPlan(p) || planPortfolioId(p) === selectedPortfolioID);
+    }, [enriched, selectedPortfolioID]);
+
     const filtered = useMemo(() => {
-        let result = enriched;
+        let result = scopedPlans;
         if (propertyFilter === 'none') result = result.filter(p => !p.property_id);
         else if (propertyFilter !== 'all') result = result.filter(p => p.property_id === propertyFilter);
         if (statusFilter !== 'all') result = result.filter(p => (p.status || 'draft') === statusFilter);
@@ -297,7 +342,7 @@ const FloorPlanLibrary = () => {
         else if (sortBy === 'property') result = [...result].sort((a, b) => a.propertyLabel.localeCompare(b.propertyLabel));
         // default: by updated_at (already ordered)
         return result;
-    }, [enriched, propertyFilter, statusFilter, searchTerm, sortBy]);
+    }, [scopedPlans, propertyFilter, statusFilter, searchTerm, sortBy]);
 
     const resetFilters = () => {
         setSearchTerm('');
@@ -307,21 +352,23 @@ const FloorPlanLibrary = () => {
 
     if (loading) return <div style={{ display: 'flex', justifyContent: 'center', padding: '60px' }}><Loader2 className="animate-spin" size={28} /></div>;
 
+    // Zuordnen nur mit Schreibrecht am Plan; angeboten werden nur beschreibbare Objekte im gewählten Bereich
+    const assignableProperties = scopedProperties.filter(pr => canWriteReno(pr.portfolio_id));
     const renderPropertySelect = (p) => (
         <select
             value={p.property_id || ''}
             onClick={e => e.stopPropagation()}
             onChange={e => assignProperty(p, e.target.value)}
-            disabled={busyPlanId === p.id}
-            title="Immobilie zuordnen"
+            disabled={busyPlanId === p.id || !canEditPlan(p)}
+            title={canEditPlan(p) ? 'Immobilie zuordnen' : 'Nur Leserecht – Zuordnung nicht änderbar'}
             style={{ maxWidth: '220px', padding: '4px 6px', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '0.8rem', background: 'var(--surface-color)', color: 'var(--text-secondary)' }}
         >
             <option value="">— keine Immobilie —</option>
             {/* Zugeordnete Immobilie bleibt sichtbar, auch wenn sie nicht in der Liste ist */}
-            {p.property_id && !properties.some(pr => pr.id === p.property_id) && (
+            {p.property_id && !assignableProperties.some(pr => pr.id === p.property_id) && (
                 <option value={p.property_id}>{p.propertyLabel}</option>
             )}
-            {properties.map(pr => (
+            {assignableProperties.map(pr => (
                 <option key={pr.id} value={pr.id}>{pr.street} {pr.house_number}, {pr.city}</option>
             ))}
         </select>
@@ -337,7 +384,7 @@ const FloorPlanLibrary = () => {
                 value={p.unit_id || ''}
                 onClick={e => e.stopPropagation()}
                 onChange={e => assignUnit(p, e.target.value)}
-                disabled={busyPlanId === p.id}
+                disabled={busyPlanId === p.id || !canEditPlan(p)}
                 title="Einheit zuordnen"
                 style={{ maxWidth: '160px', padding: '4px 6px', borderRadius: '6px', border: '1px solid var(--border-color)', fontSize: '0.8rem', background: 'var(--surface-color)', color: 'var(--text-secondary)' }}
             >
@@ -350,19 +397,22 @@ const FloorPlanLibrary = () => {
         );
     };
 
-    const renderStatusBadge = (p, compact = false) => (
-        <button
-            onClick={e => { e.stopPropagation(); toggleStatus(p); }}
-            disabled={busyPlanId === p.id}
-            title={p.status === 'completed' ? 'Als Entwurf markieren' : 'Als fertig markieren'}
-            style={{
-                fontSize: '0.68rem', fontWeight: 600, padding: compact ? '1px 8px' : '2px 8px', borderRadius: compact ? '6px' : '8px',
-                background: p.status === 'completed' ? '#dcfce7' : '#f1f5f9',
-                color: p.status === 'completed' ? '#16a34a' : '#64748b',
-                border: 'none', cursor: 'pointer',
-            }}
-        >{p.status === 'completed' ? 'Fertig' : 'Entwurf'}</button>
-    );
+    const renderStatusBadge = (p, compact = false) => {
+        const editable = canEditPlan(p);
+        return (
+            <button
+                onClick={e => { e.stopPropagation(); if (editable) toggleStatus(p); }}
+                disabled={busyPlanId === p.id || !editable}
+                title={!editable ? 'Nur Leserecht' : p.status === 'completed' ? 'Als Entwurf markieren' : 'Als fertig markieren'}
+                style={{
+                    fontSize: '0.68rem', fontWeight: 600, padding: compact ? '1px 8px' : '2px 8px', borderRadius: compact ? '6px' : '8px',
+                    background: p.status === 'completed' ? '#dcfce7' : '#f1f5f9',
+                    color: p.status === 'completed' ? '#16a34a' : '#64748b',
+                    border: 'none', cursor: editable ? 'pointer' : 'default',
+                }}
+            >{p.status === 'completed' ? 'Fertig' : 'Entwurf'}</button>
+        );
+    };
 
     return (
         <div>
@@ -396,7 +446,7 @@ const FloorPlanLibrary = () => {
                 >
                     <option value="all">Alle Immobilien</option>
                     <option value="none">Ohne Immobilie</option>
-                    {properties.map(p => (
+                    {scopedProperties.map(p => (
                         <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.city}</option>
                     ))}
                 </select>
@@ -441,13 +491,13 @@ const FloorPlanLibrary = () => {
 
             {/* Content */}
             {filtered.length === 0 ? (
-                loadError ? null : plans.length > 0 ? (
+                loadError ? null : scopedPlans.length > 0 ? (
                     /* Pläne vorhanden, aber kein Treffer für die Filter */
                     <Card>
                         <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)' }}>
                             <Search size={36} style={{ margin: '0 auto 12px', opacity: 0.25 }} />
                             <p style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '6px' }}>Keine Grundrisse für die gewählten Filter</p>
-                            <p style={{ fontSize: '0.85rem', marginBottom: '16px' }}>Es gibt {plans.length} Grundriss{plans.length === 1 ? '' : 'e'}, aber keiner passt zu Suche, Immobilie oder Status.</p>
+                            <p style={{ fontSize: '0.85rem', marginBottom: '16px' }}>Es gibt {scopedPlans.length} Grundriss{scopedPlans.length === 1 ? '' : 'e'}, aber keiner passt zu Suche, Immobilie oder Status.</p>
                             <Button variant="secondary" onClick={resetFilters}>Filter zurücksetzen</Button>
                         </div>
                     </Card>
@@ -457,9 +507,11 @@ const FloorPlanLibrary = () => {
                             <PenTool size={48} style={{ margin: '0 auto 16px', opacity: 0.25 }} />
                             <p style={{ fontWeight: 600, fontSize: '1.05rem', marginBottom: '6px' }}>Noch kein Grundriss vorhanden</p>
                             <p style={{ fontSize: '0.88rem', marginBottom: '20px' }}>Zeichne deinen ersten Grundriss und nutze Aufmaßdaten für die Sanierung.</p>
-                            <Button icon={Plus} onClick={() => navigate('/renovation/floorplan/new')}>
-                                Jetzt ersten Grundriss zeichnen
-                            </Button>
+                            {canCreatePlan && (
+                                <Button icon={Plus} onClick={() => navigate('/renovation/floorplan/new')}>
+                                    Jetzt ersten Grundriss zeichnen
+                                </Button>
+                            )}
                         </div>
                     </Card>
                 )
@@ -498,12 +550,16 @@ const FloorPlanLibrary = () => {
                                     </td>
                                     <td style={{ padding: '12px 14px' }}>
                                         <div style={{ display: 'flex', gap: '6px' }} onClick={e => e.stopPropagation()}>
-                                            <button onClick={() => navigate(`/renovation/floorplan/${p.id}`)} title="Öffnen" style={iconBtnStyle}><ExternalLink size={15} /></button>
-                                            <button onClick={() => handleDuplicate(p)} disabled={busyPlanId === p.id} title="Duplizieren" style={iconBtnStyle}>
-                                                {busyPlanId === p.id ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />}
-                                            </button>
+                                            <button onClick={() => navigate(`/renovation/floorplan/${p.id}`)} title={canEditPlan(p) ? 'Öffnen' : 'Ansehen (nur Leserecht)'} style={iconBtnStyle}><ExternalLink size={15} /></button>
+                                            {canEditPlan(p) && (
+                                                <button onClick={() => handleDuplicate(p)} disabled={busyPlanId === p.id} title="Duplizieren" style={iconBtnStyle}>
+                                                    {busyPlanId === p.id ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />}
+                                                </button>
+                                            )}
                                             <button onClick={() => openVersions(p)} title="Frühere Stände" style={iconBtnStyle}><History size={15} /></button>
-                                            <button onClick={() => handleDelete(p)} title="Löschen" style={{ ...iconBtnStyle, color: '#ef4444' }}><Trash2 size={15} /></button>
+                                            {canEditPlan(p) && (
+                                                <button onClick={() => handleDelete(p)} title="Löschen" style={{ ...iconBtnStyle, color: '#ef4444' }}><Trash2 size={15} /></button>
+                                            )}
                                         </div>
                                     </td>
                                 </tr>
@@ -541,11 +597,15 @@ const FloorPlanLibrary = () => {
                                 {renderStatusBadge(p, true)}
                             </div>
                             <div style={{ display: 'flex', gap: '6px', marginTop: '12px' }} onClick={e => e.stopPropagation()}>
-                                <button onClick={() => handleDuplicate(p)} disabled={busyPlanId === p.id} title="Duplizieren" style={iconBtnStyle}>
-                                    {busyPlanId === p.id ? <Loader2 size={14} className="animate-spin" /> : <Copy size={14} />}
-                                </button>
+                                {canEditPlan(p) && (
+                                    <button onClick={() => handleDuplicate(p)} disabled={busyPlanId === p.id} title="Duplizieren" style={iconBtnStyle}>
+                                        {busyPlanId === p.id ? <Loader2 size={14} className="animate-spin" /> : <Copy size={14} />}
+                                    </button>
+                                )}
                                 <button onClick={() => openVersions(p)} title="Frühere Stände" style={iconBtnStyle}><History size={14} /></button>
-                                <button onClick={() => handleDelete(p)} title="Löschen" style={{ ...iconBtnStyle, color: '#ef4444' }}><Trash2 size={14} /></button>
+                                {canEditPlan(p) && (
+                                    <button onClick={() => handleDelete(p)} title="Löschen" style={{ ...iconBtnStyle, color: '#ef4444' }}><Trash2 size={14} /></button>
+                                )}
                             </div>
                         </div>
                     ))}
@@ -582,9 +642,11 @@ const FloorPlanLibrary = () => {
                                             {info.storeys} Geschoss{info.storeys === 1 ? '' : 'e'} · {info.rooms} Räume · {info.walls} Wände · gesichert am {formatDateTimeDE(entry.archived_at)}
                                         </div>
                                     </div>
-                                    <Button size="sm" variant="secondary" disabled={versionDialog.restoring} onClick={() => restoreVersion(entry)}>
-                                        Wiederherstellen
-                                    </Button>
+                                    {canEditPlan(versionDialog.plan) && (
+                                        <Button size="sm" variant="secondary" disabled={versionDialog.restoring} onClick={() => restoreVersion(entry)}>
+                                            Wiederherstellen
+                                        </Button>
+                                    )}
                                 </div>
                             );
                         })}

@@ -9,11 +9,15 @@ import Modal from '../../components/ui/Modal';
 import Input from '../../components/ui/Input';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { translateError } from '../../lib/errorTranslator';
 import { localDateStr, formatDateDE, assertWrite } from '../../components/renovation/renovationUtils';
 
 const RenovationTasks = ({ onTaskChange } = {}) => {
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const [tasks, setTasks] = useState([]);
     const [projects, setProjects] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -41,10 +45,10 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
     const fetchAll = async () => {
         const [tasksRes, projRes] = await Promise.all([
             supabase.from('renovation_tasks').select(`
-                *, project:renovation_projects(name, property:properties(street, house_number, city)),
+                *, project:renovation_projects(name, user_id, property:properties(street, house_number, city, portfolio_id)),
                 trade:renovation_project_trades(name)
             `).order('created_at', { ascending: false }),
-            supabase.from('renovation_projects').select('id, name, property_id, user_id, property:properties(portfolio:portfolios(user_id)), trades:renovation_project_trades(id, name)').order('created_at', { ascending: false }),
+            supabase.from('renovation_projects').select('id, name, property_id, user_id, property:properties(portfolio_id, portfolio:portfolios(user_id)), trades:renovation_project_trades(id, name)').order('created_at', { ascending: false }),
         ]);
         const err = tasksRes.error || projRes.error;
         if (err) {
@@ -61,13 +65,37 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
 
     useEffect(() => { if (user) fetchAll(); }, [user]);
 
+    // Schreibrecht wie die RLS von renovation_tasks (Freigabe „Immobilien“ oder „Investorportal“ mit
+    // Schreibrecht am Objekt des Projekts). Solange die Freigaben laden, nicht sperren.
+    const canWriteProject = (project) => {
+        if (!perm || perm.loadingPermissions) return true;
+        const pid = project?.property?.portfolio_id;
+        return !!pid && (perm.canWrite('immobilien', pid) || perm.canWrite('investorportal', pid));
+    };
+
+    // Gewähltes Portfolio: nur Aufgaben und Projekte zu Objekten dieses Portfolios
+    // (ohne Auswahl: alles, was die RLS freigibt)
+    const scopedProjects = useMemo(
+        () => (selectedPortfolioID ? projects.filter(p => p.property?.portfolio_id === selectedPortfolioID) : projects),
+        [projects, selectedPortfolioID]
+    );
+    const scopedTasks = useMemo(
+        () => (selectedPortfolioID ? tasks.filter(t => t.project?.property?.portfolio_id === selectedPortfolioID) : tasks),
+        [tasks, selectedPortfolioID]
+    );
+    // Neue Aufgaben nur in Projekten mit Schreibrecht
+    const writableProjects = scopedProjects.filter(canWriteProject);
+
+    // Portfolio gewechselt: Projekt-Filter passt nicht mehr
+    useEffect(() => { setFilterProject('all'); }, [selectedPortfolioID]);
+
     const filtered = useMemo(() => {
         // Datumsvergleich als lokaler Kalendertag ('YYYY-MM-DD'), nicht als UTC-Zeitpunkt
         const now = new Date();
         const mondayOffset = (now.getDay() + 6) % 7; // Mo=0 … So=6
         const weekStartStr = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - mondayOffset));
         const weekEndStr = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + (6 - mondayOffset)));
-        return tasks.filter(t => {
+        return scopedTasks.filter(t => {
             if (filterProject !== 'all' && t.project_id !== filterProject) return false;
             if (filterStatus === 'open' && t.is_completed) return false;
             if (filterStatus === 'done' && !t.is_completed) return false;
@@ -77,10 +105,10 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
             }
             return true;
         });
-    }, [tasks, filterProject, filterStatus, filterDue]);
+    }, [scopedTasks, filterProject, filterStatus, filterDue]);
 
     const toggleTask = async (task) => {
-        if (busyTaskId) return;
+        if (busyTaskId || !canWriteProject(task.project)) return;
         setBusyTaskId(task.id);
         try {
             const is_completed = !task.is_completed;
@@ -107,11 +135,12 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
 
     const openAdd = () => {
         setEditingTask(null);
-        setForm({ title: '', description: '', project_id: projects[0]?.id || '', project_trade_id: '', due_date: '' });
+        setForm({ title: '', description: '', project_id: writableProjects[0]?.id || '', project_trade_id: '', due_date: '' });
         setShowModal(true);
     };
 
     const openEdit = (task) => {
+        if (!canWriteProject(task.project)) return; // nur Leserecht: keine Bearbeitung
         setEditingTask(task);
         setForm({
             title: task.title, description: task.description || '',
@@ -182,7 +211,7 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                 <select value={filterProject} onChange={e => setFilterProject(e.target.value)}
                     style={{ padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', fontSize: '0.85rem', background: 'var(--surface-color)' }}>
                     <option value="all">Alle Projekte</option>
-                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    {scopedProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
                 <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
                     style={{ padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', fontSize: '0.85rem', background: 'var(--surface-color)' }}>
@@ -196,7 +225,7 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                     <option value="week">Fällig diese Woche</option>
                 </select>
                 <div style={{ flex: 1 }} />
-                <Button icon={Plus} size="sm" onClick={openAdd}>Aufgabe</Button>
+                {writableProjects.length > 0 && <Button icon={Plus} size="sm" onClick={openAdd}>Aufgabe</Button>}
             </div>
 
             {/* Task List */}
@@ -215,6 +244,7 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                         const due = t.due_date ? String(t.due_date).slice(0, 10) : '';
                         // Überfällig erst ab dem Folgetag (heute fällige Aufgaben sind nicht überfällig)
                         const isOverdue = !!due && !t.is_completed && due < todayStr;
+                        const editable = canWriteProject(t.project);
                         return (
                             <div
                                 key={t.id}
@@ -222,14 +252,15 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                                     display: 'flex', alignItems: 'flex-start', gap: '10px',
                                     padding: '12px 14px', borderRadius: 'var(--radius-md)',
                                     background: 'var(--surface-color)', border: `1px solid ${isOverdue ? '#fca5a5' : 'var(--border-color)'}`,
-                                    cursor: 'pointer', transition: 'border-color 0.15s',
+                                    cursor: editable ? 'pointer' : 'default', transition: 'border-color 0.15s',
                                 }}
                                 onClick={() => openEdit(t)}
+                                title={editable ? undefined : 'Nur Leserecht'}
                             >
                                 <button
                                     onClick={e => { e.stopPropagation(); toggleTask(t); }}
-                                    disabled={busyTaskId === t.id}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', flexShrink: 0, marginTop: '1px' }}
+                                    disabled={busyTaskId === t.id || !editable}
+                                    style={{ background: 'none', border: 'none', cursor: editable ? 'pointer' : 'default', padding: '2px', flexShrink: 0, marginTop: '1px' }}
                                 >
                                     {busyTaskId === t.id
                                         ? <Loader2 size={20} className="animate-spin" color="var(--text-secondary)" />
@@ -256,10 +287,12 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                                         )}
                                     </div>
                                 </div>
-                                <button onClick={e => { e.stopPropagation(); deleteTask(t.id); }}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px' }}>
-                                    <Trash2 size={14} />
-                                </button>
+                                {editable && (
+                                    <button onClick={e => { e.stopPropagation(); deleteTask(t.id); }}
+                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px' }}>
+                                        <Trash2 size={14} />
+                                    </button>
+                                )}
                             </div>
                         );
                     })}
@@ -276,7 +309,7 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                     <select value={form.project_id} onChange={e => setForm({ ...form, project_id: e.target.value, project_trade_id: '' })}
                         style={{ width: '100%', padding: '10px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', fontSize: '0.875rem', background: 'var(--surface-color)' }}>
                         <option value="">Projekt wählen</option>
-                        {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        {writableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                 </div>
                 {selectedProjectTrades.length > 0 && (

@@ -43,6 +43,11 @@ const ExportModal = ({
     const [extraOptions, setExtraOptions] = useState(() => defaults.extraOptions);
     const [generating, setGenerating] = useState(false);
     const [error, setError] = useState(null);
+    // Hinweis, wenn die PDF-Vorlage nicht geladen werden konnte (PDF dann mit Standard-Layout)
+    const [templateNotice, setTemplateNotice] = useState(null);
+    const templateLoading = !!pdfTemplate?.loading;
+    const templateWarning = templateNotice
+        || (pdfTemplate?.loadError ? 'Die PDF-Vorlage konnte nicht geladen werden – das PDF wird mit dem Standard-Layout erstellt.' : null);
 
     if (!config) return null;
 
@@ -69,8 +74,12 @@ const ExportModal = ({
 
     // ─── Generate PDF (Client-Side) ─────────────
     const handleGenerate = async () => {
+        // Während die Vorlage lädt, käme sonst still der Standard-Kopf ins PDF
+        if (templateLoading) return;
         setGenerating(true);
         setError(null);
+        setTemplateNotice(null);
+        let targetWindow = null;
         try {
             // Filter data based on scope
             let filteredData = scope === 'all' && hasAllData ? [...allData] : [...data];
@@ -91,14 +100,14 @@ const ExportModal = ({
 
             // Resolve template: if filtering by property, use that property's portfolio template
             let effectiveTemplate = pdfTemplate;
-            if (scope === 'property' && selectedPropertyId) {
-                const prop = properties.find(p => p.id === selectedPropertyId);
-                if (prop?.portfolio_id && prop.portfolio_id !== selectedPortfolioID) {
-                    effectiveTemplate = await fetchPdfTemplate(prop.portfolio_id, reportType);
-                }
+            const prop = scope === 'property' ? properties.find(p => p.id === selectedPropertyId) : null;
+            if (prop?.portfolio_id && prop.portfolio_id !== selectedPortfolioID) {
+                // Druckfenster synchron im Klick öffnen – nach dem await blockieren Browser das Pop-up sonst
+                targetWindow = window.open('', '_blank');
+                effectiveTemplate = await fetchPdfTemplate(prop.portfolio_id, reportType);
             }
 
-            generateClientPdf({
+            const opened = generateClientPdf({
                 reportType,
                 data: filteredData,
                 selectedColumns,
@@ -111,11 +120,21 @@ const ExportModal = ({
                 template: effectiveTemplate,
                 extraOptions,
                 unitData,
+                targetWindow,
             });
+            if (!opened) {
+                throw new Error('Das Druckfenster konnte nicht geöffnet werden. Bitte Pop-ups für diese Seite erlauben und erneut versuchen.');
+            }
 
+            if (effectiveTemplate?.loadError) {
+                // PDF steht mit Standard-Layout bereit – Dialog offen lassen, damit der Hinweis sichtbar bleibt
+                setTemplateNotice('Die PDF-Vorlage dieses Portfolios konnte nicht geladen werden – das PDF wurde mit dem Standard-Layout erstellt.');
+                return;
+            }
             onClose();
         } catch (err) {
             console.error('PDF generation error:', err);
+            if (targetWindow && !targetWindow.closed) targetWindow.close();
             setError(err.message || 'PDF konnte nicht erstellt werden');
         } finally {
             setGenerating(false);
@@ -174,11 +193,11 @@ const ExportModal = ({
                 <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', width: '100%' }}>
                     <Button variant="secondary" onClick={onClose} disabled={generating}>Abbrechen</Button>
                     <Button
-                        icon={generating ? Loader2 : Download}
+                        icon={generating || templateLoading ? Loader2 : Download}
                         onClick={handleGenerate}
-                        disabled={generating || selectedColumns.length === 0}
+                        disabled={generating || templateLoading || selectedColumns.length === 0}
                     >
-                        {generating ? 'Wird erstellt…' : 'PDF erstellen'}
+                        {generating ? 'Wird erstellt…' : (templateLoading ? 'Vorlage wird geladen…' : 'PDF erstellen')}
                     </Button>
                 </div>
             }
@@ -231,7 +250,7 @@ const ExportModal = ({
                         </div>
                     </div>
                     <div style={chipContainerStyle}>
-                        {config.columns.filter(c => !c.isChart || selectedColumns.includes(c.key)).map(col => (
+                        {config.columns.map(col => (
                             <button
                                 key={col.key}
                                 style={chipStyle(selectedColumns.includes(col.key), col.always)}
@@ -323,6 +342,17 @@ const ExportModal = ({
                         }}>
                             <AlertTriangle size={16} />
                             Großer Export ({rowCount} Zeilen)
+                        </div>
+                    )}
+
+                    {templateWarning && (
+                        <div style={{
+                            marginTop: '10px', padding: '10px 12px', borderRadius: '8px',
+                            background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
+                            display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: '#d97706',
+                        }}>
+                            <AlertTriangle size={16} style={{ flexShrink: 0 }} />
+                            {templateWarning}
                         </div>
                     )}
 

@@ -12,7 +12,7 @@
 import { REPORT_CONFIGS, formatValue, generateFilename } from './reportConfigs';
 import {
     MM_TO_PX, HEADER_H, FOOTER_H, DEFAULT_MARGIN, DEFAULT_ACCENT, PDF_FONT_STACK,
-    getTemplateOrientation, fitElementsToOrientation,
+    getTemplateOrientation, fitElementsToOrientation, getPresetElements,
 } from '../pages/pdf-template/constants';
 
 // ─── Escaping & Whitelists ───────────────────────────────────────────
@@ -211,7 +211,8 @@ function renderTemplateElement(el, { title, subtitle, portfolioName, propertyNam
  * @param {string} options.accentColor - brand accent color
  * @param {string} options.logoUrl - optional logo URL
  * @param {string} options.subtitle - optional subtitle
- * @param {Object} options.template - full usePdfTemplate() result (preferred)
+ * @param {Object} options.template - full usePdfTemplate() result (preferred); template.isDefault (keine
+ *   gespeicherte Vorlage) oder kein template → Standard-Layout des Vorlagen-Editors
  * @param {Array}  options.templateElements - elements from pdf_templates (fallback)
  * @param {number} options.templateMargin - margin in mm (fallback)
  * @param {number} options.templateHeaderHeight - header height mm (fallback)
@@ -292,14 +293,21 @@ export const generateClientPdf = ({
     // gelten für die im Editor gewählte Orientierung – weicht die Export-
     // Orientierung ab, werden sie (wie im Editor) umgerechnet und auf Ränder/
     // Zonen begrenzt, damit z. B. die Fußzeile nicht außerhalb der Seite landet.
-    let tplElements = template ? (template.elements || rawElements) : rawElements;
+    const hasSavedTemplate = !!template && template.isDefault !== true;
+    let tplElements = hasSavedTemplate ? (template.elements || rawElements) : rawElements;
     if (Array.isArray(tplElements) && tplElements.length > 0) {
-        const tplOrient = template ? getTemplateOrientation(template.orientationByReport) : orient;
+        const tplOrient = hasSavedTemplate ? getTemplateOrientation(template.orientationByReport) : orient;
         tplElements = fitElementsToOrientation(tplElements, {
             from: tplOrient, to: orient, margin: tplMargin, headerH: tplHeaderH, footerH: tplFooterH,
         });
+    } else if (hasSavedTemplate) {
+        // Gespeicherte Vorlage ohne Elemente: Kopf und Fuß bleiben leer (wie im Editor)
+        tplElements = [];
     } else {
-        tplElements = null;
+        // Keine gespeicherte Vorlage: dasselbe Standard-Layout, das der Vorlagen-Editor anzeigt
+        tplElements = fitElementsToOrientation(getPresetElements('standard', orient), {
+            from: orient, to: orient, margin: tplMargin, headerH: tplHeaderH, footerH: tplFooterH,
+        });
     }
     const filename = generateFilename(reportType, portfolioName, propertyName);
     const dateStr = new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -524,7 +532,6 @@ function buildHtml({
     const headerH = templateHeaderHeight || 50;
     const footerH = templateFooterHeight || 20;
     const title = config.label;
-    const hasTemplate = templateElements && templateElements.length > 0;
     const widthTotal = totalEstWidth || 1;
     let sumWarning = false;
 
@@ -673,36 +680,15 @@ function buildHtml({
     // ── Template-aware header & footer ──────────────────────────────
     const elContext = { title, subtitle, portfolioName, propertyName, logoUrl, dateStr };
 
-    let headerHtml = '';
-    let footerHtml = '';
-
-    if (hasTemplate) {
-        // Use positioned elements from the saved template
-        const headerEls = templateElements.filter(e => e.zone === 'header' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
-        const footerEls = templateElements.filter(e => e.zone === 'footer' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
-        // Footer elements have Y coords relative to the full page, but the
-        // .footer container starts at (pageH - footerH). Subtract that offset.
-        const footerYOffset = pageH - footerH;
-        headerHtml = headerEls.map(el => renderTemplateElement(el, elContext, 0)).join('');
-        footerHtml = footerEls.map(el => renderTemplateElement(el, elContext, footerYOffset)).join('');
-    } else {
-        // Fallback: hardcoded header/footer (same as before)
-        headerHtml = `
-            <div style="position:absolute;left:${margin * MM_TO_PX}px;right:${margin * MM_TO_PX}px;top:${18 * MM_TO_PX}px;display:flex;justify-content:space-between;align-items:flex-start;">
-                <div>
-                    <div style="font-size:16pt;font-weight:700;color:#1a1a1a;margin-bottom:2mm">${escapeHtml(title)}</div>
-                    ${subtitle ? `<div style="font-size:11pt;color:#555;margin-bottom:1mm">${escapeHtml(subtitle)}</div>` : ''}
-                    <div style="font-size:10pt;color:#888">${escapeHtml(portfolioName)}${propertyName ? ` — ${escapeHtml(propertyName)}` : ''} · Stichtag: ${escapeHtml(dateStr)}</div>
-                </div>
-                ${logoUrl ? `<img src="${escapeHtml(logoUrl)}" alt="" style="max-height:15mm;max-width:45mm;object-fit:contain" />` : ''}
-            </div>
-            <div style="position:absolute;left:${margin * MM_TO_PX}px;right:${margin * MM_TO_PX}px;top:${44 * MM_TO_PX}px;height:0.5mm;background:${accentColor};opacity:0.3"></div>
-        `;
-        footerHtml = `
-            <div style="position:absolute;left:${margin * MM_TO_PX}px;bottom:3mm;font-size:9pt;color:#888">Stichtag: ${escapeHtml(dateStr)}</div>
-            <div data-page-number="1" style="position:absolute;right:${margin * MM_TO_PX}px;bottom:3mm;font-size:9pt;color:#888;text-align:right">Seite 1 von 1</div>
-        `;
-    }
+    // Positionierte Elemente der Vorlage (ohne gespeicherte Vorlage: Standard-Layout, s. generateClientPdf)
+    const elements = Array.isArray(templateElements) ? templateElements : [];
+    const headerEls = elements.filter(e => e.zone === 'header' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
+    const footerEls = elements.filter(e => e.zone === 'footer' && e.visible).sort((a, b) => (a.zIndex || 1) - (b.zIndex || 1));
+    // Footer elements have Y coords relative to the full page, but the
+    // .footer container starts at (pageH - footerH). Subtract that offset.
+    const footerYOffset = pageH - footerH;
+    const headerHtml = headerEls.map(el => renderTemplateElement(el, elContext, 0)).join('');
+    const footerHtml = footerEls.map(el => renderTemplateElement(el, elContext, footerYOffset)).join('');
 
     const sizeStr = isLandscape ? 'A4 landscape' : 'A4';
     const storageOrigin = getStorageOrigin();

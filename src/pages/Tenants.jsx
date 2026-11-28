@@ -18,7 +18,8 @@ import ExportDropdown from '../components/ExportDropdown';
 import {
     localISODate, formatDateDE, isValidISODate, getLeaseTimeState, sumRent,
     checkLeaseDeletion, describeDeletionBlock, deletionConfirmText, translateLeaseDeleteError,
-    findOverlappingLeases, describeLease, buildTemplateTenantData, TENANT_SALUTATION_OPTIONS
+    findOverlappingLeases, describeLease, buildTemplateTenantData, TENANT_SALUTATION_OPTIONS,
+    fetchRentPeriods, getEffectivePeriod
 } from '../lib/leaseRentPeriods';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
@@ -147,23 +148,8 @@ const Tenants = () => {
             navigate(location.pathname, { replace: true, state: {} });
         }
 
-        const params = new URLSearchParams(location.search);
-        const action = params.get('action');
-        const propertyId = params.get('propertyId');
-        const unitId = params.get('unitId');
-
-        if (action === 'create' && propertyId && unitId) {
-            setLeaseForm(prev => ({
-                ...prev,
-                property_id: propertyId,
-                unit_id: unitId
-            }));
-            setCurrentStep(1); // Start with Tenant creation
-            setIsCreateModalOpen(true);
-            // Clear URL
-            navigate(location.pathname, { replace: true });
-        }
-    }, [location.search, navigate, location.pathname, location.state]);
+        // Einstieg '?action=create&propertyId=…&unitId=…': siehe Effekt nach dem Laden der Daten
+    }, [navigate, location.pathname, location.state]);
 
     // Data State
     const [allUnits, setAllUnits] = useState([]);
@@ -328,6 +314,26 @@ const Tenants = () => {
         if (user && userRole !== 'tenant') fetchData();
     }, [user, userRole, selectedPortfolioID]);
 
+    // Einstieg '?action=create&propertyId=…&unitId=…' (z. B. „Vermieten“ auf der Immobilienseite): wie die Knöpfe
+    // über openCreateWizard (Abo-Prüfung, leere Formulare) und nur mit Schreibrecht „Mietverhältnisse“ für das
+    // Portfolio der Einheit – erst wenn Rechte und Objekte geladen sind.
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        if (params.get('action') !== 'create') return;
+        const propertyId = params.get('propertyId');
+        const unitId = params.get('unitId');
+        if (!propertyId || !unitId) return;
+        if (perm?.loadingPermissions || loading) return;
+        navigate(location.pathname, { replace: true });
+        const portfolioId = propertiesDropdown.find(p => p.id === propertyId)?.portfolio_id || null;
+        if (!canWriteLeases(portfolioId)) {
+            alert('Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Mietverhältnisse können nur mit Schreibrecht „Mietverhältnisse“ angelegt werden.');
+            return;
+        }
+        openCreateWizard({ property_id: propertyId, unit_id: unitId });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.search, perm?.loadingPermissions, loading, propertiesDropdown]);
+
     // Filter (lokal, ohne Neuladen)
     const propertyFilteredUnits = useMemo(() => allUnits.filter(u =>
         (!filterPropertyId || u.property_id === filterPropertyId) &&
@@ -417,11 +423,16 @@ const Tenants = () => {
         if (!leaseForm.unit_id) return alert('Keine Einheit ausgewählt.');
         try {
             setIsSaving(true);
-            const { error } = await supabase.from('units').update({
+            const { data: updatedUnits, error } = await supabase.from('units').update({
                 is_vacation_rental: true,
                 cold_rent_ist: leaseForm.cold_rent || null
-            }).eq('id', leaseForm.unit_id);
+            }).eq('id', leaseForm.unit_id).select('id');
             if (error) throw error;
+            // RLS units_update verlangt Schreibrecht „Immobilien“ – sonst 0 geänderte Zeilen ohne Fehler; Dialog bleibt offen
+            if (!updatedUnits || updatedUnits.length === 0) {
+                alert('Keine Berechtigung, die Einheit zu ändern – dafür ist das Schreibrecht „Immobilien“ erforderlich.');
+                return;
+            }
             setIsCreateModalOpen(false);
             resetForms();
             fetchData();
@@ -546,17 +557,19 @@ const Tenants = () => {
             // 2. Einheit nur angleichen, wenn der Vertrag heute läuft
             let unitWarning = null;
             if (getLeaseTimeState(newLease) === 'running') {
-                const { error: unitUpdateError } = await supabase.from('units').update({
+                const { data: updatedUnits, error: unitUpdateError } = await supabase.from('units').update({
                     cold_rent_ist: coldRent,
                     service_charge_soll: serviceCharge,
                     heating_cost_soll: heatingCost,
                     other_costs_soll: otherCosts,
                     deposit_soll: deposit
-                }).eq('id', leaseForm.unit_id);
+                }).eq('id', leaseForm.unit_id).select('id');
 
                 if (unitUpdateError) {
                     console.error('Fehler beim Aktualisieren der Einheit:', unitUpdateError);
                     unitWarning = 'Der Mietvertrag wurde gespeichert, die Werte der Einheit konnten aber nicht angeglichen werden: ' + translateError(unitUpdateError);
+                } else if (!updatedUnits || updatedUnits.length === 0) {
+                    unitWarning = 'Der Mietvertrag wurde gespeichert, die Werte der Einheit (Kaltmiete Ist/NK-Soll/Kaution) konnten aber nicht angeglichen werden – dafür ist das Schreibrecht „Immobilien“ nötig.';
                 }
             }
 
@@ -597,6 +610,37 @@ const Tenants = () => {
             setIsSaving(false);
         }
     };
+
+    // „Dokument erstellen“: wie die Mieterakte mit der HEUTE gültigen Miete aus der Miethistorie (die Spalten der
+    // Vertragszeile können nach einer künftigen Mietänderung veraltet sein); bei Ladefehler die Vertragswerte.
+    const openDocumentForLease = async (row, lease) => {
+        if (!lease) return;
+        let effectiveLease = lease;
+        try {
+            const periodsState = await fetchRentPeriods(lease.id);
+            if (periodsState.supported === true) {
+                const period = getEffectivePeriod(periodsState.periods, localISODate());
+                if (period) effectiveLease = { ...lease, ...period, id: lease.id, deposit: lease.deposit };
+            } else if (periodsState.error) {
+                console.warn('Miethistorie nicht ladbar – Dokument mit den Vertragswerten:', periodsState.error);
+            }
+        } catch (err) {
+            console.warn('Miethistorie nicht ladbar – Dokument mit den Vertragswerten:', err);
+        }
+        const tenantData = buildTemplateTenantData({
+            lease: effectiveLease,
+            tenant: lease.tenant,
+            unit: row,
+            property: row.property
+        });
+        // Öffnet den Schreibvorlagen-Manager mit den ECHTEN Daten dieses Mietverhältnisses.
+        // Dort wählt der Nutzer die Vorlage (Vertrag/Mieterhöhung/Bescheinigung/...) und druckt.
+        navigate('/settings', { state: { activeTab: 'document-templates', tenant: tenantData } });
+    };
+
+    // Nachmieter-Abkürzung (Menü und mobile Karte): gekündigter, laufender Vertrag ohne Folgevertrag
+    const offersNachmieter = (row) => !!row && canWriteLeases(row.property?.portfolio_id) && row.status === 'rented' &&
+        !row.isExtraRow && !!row.activeLease?.end_date && (row.futureLeases || []).length === 0;
 
     const openNachmieterWizard = (row) => {
         const end = row.activeLease?.end_date;
@@ -792,7 +836,7 @@ const Tenants = () => {
             )}
 
             {/* Actions */}
-            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
                 {row.activeLease ? (
                     <>
                         <Button variant="ghost" size="sm" onClick={() => {
@@ -800,6 +844,14 @@ const Tenants = () => {
                         }} title="Details anzeigen" style={{ flex: 1 }}>
                             <Eye size={16} style={{ marginRight: '4px' }} /> Details
                         </Button>
+                        <Button variant="ghost" size="sm" onClick={() => openDocumentForLease(row, row.activeLease)} title="Dokument erstellen (Schreibvorlagen)">
+                            <FileText size={16} style={{ marginRight: '4px' }} /> Dokument
+                        </Button>
+                        {offersNachmieter(row) && (
+                            <Button variant="secondary" size="sm" onClick={() => openNachmieterWizard(row)} title="Nachmieter anlegen">
+                                <UserPlus size={16} style={{ marginRight: '4px' }} /> Nachmieter
+                            </Button>
+                        )}
                     </>
                 ) : row.status !== 'vacation_rental' && canWriteLeases(row.property?.portfolio_id) ? (
                     <Button variant="secondary" size="sm" icon={Plus} onClick={() => openCreateWizard({ property_id: row.property_id, unit_id: row.id })}>Vermieten</Button>
@@ -814,8 +866,7 @@ const Tenants = () => {
     const menuLease = menuRow?.activeLease;
     const menuCanWrite = menuRow ? canWriteLeases(menuRow.property?.portfolio_id) : false;
     const menuLeaseEnded = menuLease ? getLeaseTimeState(menuLease) === 'ended' : false;
-    const menuOffersNachmieter = !!menuRow && menuCanWrite && menuRow.status === 'rented' && !menuRow.isExtraRow &&
-        !!menuLease?.end_date && (menuRow.futureLeases || []).length === 0;
+    const menuOffersNachmieter = offersNachmieter(menuRow);
 
     return (
         <div>
@@ -1253,16 +1304,10 @@ const Tenants = () => {
                             onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--background-color)'}
                             onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                             onClick={() => {
-                                const tenantData = buildTemplateTenantData({
-                                    lease: menuLease,
-                                    tenant: menuLease.tenant,
-                                    unit: menuRow,
-                                    property: menuRow.property
-                                });
+                                const row = menuRow;
+                                const lease = menuLease;
                                 closeMenu();
-                                // Öffnet den Schreibvorlagen-Manager mit den ECHTEN Daten dieses Mietverhältnisses.
-                                // Dort wählt der Nutzer die Vorlage (Vertrag/Mieterhöhung/Bescheinigung/...) und druckt.
-                                navigate('/settings', { state: { activeTab: 'document-templates', tenant: tenantData } });
+                                openDocumentForLease(row, lease);
                             }}
                         >
                             <FileText size={14} /> Dokument erstellen

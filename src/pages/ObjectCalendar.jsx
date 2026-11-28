@@ -3,6 +3,7 @@ import { Calendar, ChevronLeft, ChevronRight, Check, Trash2, Plus, Upload, Setti
 import Button from '../components/ui/Button';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { useViewMode } from '../context/ViewModeContext';
 import { supabase } from '../lib/supabase';
 import { usePdfTemplate, fetchPdfTemplate } from '../lib/usePdfTemplate';
@@ -12,6 +13,7 @@ import {
     toIso, parseIsoLocal, isIsoDate, addDays, planHorizonIso, buildRecurringDates,
     parseIcs, summarizeRecurringSeries, planSeriesExtension, seriesEndingBefore
 } from '../lib/calendarRecurrence';
+import { buildOccupancyCheck, pickRotationUnit, anyUnitEligible } from '../lib/calendarRotation';
 
 // ── Constants ────────────────────────────────────────────────
 const WEEKDAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -44,6 +46,9 @@ const ICS_MAX_BYTES = 2 * 1024 * 1024;
 const ICS_MAX_EVENTS = 2000;
 const INSERT_CHUNK = 500;
 const PLAN_HINT_DAYS = 60;
+// Änderungen an diesen Feldern planen den Reinigungsplan neu (C-8)
+const CLEANING_KEYS = ['cleaning_active', 'cleaning_performer', 'cleaning_frequency', 'cleaning_weekday'];
+const READ_ONLY_HINT = 'Für dieses Objekt haben Sie nur Leserechte (Freigabe). Termine und Einstellungen können nur mit Schreibrecht „Immobilien“ oder „Mieterportal“ geändert werden.';
 
 // ── Helpers ──────────────────────────────────────────────────
 // Datums- und Serienlogik (toIso, parseIsoLocal, Serien, ICS) liegt in src/lib/calendarRecurrence.js
@@ -87,8 +92,10 @@ const normalizeSettings = (row) => {
     };
 };
 
-// Reinigungstermine im Zeitraum [fromIso, toIsoDate] mit Mieter-Rotation ab startUnitIdx
-const generateCleaningEvents = (fromIso, toIsoDate, units, settings, startUnitIdx = 0) => {
+// Reinigungstermine im Zeitraum [fromIso, toIsoDate] mit Mieter-Rotation ab startUnitIdx.
+// isEligible(unit, iso): nur vermietete Einheiten sind zuständig (C-10); ist an einem Termin keine
+// Einheit vermietet, entfällt der Termin. null = reihum über alle Einheiten.
+const generateCleaningEvents = (fromIso, toIsoDate, units, settings, startUnitIdx = 0, isEligible = null) => {
     if (!settings?.cleaning_active || settings.cleaning_performer === 'janitor' || !units.length) return [];
     const weekday = normalizeWeekday(settings.cleaning_weekday);
     const occurrences = CLEANING_OCCURRENCES[settings.cleaning_frequency] || CLEANING_OCCURRENCES.monthly;
@@ -101,9 +108,11 @@ const generateCleaningEvents = (fromIso, toIsoDate, units, settings, startUnitId
         occurrences.forEach(n => {
             const date = new Date(y, m, firstMatch + (n - 1) * 7);
             if (date.getMonth() !== m || date < from || date > to) return;
-            const unit = units[unitIdx % units.length];
-            events.push({ event_type: 'cleaning', title: 'Treppenhausreinigung', event_date: toIso(date), assigned_unit_id: unit.id, assigned_unit_name: unit.unit_name, color: EC.cleaning, status: 'pending' });
-            unitIdx++;
+            const iso = toIso(date);
+            const { unit, nextIdx } = pickRotationUnit(units, unitIdx, iso, isEligible);
+            if (!unit) return;
+            events.push({ event_type: 'cleaning', title: 'Treppenhausreinigung', event_date: iso, assigned_unit_id: unit.id, assigned_unit_name: unit.unit_name, color: EC.cleaning, status: 'pending' });
+            unitIdx = nextIdx;
         });
         cursor.setMonth(cursor.getMonth() + 1);
     }
@@ -141,6 +150,7 @@ const glassBlue = (extra = {}) => ({ ...glass, background: 'rgba(14,165,233,0.06
 const ObjectCalendar = () => {
     const { user, userRole, roleData } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
     const pdfTemplate = usePdfTemplate('immobilien');
     const isInvestor = userRole !== 'tenant';
@@ -153,6 +163,7 @@ const ObjectCalendar = () => {
     const [propertiesLoaded, setPropertiesLoaded] = useState(false);
     const [selectedPropertyId, setSelectedPropertyId] = useState(null);
     const [units, setUnits] = useState([]);
+    const [unitLeases, setUnitLeases] = useState(null); // { [unitId]: Mietverträge } für die Rotation; null = nicht geladen
     const [settings, setSettings] = useState(null); // Formularzustand
     const [savedSettings, setSavedSettings] = useState(null); // zuletzt geladener/gespeicherter Stand
     const [events, setEvents] = useState([]);
@@ -185,6 +196,16 @@ const ObjectCalendar = () => {
     // Mieter: eigene Einheit aus get_my_tenancy (die Einheiten-Tabelle ist für Mieter nicht lesbar)
     const tenantUnitsRef = useRef([]);
 
+    // ── Objekt, Eigentümer, Schreibrecht ─────────────────────
+    const selectedProperty = properties.find(p => p.id === selectedPropertyId) || null;
+    // Kalender-Daten gehören dem Portfolio-Eigentümer, nicht dem Konto des Bearbeiters (C-13; sonst
+    // verschwinden sie per ON DELETE CASCADE mit dem Konto eines Mitnutzers). Mieter: eigenes Konto.
+    const ownerId = (isInvestor && selectedProperty?.portfolio?.user_id) || user?.id;
+    // Schreibrecht wie die RLS: „immobilien“ oder „mieterportal“ (schreiben) im Portfolio des Objekts (C-14).
+    // Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich.
+    const canEditCal = isInvestor && (!perm || perm.loadingPermissions
+        || perm.canWrite('immobilien', selectedProperty?.portfolio_id) || perm.canWrite('mieterportal', selectedProperty?.portfolio_id));
+
     // ── Week Data / geladener Zeitraum ───────────────────────
     const weekStart = useMemo(() => addDays(getMondayOfWeek(new Date()), weekOffset * 7), [weekOffset]);
     const weekDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
@@ -199,7 +220,8 @@ const ObjectCalendar = () => {
         const go = async () => {
             let list = []; let error = null;
             if (isInvestor) {
-                let q = supabase.from('properties').select('id, street, house_number, portfolio_id').order('street');
+                // portfolio.user_id = Eigentümer (Kalender-Daten werden auf ihn angelegt)
+                let q = supabase.from('properties').select('id, street, house_number, portfolio_id, portfolio:portfolios(user_id)').order('street');
                 if (selectedPortfolioID) q = q.eq('portfolio_id', selectedPortfolioID);
                 const res = await q;
                 list = res.data || []; error = res.error;
@@ -237,25 +259,31 @@ const ObjectCalendar = () => {
         if (!user) return;
         if (!selectedPropertyId) {
             // Kein Objekt (mehr) gewählt → keine Daten eines fremden Objekts stehen lassen
-            setUnits([]); setSettings(null); setSavedSettings(null); setHistory([]); setCleaningPlanEnd(undefined);
+            setUnits([]); setUnitLeases(null); setSettings(null); setSavedSettings(null); setHistory([]); setCleaningPlanEnd(undefined);
             return;
         }
         let cancelled = false;
         const load = async () => {
             setLoading(true);
-            const [uRes, sRes, hRes, pRes] = await Promise.all([
+            const [uRes, sRes, hRes, pRes, lRes] = await Promise.all([
                 isInvestor
-                    ? supabase.from('units').select('id, unit_name, floor').eq('property_id', selectedPropertyId).order('unit_name')
+                    ? supabase.from('units').select('id, unit_name, floor, is_vacation_rental').eq('property_id', selectedPropertyId).order('unit_name')
                     // Mieter: nur die eigene Einheit aus get_my_tenancy (keine direkte Abfrage auf units)
                     : Promise.resolve({ data: tenantUnitsRef.current.filter(u => u.property_id === selectedPropertyId), error: null }),
                 // Eigentümer und Teammitglied können je eine Zeile haben → deterministisch die zuletzt geänderte nehmen
                 supabase.from('objektkalender_settings').select('*').eq('property_id', selectedPropertyId).order('updated_at', { ascending: false, nullsFirst: false }).limit(1),
                 fetchHistoryRows(selectedPropertyId),
                 fetchCleaningPlanEnd(selectedPropertyId),
+                // Mietverträge der Einheiten: Rotation nur über vermietete Einheiten (C-10). Kein Pflichtteil –
+                // bei einem Fehler wird wie bisher über alle Einheiten rotiert (Hinweis in den Einstellungen).
+                isInvestor
+                    ? supabase.from('units').select('id, leases(start_date, end_date, status)').eq('property_id', selectedPropertyId)
+                    : Promise.resolve({ data: null, error: null }),
             ]);
             if (cancelled) return;
             const failed = [];
             setUnits(uRes.data || []);
+            setUnitLeases(lRes.error || !lRes.data ? null : Object.fromEntries(lRes.data.map(u => [u.id, u.leases || []])));
             if (uRes.error) failed.push('Einheiten');
             if (sRes.error) {
                 failed.push('Einstellungen');
@@ -340,9 +368,13 @@ const ObjectCalendar = () => {
                 anchorUnitId = lastPast?.[0]?.assigned_unit_id || null;
             }
             const anchorIdx = units.findIndex(u => u.id === anchorUnitId);
-            const planned = generateCleaningEvents(startIso, planHorizonIso(thisYear), units, cfg, anchorIdx + 1);
+            // Nur vermietete Einheiten (C-10). Ist im ganzen Zeitraum keine vermietet hinterlegt (z. B. Verträge
+            // nicht erfasst) oder sind die Verträge nicht lesbar, wie bisher reihum über alle Einheiten.
+            const isOccupied = buildOccupancyCheck(unitLeases);
+            let planned = generateCleaningEvents(startIso, planHorizonIso(thisYear), units, cfg, anchorIdx + 1, isOccupied);
+            if (isOccupied && !planned.length) planned = generateCleaningEvents(startIso, planHorizonIso(thisYear), units, cfg, anchorIdx + 1);
             for (let i = 0; i < planned.length; i += INSERT_CHUNK) {
-                const chunk = planned.slice(i, i + INSERT_CHUNK).map(ev => ({ ...ev, user_id: user.id, property_id: pid }));
+                const chunk = planned.slice(i, i + INSERT_CHUNK).map(ev => ({ ...ev, user_id: ownerId, property_id: pid }));
                 const { error: insErr } = await supabase.from('objektkalender_events').insert(chunk);
                 if (insErr) return { error: insErr, created };
                 created += chunk.length;
@@ -359,8 +391,10 @@ const ObjectCalendar = () => {
     const handleSaveSettings = async () => {
         // Während ein anderes Objekt lädt, gehören settings/units noch zum vorherigen Objekt
         if (!user || !selectedPropertyId || !settings || saving || loading) return;
+        if (!canEditCal) { alert(READ_ONLY_HINT); return; }
         setSaving(true);
         try {
+            const prev = savedSettings; // Stand vor dem Speichern (für „hat sich die Reinigung geändert?“)
             const values = {
                 cleaning_active: !!settings.cleaning_active,
                 cleaning_performer: settings.cleaning_performer === 'janitor' ? 'janitor' : 'tenant',
@@ -376,22 +410,37 @@ const ObjectCalendar = () => {
                 ({ data: saved, error } = await supabase.from('objektkalender_settings').update(values).eq('id', settings.id).select().maybeSingle());
                 if (!error && !saved) { alert('Die Einstellungen konnten nicht gespeichert werden (keine Berechtigung für dieses Objekt).'); return; }
             } else {
-                ({ data: saved, error } = await supabase.from('objektkalender_settings').upsert({ ...values, user_id: user.id, property_id: selectedPropertyId }, { onConflict: 'user_id,property_id' }).select().maybeSingle());
+                ({ data: saved, error } = await supabase.from('objektkalender_settings').upsert({ ...values, user_id: ownerId, property_id: selectedPropertyId }, { onConflict: 'user_id,property_id' }).select().maybeSingle());
             }
             if (error) { alert(`Die Einstellungen konnten nicht gespeichert werden: ${translateError(error)}`); return; } // Panel bleibt offen
             const s = normalizeSettings(saved || { ...settings, ...values });
             setSettings(s); setSavedSettings(s);
 
-            const res = await regenerateCleaningPlan(values);
-            setEventsReloadKey(k => k + 1);
-            await refreshCleaningPlanEnd();
-            setShowSettings(false);
-            if (res.error) {
-                const reason = res.userMessage || translateError(res.error);
-                alert(res.partial
-                    ? `Die Einstellungen wurden gespeichert. Alte Reinigungstermine konnten nicht vollständig entfernt werden – bitte prüfen: ${reason}`
-                    : `Die Einstellungen wurden gespeichert, der Reinigungsplan konnte aber nicht aktualisiert werden: ${reason}`);
+            const problems = [];
+            // Reinigungsplan nur neu planen, wenn sich die Reinigung geändert hat (oder erstmals gespeichert wird) –
+            // sonst kämen z. B. beim Speichern der Mülleinstellungen einzeln gelöschte Termine zurück (C-8)
+            const cleaningChanged = !prev?.id || CLEANING_KEYS.some(k => prev[k] !== values[k]);
+            if (cleaningChanged) {
+                const res = await regenerateCleaningPlan(values);
+                if (res.error) {
+                    const reason = res.userMessage || translateError(res.error);
+                    problems.push(res.partial
+                        ? `Alte Reinigungstermine konnten nicht vollständig entfernt werden – bitte prüfen: ${reason}`
+                        : `Der Reinigungsplan konnte aber nicht aktualisiert werden: ${reason}`);
+                }
             }
+            // Mülltermine durch den Hausmeisterdienst: offene künftige Termine keiner Einheit mehr zuordnen (C-9)
+            if (values.waste_performer === 'janitor' && prev?.waste_performer !== 'janitor') {
+                const { error: wErr } = await supabase.from('objektkalender_events')
+                    .update({ assigned_unit_id: null, assigned_unit_name: null })
+                    .eq('property_id', selectedPropertyId).eq('event_type', 'waste').eq('status', 'pending')
+                    .gte('event_date', today).not('assigned_unit_id', 'is', null);
+                if (wErr) problems.push(`Die künftigen Mülltermine konnten nicht vom Mieter auf den Hausmeisterdienst umgestellt werden: ${translateError(wErr)}`);
+            }
+            setEventsReloadKey(k => k + 1);
+            if (cleaningChanged) await refreshCleaningPlanEnd();
+            setShowSettings(false);
+            if (problems.length) alert(`Die Einstellungen wurden gespeichert. ${problems.join('\n\n')}`);
         } finally {
             setSaving(false);
         }
@@ -430,7 +479,7 @@ const ObjectCalendar = () => {
         if (!fresh.length) return { error: null, created: 0, series: 0 };
 
         const toInsert = fresh.map(({ s, date }) => ({
-            user_id: user.id, property_id: pid, event_type: 'custom', title: s.title, color: safeColor(s.color, EC.custom),
+            user_id: ownerId, property_id: pid, event_type: 'custom', title: s.title, color: safeColor(s.color, EC.custom),
             event_date: date, recurring: true, recurrence_rule: s.rule, assigned_unit_id: s.assignedUnitId,
             assigned_unit_name: s.assignedUnitName, push_enabled: s.pushEnabled, status: 'pending'
         }));
@@ -447,6 +496,7 @@ const ObjectCalendar = () => {
 
     const handleExtendPlan = async () => {
         if (saving || loading || !selectedPropertyId) return;
+        if (!canEditCal) { alert(READ_ONLY_HINT); return; }
         setSaving(true);
         try {
             const problems = [];
@@ -470,6 +520,7 @@ const ObjectCalendar = () => {
 
     const handleMarkDone = async (event) => {
         if (markingId) return;
+        if (!canEditCal && !(tenantUnitId && event.assigned_unit_id === tenantUnitId)) { alert(READ_ONLY_HINT); return; }
         setMarkingId(event.id);
         try {
             const now = new Date().toISOString();
@@ -479,7 +530,8 @@ const ObjectCalendar = () => {
                 return;
             }
             setEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: 'done', completed_at: now, completed_by: user.id } : e));
-            const { error: hErr } = await supabase.from('objektkalender_history').insert({ user_id: user.id, property_id: selectedPropertyId, event_id: event.id, event_type: event.event_type, title: event.title, event_date: event.event_date, assigned_unit_name: event.assigned_unit_name, status: 'done', completed_at: now, completed_by: user.id });
+            // Mieter: eigenes Konto (ok_tenants_insert_history verlangt user_id = auth.uid()); sonst Eigentümer (C-13)
+            const { error: hErr } = await supabase.from('objektkalender_history').insert({ user_id: isInvestor ? ownerId : user.id, property_id: selectedPropertyId, event_id: event.id, event_type: event.event_type, title: event.title, event_date: event.event_date, assigned_unit_name: event.assigned_unit_name, status: 'done', completed_at: now, completed_by: user.id });
             if (hErr) alert(`Der Termin ist als erledigt markiert, der Eintrag in der Historie konnte aber nicht gespeichert werden: ${translateError(hErr)}`);
             else refreshHistory();
         } finally {
@@ -494,12 +546,28 @@ const ObjectCalendar = () => {
     const executeDelete = async (mode) => {
         const event = deleteConfirm;
         if (!event || deleting) return;
+        if (!canEditCal) { alert(READ_ONLY_HINT); return; }
         setDeleting(true);
         try {
             let q = supabase.from('objektkalender_events').delete({ count: 'exact' });
             if (mode === 'single') q = q.eq('id', event.id);
-            // Delete this + all future events with same title & type
-            else q = q.eq('property_id', selectedPropertyId).eq('event_type', event.event_type).eq('title', event.title).gte('event_date', event.event_date);
+            else {
+                // Diesen + alle künftigen gleicher Art und gleichen Titels; erledigte Termine bleiben (außer dem
+                // gewählten selbst), damit Erledigt-Status und Rotationsanker erhalten bleiben (C-7)
+                q = q.eq('property_id', selectedPropertyId).eq('event_type', event.event_type).eq('title', event.title)
+                    .gte('event_date', event.event_date).or(`id.eq.${event.id},status.is.null,status.neq.done`);
+                // Zusatzaufgaben: nur dieselbe Serie (Titel, Regel, Einheit) bzw. gleichnamige Einzeltermine derselben
+                // Einheit. Reinigung und Müll sind eine Rotation über alle Einheiten und bleiben einheitenübergreifend.
+                if (event.event_type === 'custom') {
+                    q = event.assigned_unit_id ? q.eq('assigned_unit_id', event.assigned_unit_id) : q.is('assigned_unit_id', null);
+                    if (event.recurring) {
+                        q = q.eq('recurring', true);
+                        q = event.recurrence_rule ? q.eq('recurrence_rule', event.recurrence_rule) : q.is('recurrence_rule', null);
+                    } else {
+                        q = q.not('recurring', 'is', true);
+                    }
+                }
+            }
             const { error, count } = await q;
             if (error) { alert(`Der Termin konnte nicht gelöscht werden: ${translateError(error)}`); return; }
             if (!count) { alert('Es wurde kein Termin gelöscht (keine Berechtigung).'); return; }
@@ -514,14 +582,17 @@ const ObjectCalendar = () => {
 
     const handleAddTask = async () => {
         if (addingTask) return;
+        if (!canEditCal) { alert(READ_ONLY_HINT); return; }
         const title = taskForm.title.trim();
         if (!title) { alert('Bitte einen Titel eingeben.'); return; }
         if (!isIsoDate(taskForm.event_date)) { alert('Bitte ein gültiges Datum wählen.'); return; }
         const unit = units.find(u => u.id === taskForm.assigned_unit_id);
-        const payload = { user_id: user.id, property_id: selectedPropertyId, event_type: 'custom', title, color: safeColor(taskForm.color, EC.custom), event_date: taskForm.event_date, recurring: taskForm.recurring, recurrence_rule: taskForm.recurring ? taskForm.recurrence_rule : null, assigned_unit_id: taskForm.assigned_unit_id || null, assigned_unit_name: unit?.unit_name || null, push_enabled: taskForm.push_enabled, status: 'pending' };
+        const payload = { user_id: ownerId, property_id: selectedPropertyId, event_type: 'custom', title, color: safeColor(taskForm.color, EC.custom), event_date: taskForm.event_date, recurring: taskForm.recurring, recurrence_rule: taskForm.recurring ? taskForm.recurrence_rule : null, assigned_unit_id: taskForm.assigned_unit_id || null, assigned_unit_name: unit?.unit_name || null, push_enabled: taskForm.push_enabled, status: 'pending' };
         const startYear = parseIsoLocal(taskForm.event_date).getFullYear();
+        // Wiederkehrend: nur Termine ab heute (vergangene wären sofort „überfällig“, C-12); der Takt der Serie
+        // bleibt, weil alle Termine aus demselben Raster ab dem Startdatum stammen. Einzeltermine dürfen zurückliegen.
         const dates = taskForm.recurring
-            ? buildRecurringDates(taskForm.event_date, taskForm.recurrence_rule, planHorizonIso(Math.max(startYear - 1, thisYear)))
+            ? buildRecurringDates(taskForm.event_date, taskForm.recurrence_rule, planHorizonIso(Math.max(startYear - 1, thisYear))).filter(d => d >= today)
             : [taskForm.event_date];
         if (!dates.length) { alert('Für diese Angaben ergeben sich keine Termine.'); return; }
         const toInsert = dates.map(d => ({ ...payload, event_date: d, recurring: taskForm.recurring }));
@@ -550,6 +621,7 @@ const ObjectCalendar = () => {
         const file = input.files?.[0];
         input.value = ''; // dieselbe Datei kann erneut gewählt werden
         if (!file || importing || loading) return;
+        if (!canEditCal) { alert(READ_ONLY_HINT); return; }
         if (file.size > ICS_MAX_BYTES) { alert('Die ICS-Datei ist zu groß (maximal 2 MB).'); return; }
         setImporting(true);
         try {
@@ -584,9 +656,20 @@ const ObjectCalendar = () => {
             const noteText = notes.length ? `\n\nHinweis: ${notes.join('; ')}.` : '';
             if (!fresh.length) { alert(`Keine neuen Mülltermine importiert.${noteText}`); return; }
 
-            const rows = fresh.map((p, idx) => {
-                const unit = units.length ? units[idx % units.length] : null;
-                return { user_id: user.id, property_id: selectedPropertyId, event_type: 'waste', title: p.title, event_date: p.date, waste_type: p.wasteType, color: WASTE_TYPES.find(w => w.key === p.wasteType)?.color || EC.waste, status: 'pending', push_enabled: true, assigned_unit_id: unit?.id || null, assigned_unit_name: unit?.unit_name || null };
+            // Zuordnung reihum nur bei „Mieter (Rotation)“ (Formularzustand, der Knopf steht im Formular; C-9) und nur an
+            // vermietete Einheiten (C-10; ist an keinem Termin eine vermietet hinterlegt: alle Einheiten). Hausmeister: keine Einheit.
+            const rotate = settings?.waste_performer !== 'janitor' && units.length > 0;
+            const isOccupied = buildOccupancyCheck(unitLeases);
+            const wasteCheck = anyUnitEligible(units, fresh.map(p => p.date), isOccupied) ? isOccupied : null;
+            let rotIdx = 0;
+            const rows = fresh.map((p) => {
+                let unit = null;
+                if (rotate) {
+                    const pick = pickRotationUnit(units, rotIdx, p.date, wasteCheck);
+                    unit = pick.unit;
+                    if (unit) rotIdx = pick.nextIdx;
+                }
+                return { user_id: ownerId, property_id: selectedPropertyId, event_type: 'waste', title: p.title, event_date: p.date, waste_type: p.wasteType, color: WASTE_TYPES.find(w => w.key === p.wasteType)?.color || EC.waste, status: 'pending', push_enabled: true, assigned_unit_id: unit?.id || null, assigned_unit_name: unit?.unit_name || null };
             });
             const inserted = []; let insErr = null;
             for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
@@ -794,7 +877,7 @@ const ObjectCalendar = () => {
         const bgColor = isDone ? EC.done : isOver ? EC.overdue : evColor(event);
         const wasteLabel = event.waste_type ? WASTE_TYPES.find(w => w.key === event.waste_type)?.label : null;
         const isMyUnit = tenantUnitId && event.assigned_unit_id === tenantUnitId;
-        const canMarkDone = isInvestor || isMyUnit;
+        const canMarkDone = canEditCal || isMyUnit;
 
         // Strong highlight style for tenant's own events
         const myUnitStyle = isMyUnit && !isDone ? {
@@ -821,7 +904,7 @@ const ObjectCalendar = () => {
                 </div>
                 <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
                     {!isDone && canMarkDone && <button onClick={() => handleMarkDone(event)} disabled={!!markingId} style={{ background: EC.done, color: '#fff', border: 'none', borderRadius: '8px', padding: '5px 12px', cursor: markingId ? 'wait' : 'pointer', opacity: markingId === event.id ? 0.6 : 1, fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '3px' }}><Check size={12} /> Erledigt</button>}
-                    {isInvestor && <button onClick={() => handleDeleteEvent(event)} style={{ background: 'none', border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '5px 7px', cursor: 'pointer', color: 'var(--text-secondary)' }}><Trash2 size={12} /></button>}
+                    {canEditCal && <button onClick={() => handleDeleteEvent(event)} style={{ background: 'none', border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '5px 7px', cursor: 'pointer', color: 'var(--text-secondary)' }}><Trash2 size={12} /></button>}
                 </div>
             </div>
         );
@@ -861,6 +944,11 @@ const ObjectCalendar = () => {
                     </button>
                     <button disabled={deleting} onClick={() => executeDelete('future')} style={{ padding: '10px 16px', borderRadius: '10px', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.06)', cursor: deleting ? 'wait' : 'pointer', textAlign: 'left', color: '#EF4444', fontSize: '0.88rem', fontWeight: 500 }}>
                         🗑️ Diesen + alle zukünftigen löschen
+                        <span style={{ display: 'block', fontSize: '0.72rem', fontWeight: 400, color: 'var(--text-secondary)', marginTop: '2px' }}>
+                            {deleteConfirm.event_type === 'custom'
+                                ? (deleteConfirm.recurring ? 'Nur diese Serie' : 'Nur gleichnamige Einzeltermine') + (deleteConfirm.assigned_unit_name ? ` der Einheit ${deleteConfirm.assigned_unit_name}` : ' ohne Einheit')
+                                : 'Alle Einheiten'}; andere erledigte Termine bleiben erhalten.
+                        </span>
                     </button>
                     <button disabled={deleting} onClick={() => setDeleteConfirm(null)} style={{ padding: '8px 16px', borderRadius: '10px', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '4px' }}>
                         {deleting ? 'Wird gelöscht…' : 'Abbrechen'}
@@ -883,8 +971,19 @@ const ObjectCalendar = () => {
         );
     };
 
+    // Lesemodus (C-14): Mitnutzer mit reinem Leserecht sehen die Termine, aber keine Bearbeiten-Knöpfe
+    const renderReadOnlyHint = () => {
+        if (!isInvestor || canEditCal || !selectedProperty) return null;
+        return (
+            <div style={{ ...glassBlue({ padding: '10px 16px', marginBottom: '16px' }), display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                <Eye size={16} style={{ flexShrink: 0 }} />
+                <span>{READ_ONLY_HINT}</span>
+            </div>
+        );
+    };
+
     const renderPlanHint = () => {
-        if (!isInvestor || loading) return null;
+        if (!canEditCal || loading) return null;
         const hintIso = toIso(addDays(new Date(), PLAN_HINT_DAYS));
         const fmtDate = (iso) => fmtIso(iso, { day: '2-digit', month: '2-digit', year: 'numeric' });
         const cleaningDue = !!savedSettings?.cleaning_active && savedSettings.cleaning_performer !== 'janitor' && units.length > 0
@@ -940,7 +1039,9 @@ const ObjectCalendar = () => {
                         </div>
                     )}
                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '10px' }}>
-                        Beim Speichern werden die offenen, künftigen Reinigungstermine bis 31.12.{thisYear + 1} neu geplant; erledigte Termine bleiben erhalten.
+                        Ändern sich Schalter, Durchführung, Frequenz oder Wochentag, werden beim Speichern die offenen, künftigen Reinigungstermine bis 31.12.{thisYear + 1} neu geplant; erledigte Termine bleiben erhalten.
+                        {settings.cleaning_active && settings.cleaning_performer !== 'janitor' && <> Zuständig sind reihum nur Einheiten mit laufendem Mietvertrag am Termin (ohne Ferienwohnungen); ist keine Einheit als vermietet hinterlegt, wird über alle Einheiten rotiert.</>}
+                        {settings.cleaning_active && settings.cleaning_performer !== 'janitor' && !loading && unitLeases === null && <> Die Mietverträge konnten nicht geladen werden – es wird über alle Einheiten rotiert.</>}
                     </div>
                 </div>
                 <div style={{ ...glassBlue(), padding: '16px', borderRadius: '14px' }}>
@@ -952,6 +1053,13 @@ const ObjectCalendar = () => {
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '12px' }}>
                             <div><label style={labelSt}>Durchführung</label><select style={selectSt} value={settings.waste_performer} onChange={e => u('waste_performer', e.target.value)}><option value="tenant">Mieter (Rotation)</option><option value="janitor">Hausmeisterdienst</option></select></div>
                             <div><label style={labelSt}>ICS importieren</label><input ref={fileInputRef} type="file" accept=".ics,text/calendar" onChange={handleIcsImport} style={{ display: 'none' }} /><Button size="sm" variant="secondary" icon={Upload} disabled={importing || loading} onClick={() => fileInputRef.current?.click()}>{importing ? 'Importiere…' : 'ICS importieren'}</Button></div>
+                        </div>
+                    )}
+                    {settings.waste_active && (
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '10px' }}>
+                            {settings.waste_performer === 'janitor'
+                                ? 'Importierte Mülltermine werden keiner Einheit zugeordnet. Beim Speichern mit „Hausmeisterdienst“ verlieren offene, künftige Mülltermine ihre Einheit.'
+                                : 'Importierte Mülltermine werden reihum den vermieteten Einheiten zugeordnet (ist keine als vermietet hinterlegt: allen Einheiten).'}
                         </div>
                     )}
                 </div>
@@ -967,7 +1075,7 @@ const ObjectCalendar = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     <div><label style={labelSt}>Titel *</label><input style={inputSt} value={taskForm.title} maxLength={200} onChange={e => setTaskForm(p => ({ ...p, title: e.target.value }))} placeholder="z.B. Winterdienst" /></div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                        <div><label style={labelSt}>Datum</label><input type="date" style={inputSt} value={taskForm.event_date} onChange={e => setTaskForm(p => ({ ...p, event_date: e.target.value }))} /></div>
+                        <div><label style={labelSt}>Datum</label><input type="date" style={inputSt} value={taskForm.event_date} onChange={e => setTaskForm(p => ({ ...p, event_date: e.target.value }))} />{taskForm.recurring && isIsoDate(taskForm.event_date) && taskForm.event_date < today && <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Termine vor heute werden nicht angelegt; die Serie beginnt im gewählten Takt ab heute.</div>}</div>
                         <div><label style={labelSt}>Farbe</label><div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><input type="color" value={taskForm.color} onChange={e => setTaskForm(p => ({ ...p, color: e.target.value }))} style={{ width: '36px', height: '36px', border: 'none', cursor: 'pointer', borderRadius: '8px' }} /><span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{taskForm.color}</span></div></div>
                     </div>
                     <div><label style={labelSt}>Einheit</label><select style={selectSt} value={taskForm.assigned_unit_id} onChange={e => setTaskForm(p => ({ ...p, assigned_unit_id: e.target.value }))}><option value="">– Keine –</option>{units.map(u => <option key={u.id} value={u.id}>{u.unit_name}</option>)}</select></div>
@@ -1111,15 +1219,16 @@ const ObjectCalendar = () => {
                     <h1 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Objektkalender</h1>
                 </div>
                 <div style={{ display: 'flex', gap: '6px' }}>
-                    {isInvestor && <button className="cal-nav" onClick={() => setShowSettings(!showSettings)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px', color: 'var(--text-secondary)', borderRadius: '8px', minHeight: 'auto' }}><SettingsIcon size={18} /></button>}
+                    {canEditCal && <button className="cal-nav" onClick={() => setShowSettings(!showSettings)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px', color: 'var(--text-secondary)', borderRadius: '8px', minHeight: 'auto' }}><SettingsIcon size={18} /></button>}
                     {isInvestor && <button className="cal-nav" onClick={handleExportPdf} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px', color: 'var(--text-secondary)', borderRadius: '8px', minHeight: 'auto' }}><FileText size={18} /></button>}
                 </div>
             </div>
             {properties.length > 1 && <select style={{ ...selectSt, marginBottom: '12px', fontSize: '0.82rem' }} value={selectedPropertyId || ''} onChange={e => setSelectedPropertyId(e.target.value)}>{properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number || ''}</option>)}</select>}
             {properties.length === 1 && <div style={{ padding: '6px 12px', borderRadius: '10px', ...glassBlue(), fontSize: '0.8rem', fontWeight: 600, marginBottom: '12px', textAlign: 'center' }}>{properties[0].street} {properties[0].house_number || ''}</div>}
             {renderErrors()}
+            {renderReadOnlyHint()}
             {renderPlanHint()}
-            {showSettings && isInvestor && renderSettings()}
+            {showSettings && canEditCal && renderSettings()}
             <div style={glassCard()}>
                 {contentLoading ? <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>Lade Termine…</div> : renderMobileView()}
             </div>
@@ -1128,7 +1237,7 @@ const ObjectCalendar = () => {
                     <span key={l} style={{ display: 'flex', alignItems: 'center', gap: '3px' }}><span style={{ width: '6px', height: '6px', borderRadius: '50%', background: c }} />{l}</span>
                 ))}
             </div>
-            {isInvestor && (
+            {canEditCal && (
                 <button onClick={() => setShowTaskModal(true)} style={{ position: 'fixed', bottom: '80px', right: '20px', width: '56px', height: '56px', borderRadius: '16px', border: 'none', cursor: 'pointer', background: 'linear-gradient(135deg, #0EA5E9, #3B82F6)', color: '#fff', boxShadow: '0 4px 20px rgba(14,165,233,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}><Plus size={24} /></button>
             )}
             {showTaskModal && renderTaskModal()}
@@ -1151,17 +1260,18 @@ const ObjectCalendar = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                     {properties.length > 1 && <select style={{ ...selectSt, width: 'auto', minWidth: '180px' }} value={selectedPropertyId || ''} onChange={e => setSelectedPropertyId(e.target.value)}>{properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number || ''}</option>)}</select>}
                     {properties.length === 1 && <div style={{ padding: '6px 14px', borderRadius: '10px', ...glassBlue(), fontSize: '0.85rem', fontWeight: 600 }}>{properties[0].street} {properties[0].house_number || ''}</div>}
-                    {isInvestor && <>
+                    {canEditCal && <>
                         <Button size="sm" variant="secondary" icon={SettingsIcon} onClick={() => setShowSettings(!showSettings)}>Einstellungen</Button>
                         <Button size="sm" variant="secondary" icon={Plus} onClick={() => setShowTaskModal(true)}>Aufgabe</Button>
-                        <Button size="sm" variant="secondary" icon={FileText} onClick={handleExportPdf}>PDF</Button>
                     </>}
+                    {isInvestor && <Button size="sm" variant="secondary" icon={FileText} onClick={handleExportPdf}>PDF</Button>}
                 </div>
             </div>
 
             {renderErrors()}
+            {renderReadOnlyHint()}
             {renderPlanHint()}
-            {showSettings && isInvestor && renderSettings()}
+            {showSettings && canEditCal && renderSettings()}
 
             {/* Tabs */}
             <div style={{ display: 'flex', gap: '6px', marginBottom: '20px', flexWrap: 'wrap', ...glassCard({ padding: '6px', display: 'inline-flex' }), borderRadius: '14px' }}>

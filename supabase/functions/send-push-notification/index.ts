@@ -363,25 +363,33 @@ async function buildFromWebhook(client: any, table: string, record: any): Promis
         }
 
         case 'documents': {
-            // Notify tenants if document is for a specific unit
-            const doc = await loadFreshRow(client, 'documents', 'id, unit_id, name, created_at', record?.id)
-            if (!doc || !isUuid(doc.unit_id)) return null
-            const { data: leases } = await client
-                .from('leases')
-                .select('tenant_id')
-                .eq('unit_id', doc.unit_id)
-                .eq('status', 'active')
-            const tenantIds = [...new Set((leases || []).map((l: any) => l.tenant_id).filter(isUuid))]
-            if (tenantIds.length === 0) return null
-            const { data: roles } = await client
+            // Empfänger wie die Lese-Policies der Mieter (tenants_read_personal_docs / tenants_read_general_docs):
+            // persönliches Dokument (tenant_id) nur an diesen Mieter, allgemeines Dokument des Objekts
+            // (tenant_id NULL, property_id gesetzt) an alle Mieter des Objekts. Sonst sehen Mieter es nicht.
+            const doc = await loadFreshRow(client, 'documents', 'id, tenant_id, property_id, user_id, name, created_at', record?.id)
+            if (!doc) return null
+            let rolesQuery = client
                 .from('user_roles')
                 .select('user_id')
-                .in('tenant_id', tenantIds)
                 .eq('role', 'tenant')
+            if (isUuid(doc.tenant_id)) {
+                rolesQuery = rolesQuery.eq('tenant_id', doc.tenant_id)
+            } else if (isUuid(doc.property_id)) {
+                rolesQuery = rolesQuery.eq('property_id', doc.property_id)
+            } else {
+                return null
+            }
+            const { data: roles, error: rolesError } = await rolesQuery
+            if (rolesError) {
+                console.error('Lookup user_roles failed:', rolesError.message)
+                return null
+            }
+            // Ersteller nicht benachrichtigen
+            const targets = (roles || []).map((r: any) => r.user_id).filter((id: string) => id !== doc.user_id)
             return {
                 title: '📄 Neues Dokument',
                 body: HIDE_CONTENT ? 'Ein neues Dokument wurde bereitgestellt.' : (oneLine(doc.name, 100) || 'Ein neues Dokument wurde hochgeladen.'),
-                targetUserIds: (roles || []).map((r: any) => r.user_id),
+                targetUserIds: targets,
                 data: { route: '/tenant/documents', type: 'document' },
             }
         }

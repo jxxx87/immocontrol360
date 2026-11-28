@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 import {
     FILE_RULES, acceptAttribute, validateUploadFile, buildStorageObjectName,
@@ -18,6 +20,8 @@ const getDocPath = (doc) => doc?.file_path || doc?.storage_path || null;
 
 const Documents = () => {
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const [properties, setProperties] = useState([]);
     const [selectedProperty, setSelectedProperty] = useState(null);
     const [activeTab, setActiveTab] = useState('general'); // 'general' | 'personal'
@@ -33,6 +37,10 @@ const Documents = () => {
     // Schutz gegen veraltete Antworten bei schnellem Objektwechsel
     const docsRequestRef = useRef(0);
     const tenantsRequestRef = useRef(0);
+    const propertiesRequestRef = useRef(0);
+    // Zählt jedes Laden der Objektliste: Dokumente/Mieter auch dann neu laden, wenn nach einem
+    // Portfoliowechsel dasselbe Objekt vorgewählt bleibt (die Listen wurden geleert)
+    const [propertiesLoadKey, setPropertiesLoadKey] = useState(0);
 
     const showFeedback = useCallback(
         (type, messages) => setFeedback({ type, messages: Array.isArray(messages) ? messages : [messages] }),
@@ -40,24 +48,47 @@ const Documents = () => {
     );
 
     // ── FETCH PROPERTIES ─────────────────────────────────────────────
+    // Nur die Objekte des oben gewählten Portfolios ("Alle Portfolios" = alle lesbaren).
+    // Bei einem Portfoliowechsel Auswahl und Listen zurücksetzen und das erste Objekt vorwählen.
     useEffect(() => {
         const fetchProperties = async () => {
-            const { data, error } = await supabase
+            const requestId = ++propertiesRequestRef.current;
+            // Noch laufende Abfragen des bisherigen Objekts nicht mehr übernehmen
+            docsRequestRef.current += 1;
+            tenantsRequestRef.current += 1;
+            setGeneralDocs([]);
+            setPersonalDocs([]);
+            setTenants([]);
+            setThumbUrls({});
+            setSelectedTenant(null);
+
+            let query = supabase
                 .from('properties')
-                .select('id, street, house_number, city')
+                .select('id, street, house_number, city, portfolio_id')
                 .order('street');
+            if (selectedPortfolioID) query = query.eq('portfolio_id', selectedPortfolioID);
+            const { data, error } = await query;
+            if (requestId !== propertiesRequestRef.current) return;
             if (error) {
                 console.error('Error fetching properties:', error);
                 showFeedback('error', `Immobilien konnten nicht geladen werden: ${translateError(error)}`);
             }
             setProperties(data || []);
-            if (data && data.length > 0) {
-                setSelectedProperty(data[0]);
-            }
+            setSelectedProperty(data && data.length > 0 ? data[0] : null);
+            setPropertiesLoadKey(k => k + 1);
             setLoading(false);
         };
         fetchProperties();
-    }, [showFeedback]);
+    }, [showFeedback, selectedPortfolioID]);
+
+    // Hochladen/Löschen verlangen Schreibrecht "Immobilien" oder "Mieterportal" am Portfolio des Objekts
+    // (wie die Policies von documents und dem Speicher-Bucket). Solange die Rechte laden, nicht sperren.
+    const selectedPortfolioOfProperty = selectedProperty?.portfolio_id || null;
+    const canWriteDocs = (!perm || perm.loadingPermissions)
+        ? true
+        : selectedPortfolioOfProperty
+            ? perm.canWrite('immobilien', selectedPortfolioOfProperty) || perm.canWrite('mieterportal', selectedPortfolioOfProperty)
+            : perm.canWrite('immobilien') || perm.canWrite('mieterportal');
 
     // ── FETCH DOCUMENTS FOR SELECTED PROPERTY ────────────────────────
     const fetchDocuments = useCallback(async (propertyId) => {
@@ -185,11 +216,11 @@ const Documents = () => {
         if (!selectedPropertyId) return;
         fetchDocuments(selectedPropertyId);
         fetchTenants(selectedPropertyId);
-    }, [selectedPropertyId, fetchDocuments, fetchTenants]);
+    }, [selectedPropertyId, propertiesLoadKey, fetchDocuments, fetchTenants]);
 
     // ── UPLOAD ───────────────────────────────────────────────────────
     const handleUpload = async (files) => {
-        if (!files || files.length === 0 || !selectedProperty || uploading) return;
+        if (!files || files.length === 0 || !selectedProperty || uploading || !canWriteDocs) return;
         const propertyId = selectedProperty.id;
         const isGeneral = activeTab === 'general';
         const tenant = isGeneral ? null : selectedTenant;
@@ -276,6 +307,10 @@ const Documents = () => {
     // Erst die Datei im Speicher löschen, dann den Datensatz. Bleibt die Datei liegen
     // (z. B. fehlende Löschberechtigung), wird das angezeigt statt still übergangen.
     const handleDelete = async (doc) => {
+        if (!canWriteDocs) {
+            showFeedback('error', 'Sie haben für diese Immobilie nur Leserecht – Dokumente können nicht gelöscht werden.');
+            return;
+        }
         if (!window.confirm(`"${doc.file_name}" wirklich löschen?`)) return;
         setFeedback(null);
 
@@ -534,8 +569,30 @@ const Documents = () => {
                 </div>
             )}
 
+            {selectedProperty && !canWriteDocs && (
+                <div style={{
+                    backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-md)',
+                    padding: '12px 16px', marginBottom: '16px',
+                    fontSize: '0.82rem', color: 'var(--text-secondary)',
+                    border: '1px solid var(--border-color)'
+                }}>
+                    Nur Leserecht: Sie können die Dokumente dieser Immobilie ansehen und herunterladen, aber nicht hochladen oder löschen.
+                </div>
+            )}
+
+            {!selectedProperty && (
+                <div style={{
+                    backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-md)',
+                    padding: '12px 16px', marginBottom: '16px',
+                    fontSize: '0.82rem', color: 'var(--text-secondary)',
+                    border: '1px solid var(--border-color)'
+                }}>
+                    {selectedPortfolioID ? 'In diesem Portfolio gibt es keine Immobilien.' : 'Es sind noch keine Immobilien angelegt.'}
+                </div>
+            )}
+
             {/* Upload Area */}
-            {(activeTab === 'general' || (activeTab === 'personal' && selectedTenant)) && (
+            {selectedProperty && canWriteDocs && (activeTab === 'general' || (activeTab === 'personal' && selectedTenant)) && (
                 <div style={{
                     backgroundColor: 'var(--surface-color)',
                     borderRadius: 'var(--radius-lg)',
@@ -586,7 +643,7 @@ const Documents = () => {
                 </div>
             )}
 
-            {activeTab === 'personal' && !selectedTenant && (
+            {selectedProperty && canWriteDocs && activeTab === 'personal' && !selectedTenant && (
                 <div style={{
                     backgroundColor: 'var(--surface-color)', borderRadius: 'var(--radius-md)',
                     padding: '12px 16px', marginBottom: '16px',
@@ -601,6 +658,7 @@ const Documents = () => {
             <DocumentList
                 docs={activeTab === 'general' ? generalDocs : filteredPersonalDocs}
                 activeTab={activeTab}
+                canDelete={canWriteDocs}
                 onDelete={handleDelete}
                 onDownload={handleDownload}
                 getFileIcon={getFileIcon}
@@ -632,7 +690,7 @@ const DocumentThumbnail = ({ doc, getFileIcon, url }) => {
 };
 
 // ── DOCUMENT LIST COMPONENT ──────────────────────────────────────────
-const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, formatDate, thumbUrls = {} }) => {
+const DocumentList = ({ docs, activeTab, canDelete = true, onDelete, onDownload, getFileIcon, formatDate, thumbUrls = {} }) => {
     if (docs.length === 0) {
         return (
             <div style={{
@@ -710,19 +768,21 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                                 <Download size={14} />
                                 Download
                             </button>
-                            <button
-                                onClick={() => onDelete(doc)}
-                                style={{
-                                    display: 'flex', alignItems: 'center',
-                                    padding: '6px 8px', borderRadius: 'var(--radius-md)',
-                                    border: '1px solid var(--border-color)',
-                                    backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
-                                    cursor: 'pointer'
-                                }}
-                                title="Löschen"
-                            >
-                                <Trash2 size={14} />
-                            </button>
+                            {canDelete && (
+                                <button
+                                    onClick={() => onDelete(doc)}
+                                    style={{
+                                        display: 'flex', alignItems: 'center',
+                                        padding: '6px 8px', borderRadius: 'var(--radius-md)',
+                                        border: '1px solid var(--border-color)',
+                                        backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
+                                        cursor: 'pointer'
+                                    }}
+                                    title="Löschen"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}
@@ -775,18 +835,21 @@ const DocumentList = ({ docs, activeTab, onDelete, onDownload, getFileIcon, form
                             >
                                 <Download size={16} /> Download
                             </button>
-                            <button
-                                onClick={() => onDelete(doc)}
-                                style={{
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    padding: '8px 12px', borderRadius: 'var(--radius-md)',
-                                    border: '1px solid var(--border-color)',
-                                    backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
-                                    cursor: 'pointer'
-                                }}
-                            >
-                                <Trash2 size={16} />
-                            </button>
+                            {canDelete && (
+                                <button
+                                    onClick={() => onDelete(doc)}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        padding: '8px 12px', borderRadius: 'var(--radius-md)',
+                                        border: '1px solid var(--border-color)',
+                                        backgroundColor: 'var(--surface-color)', color: 'var(--danger-color)',
+                                        cursor: 'pointer'
+                                    }}
+                                    title="Löschen"
+                                >
+                                    <Trash2 size={16} />
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}

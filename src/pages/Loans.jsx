@@ -13,7 +13,7 @@ import RateInput from '../components/ui/RateInput';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 import { Plus, Trash2, Edit2, ChevronDown, ChevronRight, Calculator, AlertCircle } from 'lucide-react';
 import ExportDropdown from '../components/ExportDropdown';
-import { parseNum, round2, parseLocalDate, getMonthlyPayment, generateSchedule } from '../lib/loanSchedule';
+import { parseNum, round2, parseLocalDate, getMonthlyPayment, generateSchedule, getLoanSnapshot } from '../lib/loanSchedule';
 
 // --- Berechnungen (ohne React-State) ---
 // Tilgungsplan, Rate und Restschuld kommen aus src/lib/loanSchedule.js (gemeinsam mit Cockpit und Objektliste)
@@ -36,27 +36,6 @@ const loanGroupInfo = (loan, propsById) => {
 const buildGroups = (rawLoans, rawProps, rawWEs, filters) => {
     const propsById = new Map(rawProps.map(p => [p.id, p]));
     const today = new Date();
-
-    // Filter (WE-Auswahl umfasst auch Darlehen der Mitgliedsobjekte – wie die Gruppierung)
-    const filtered = rawLoans.filter(l => {
-        if (filters.propertyId) {
-            if (filters.propertyId.startsWith('we_')) {
-                const info = loanGroupInfo(l, propsById);
-                if (!info.isWE || `we_${info.key}` !== filters.propertyId) return false;
-            } else if (l.property_id !== filters.propertyId) {
-                return false;
-            }
-        }
-        if (filters.search) {
-            const term = filters.search.toLowerCase();
-            return (
-                (l.bank_name || '').toLowerCase().includes(term) ||
-                (l.account_number || '').toLowerCase().includes(term) ||
-                (l.property?.street || '').toLowerCase().includes(term)
-            );
-        }
-        return true;
-    });
 
     // Build prop groups map for economic units
     const propGroups = {};
@@ -102,6 +81,31 @@ const buildGroups = (rawLoans, rawProps, rawWEs, filters) => {
         }
     });
 
+    // Filter (WE-Auswahl umfasst auch Darlehen der Mitgliedsobjekte – wie die Gruppierung)
+    const filtered = rawLoans.filter(l => {
+        if (filters.propertyId) {
+            if (filters.propertyId.startsWith('we_')) {
+                const info = loanGroupInfo(l, propsById);
+                if (!info.isWE || `we_${info.key}` !== filters.propertyId) return false;
+            } else if (l.property_id !== filters.propertyId) {
+                return false;
+            }
+        }
+        if (filters.search) {
+            const term = filters.search.toLowerCase();
+            // Gruppenbezeichnung: bei Wirtschaftseinheiten Name und Straßen der Mitgliedsobjekte
+            // (Darlehen direkt an einer WE haben kein eingebettetes Objekt)
+            const group = propGroups[loanGroupInfo(l, propsById).key];
+            return (
+                (l.bank_name || '').toLowerCase().includes(term) ||
+                (l.account_number || '').toLowerCase().includes(term) ||
+                (l.property?.street || '').toLowerCase().includes(term) ||
+                `${group?.street || ''} ${group?.house_number || ''} ${group?.city || ''}`.toLowerCase().includes(term)
+            );
+        }
+        return true;
+    });
+
     // Group by Property or Economic Unit; Kennzahlen je Darlehen nur einmal berechnen
     const groups = {};
     filtered.forEach(loan => {
@@ -115,17 +119,23 @@ const buildGroups = (rawLoans, rawProps, rawWEs, filters) => {
             };
         }
         const current = generateSchedule(loan, today);
-        const monthlyPayment = getMonthlyPayment(loan);
+        // Rate wie Cockpit und Objektliste (getLoanSnapshot): getilgte Darlehen mit 0, die letzte Rate
+        // auf Restschuld + Zins begrenzt; die Nennrate steht im Formular und im Tilgungsplan
+        const nominal = getMonthlyPayment(loan);
+        const snapshot = getLoanSnapshot(loan, today);
+        const monthlyPayment = nominal === null ? null : round2(snapshot.payment);
+        const currentDebt = Math.max(0, current.balance);
         const enriched = {
             ...loan,
-            _currentDebt: current.balance,
+            _currentDebt: currentDebt,
             _monthlyPayment: monthlyPayment,
+            _paidOff: nominal !== null && snapshot.debt <= 0,
             _issue: current.issue,
             _notice: current.notice
         };
         groups[pid].loans.push(enriched);
         groups[pid].totals.amount += parseNum(loan.loan_amount) || 0;
-        groups[pid].totals.currentDebt += current.balance;
+        groups[pid].totals.currentDebt += currentDebt;
         groups[pid].totals.annuity += monthlyPayment || 0;
     });
 
@@ -171,11 +181,10 @@ const Loans = () => {
     const [loading, setLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
 
-    const [expandedGroups, setExpandedGroups] = useState(() => {
-        const params = new URLSearchParams(window.location.search);
-        const urlPropertyId = params.get('propertyId');
-        return urlPropertyId ? { [urlPropertyId]: true } : {};
-    });
+    // Auf-/Zuklappen je Gruppe (Gruppenschlüssel aus loanGroupInfo); ohne eigenen Eintrag ist die Gruppe
+    // aus dem Link (?propertyId=…, z. B. aus dem Cockpit) aufgeklappt
+    const [expandedGroups, setExpandedGroups] = useState({});
+    const [urlPropertyId] = useState(() => new URLSearchParams(window.location.search).get('propertyId') || '');
 
     // Filters
     const [filters, setFilters] = useState(() => {
@@ -249,6 +258,14 @@ const Loans = () => {
         () => buildGroups(loans, properties, economicUnits, filters),
         [loans, properties, economicUnits, filters]
     );
+
+    // Gruppe aus dem Link: we_<WE-ID> → WE-ID; Objekt einer WE → deren WE-ID; sonst die Objekt-ID
+    const urlGroupKey = useMemo(() => {
+        if (!urlPropertyId) return null;
+        if (urlPropertyId.startsWith('we_')) return urlPropertyId.slice(3);
+        return properties.find(p => p.id === urlPropertyId)?.economic_unit_id || urlPropertyId;
+    }, [urlPropertyId, properties]);
+    const isGroupExpanded = (pid) => expandedGroups[pid] ?? (pid === urlGroupKey);
 
     // --- Actions ---
     const handleSave = async () => {
@@ -421,10 +438,13 @@ const Loans = () => {
     };
 
     const toggleGroup = (pid) => {
-        setExpandedGroups(prev => ({ ...prev, [pid]: !prev[pid] }));
+        setExpandedGroups(prev => ({ ...prev, [pid]: !(prev[pid] ?? (pid === urlGroupKey)) }));
     };
 
-    const rateLabel = (loan) => (loan._monthlyPayment !== null ? eur(loan._monthlyPayment) : '–');
+    const rateLabel = (loan) => {
+        if (loan._paidOff) return 'getilgt';
+        return loan._monthlyPayment !== null ? eur(loan._monthlyPayment) : '–';
+    };
     const percent = (v) => (v === null || v === undefined || v === '' ? '–' : `${v}%`);
     const issueHint = (loan) => (
         <>
@@ -548,7 +568,7 @@ const Loans = () => {
                             onClick={() => toggleGroup(pid)}
                         >
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                {expandedGroups[pid] ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+                                {isGroupExpanded(pid) ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
                                 <div>
                                     <div style={{ fontWeight: 600, fontSize: '1rem' }}>
                                         {group.property?.street} {group.property?.house_number}
@@ -575,7 +595,7 @@ const Loans = () => {
                         </div>
 
                         {/* Loans Table */}
-                        {expandedGroups[pid] && (
+                        {isGroupExpanded(pid) && (
                             <div style={{ padding: '1rem' }}>
                                 <div className="hidden-mobile">
                                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
@@ -587,7 +607,7 @@ const Loans = () => {
                                                 <th style={{ textAlign: 'right', padding: '0.5rem' }}>Zins / Tilgung</th>
                                                 <th style={{ textAlign: 'right', padding: '0.5rem' }}>Rate</th>
                                                 <th style={{ textAlign: 'right', padding: '0.5rem' }}>Restschuld (akt.)</th>
-                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Laufzeit bis</th>
+                                                <th style={{ textAlign: 'right', padding: '0.5rem' }}>Zinsbindung bis</th>
                                                 <th style={{ textAlign: 'right', padding: '0.5rem' }}>Aktionen</th>
                                             </tr>
                                         </thead>
@@ -677,7 +697,7 @@ const Loans = () => {
                                                     <div style={{ fontWeight: 600 }}>{eur(loan._currentDebt)}</div>
                                                 </div>
                                                 <div>
-                                                    <div style={{ color: 'var(--text-secondary)' }}>Laufzeit bis</div>
+                                                    <div style={{ color: 'var(--text-secondary)' }}>Zinsbindung bis</div>
                                                     <div>{formatDateDE(loan.end_date)}</div>
                                                 </div>
                                             </div>

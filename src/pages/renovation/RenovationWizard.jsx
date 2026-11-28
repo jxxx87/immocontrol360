@@ -11,6 +11,7 @@ import Input from '../../components/ui/Input';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { translateError } from '../../lib/errorTranslator';
 import { fmtEUR0, round2, formatDateDE } from '../../components/renovation/renovationUtils';
 
@@ -24,7 +25,16 @@ const STEPS = [
 const RenovationWizard = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const navigate = useNavigate();
+
+    // Schreibrecht wie die RLS von renovation_projects (Freigabe „Immobilien“ oder „Investorportal“
+    // mit Schreibrecht im Portfolio des Objekts). Solange die Freigaben laden, nicht sperren.
+    const canWriteProperty = (prop) => {
+        if (!perm || perm.loadingPermissions) return true;
+        const pid = prop?.portfolio_id;
+        return !!pid && (perm.canWrite('immobilien', pid) || perm.canWrite('investorportal', pid));
+    };
 
     const [step, setStep] = useState(0);
     const [loading, setLoading] = useState(true);
@@ -56,6 +66,8 @@ const RenovationWizard = () => {
 
     // Contacts (Dienstleister/Handwerker only)
     const [contacts, setContacts] = useState([]);
+    const [contactsError, setContactsError] = useState(null);
+    const [contactSaving, setContactSaving] = useState(false);
     const [showContactModal, setShowContactModal] = useState(false);
     const [contactForSubtrade, setContactForSubtrade] = useState(null); // subtrade id to assign after creation
     const [newContact, setNewContact] = useState({ contact_type: 'vendor', name: '', email: '', phone: '', street: '', zip: '', city: '' });
@@ -74,8 +86,9 @@ const RenovationWizard = () => {
         const query = (uid) => supabase.from('renovation_trades').select('*, subtrades:renovation_subtrades(*)').eq('user_id', uid).order('sort_order');
         let res = await query(ownerId);
         let usedOwner = ownerId;
-        // Keine (lesbaren) Vorlagen des Eigentümers → eigene Vorlagen verwenden
-        if (ownerId !== user.id && (res.error || (res.data || []).length === 0)) {
+        // Keine (lesbaren) Vorlagen des Eigentümers → eigene Vorlagen verwenden (Hinweis in Schritt 2).
+        // Bei einem Ladefehler nicht still zurückfallen, sondern den Fehler zeigen.
+        if (ownerId !== user.id && !res.error && (res.data || []).length === 0) {
             res = await query(user.id);
             usedOwner = user.id;
         }
@@ -95,12 +108,17 @@ const RenovationWizard = () => {
     const loadContacts = async (ownerId) => {
         const ids = [...new Set([user.id, ownerId].filter(Boolean))];
         const { data, error } = await supabase.from('contacts').select('id, name, phone, email, contact_type').in('user_id', ids).eq('contact_type', 'vendor').order('name');
-        if (error) { console.error('Error loading contacts:', error); return; }
+        if (error) {
+            console.error('Error loading contacts:', error);
+            setContactsError(translateError(error));
+            return;
+        }
+        setContactsError(null);
         setContacts(data || []);
     };
 
     const fetchData = async () => {
-        let q = supabase.from('properties').select('id, street, house_number, city, zip, user_id, portfolio:portfolios(user_id)');
+        let q = supabase.from('properties').select('id, street, house_number, city, zip, user_id, portfolio_id, portfolio:portfolios(user_id)');
         if (selectedPortfolioID) q = q.eq('portfolio_id', selectedPortfolioID);
         const propRes = await q.order('street');
         if (propRes.error) {
@@ -206,18 +224,23 @@ const RenovationWizard = () => {
         setShowContactModal(true);
     };
 
+    // Die Auswahl lädt nur Dienstleister (contact_type 'vendor') → nur diesen Typ anlegen,
+    // sonst verschwände der Kontakt beim nächsten Laden aus der Auswahl
     const saveNewContact = async () => {
+        if (contactSaving) return;
         if (!newContact.name) return alert('Name ist erforderlich.');
+        setContactSaving(true);
         const { data, error } = await supabase.from('contacts').insert({
             user_id: user.id,
             name: newContact.name,
-            contact_type: newContact.contact_type || 'vendor',
+            contact_type: 'vendor',
             email: newContact.email || null,
             phone: newContact.phone || null,
             street: newContact.street || null,
             zip: newContact.zip || null,
             city: newContact.city || null,
         }).select().single();
+        setContactSaving(false);
         if (error) { alert('Fehler: ' + translateError(error)); return; }
         // Add to local contacts list
         setContacts(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
@@ -247,8 +270,12 @@ const RenovationWizard = () => {
         return !Number.isFinite(n) || n < 0;
     });
 
+    // Nur Objekte mit Schreibrecht anbieten (sonst lehnt die Datenbank „Projekt erstellen“ ab)
+    const writableProperties = properties.filter(canWriteProperty);
+    const selectedWritable = writableProperties.some(p => p.id === selectedProperty);
+
     const canNext = () => {
-        if (step === 0) return !!selectedProperty && !templatesLoading;
+        if (step === 0) return !!selectedProperty && selectedWritable && !templatesLoading;
         if (step === 1) return selectedTrades.length > 0 && tradesWithoutSubtrade.length === 0 && !hasInvalidBudget;
         if (step === 2) return !!projectName.trim();
         return true;
@@ -260,6 +287,11 @@ const RenovationWizard = () => {
     // gelöscht (abhängige Zeilen per ON DELETE CASCADE), damit kein unvollständiges Projekt bleibt.
     const handleCreate = async () => {
         if (creating) return;
+        if (!selectedWritable) {
+            alert('Für die gewählte Immobilie haben Sie kein Schreibrecht. Bitte eine andere Immobilie wählen.');
+            setStep(0);
+            return;
+        }
         setCreating(true);
         let projectId = null;
         try {
@@ -394,10 +426,21 @@ const RenovationWizard = () => {
                                 <Button size="sm" variant="secondary" onClick={fetchData}>Erneut laden</Button>
                             </div>
                         )}
+                        {!propertiesError && properties.length > 0 && writableProperties.length === 0 && (
+                            <div style={hintBoxStyle}>
+                                <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                                <span>Keine Immobilien mit Schreibrecht: In {selectedPortfolioID ? 'diesem Portfolio' : 'den freigegebenen Portfolios'} haben Sie für „Immobilien“ bzw. „Investorportal“ nur Leserecht und können kein Sanierungsprojekt anlegen.</span>
+                            </div>
+                        )}
+                        {writableProperties.length > 0 && writableProperties.length < properties.length && (
+                            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                Angeboten werden nur Immobilien, für die Sie Schreibrecht haben.
+                            </p>
+                        )}
                         <select value={selectedProperty} onChange={e => handlePropertyChange(e.target.value)}
                             style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', fontSize: '0.9rem', background: 'var(--surface-color)', marginBottom: '12px' }}>
                             <option value="">— Immobilie wählen —</option>
-                            {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.zip} {p.city}</option>)}
+                            {writableProperties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.zip} {p.city}</option>)}
                         </select>
                         {units.length > 0 && (
                             <>
@@ -422,6 +465,21 @@ const RenovationWizard = () => {
 
                         {templatesLoading && (
                             <div style={{ display: 'flex', justifyContent: 'center', padding: '24px' }}><Loader2 className="animate-spin" size={22} /></div>
+                        )}
+
+                        {!templatesLoading && !templatesError && templateSource.used && templateSource.requested && templateSource.used !== templateSource.requested && (
+                            <div style={hintBoxStyle}>
+                                <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                                <span>Für den Eigentümer dieser Immobilie sind keine Gewerke-Vorlagen hinterlegt bzw. sichtbar – angeboten werden Ihre eigenen Vorlagen (Gewerke und Meilensteine).</span>
+                            </div>
+                        )}
+
+                        {contactsError && (
+                            <div style={errorBoxStyle}>
+                                <AlertTriangle size={15} />
+                                <span style={{ flex: 1 }}>Dienstleister/Handwerker konnten nicht geladen werden: {contactsError}</span>
+                                <Button size="sm" variant="secondary" onClick={() => loadContacts(templateSource.requested || user.id)}>Erneut laden</Button>
+                            </div>
                         )}
 
                         {!templatesLoading && templatesError && (
@@ -595,21 +653,11 @@ const RenovationWizard = () => {
             </div>
 
             {/* New Contact Modal */}
-            <Modal isOpen={showContactModal} onClose={() => setShowContactModal(false)} title="Neuen Kontakt anlegen"
-                footer={<><Button variant="secondary" onClick={() => setShowContactModal(false)}>Abbrechen</Button><Button onClick={saveNewContact}>Speichern & Zuweisen</Button></>}>
-                <div style={{ marginBottom: 'var(--spacing-md)' }}>
-                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Typ</label>
-                    <select
-                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', outline: 'none', backgroundColor: 'var(--surface-color)' }}
-                        value={newContact.contact_type}
-                        onChange={e => setNewContact({ ...newContact, contact_type: e.target.value })}
-                    >
-                        <option value="other">Sonstiges</option>
-                        <option value="vendor">Dienstleister / Handwerker</option>
-                        <option value="tenant">Mieter</option>
-                        <option value="guest">Gast</option>
-                    </select>
-                </div>
+            <Modal isOpen={showContactModal} onClose={() => { if (!contactSaving) setShowContactModal(false); }} title="Neuen Dienstleister / Handwerker anlegen"
+                footer={<><Button variant="secondary" onClick={() => setShowContactModal(false)} disabled={contactSaving}>Abbrechen</Button><Button onClick={saveNewContact} disabled={contactSaving}>{contactSaving ? <Loader2 size={16} className="animate-spin" /> : 'Speichern & Zuweisen'}</Button></>}>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: 'var(--spacing-md)' }}>
+                    Der Kontakt wird als „Dienstleister / Handwerker“ angelegt (nur diese stehen hier zur Auswahl).
+                </p>
                 <Input label="Name / Firma" placeholder="Muster GmbH" value={newContact.name} onChange={e => setNewContact({ ...newContact, name: e.target.value })} />
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                     <Input label="E-Mail" type="email" placeholder="info@..." value={newContact.email} onChange={e => setNewContact({ ...newContact, email: e.target.value })} />
@@ -623,6 +671,12 @@ const RenovationWizard = () => {
             </Modal>
         </div>
     );
+};
+
+const hintBoxStyle = {
+    display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '10px 14px', marginBottom: '12px',
+    borderRadius: 'var(--radius-md)', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)',
+    color: '#b45309', fontSize: '0.82rem', // auch im Dunkelmodus lesbar
 };
 
 const errorBoxStyle = {

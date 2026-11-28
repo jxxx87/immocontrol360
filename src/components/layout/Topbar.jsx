@@ -7,6 +7,7 @@ import NotificationBell from '../ui/NotificationBell';
 import { supabase } from '../../lib/supabase';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useSubscription } from '../../context/SubscriptionContext';
+import { getActiveUnsavedMessage, withoutUnsavedChangesGuard } from '../../lib/useUnsavedChangesGuard';
 
 const DEFAULT_OPENING_HOURS = 'Mo-Fr 9:00 - 17:00 Uhr';
 
@@ -127,10 +128,17 @@ const Topbar = ({ onboardingLocked }) => {
         // roleData: neu laden, wenn sich die Mieterrolle ändert (die Funktion liest sie serverseitig)
     }, [isTenant, roleData]);
 
-    const handleLogout = async () => {
+    // Ungespeicherte Änderungen (useUnsavedChangesGuard) VOR signOut() abfragen – danach wäre die
+    // Sitzung schon beendet. Ohne solche Änderungen fragt nur der mobile Knopf (confirmMessage).
+    const handleLogout = async (confirmMessage = null) => {
+        const question = getActiveUnsavedMessage() || confirmMessage;
+        if (question && !window.confirm(question)) return;
         setActivePopup(null);
-        await signOut();
-        navigate('/login');
+        // Bereits bestätigt: die Navigation zu /login nicht noch einmal abfragen
+        await withoutUnsavedChangesGuard(async () => {
+            await signOut();
+            navigate('/login');
+        });
     };
 
     // Portfolio-Auswahl (Desktop und mobil)
@@ -539,7 +547,7 @@ const Topbar = ({ onboardingLocked }) => {
                                         </button>
                                     )}
                                     <button
-                                        onClick={handleLogout}
+                                        onClick={() => handleLogout()}
                                         style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 10px', border: 'none', background: 'transparent', borderRadius: '6px', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--danger-color, #DC2626)', textAlign: 'left' }}
                                     >
                                         <LogOut size={16} /> Abmelden
@@ -596,9 +604,7 @@ const Topbar = ({ onboardingLocked }) => {
                             <NotificationBell />
                         </div>
                         <button
-                            onClick={() => {
-                                if (window.confirm('Wirklich abmelden? Nicht gespeicherte Eingaben gehen verloren.')) handleLogout();
-                            }}
+                            onClick={() => handleLogout('Wirklich abmelden? Nicht gespeicherte Eingaben gehen verloren.')}
                             title="Abmelden"
                             style={{
                                 display: 'flex',

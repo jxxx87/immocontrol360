@@ -93,6 +93,14 @@ const logoStoragePath = (url) => {
     }
 };
 
+// Best effort: nicht (mehr) verwendete Logos aus dem öffentlichen Bucket entfernen
+const removeLogoPaths = (paths) => {
+    if (!paths.length) return;
+    supabase.storage.from('pdf-assets').remove(paths)
+        .then(({ error }) => { if (error) console.warn('Logo konnte nicht gelöscht werden:', error.message); })
+        .catch(err => console.warn('Logo konnte nicht gelöscht werden:', err));
+};
+
 // ─── Test-PDF (Beispieldaten, klar als Muster erkennbar) ────────────
 const TEST_COLUMNS = ['adresse', 'einheiten', 'kaufpreis', 'marktpreis', 'miete_monat'];
 const TEST_ROWS = [
@@ -102,6 +110,7 @@ const TEST_ROWS = [
 ];
 
 const NO_ROW_SAVED = 'Die Vorlage wurde nicht gespeichert – keine Berechtigung oder die Vorlage existiert nicht mehr. Bitte die Seite neu laden.';
+const OWNER_ONLY_NOTICE = 'Nur der Eigentümer des Portfolios kann die PDF-Vorlage ändern. Sie können die Vorlage ansehen und ein Test-PDF erstellen.';
 const UNSAVED_MESSAGE = 'Es gibt ungespeicherte Änderungen an der PDF-Vorlage. Trotzdem verlassen?';
 const describeSaveError = (err) => {
     const msg = err?.message || String(err || 'Unbekannter Fehler');
@@ -217,6 +226,8 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
     const handleSaveRef = useRef(null);
     const savedLogoUrlRef = useRef(null);
     const uploadedLogoPathsRef = useRef([]);
+    const savingLogoUrlRef = useRef(null);
+    const aliveRef = useRef(true);
     const dragRef = useRef(null);
     const collisionTimerRef = useRef(null);
     const noticeTimerRef = useRef(null);
@@ -226,6 +237,9 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
     const previewRef = useRef(null);
 
     const selectedPortfolio = portfolios.find(p => p.id === portfolioId);
+    // Speichern und Logo-Upload erlaubt die Datenbank nur dem Portfolio-Eigentümer (pdf_templates/pdf-assets),
+    // Mitnutzer sehen die Vorlage im Lesemodus (wie canWriteTemplates in DocumentTemplates.jsx)
+    const canEdit = !selectedPortfolio?.user_id || selectedPortfolio.user_id === userId;
 
     const pageDims = getPageDims(currentOrientation);
     const pageW = pageDims.w;
@@ -280,10 +294,11 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
 
     // Änderung übernehmen: State + Verlaufsschritt + ungespeichert
     const commitLayout = useCallback((changes) => {
+        if (!canEdit) return; // Lesemodus: keine Änderungen
         applyLayout(changes);
         pushHistory();
         markDirty();
-    }, [applyLayout, pushHistory, markDirty]);
+    }, [applyLayout, pushHistory, markDirty, canEdit]);
 
     const flashCollisionWarning = useCallback((hasCollision) => {
         setCollisionWarning(hasCollision);
@@ -438,12 +453,26 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
             .filter(p => p && p !== keepPath && p.startsWith(`logos/${portfolioId}/`));
         uploadedLogoPathsRef.current = [];
         savedLogoUrlRef.current = currentUrl;
-        if (toRemove.length === 0) return;
-        // Best effort: nicht mehr verwendete Logos aus dem öffentlichen Bucket entfernen
-        supabase.storage.from('pdf-assets').remove(toRemove)
-            .then(({ error }) => { if (error) console.warn('Altes Logo konnte nicht gelöscht werden:', error.message); })
-            .catch(err => console.warn('Altes Logo konnte nicht gelöscht werden:', err));
+        removeLogoPaths(toRemove);
     };
+
+    // Verwerfen (Portfoliowechsel „Änderungen verwerfen", Verlassen der Seite, Nutzerwechsel): nicht
+    // gespeicherte Uploads wieder entfernen, sonst bleiben sie dauerhaft im öffentlichen Bucket.
+    // Behalten werden das gespeicherte Logo und ein gerade gespeichertes. Neuladen/Tab schließen
+    // erreicht diese Aufräumung nicht (der Browser bricht laufende Anfragen ab).
+    useEffect(() => {
+        aliveRef.current = true;
+        const uploaded = uploadedLogoPathsRef;
+        const saved = savedLogoUrlRef;
+        const inFlight = savingLogoUrlRef;
+        return () => {
+            aliveRef.current = false;
+            const keep = new Set([logoStoragePath(saved.current), logoStoragePath(inFlight.current)]);
+            const pending = uploaded.current.filter(p => p && !keep.has(p) && p.startsWith(`logos/${portfolioId}/`));
+            uploaded.current = [];
+            removeLogoPaths(pending);
+        };
+    }, [portfolioId]);
 
     const updateTemplateRow = async (payload, id) => {
         let query = supabase.from('pdf_templates').update(payload).eq('portfolio_id', portfolioId);
@@ -454,7 +483,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
     };
 
     const handleSave = async () => {
-        if (!userId || !portfolioId || loading || loadError || savingRef.current) return;
+        if (!userId || !portfolioId || loading || loadError || savingRef.current || !canEdit) return;
         savingRef.current = true;
         setSaving(true);
         const changeAtStart = changeCountRef.current;
@@ -465,6 +494,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
             Object.keys(REPORT_CONFIGS).forEach(rt => { orientationMap[rt] = orientation; });
             orientationMap.global = orientation;
             const safeLogo = sanitizeLogoUrl(logoUrl);
+            savingLogoUrlRef.current = safeLogo;
             const payload = {
                 margin_mm: marginRef.current,
                 header_height_mm: HEADER_H,
@@ -514,6 +544,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
             alert('Fehler beim Speichern: ' + describeSaveError(err));
         } finally {
             savingRef.current = false;
+            savingLogoUrlRef.current = null;
             setSaving(false);
         }
     };
@@ -524,6 +555,10 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
     // ─── Logo Upload ───────────────────────────
     const handleLogoUpload = async (file) => {
         if (!file || !portfolioId) return;
+        if (!canEdit) {
+            alert(OWNER_ONLY_NOTICE);
+            return;
+        }
         const ext = LOGO_TYPES[file.type];
         if (!ext) {
             alert('Bitte ein Logo im Format PNG oder JPG hochladen.');
@@ -543,10 +578,15 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
                 .from('pdf-assets')
                 .upload(path, file, { contentType: file.type, upsert: false });
             if (upErr) throw upErr;
+            // Editor inzwischen verlassen/verworfen: Upload nicht liegen lassen
+            if (!aliveRef.current) {
+                removeLogoPaths([path]);
+                return;
+            }
+            uploadedLogoPathsRef.current = [...uploadedLogoPathsRef.current, path];
             const { data: urlData } = supabase.storage.from('pdf-assets').getPublicUrl(path);
             const safeUrl = sanitizeLogoUrl(urlData?.publicUrl);
             if (!safeUrl) throw new Error('Ungültige Logo-Adresse.');
-            uploadedLogoPathsRef.current = [...uploadedLogoPathsRef.current, path];
             setLogoUrl(safeUrl);
             markDirty();
         } catch (err) {
@@ -592,6 +632,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
         if (!el || el.zone !== activeZone) return;
         setSelectedId(elId);
         setRightTab('properties');
+        if (!canEdit) return; // Lesemodus: auswählen ja, verschieben nein
         const rect = previewRef.current?.getBoundingClientRect();
         if (!rect) return;
         const p = pointerXY(e);
@@ -603,7 +644,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
             origX: el.x,
             origY: el.y,
         });
-    }, [activeZone]);
+    }, [activeZone, canEdit]);
 
     useEffect(() => {
         if (!dragging) return undefined;
@@ -1149,17 +1190,25 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
                 {dirty && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(239,68,68,0.1)', color: '#dc2626', fontWeight: 500 }}>Ungespeichert</span>}
                 {!dirty && saveNotice && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(34,197,94,0.12)', color: '#15803d', fontWeight: 500 }}>✓ {saveNotice}</span>}
                 {collisionWarning && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(245,158,11,0.12)', color: '#d97706', fontWeight: 500 }}>⚠ Layout kollidiert – bitte Elemente anpassen</span>}
+                {!canEdit && <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '10px', background: 'rgba(100,116,139,0.12)', color: 'var(--text-secondary)', fontWeight: 500 }}>Nur lesen</span>}
             </div>
+
+            {!canEdit && (
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', padding: '12px 14px', marginBottom: '16px', borderRadius: 'var(--radius-md)', fontSize: '0.85rem', background: 'rgba(14,165,233,0.06)', border: '1px solid rgba(14,165,233,0.25)', color: 'var(--text-primary)' }}>
+                    <Lock size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div>{OWNER_ONLY_NOTICE}</div>
+                </div>
+            )}
 
             {/* TOOLBAR */}
             <div style={toolbarStyle}>
 
                 <div style={{ display: 'flex', gap: '2px' }}>
-                    <button style={toggleBtnStyle(currentOrientation === 'portrait')} onClick={() => switchOrientation('portrait')} title="Hochformat">⬜ Hoch</button>
-                    <button style={toggleBtnStyle(currentOrientation === 'landscape')} onClick={() => switchOrientation('landscape')} title="Querformat">⬕ Quer</button>
+                    <button style={toggleBtnStyle(currentOrientation === 'portrait')} onClick={() => switchOrientation('portrait')} disabled={!canEdit} title="Hochformat">⬜ Hoch</button>
+                    <button style={toggleBtnStyle(currentOrientation === 'landscape')} onClick={() => switchOrientation('landscape')} disabled={!canEdit} title="Querformat">⬕ Quer</button>
                 </div>
 
-                <select value={margin} onChange={e => changeMargin(e.target.value)} style={selectStyle}>
+                <select value={margin} onChange={e => changeMargin(e.target.value)} disabled={!canEdit} style={selectStyle}>
                     {MARGIN_OPTIONS.map(m => <option key={m} value={m}>Rand {m}mm</option>)}
                 </select>
 
@@ -1179,7 +1228,7 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
                     <button style={iconBtnStyle} onClick={() => setZoom(z => ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, ZOOM_LEVELS.indexOf(z) + 1)] || z)} title="Vergrößern"><ZoomIn size={14} /></button>
                 </div>
 
-                <Button icon={saving ? Loader2 : Save} onClick={handleSave} disabled={saving} style={{ fontSize: '0.8rem' }}>
+                <Button icon={saving ? Loader2 : Save} onClick={handleSave} disabled={saving || !canEdit} title={canEdit ? undefined : OWNER_ONLY_NOTICE} style={{ fontSize: '0.8rem' }}>
                     {saving ? 'Speichert…' : 'Speichern'}
                 </Button>
                 <Button variant="secondary" icon={FileText} onClick={handleTestPdf} style={{ fontSize: '0.8rem' }}>
@@ -1265,7 +1314,10 @@ function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
                         ))}
                     </div>
                     <div style={{ maxHeight: isMobile ? '400px' : 'calc(100vh - 260px)', overflowY: 'auto' }}>
-                        {rightTab === 'elements' ? renderElementsPanel() : renderPropertiesPanel()}
+                        {/* Lesemodus: alle Eingaben (auch Logo-Upload, Farbe, Subtitel) gesperrt */}
+                        <fieldset disabled={!canEdit} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+                            {rightTab === 'elements' ? renderElementsPanel() : renderPropertiesPanel()}
+                        </fieldset>
                     </div>
                 </Card>
             </div>

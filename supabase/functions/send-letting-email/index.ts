@@ -21,6 +21,9 @@ import nodemailer from "npm:nodemailer@6.9.13"
 //    damit die App die deutsche Meldung anzeigen kann (supabase.functions.invoke
 //    liefert bei Nicht-2xx nur eine generische Fehlermeldung).
 //  • Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.168.0.
+//  • Welle 7: gespeicherte Postfächer nur mit erlaubtem Server/Port (A-21),
+//    Mieterdaten-Link-Mail auch für Mitnutzer mit Schreibrecht (B-31),
+//    Eingangsbestätigung ohne pauschale Erfolgsmeldung für Unterlagen (C-27).
 // ───────────────────────────────────────────────────────────────────────────
 
 const corsHeaders = {
@@ -41,6 +44,15 @@ const MAX_ATTACHMENTS = 10
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const MAX_HTML_LENGTH = 500_000
 const ALLOWED_SMTP_PORTS = new Set([25, 465, 587, 2525])
+const INVALID_STORED_SMTP_MSG = 'Ihre gespeicherten E-Mail-Einstellungen nutzen einen nicht erlaubten Server oder Port (erlaubt sind öffentliche Mailserver auf den Ports 25, 465, 587 und 2525). Bitte korrigieren Sie sie unter Einstellungen > E-Mail.'
+
+// Unterlagen des Bewerbungsformulars (PublicLettingPortal.jsx, DOC_CONFIG) – nur für Mailtexte
+const APPLICANT_DOC_LABELS = new Map([
+  ['schufa', 'Schufa-Auskunft'],
+  ['income_proof', 'Gehaltsnachweis'],
+  ['id_copy', 'Ausweiskopie'],
+  ['previous_landlord', 'Vorvermieterbescheinigung'],
+])
 
 const EXISTING_ACCOUNT_MSG = 'Für diese E-Mail-Adresse besteht bereits ein Benutzerkonto, das nicht eindeutig diesem Mieter zugeordnet ist. Aus Sicherheitsgründen wird kein Anmeldelink erzeugt. Der Mieter kann sich mit seinem Passwort bzw. über „Passwort vergessen“ anmelden.'
 
@@ -202,8 +214,8 @@ async function loadSmtpPassword(supabaseAdmin: any, userId: string): Promise<str
   return typeof legacy?.smtp_pass === 'string' ? legacy.smtp_pass : '';
 }
 
-// Nur das eigene Postfach des Nutzers (kein Plattform-Fallback)
-async function getUserSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
+// Gespeicherte Postfach-Einstellungen des Nutzers (ohne Passwort, ungeprüft)
+async function loadUserSmtpSettings(supabaseAdmin: any, userId: string) {
   if (!userId) return null;
   const { data: userSettings, error } = await supabaseAdmin
     .from('user_smtp_settings')
@@ -216,10 +228,33 @@ async function getUserSmtpConfig(supabaseAdmin: any, userId: string): Promise<Sm
     return null;
   }
   if (!userSettings || !userSettings.smtp_host) return null;
+  return userSettings;
+}
+
+// Nur das eigene Postfach des Nutzers (kein Plattform-Fallback).
+// Server und Port müssen dieselbe Prüfung bestehen wie beim Verbindungstest (A-21: kein
+// Verbindungsaufbau zu internen Adressen/Ports über gespeicherte Werte). Ungültige Werte:
+// 'throw' = verständliche Meldung (422) für den angemeldeten Vermieter, 'ignore' = wie
+// "kein eigenes Postfach" (öffentliche Prozess-Mails nehmen dann das Plattform-Postfach).
+async function getUserSmtpConfig(
+  supabaseAdmin: any,
+  userId: string,
+  onInvalid: 'throw' | 'ignore' = 'throw',
+): Promise<SmtpConfig | null> {
+  const userSettings = await loadUserSmtpSettings(supabaseAdmin, userId);
+  if (!userSettings) return null;
+
+  const host = String(userSettings.smtp_host).trim().toLowerCase();
+  const port = Number(userSettings.smtp_port) || 587;
+  if (!isAllowedSmtpHost(host) || !ALLOWED_SMTP_PORTS.has(port)) {
+    console.warn('Stored SMTP settings rejected: host or port not allowed.');
+    if (onInvalid === 'throw') throw new HttpError(422, INVALID_STORED_SMTP_MSG);
+    return null;
+  }
 
   return {
-    host: userSettings.smtp_host,
-    port: Number(userSettings.smtp_port) || 587,
+    host,
+    port,
     user: userSettings.smtp_user,
     pass: await loadSmtpPassword(supabaseAdmin, userId),
     from: userSettings.smtp_sender || userSettings.smtp_user,
@@ -239,8 +274,12 @@ function getPlatformSmtpConfig(): SmtpConfig | null {
   };
 }
 
-async function getNotificationSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
-  const own = await getUserSmtpConfig(supabaseAdmin, userId);
+async function getNotificationSmtpConfig(
+  supabaseAdmin: any,
+  userId: string,
+  onInvalid: 'throw' | 'ignore' = 'throw',
+): Promise<SmtpConfig | null> {
+  const own = await getUserSmtpConfig(supabaseAdmin, userId, onInvalid);
   if (own) {
     console.log('Using custom SMTP settings of the landlord.');
     return own;
@@ -308,9 +347,15 @@ function isAllowedSmtpHost(host: string): boolean {
   if (!/^[a-z0-9.-]+$/.test(host)) return false; // keine IPv6-Literale, keine Sonderzeichen
   if (!host.includes('.')) return false;
   if (host === 'localhost' || /\.(localhost|local|internal|lan|home|intranet)$/.test(host)) return false;
+  const labels = host.split('.');
+  if (labels.some((label) => label === '')) return false;
   const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  // Kurz-, Oktal- und Hex-Schreibweisen (127.1, 10.0x1, 012.0.0.1) löst der Resolver als
+  // IP-Adresse auf -> nur die übliche Schreibweise a.b.c.d zulassen (echte TLDs sind nie numerisch)
+  if (!ipv4 && /^(0x[0-9a-f]*|\d+)$/.test(labels[labels.length - 1])) return false;
   if (ipv4) {
     const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    if ([ipv4[1], ipv4[2], ipv4[3], ipv4[4]].some((p) => p.length > 1 && p.startsWith('0'))) return false;
     if ([ipv4[1], ipv4[2], ipv4[3], ipv4[4]].some((p) => Number(p) > 255)) return false;
     if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
     if (a === 169 && b === 254) return false;
@@ -846,10 +891,11 @@ Deno.serve(async (req) => {
         throw new HttpError(422, 'Bitte geben Sie gültige SMTP-Zugangsdaten an.');
       }
       // Ist das Passwort im Formular leer, das gespeicherte Passwort desselben Kontos verwenden
+      // (nur bei gleichem Server und Benutzer; Server und Port sind oben schon geprüft)
       if (!smtpPass) {
-        const stored = await getUserSmtpConfig(supabaseAdmin, caller.id);
-        if (stored && String(stored.host).trim().toLowerCase() === host && stored.user === smtpUser) {
-          smtpPass = stored.pass;
+        const stored = await loadUserSmtpSettings(supabaseAdmin, caller.id);
+        if (stored && String(stored.smtp_host).trim().toLowerCase() === host && stored.smtp_user === smtpUser) {
+          smtpPass = await loadSmtpPassword(supabaseAdmin, caller.id);
         }
       }
       const from = oneLine(settings.smtp_sender || smtpUser, 320);
@@ -987,7 +1033,27 @@ Deno.serve(async (req) => {
           supabaseAdmin.from('tenants').select('id').eq('user_id', caller.id).ilike('email', likeTo).limit(1),
           supabaseAdmin.from('contacts').select('id').eq('user_id', caller.id).ilike('email', likeTo).limit(1),
         ]);
-        const isOwnRecipient = (ownTenant && ownTenant.length > 0) || (ownContact && ownContact.length > 0);
+        let isOwnRecipient = (ownTenant && ownTenant.length > 0) || (ownContact && ownContact.length > 0);
+        // Mieterdaten-Link (B-31): auch Mitnutzer mit Schreibrecht "mietverhaeltnisse" (wie beim
+        // Erzeugen des Links per RLS), nur an die beim Mieter hinterlegte Adresse und nur zu
+        // einem gültigen (nicht abgelaufenen, noch nicht benutzten) Link dieses Mieters
+        const linkTenantId = payload.tenantId ?? payload.tenant_id;
+        const linkId = payload.linkId ?? payload.link_id;
+        if (!isOwnRecipient && payload.purpose === 'tenant_data_update' && isUuid(linkTenantId) && isUuid(linkId)) {
+          const tenant = await getWritableTenant(supabaseAdmin, caller, linkTenantId);
+          if (tenant && normEmail(tenant.email) === to) {
+            const { data: link, error: linkErr } = await supabaseAdmin
+              .from('tenant_verification_links')
+              .select('id')
+              .eq('id', linkId)
+              .eq('tenant_id', tenant.id)
+              .eq('is_updated', false)
+              .gt('expires_at', new Date().toISOString())
+              .maybeSingle();
+            if (linkErr) console.error('Verification link lookup failed:', linkErr.message);
+            isOwnRecipient = !!link;
+          }
+        }
         const platform = isOwnRecipient ? getPlatformSmtpConfig() : null;
         if (!platform) {
           throw new HttpError(422, 'Für den Versand eigener E-Mails richten Sie bitte zuerst Ihr E-Mail-Postfach unter Einstellungen > E-Mail ein.');
@@ -1025,7 +1091,8 @@ Deno.serve(async (req) => {
       if (applicant.received_mail_sent_at) {
         throw new HttpError(409, 'Die Eingangsbestätigung wurde bereits verschickt.');
       }
-      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      // Ungültiges gespeichertes Postfach wie "kein eigenes Postfach" behandeln (A-21)
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id, 'ignore');
       if (!config) return noProcessMailConfig();
       const claim: MailClaim = {
         table: 'rental_applicants',
@@ -1047,6 +1114,17 @@ Deno.serve(async (req) => {
         const incomeStr = applicant.monthly_income !== null && applicant.monthly_income !== undefined && Number.isFinite(income)
           ? income.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
           : 'Keine Angabe';
+        // Nicht übertragene Unterlagen meldet die Bewerbungsseite (C-27). Nur bekannte Typen,
+        // nur für den Mailtext – die Unterlagen selbst liegen im Speicher bzw. in der Cloud.
+        const failedDocs = Array.isArray(payload.failed_documents ?? payload.failedDocuments)
+          ? (payload.failed_documents ?? payload.failedDocuments).slice(0, 20)
+          : [];
+        const failedLabels = [...new Set(
+          failedDocs
+            .filter((docType: unknown) => typeof docType === 'string' && APPLICANT_DOC_LABELS.has(docType))
+            .map((docType: string) => APPLICANT_DOC_LABELS.get(docType) as string),
+        )];
+        const safeFailedList = escapeHtml(failedLabels.join(', '));
 
         // Email template to applicant (Tenant)
         const tenantHtml = `
@@ -1057,7 +1135,8 @@ Deno.serve(async (req) => {
           <div style="padding: 20px; color: #1e293b; line-height: 1.6;">
             <p>Hallo ${firstName} ${lastName},</p>
             <p>vielen Dank für Ihr Interesse an der Wohnung <strong>${safeTitle}</strong>${safeAddress ? ` (${safeAddress})` : ''}.</p>
-            <p>Ihre Selbstauskunft und Unterlagen wurden erfolgreich an uns übermittelt.</p>
+            <p>Ihre Selbstauskunft ist bei uns eingegangen.</p>
+            ${failedLabels.length > 0 ? `<p>Folgende Unterlagen konnten dabei nicht übertragen werden: <strong>${safeFailedList}</strong>. Bitte reichen Sie diese nach Rücksprache mit uns nach.</p>` : ''}
             <p>Sie können sich jetzt direkt online Ihren Wunschtermin für die Besichtigung aussuchen:</p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${bookingLink}" style="background-color: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Besichtigungstermin wählen</a>
@@ -1095,6 +1174,7 @@ Deno.serve(async (req) => {
                 <td style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">${escapeHtml(incomeStr)}</td>
               </tr>
             </table>
+            ${failedLabels.length > 0 ? `<p><strong>Hinweis:</strong> Laut Bewerbungsseite konnten folgende Unterlagen nicht übertragen werden: ${safeFailedList}.</p>` : ''}
             <p>Die vollständige Selbstauskunft sowie alle hochgeladenen Dokumente finden Sie direkt in Ihrem Vermietungscockpit oder im Objektordner in der Cloud.</p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${APP_ORIGIN}/letting" style="background-color: #1e293b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Zum Vermietungscockpit</a>
@@ -1123,7 +1203,8 @@ Deno.serve(async (req) => {
         throw new HttpError(409, 'Die Terminbestätigung kann nur direkt nach der Buchung verschickt werden.');
       }
       if (booking.confirmed_mail_sent_at) throw new HttpError(409, 'Die Terminbestätigung wurde bereits verschickt.');
-      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      // Ungültiges gespeichertes Postfach wie "kein eigenes Postfach" behandeln (A-21)
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id, 'ignore');
       if (!config) return noProcessMailConfig();
       const claim: MailClaim = {
         table: 'rental_viewing_bookings',
@@ -1217,7 +1298,8 @@ Deno.serve(async (req) => {
         throw new HttpError(409, 'Die Absagebestätigung kann nur direkt nach der Stornierung verschickt werden.');
       }
       if (booking.canceled_mail_sent_at) throw new HttpError(409, 'Die Absagebestätigung wurde bereits verschickt.');
-      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      // Ungültiges gespeichertes Postfach wie "kein eigenes Postfach" behandeln (A-21)
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id, 'ignore');
       if (!config) return noProcessMailConfig();
       const claim: MailClaim = {
         table: 'rental_viewing_bookings',

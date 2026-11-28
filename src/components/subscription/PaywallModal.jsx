@@ -5,13 +5,15 @@ import { supabase } from '../../lib/supabase';
 import { Check, X, Loader2, Crown, Shield, Zap, Star } from 'lucide-react';
 
 /* ─── Plan Data ──────────────────────────────────────────── */
+// Leistungen wie auf der Website (immowebsite/src/lib/plans.js) – nur bewerben, was die App kann.
+// Bei Änderungen beide Listen gemeinsam anpassen (getrennte Builds, keine gemeinsame Datei).
 const PLANS = [
     {
         id: 'starter',
         title: 'Starter',
         monthly: '9,99',
         yearly: '8,99',
-        features: ['Bis zu 5 Einheiten', 'Grundlegende Buchhaltung', 'E-Mail Support'],
+        features: ['Bis zu 5 Einheiten', 'Immobilien & Mieterverwaltung', 'Finanzen', 'Nebenkostenabrechnung', 'Zählermanagement'],
         accent: '#64748b',      // slate
         accentLight: '#f1f5f9',
     },
@@ -20,7 +22,7 @@ const PLANS = [
         title: 'Professional',
         monthly: '32,99',
         yearly: '29,69',
-        features: ['Bis zu 50 Einheiten', 'Mieterportal Zugänge', 'Investorportal', 'Automatisierungen'],
+        features: ['Bis zu 50 Einheiten', 'Alles aus dem Starter inbegriffen', 'Mieterportal', 'Investorportal'],
         accent: '#0ea5e9',      // sky / primary
         accentLight: '#e0f2fe',
         popular: true,
@@ -30,11 +32,20 @@ const PLANS = [
         title: 'Business',
         monthly: '59,99',
         yearly: '53,99',
-        features: ['Bis zu 250 Einheiten', 'Multi-User (Teams)', 'API-Zugriff', 'Priorisierter Support'],
+        features: ['Bis zu 250 Einheiten', 'Alles aus Professional inbegriffen', 'Multi-User Zugriff', 'Priorisierter Support'],
         accent: '#f59e0b',      // amber
         accentLight: '#fef3c7',
     },
 ];
+
+// Auf der Website gewählte Zahlweise (Register.jsx speichert ?cycle=… unter diesem Schlüssel)
+const PREFERRED_CYCLE_KEY = 'preferredBillingCycle';
+const readPreferredCycle = () => {
+    try {
+        const value = localStorage.getItem(PREFERRED_CYCLE_KEY);
+        return value === 'monthly' || value === 'yearly' ? value : null;
+    } catch { return null; }
+};
 
 // Stripe-Status, bei denen ein Abo noch läuft (dann kein neuer Checkout, sondern Kundenportal)
 const RUNNING_STATUSES = ['active', 'trialing', 'past_due', 'unpaid', 'paused'];
@@ -44,7 +55,10 @@ const PaywallModal = () => {
     const { showPaywall, setShowPaywall, paywallReason, subscription } = useSubscription();
     const { session } = useAuth();
     const [loadingPlan, setLoadingPlan] = useState(null);
-    const [billingPeriod, setBillingPeriod] = useState('yearly');
+    // null = im Dialog noch nicht umgeschaltet → auf der Website gewählte Zahlweise, sonst jährlich.
+    // Beim Rendern gelesen, nicht beim Einhängen: der Dialog hängt schon vor der Registrierung im Baum.
+    const [chosenPeriod, setBillingPeriod] = useState(null);
+    const billingPeriod = chosenPeriod || readPreferredCycle() || 'yearly';
     const dialogRef = useRef(null);
 
     const isMonthly = billingPeriod === 'monthly';
@@ -81,7 +95,7 @@ const PaywallModal = () => {
             // Laufendes Stripe-Abo: kein zweites Abo anlegen, Tarifwechsel über das Kundenportal
             if (subscription?.stripe_subscription_id && RUNNING_STATUSES.includes(subscription.status)) {
                 const { data: portal, error: portalError } = await supabase.functions.invoke('create-portal-session', {
-                    body: { user_id: session.user.id, return_url: `${window.location.origin}/settings` },
+                    body: { user_id: session.user.id, return_url: `${window.location.origin}/settings?tab=billing` },
                 });
                 if (portalError || !portal?.url) {
                     throw new Error(portal?.message || 'Das Stripe-Kundenportal konnte nicht geöffnet werden.');

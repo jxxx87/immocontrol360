@@ -157,6 +157,10 @@ const mayLeaveTemplatesTab = (currentTab, templatesDirty, nextTab) =>
     currentTab !== 'document-templates' || nextTab === 'document-templates' || !templatesDirty
     || window.confirm(TEMPLATES_UNSAVED_MESSAGE);
 
+// Reiter, die per ?tab=… geöffnet werden dürfen (Rückkehr aus Stripe-Kundenportal/-Checkout:
+// eine externe Weiterleitung bringt keinen Router-State mit)
+const URL_TAB_IDS = ['billing'];
+
 const Settings = () => {
     const { user } = useAuth();
     const { isMobile } = useViewMode();
@@ -225,6 +229,29 @@ const Settings = () => {
             }
         }
         acceptedLocationStateRef.current = location.state;
+    }, [location, navigate]);
+
+    // ?tab=billing (return_url/cancel_url von Stripe): Reiter öffnen und den Parameter wieder entfernen,
+    // damit Neuladen/Zurück nicht erneut umschalten. Router-State bleibt unverändert.
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const urlTab = params.get('tab');
+        if (urlTab === null) return;
+        // Der Effekt oben stellt gerade einen abgebrochenen Wechsel wieder her: erst danach auswerten
+        if (restoringLocationRef.current) return;
+        params.delete('tab');
+        const search = params.toString();
+        // Gleicher State → der location-Effekt oben soll ihn nicht erneut auswerten
+        restoringLocationRef.current = true;
+        navigate(
+            { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash },
+            { replace: true, state: location.state }
+        );
+        if (!URL_TAB_IDS.includes(urlTab)) return;
+        if (!mayLeaveTemplatesTab(activeTabRef.current, templatesDirtyRef.current, urlTab)) return;
+        setTemplatesDirty(false);
+        setActiveTab(urlTab);
+        setIsSidebarCollapsed(false);
     }, [location, navigate]);
 
     // Push-Schalter (eigener State statt Hilfsfeld im Profil, das sonst mitgespeichert würde)
@@ -613,7 +640,16 @@ const Settings = () => {
             alert('Standard-Kostenarten können nicht gelöscht werden.');
             return;
         }
-        if (!window.confirm('Kostenart löschen?')) return;
+        // Buchungen behalten die Kostenart nicht (FK ON DELETE SET NULL) und fallen dann aus der NK-Abrechnung
+        const usedBy = await countRows('expenses', 'id', 'category_id', row.id);
+        const usageText = usedBy === null
+            ? 'Ob Buchungen diese Kostenart verwenden, konnte nicht geprüft werden. Buchungen dieser Kostenart verlieren beim Löschen ihre Kostenart und fehlen dann in künftigen Nebenkostenabrechnungen.'
+            : usedBy > 0
+                ? `${usedBy} Buchung(en) verwenden diese Kostenart. Sie verlieren beim Löschen ihre Kostenart und fehlen dann in künftigen Nebenkostenabrechnungen, bis Sie die Kostenart je Buchung neu setzen.`
+                : '';
+        if (!window.confirm(usageText
+            ? `Kostenart „${row.name}“ löschen?\n\n${usageText}\n\nDas Löschen lässt sich nicht rückgängig machen.`
+            : 'Kostenart löschen?')) return;
         try {
             const { data, error } = await supabase.from('expense_categories').delete().eq('id', row.id).select('id');
             if (error) throw error;
@@ -683,7 +719,16 @@ const Settings = () => {
     };
 
     const handleDeleteKey = async (id) => {
-        if (!window.confirm('Schlüssel löschen?')) return;
+        // Kostenarten verlieren ihren Standard-Schlüssel (FK ON DELETE SET NULL); der NK-Assistent nimmt dann Wohnfläche
+        const usedBy = await countRows('expense_categories', 'id', 'distribution_key_id', id);
+        const usageText = usedBy === null
+            ? 'Ob Kostenarten diesen Schlüssel als Standard verwenden, konnte nicht geprüft werden. Solche Kostenarten verlieren beim Löschen ihren Standard-Schlüssel und werden in neuen Nebenkostenabrechnungen zunächst nach Wohnfläche verteilt.'
+            : usedBy > 0
+                ? `${usedBy} Kostenart(en) verwenden diesen Schlüssel als Standard. Sie verlieren beim Löschen ihren Standard-Schlüssel und werden in neuen Nebenkostenabrechnungen zunächst nach Wohnfläche verteilt, bis Sie einen anderen Schlüssel zuordnen.`
+                : '';
+        if (!window.confirm(usageText
+            ? `Schlüssel löschen?\n\n${usageText}\n\nDas Löschen lässt sich nicht rückgängig machen.`
+            : 'Schlüssel löschen?')) return;
         try {
             const { data, error } = await supabase.from('distribution_keys').delete().eq('id', id).select('id');
             if (error) throw error;
@@ -919,6 +964,8 @@ const Settings = () => {
         }
     };
 
+    // Tarifmerkmal „Multi-User" (nur Business) wird beim Teilen bewusst noch NICHT geprüft – offene
+    // Geschäftsentscheidung (bestehende Professional-Konten mit Freigaben)
     const openShareModal = (row) => { setSharePortfolioId(row.id); setIsShareModalOpen(true); };
 
     // Aktionen je Portfolio: Teilen/Bearbeiten/Löschen nur für den Eigentümer
@@ -1020,12 +1067,14 @@ const Settings = () => {
         { key: 'dashboard', label: 'Dashboard' },
         { key: 'properties', label: 'Immobilien' },
         { key: 'tenants', label: 'Mietverhältnisse' },
+        { key: 'forderungen', label: 'Forderungen' },
         { key: 'finance', label: 'Finanzen' },
         { key: 'utility-costs', label: 'Nebenkosten' },
         { key: 'meters', label: 'Zähler' },
         { key: 'contacts', label: 'Kontakte' },
         { key: 'mieterportal', label: 'Mieterportal' },
         { key: 'investorportal', label: 'Investorportal' },
+        { key: 'cloud-documents', label: 'Dokumente' },
     ];
 
     const isNavVisible = (key) => navVisibility[key] !== false;

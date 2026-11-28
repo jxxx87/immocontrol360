@@ -7,6 +7,8 @@ import {
 import Button from '../../components/ui/Button';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { usePortfolio } from '../../context/PortfolioContext';
+import { usePermission } from '../../context/PermissionContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { translateError } from '../../lib/errorTranslator';
 
@@ -19,8 +21,26 @@ const TYPE_LABELS = {
 
 const RenovationCalculator = () => {
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
     const navigate = useNavigate();
+
+    // Schreibrecht wie die RLS von renovation_calculations: mit Objekt Schreibrecht „Immobilien“
+    // oder „Investorportal“ im Portfolio des Objekts, ohne Objekt nur das eigene Konto.
+    // Solange die Freigaben laden, nicht sperren (die Datenbank prüft zusätzlich).
+    const canWriteReno = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId
+            ? perm.canWrite('immobilien', portfolioId) || perm.canWrite('investorportal', portfolioId)
+            : perm.canWrite('immobilien') || perm.canWrite('investorportal');
+    };
+    const canEditCalc = (c) => {
+        if (!c.property_id) return c.user_id === user?.id;
+        const pid = c.property?.portfolio_id;
+        return pid ? canWriteReno(pid) : !perm || perm.loadingPermissions;
+    };
+    const canCreateCalc = !selectedPortfolioID || canWriteReno(selectedPortfolioID);
 
     const [calculations, setCalculations] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -38,8 +58,8 @@ const RenovationCalculator = () => {
             const { data, error } = await supabase
                 .from('renovation_calculations')
                 .select(`
-                    id, name, calc_type, total_cost, created_at,
-                    property:properties(street, house_number, city),
+                    id, user_id, property_id, name, calc_type, total_cost, created_at,
+                    property:properties(street, house_number, city, portfolio_id),
                     unit:units(unit_name)
                 `)
                 .order('created_at', { ascending: false });
@@ -60,6 +80,8 @@ const RenovationCalculator = () => {
 
     const handleDelete = async (id, e) => {
         e.stopPropagation();
+        const calc = calculations.find(c => c.id === id);
+        if (calc && !canEditCalc(calc)) return;
         if (!window.confirm('Kalkulation endgültig löschen?')) return;
         setDeletingId(id);
         try {
@@ -82,13 +104,20 @@ const RenovationCalculator = () => {
         }
     };
 
+    // Gewähltes Portfolio: dessen Kalkulationen plus eigene ohne Objekt (gehören zu keinem
+    // Portfolio, z. B. nur mit einem Deal verknüpft – sie würden sonst nirgends erscheinen)
+    const scopedCalculations = useMemo(() => {
+        if (!selectedPortfolioID) return calculations;
+        return calculations.filter(c => !c.property_id || c.property?.portfolio_id === selectedPortfolioID);
+    }, [calculations, selectedPortfolioID]);
+
     const enriched = useMemo(() => {
-        return calculations.map(c => {
+        return scopedCalculations.map(c => {
             const propertyLabel = c.property ? `${c.property.street} ${c.property.house_number || ''}, ${c.property.city}` : null;
             const unitLabel = c.unit?.unit_name || null;
             return { ...c, total: Number(c.total_cost || 0), propertyLabel, unitLabel };
         });
-    }, [calculations]);
+    }, [scopedCalculations]);
 
     const filtered = useMemo(() => {
         if (!searchTerm) return enriched;
@@ -141,9 +170,11 @@ const RenovationCalculator = () => {
                 }}>
                     <Calculator size={48} style={{ opacity: 0.3, marginBottom: '12px' }} />
                     <p>Noch keine Kalkulationen erstellt.</p>
-                    <Button icon={Plus} onClick={() => navigate('/renovation/calculator/new')} style={{ marginTop: '16px' }}>
-                        Neue Kalkulation
-                    </Button>
+                    {canCreateCalc && (
+                        <Button icon={Plus} onClick={() => navigate('/renovation/calculator/new')} style={{ marginTop: '16px' }}>
+                            Neue Kalkulation
+                        </Button>
+                    )}
                 </div>
             ) : filtered.length === 0 ? (
                 <div style={{
@@ -196,14 +227,16 @@ const RenovationCalculator = () => {
                                         </div>
                                     </div>
                                     <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                                        <button
-                                            onClick={(e) => handleDelete(c.id, e)}
-                                            disabled={deletingId === c.id}
-                                            title="Kalkulation löschen"
-                                            style={{ background: 'none', border: 'none', cursor: deletingId === c.id ? 'wait' : 'pointer', color: 'var(--text-secondary)', padding: '4px' }}
-                                        >
-                                            {deletingId === c.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                                        </button>
+                                        {canEditCalc(c) && (
+                                            <button
+                                                onClick={(e) => handleDelete(c.id, e)}
+                                                disabled={deletingId === c.id}
+                                                title="Kalkulation löschen"
+                                                style={{ background: 'none', border: 'none', cursor: deletingId === c.id ? 'wait' : 'pointer', color: 'var(--text-secondary)', padding: '4px' }}
+                                            >
+                                                {deletingId === c.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                            </button>
+                                        )}
                                         <ArrowRight size={16} color="var(--text-secondary)" />
                                     </div>
                                 </div>

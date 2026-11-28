@@ -246,7 +246,8 @@ Deno.serve(async (req: Request) => {
             const portalCustomer = typeof running.customer === "string" ? running.customer : running.customer?.id;
             const portal = await stripePost("/billing_portal/sessions", {
                 customer: portalCustomer || customerId || "",
-                return_url: `${baseUrl}/settings`,
+                // ?tab=billing: Einstellungen öffnen direkt „Abrechnung & Abo“ (Settings.jsx)
+                return_url: `${baseUrl}/settings?tab=billing`,
             });
             console.log(`User ${userId} already has running subscription ${running.id} (${running.status}) → portal`);
             return json({
@@ -273,7 +274,7 @@ Deno.serve(async (req: Request) => {
             "line_items[0][quantity]": "1",
             mode: "subscription",
             success_url: `${baseUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `${baseUrl}/settings`,
+            cancel_url: `${baseUrl}/settings?tab=billing`,
             "metadata[user_id]": userId,
             "subscription_data[metadata][user_id]": userId,
             "subscription_data[metadata][plan]": plan_id,

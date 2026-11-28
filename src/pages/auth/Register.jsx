@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import AuthLayout from '../../components/layout/AuthLayout';
 import Button from '../../components/ui/Button';
@@ -18,6 +18,15 @@ const TRIAL_PLANS = {
     business: 'Business',
 };
 
+// Zahlweise von der Website (/abo-starten → ?cycle=…); PaywallModal belegt damit den Umschalter vor
+const PREFERRED_CYCLE_KEY = 'preferredBillingCycle';
+
+// Bestehende Adresse (Supabase-Code oder ältere Meldung): neutral antworten – verrät nicht, ob es ein Konto gibt
+const isExistingAccountError = (err) =>
+    err?.code === 'user_already_exists' || err?.code === 'email_exists'
+    || /already (been )?registered/i.test(err?.message || '');
+const NEUTRAL_SIGNUP_MESSAGE = 'Die Registrierung mit diesen Daten ist nicht möglich. Falls Sie bereits ein Konto haben, melden Sie sich bitte über „Hier anmelden" an oder setzen Sie dort Ihr Passwort zurück.';
+
 const Register = () => {
     const location = useLocation();
     const queryParams = new URLSearchParams(location.search);
@@ -26,6 +35,13 @@ const Register = () => {
     const plan = rawPlan
         ? (TRIAL_PLANS[rawPlan.trim().toLowerCase()] ? rawPlan.trim().toLowerCase() : 'professional')
         : null;
+    const rawCycle = (queryParams.get('cycle') || '').trim().toLowerCase();
+    const cycle = rawCycle === 'monthly' || rawCycle === 'yearly' ? rawCycle : null;
+
+    useEffect(() => {
+        if (!cycle) return;
+        try { localStorage.setItem(PREFERRED_CYCLE_KEY, cycle); } catch { /* Speicher nicht verfügbar */ }
+    }, [cycle]);
 
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -91,20 +107,24 @@ const Register = () => {
                 // Redirect to Dashboard (Trial active!)
                 navigate('/');
             } else {
-                // STANDARD FLOW: Normal registration (requires email confirmation usually)
-                const { error } = await signUp({ email, password });
+                // STANDARD FLOW: Normal registration
+                const { data, error } = await signUp({ email: email.trim().toLowerCase(), password });
                 if (error) throw error;
 
-                alert('Registrierung erfolgreich! Bitte prüfen Sie Ihre E-Mails zur Bestätigung.');
-                navigate('/login');
+                if (data?.session) {
+                    // E-Mail-Bestätigung ist aus: Supabase meldet direkt an
+                    navigate('/');
+                    return;
+                }
+                // Bestätigung nötig (bei bestehender Adresse liefert Supabase dieselbe Antwort ohne Fehler)
+                setInfo('Registrierung fast abgeschlossen: Bitte bestätigen Sie Ihre E-Mail-Adresse über den Link, den wir Ihnen geschickt haben. Danach können Sie sich anmelden.');
             }
 
         } catch (error) {
             console.error(error);
-            const raw = error?.message || '';
             // Deutsche Meldungen (register-trial, eigene Texte) bleiben, englische Supabase-Texte werden übersetzt
-            setError(/already registered/i.test(raw)
-                ? 'Diese E-Mail wird bereits verwendet.'
+            setError(isExistingAccountError(error)
+                ? NEUTRAL_SIGNUP_MESSAGE
                 : translateError(error));
         } finally {
             setLoading(false);

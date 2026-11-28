@@ -1,15 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { useViewMode } from '../../context/ViewModeContext';
+import { translateError } from '../../lib/errorTranslator';
 import { User, Lock, Key, CheckCircle, AlertCircle, Phone, Mail, Home, Calendar, ShieldCheck, Wallet } from 'lucide-react';
 
 const isActiveStatus = (status) => ['active', 'aktiv'].includes(String(status || '').toLowerCase());
 
+const TENANT_MISSING_TEXT = 'Ihr Mieterdatensatz wurde nicht gefunden – bitte wenden Sie sich an Ihren Vermieter.';
+
 const TenantStamdaten = () => {
     const { user, roleData } = useAuth();
+    const { isMobile } = useViewMode();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    
+    // Kein Mieterdatensatz (Rolle ohne Mieter-ID oder Datensatz nicht lesbar): Formular sperren statt still nichts zu tun
+    const [tenantMissing, setTenantMissing] = useState(false);
+
     // Stammdaten Form
     const [tenantData, setTenantData] = useState({
         first_name: '',
@@ -45,10 +52,15 @@ const TenantStamdaten = () => {
     useEffect(() => {
         const fetchAllData = async () => {
             if (!tenantId) {
+                setTenantMissing(true);
+                setMessage({ type: 'error', text: TENANT_MISSING_TEXT });
                 setLoading(false);
                 return;
             }
 
+            setTenantMissing(false);
+            // Alten „nicht gefunden“-Hinweis entfernen, falls die Rolle inzwischen eine Mieter-ID hat
+            setMessage(prev => (prev.text === TENANT_MISSING_TEXT ? { type: '', text: '' } : prev));
             try {
                 // Mieterdaten: nur die benötigten Spalten. Vertrag mit Einheit und Objektadresse über die
                 // eingeschränkte Mieter-Sicht get_my_tenancy (keine direkten Abfragen auf Objekt/Einheit)
@@ -95,6 +107,10 @@ const TenantStamdaten = () => {
                         postal_code: tenant.postal_code || '',
                         city: tenant.city || ''
                     });
+                } else {
+                    // Kein Datensatz lesbar (z. B. gelöscht): Hinweis statt leerem, wirkungslosem Formular
+                    setTenantMissing(true);
+                    setMessage({ type: 'error', text: TENANT_MISSING_TEXT });
                 }
             } catch (err) {
                 console.error('Error fetching tenant details:', err);
@@ -111,7 +127,10 @@ const TenantStamdaten = () => {
 
     const handleSaveStammdaten = async (e) => {
         e.preventDefault();
-        if (!tenantId) return;
+        if (!tenantId || tenantMissing) {
+            setMessage({ type: 'error', text: TENANT_MISSING_TEXT });
+            return;
+        }
 
         setSaving(true);
         setMessage({ type: '', text: '' });
@@ -183,7 +202,8 @@ const TenantStamdaten = () => {
             await supabase.auth.getSession();
         } catch (err) {
             console.error('Error setting password:', err);
-            setPasswordStatus({ type: 'error', message: 'Fehler beim Einrichten des Passworts.' });
+            // Grund nennen (z. B. zu schwach, gleiches Passwort, Sitzung abgelaufen)
+            setPasswordStatus({ type: 'error', message: `Fehler beim Einrichten des Passworts: ${translateError(err)}` });
         } finally {
             setSaving(false);
         }
@@ -239,7 +259,7 @@ const TenantStamdaten = () => {
             )}
 
             {/* Main Layout Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr)', gap: '24px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1.2fr) minmax(0, 1fr)', gap: '24px' }}>
                 
                 {/* Left Side: Personal Data & Lease */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -256,139 +276,142 @@ const TenantStamdaten = () => {
                         </h2>
                         
                         <form onSubmit={handleSaveStammdaten} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                                <div>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Vorname</label>
-                                    <input
-                                        type="text"
-                                        value={tenantData.first_name}
-                                        onChange={e => setTenantData({ ...tenantData, first_name: e.target.value })}
-                                        style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
-                                        required
-                                    />
+                            {/* Ohne Mieterdatensatz gesperrt (Speichern hätte keine Wirkung) */}
+                            <fieldset disabled={tenantMissing} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px' }}>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Vorname</label>
+                                        <input
+                                            type="text"
+                                            value={tenantData.first_name}
+                                            onChange={e => setTenantData({ ...tenantData, first_name: e.target.value })}
+                                            style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
+                                            required
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Nachname</label>
+                                        <input
+                                            type="text"
+                                            value={tenantData.last_name}
+                                            onChange={e => setTenantData({ ...tenantData, last_name: e.target.value })}
+                                            style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
+                                            required
+                                        />
+                                    </div>
                                 </div>
-                                <div>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Nachname</label>
-                                    <input
-                                        type="text"
-                                        value={tenantData.last_name}
-                                        onChange={e => setTenantData({ ...tenantData, last_name: e.target.value })}
-                                        style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
-                                        required
-                                    />
-                                </div>
-                            </div>
 
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                                <div>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>E-Mail-Adresse</label>
-                                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                                        <Mail size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
-                                        <input
-                                            type="email"
-                                            value={tenantData.email}
-                                            style={{ width: '100%', padding: '10px 12px 10px 36px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: '#F8FAFC', color: 'var(--text-secondary)', fontSize: '0.9rem', outline: 'none', cursor: 'not-allowed' }}
-                                            disabled
-                                            title="E-Mail kann nicht geändert werden"
-                                        />
+                                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px' }}>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>E-Mail-Adresse</label>
+                                        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                                            <Mail size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
+                                            <input
+                                                type="email"
+                                                value={tenantData.email}
+                                                style={{ width: '100%', padding: '10px 12px 10px 36px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: '#F8FAFC', color: 'var(--text-secondary)', fontSize: '0.9rem', outline: 'none', cursor: 'not-allowed' }}
+                                                disabled
+                                                title="E-Mail kann nicht geändert werden"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Telefonnummer</label>
+                                        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                                            <Phone size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
+                                            <input
+                                                type="text"
+                                                value={tenantData.phone}
+                                                onChange={e => setTenantData({ ...tenantData, phone: e.target.value })}
+                                                placeholder="z.B. +49 170 1234567"
+                                                style={{ width: '100%', padding: '10px 12px 10px 36px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
+                                            />
+                                        </div>
                                     </div>
                                 </div>
-                                <div>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>Telefonnummer</label>
-                                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                                        <Phone size={16} color="var(--text-secondary)" style={{ position: 'absolute', left: '12px' }} />
-                                        <input
-                                            type="text"
-                                            value={tenantData.phone}
-                                            onChange={e => setTenantData({ ...tenantData, phone: e.target.value })}
-                                            placeholder="z.B. +49 170 1234567"
-                                            style={{ width: '100%', padding: '10px 12px 10px 36px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.9rem', outline: 'none' }}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
 
-                            <div style={{ borderTop: '1px solid var(--border-color)', margin: '8px 0', padding: '16px 0 0 0' }}>
-                                <h3 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>Anschrift (Meldeadresse)</h3>
-                                {!hasOwnAddress && propertyAddress.street && (
-                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: 1.4 }}>
-                                        Noch keine eigene Anschrift hinterlegt. Grau vorgeschlagen ist die Anschrift Ihres Mietobjekts –
-                                        sie wird nur gespeichert, wenn Sie sie eintragen.{' '}
-                                        <button
-                                            type="button"
-                                            onClick={() => setTenantData({ ...tenantData, ...propertyAddress })}
-                                            style={{ background: 'none', border: 'none', padding: 0, color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, textDecoration: 'underline' }}
-                                        >
-                                            Anschrift des Mietobjekts übernehmen
-                                        </button>
+                                <div style={{ borderTop: '1px solid var(--border-color)', margin: '8px 0', padding: '16px 0 0 0' }}>
+                                    <h3 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>Anschrift (Meldeadresse)</h3>
+                                    {!hasOwnAddress && propertyAddress.street && (
+                                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: 1.4 }}>
+                                            Noch keine eigene Anschrift hinterlegt. Grau vorgeschlagen ist die Anschrift Ihres Mietobjekts –
+                                            sie wird nur gespeichert, wenn Sie sie eintragen.{' '}
+                                            <button
+                                                type="button"
+                                                onClick={() => setTenantData({ ...tenantData, ...propertyAddress })}
+                                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, textDecoration: 'underline' }}
+                                            >
+                                                Anschrift des Mietobjekts übernehmen
+                                            </button>
+                                        </div>
+                                    )}
+                                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '2fr 1fr', gap: '16px', marginBottom: '12px' }}>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Straße</label>
+                                            <input
+                                                type="text"
+                                                value={tenantData.street}
+                                                placeholder={propertyAddress.street}
+                                                onChange={e => setTenantData({ ...tenantData, street: e.target.value })}
+                                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Hausnr.</label>
+                                            <input
+                                                type="text"
+                                                value={tenantData.house_number}
+                                                placeholder={propertyAddress.house_number}
+                                                onChange={e => setTenantData({ ...tenantData, house_number: e.target.value })}
+                                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
+                                            />
+                                        </div>
                                     </div>
-                                )}
-                                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px', marginBottom: '12px' }}>
-                                    <div>
-                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Straße</label>
-                                        <input
-                                            type="text"
-                                            value={tenantData.street}
-                                            placeholder={propertyAddress.street}
-                                            onChange={e => setTenantData({ ...tenantData, street: e.target.value })}
-                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
-                                        />
-                                    </div>
-                                    <div>
-                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Hausnr.</label>
-                                        <input
-                                            type="text"
-                                            value={tenantData.house_number}
-                                            placeholder={propertyAddress.house_number}
-                                            onChange={e => setTenantData({ ...tenantData, house_number: e.target.value })}
-                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
-                                        />
+                                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 2fr', gap: '16px' }}>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>PLZ</label>
+                                            <input
+                                                type="text"
+                                                value={tenantData.postal_code}
+                                                placeholder={propertyAddress.postal_code}
+                                                onChange={e => setTenantData({ ...tenantData, postal_code: e.target.value })}
+                                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Ort</label>
+                                            <input
+                                                type="text"
+                                                value={tenantData.city}
+                                                placeholder={propertyAddress.city}
+                                                onChange={e => setTenantData({ ...tenantData, city: e.target.value })}
+                                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
+                                            />
+                                        </div>
                                     </div>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '16px' }}>
-                                    <div>
-                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>PLZ</label>
-                                        <input
-                                            type="text"
-                                            value={tenantData.postal_code}
-                                            placeholder={propertyAddress.postal_code}
-                                            onChange={e => setTenantData({ ...tenantData, postal_code: e.target.value })}
-                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
-                                        />
-                                    </div>
-                                    <div>
-                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Ort</label>
-                                        <input
-                                            type="text"
-                                            value={tenantData.city}
-                                            placeholder={propertyAddress.city}
-                                            onChange={e => setTenantData({ ...tenantData, city: e.target.value })}
-                                            style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-color)', backgroundColor: 'var(--background-color)', fontSize: '0.88rem' }}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
 
-                            <button
-                                type="submit"
-                                disabled={saving}
-                                style={{
-                                    alignSelf: 'flex-start',
-                                    padding: '10px 20px',
-                                    borderRadius: '8px',
-                                    backgroundColor: 'var(--primary-color)',
-                                    color: 'white',
-                                    border: 'none',
-                                    fontWeight: 600,
-                                    fontSize: '0.88rem',
-                                    cursor: saving ? 'not-allowed' : 'pointer',
-                                    opacity: saving ? 0.7 : 1,
-                                    transition: 'background-color 0.2s',
-                                    marginTop: '8px'
-                                }}
-                            >
-                                {saving ? 'Wird gespeichert...' : 'Änderungen speichern'}
-                            </button>
+                                <button
+                                    type="submit"
+                                    disabled={saving}
+                                    style={{
+                                        alignSelf: 'flex-start',
+                                        padding: '10px 20px',
+                                        borderRadius: '8px',
+                                        backgroundColor: 'var(--primary-color)',
+                                        color: 'white',
+                                        border: 'none',
+                                        fontWeight: 600,
+                                        fontSize: '0.88rem',
+                                        cursor: (saving || tenantMissing) ? 'not-allowed' : 'pointer',
+                                        opacity: (saving || tenantMissing) ? 0.7 : 1,
+                                        transition: 'background-color 0.2s',
+                                        marginTop: '8px'
+                                    }}
+                                >
+                                    {saving ? 'Wird gespeichert...' : 'Änderungen speichern'}
+                                </button>
+                            </fieldset>
                         </form>
                     </div>
 
@@ -415,7 +438,7 @@ const TenantStamdaten = () => {
                                     </div>
                                 </div>
 
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px' }}>
                                     <div>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '2px' }}>Mietbeginn</div>
                                         <div style={{ fontSize: '0.9rem', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px' }}>

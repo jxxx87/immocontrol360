@@ -378,12 +378,13 @@ const TenantDataUpdatePortal = () => {
                                     />
                                 </div>
                                 <div>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 500, color: '#475569', marginBottom: '6px', display: 'block' }}>E-Mail-Adresse</label>
+                                    <label style={{ fontSize: '0.8rem', fontWeight: 500, color: '#475569', marginBottom: '6px', display: 'block' }}>E-Mail-Adresse (optional)</label>
+                                    {/* Nicht Pflicht: der Server behandelt eine leere Angabe als „unverändert“
+                                        (Mieter ohne E-Mail-Adresse können den Link z. B. per QR-Code erhalten) */}
                                     <input
                                         type="email"
                                         value={formData.email}
                                         onChange={(e) => handleInputChange('email', e.target.value)}
-                                        required
                                         style={{
                                             width: '100%', padding: '12px 16px', borderRadius: '12px', border: '1px solid #cbd5e1',
                                             fontSize: '0.95rem', outline: 'none', transition: 'border-color 0.2s', boxSizing: 'border-box'

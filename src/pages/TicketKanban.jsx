@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 import { extractStoragePath } from '../lib/storageFiles';
 import {
@@ -31,6 +33,8 @@ import { useViewMode } from '../context/ViewModeContext';
 const TicketKanban = () => {
     const { isMobile } = useViewMode();
     const { user } = useAuth();
+    const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const [tickets, setTickets] = useState([]);
     const [tenants, setTenants] = useState({});
     const [units, setUnits] = useState({});
@@ -43,6 +47,8 @@ const TicketKanban = () => {
     // Detailfenster nach Statuswechsel/Realtime den alten Stand)
     const [selectedTicketId, setSelectedTicketId] = useState(null);
     const imageUrlsRef = useRef({}); // cache signed URLs
+    // Nur das Ergebnis des letzten Ladevorgangs übernehmen (Portfoliowechsel, Realtime)
+    const fetchSeqRef = useRef(0);
     const selectedTicket = selectedTicketId ? tickets.find(t => t.id === selectedTicketId) || null : null;
 
     // Aus der Mieterakte (TenantDetail) kann ein bestimmtes Ticket direkt geöffnet werden
@@ -86,21 +92,39 @@ const TicketKanban = () => {
     // Lade-Zustand nur beim ersten Laden; Realtime-Aktualisierungen laufen im
     // Hintergrund, damit Board und offenes Detailfenster (samt Kommentar) erhalten bleiben.
     const fetchData = useCallback(async () => {
+        const seq = ++fetchSeqRef.current;
+        const isCurrent = () => seq === fetchSeqRef.current;
         try {
-            const ticketRes = await supabase
-                .from('tickets')
-                .select('*')
-                .order('created_at', { ascending: false });
-            if (ticketRes.error) throw ticketRes.error;
-            const ticketRows = ticketRes.data || [];
+            // Gewähltes Portfolio: nur Tickets der Objekte dieses Portfolios ("Alle Portfolios" = alle lesbaren)
+            let propertyIds = null;
+            if (selectedPortfolioID) {
+                const propRes = await supabase
+                    .from('properties')
+                    .select('id')
+                    .eq('portfolio_id', selectedPortfolioID);
+                if (propRes.error) throw propRes.error;
+                propertyIds = (propRes.data || []).map(p => p.id);
+            }
 
-            // Nur die Einheiten der vorhandenen Tickets (mit Adresse) laden
+            let ticketRows = [];
+            if (propertyIds === null || propertyIds.length > 0) {
+                let ticketQuery = supabase
+                    .from('tickets')
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                if (propertyIds) ticketQuery = ticketQuery.in('property_id', propertyIds);
+                const ticketRes = await ticketQuery;
+                if (ticketRes.error) throw ticketRes.error;
+                ticketRows = ticketRes.data || [];
+            }
+
+            // Nur die Einheiten der vorhandenen Tickets (mit Adresse und Portfolio für die Rechteprüfung) laden
             const unitIds = [...new Set(ticketRows.map(t => t.unit_id).filter(Boolean))];
             const unitMap = {};
             if (unitIds.length > 0) {
                 const unitRes = await supabase
                     .from('units')
-                    .select('id, unit_name, property:properties(street, house_number, city)')
+                    .select('id, unit_name, property:properties(street, house_number, city, portfolio_id)')
                     .in('id', unitIds);
                 if (unitRes.error) throw unitRes.error;
                 (unitRes.data || []).forEach(u => { unitMap[u.id] = u; });
@@ -131,17 +155,21 @@ const TicketKanban = () => {
                 }
             }
 
+            if (!isCurrent()) return;
             setTickets(ticketRows);
             setUnits(unitMap);
             setTenants(tMap);
             setBoardError(null);
+            // Offenes Detailfenster schließen, wenn das Ticket nicht mehr dazugehört (z. B. anderes Portfolio)
+            setSelectedTicketId(prev => (prev && !ticketRows.some(t => t.id === prev) ? null : prev));
         } catch (err) {
+            if (!isCurrent()) return;
             console.error('Error:', err);
             setBoardError(`Tickets konnten nicht geladen werden: ${translateError(err)}`);
         } finally {
-            setLoading(false);
+            if (isCurrent()) setLoading(false);
         }
-    }, []);
+    }, [selectedPortfolioID]);
 
     useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -154,16 +182,20 @@ const TicketKanban = () => {
         if (tickets.some(t => t.id === wantedId)) {
             setSelectedTicketId(wantedId);
         } else if (!boardError) {
-            setBoardNotice('Das gewünschte Ticket wurde nicht gefunden (gelöscht oder keine Berechtigung).');
+            setBoardNotice(selectedPortfolioID
+                ? 'Das gewünschte Ticket wurde nicht gefunden (gelöscht, keine Berechtigung oder es gehört nicht zum gewählten Portfolio).'
+                : 'Das gewünschte Ticket wurde nicht gefunden (gelöscht oder keine Berechtigung).');
         }
         navigate(location.pathname, { replace: true, state: {} });
-    }, [loading, tickets, boardError, navigate, location.pathname]);
+    }, [loading, tickets, boardError, navigate, location.pathname, selectedPortfolioID]);
 
     // ── REALTIME ────────────────────────────────────────────────────
+    // Eindeutiger Kanalname: Bei einem Portfoliowechsel wird neu abonniert, während der alte Kanal
+    // noch abgemeldet wird – mit gleichem Namen gäbe supabase.channel() den alten Kanal zurück.
     useEffect(() => {
         let refreshTimer = null;
         const channel = supabase
-            .channel('kanban-tickets')
+            .channel('kanban-tickets-' + Date.now())
             .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
                 // Mehrere Ereignisse kurz hintereinander zu einem Abruf bündeln
                 if (refreshTimer) clearTimeout(refreshTimer);
@@ -193,9 +225,23 @@ const TicketKanban = () => {
         return null;
     }, []);
 
+    // ── SCHREIBRECHT ────────────────────────────────────────────────
+    // Status ändern, kommentieren und löschen verlangen Schreibrecht "Mieterportal" im Portfolio
+    // des Tickets (wie tickets_update/tickets_delete und rls_message_allowed). Solange die Rechte
+    // laden, nicht sperren – die Datenbank prüft ohnehin.
+    const canWriteTicket = (ticket) => {
+        if (!perm || perm.loadingPermissions) return true;
+        const portfolioId = units[ticket?.unit_id]?.property?.portfolio_id || null;
+        return portfolioId ? perm.canWrite('mieterportal', portfolioId) : perm.canWrite('mieterportal');
+    };
+    const readOnlyScope = !!perm && !perm.loadingPermissions && !perm.canWrite('mieterportal');
+
     // ── DELETE TICKET ───────────────────────────────────────────────
     // Gibt null bei Erfolg zurück, sonst eine Fehlermeldung für das Detailfenster.
     const handleDeleteTicket = async (ticket) => {
+        if (!canWriteTicket(ticket)) {
+            return 'Das Ticket kann nicht gelöscht werden: Sie haben für dieses Portfolio nur Leserecht.';
+        }
         const { data: deleted, error } = await supabase
             .from('tickets')
             .delete()
@@ -256,6 +302,10 @@ const TicketKanban = () => {
 
         const ticket = tickets.find(t => t.id === ticketId);
         if (!ticket || ticket.status === newStatus) return;
+        if (!canWriteTicket(ticket)) {
+            setBoardNotice(`Der Status von „${ticket.title}“ kann nicht geändert werden: Sie haben für dieses Portfolio nur Leserecht.`);
+            return;
+        }
 
         const oldStatus = ticket.status;
 
@@ -264,16 +314,21 @@ const TicketKanban = () => {
             t.id === ticketId ? { ...t, status: newStatus, updated_at: new Date().toISOString() } : t
         ));
 
-        const { error } = await supabase
+        // .select('id'): Ohne Schreibrecht ändert die RLS keine Zeile und meldet keinen Fehler
+        const { data: updated, error } = await supabase
             .from('tickets')
             .update({ status: newStatus, updated_at: new Date().toISOString() })
-            .eq('id', ticketId);
+            .eq('id', ticketId)
+            .select('id');
 
-        if (error) {
-            console.error('Error updating ticket status:', error);
+        if (error || !updated || updated.length === 0) {
+            if (error) console.error('Error updating ticket status:', error);
             setTickets(prev => prev.map(t =>
                 t.id === ticketId ? { ...t, status: oldStatus } : t
             ));
+            setBoardNotice(error
+                ? `Der Status von „${ticket.title}“ konnte nicht gespeichert werden: ${translateError(error)}`
+                : `Der Status von „${ticket.title}“ konnte nicht gespeichert werden (keine Berechtigung).`);
             return;
         }
 
@@ -323,6 +378,11 @@ const TicketKanban = () => {
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginTop: '4px' }}>
                     Verwalten Sie Mieter-Tickets per Drag & Drop. Statuswechsel benachrichtigt den Mieter automatisch.
                 </p>
+                {readOnlyScope && (
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '6px' }}>
+                        Nur Leserecht: Tickets können angesehen, aber nicht verschoben, kommentiert oder gelöscht werden.
+                    </p>
+                )}
             </div>
 
             {[boardError, boardNotice].filter(Boolean).map((msg, i) => (
@@ -373,6 +433,7 @@ const TicketKanban = () => {
                                 formatDate={formatDate}
                                 priorityColors={priorityColors}
                                 priorityLabels={priorityLabels}
+                                canWriteTicket={canWriteTicket}
                                 onTicketClick={(t) => setSelectedTicketId(t.id)}
                             />
                         );
@@ -406,6 +467,7 @@ const TicketKanban = () => {
                     priorityColors={priorityColors}
                     getSignedUrl={getSignedUrl}
                     user={user}
+                    canWrite={canWriteTicket(selectedTicket)}
                     onDelete={() => handleDeleteTicket(selectedTicket)}
                     onClose={() => setSelectedTicketId(null)}
                     isMobile={isMobile}
@@ -416,7 +478,7 @@ const TicketKanban = () => {
 };
 
 // ── DROPPABLE COLUMN ────────────────────────────────────────────────
-const DroppableColumn = ({ col, tickets, overId, tenants, units, formatDate, priorityColors, priorityLabels, onTicketClick }) => {
+const DroppableColumn = ({ col, tickets, overId, tenants, units, formatDate, priorityColors, priorityLabels, canWriteTicket, onTicketClick }) => {
     const { setNodeRef, isOver } = useDroppable({ id: col.id });
     const ColIcon = col.icon;
 
@@ -478,6 +540,7 @@ const DroppableColumn = ({ col, tickets, overId, tenants, units, formatDate, pri
                             formatDate={formatDate}
                             priorityColors={priorityColors}
                             priorityLabels={priorityLabels}
+                            readOnly={!canWriteTicket(ticket)}
                             onTicketClick={onTicketClick}
                         />
                     ))}
@@ -502,10 +565,11 @@ const DroppableColumn = ({ col, tickets, overId, tenants, units, formatDate, pri
 };
 
 // ── SORTABLE TICKET CARD ────────────────────────────────────────────
-const SortableTicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, priorityLabels, onTicketClick }) => {
+const SortableTicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, priorityLabels, readOnly, onTicketClick }) => {
+    // Bei reinem Leserecht nicht ziehbar (Klick öffnet weiterhin das Detailfenster)
     const {
         attributes, listeners, setNodeRef, transform, transition, isDragging
-    } = useSortable({ id: ticket.id });
+    } = useSortable({ id: ticket.id, disabled: !!readOnly });
 
     const style = {
         transform: CSS.Transform.toString(transform),
@@ -522,6 +586,7 @@ const SortableTicketCard = ({ ticket, tenantName, unit, formatDate, priorityColo
                 formatDate={formatDate}
                 priorityColors={priorityColors}
                 priorityLabels={priorityLabels}
+                readOnly={readOnly}
                 onTicketClick={onTicketClick}
             />
         </div>
@@ -529,7 +594,7 @@ const SortableTicketCard = ({ ticket, tenantName, unit, formatDate, priorityColo
 };
 
 // ── TICKET CARD ─────────────────────────────────────────────────────
-const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, priorityLabels, isDragging, onTicketClick }) => {
+const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, priorityLabels, isDragging, readOnly, onTicketClick }) => {
     return (
         <div
             onClick={(e) => {
@@ -542,7 +607,7 @@ const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, prio
                 backgroundColor: 'var(--surface-color)',
                 borderRadius: 'var(--radius-md)',
                 padding: '14px 16px',
-                cursor: isDragging ? 'grabbing' : 'grab',
+                cursor: isDragging ? 'grabbing' : (readOnly ? 'pointer' : 'grab'),
                 boxShadow: isDragging ? 'var(--shadow-lg)' : 'var(--shadow-sm)',
                 border: '1px solid var(--border-color)',
                 transition: 'box-shadow 0.2s, transform 0.2s',
@@ -603,7 +668,7 @@ const TicketCard = ({ ticket, tenantName, unit, formatDate, priorityColors, prio
 };
 
 // ── TICKET DETAIL MODAL ─────────────────────────────────────────────
-const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLabels, priorityColors, getSignedUrl, user, onDelete, onClose, isMobile }) => {
+const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLabels, priorityColors, getSignedUrl, user, canWrite, onDelete, onClose, isMobile }) => {
     const [signedUrls, setSignedUrls] = useState(null); // null = lädt noch
     const [comments, setComments] = useState([]);
     const [loadingComments, setLoadingComments] = useState(true);
@@ -710,7 +775,7 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
     // bleiben den automatischen Statusmeldungen vorbehalten.
     const handleSendComment = async () => {
         const text = newComment.trim();
-        if (!text || sendingComment) return;
+        if (!text || sendingComment || !canWrite) return;
         setSendingComment(true);
         setCommentError(null);
 
@@ -1021,8 +1086,8 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                         </div>
                     </div>
 
-                    {/* DELETE BUTTON (only for completed tickets) */}
-                    {ticket.status === 'completed' && (
+                    {/* DELETE BUTTON (only for completed tickets, nur mit Schreibrecht) */}
+                    {ticket.status === 'completed' && canWrite && (
                         <div style={{
                             borderTop: '1px solid var(--border-color)',
                             paddingTop: '16px', marginTop: '8px'
@@ -1094,6 +1159,18 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                         {commentError}
                     </div>
                 )}
+                {!canWrite ? (
+                    <div style={{
+                        padding: isMobile ? '12px 20px' : '12px 28px',
+                        paddingBottom: isMobile ? 'calc(12px + env(safe-area-inset-bottom, 0px))' : '12px',
+                        borderTop: '1px solid var(--border-color)',
+                        backgroundColor: 'var(--surface-color)',
+                        color: 'var(--text-secondary)', fontSize: '0.82rem',
+                        flexShrink: 0
+                    }}>
+                        Nur Leserecht: Kommentieren, Statuswechsel und Löschen sind für dieses Ticket nicht möglich.
+                    </div>
+                ) : (
                 <div style={{
                     display: 'flex', gap: '8px',
                     padding: isMobile ? '12px 20px' : '12px 28px',
@@ -1133,6 +1210,7 @@ const TicketDetailModal = ({ ticket, tenantName, unit, statusLabels, priorityLab
                         {sendingComment ? '...' : 'Senden'}
                     </button>
                 </div>
+                )}
             </div>
         </div>
     );

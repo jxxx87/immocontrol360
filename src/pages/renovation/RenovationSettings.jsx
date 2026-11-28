@@ -594,9 +594,11 @@ const RenovationSettings = () => {
         return positions.map(p => (p.id === posId ? { ...p, [field]: value } : p));
     });
 
-    const deletePosition = (subtradeId, posId) => changePositions(subtradeId, positions =>
-        positions.filter(p => p.id !== posId)
-    );
+    // Rückfrage wie bei Gewerk/Untergewerk – ein Fehlklick würde den Katalogpreis sofort entfernen
+    const deletePosition = (subtradeId, posId) => {
+        if (!window.confirm('Position löschen?')) return;
+        changePositions(subtradeId, positions => positions.filter(p => p.id !== posId));
+    };
 
     /* ─── Milestone CRUD ─── */
     const addMilestone = async () => {
@@ -621,6 +623,7 @@ const RenovationSettings = () => {
         setMilestones(prev => prev.map(m => (m.id === id ? { ...m, ...clean } : m)));
     };
     const deleteMilestone = async (id) => {
+        if (!window.confirm('Meilenstein-Vorlage löschen?')) return;
         const { error } = await supabase.from('renovation_milestone_templates').delete().eq('id', id);
         if (error) { reportError('Meilenstein konnte nicht gelöscht werden', error); return; }
         loadSettings();

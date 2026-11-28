@@ -9,11 +9,6 @@ import {
 } from 'lucide-react';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const BLOCKED_STATUSES = ['declined', 'accepted', 'contract_declined'];
-
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-  !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
 
 // Lokales Datum (nicht UTC) als YYYY-MM-DD
 const localDateString = (d = new Date()) =>
@@ -41,81 +36,23 @@ const fromMinutes = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:$
 
 const shortTime = (time) => String(time || '').substring(0, 5);
 
-// Besichtigungstage (ab heute) und belegte Slots laden – bevorzugt über die Token-RPC
-const fetchSchedule = async (token, processId) => {
-  const { data, error, status } = await supabase.rpc('get_rental_viewing_schedule', { p_token: token });
-  if (!error) {
-    if (data?.error) throw new Error(data.error);
-    return { viewings: data?.viewings || [], booked: data?.booked || [] };
-  }
-  if (!isMissingRpc(error, status)) throw error;
-
-  // Bisheriger Weg, solange die Datenbank-Funktion noch nicht eingespielt ist
-  const { data: vws, error: vwsErr } = await supabase
-    .from('rental_viewings')
-    .select('id, date, start_time, end_time, slot_duration_minutes')
-    .eq('process_id', processId)
-    .gte('date', localDateString())
-    .order('date');
-  if (vwsErr) throw vwsErr;
-
-  let booked = [];
-  if (vws && vws.length > 0) {
-    const { data: bks, error: bksErr } = await supabase
-      .from('rental_viewing_bookings')
-      .select('viewing_id, start_time')
-      .in('viewing_id', vws.map(v => v.id))
-      .eq('status', 'booked');
-    if (bksErr) throw bksErr;
-    booked = bks || [];
-  }
-  return { viewings: (vws || []).filter(v => Number(v.slot_duration_minutes) > 0), booked };
+// Besichtigungstage (ab heute) und belegte Slots laden – über die Token-RPC
+// (nicht angemeldete Besucher haben keine Tabellenrechte, nur die geprüften Funktionen)
+const fetchSchedule = async (token) => {
+  const { data, error } = await supabase.rpc('get_rental_viewing_schedule', { p_token: token });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return { viewings: data?.viewings || [], booked: data?.booked || [] };
 };
 
 // Bewerber aus dem persönlichen Link (Token + Bewerber-ID) samt eigener künftiger Buchung
-const fetchApplicant = async (token, processId, applicantId) => {
-  const { data, error, status } = await supabase.rpc('get_rental_applicant_for_booking', {
+const fetchApplicant = async (token, applicantId) => {
+  const { data, error } = await supabase.rpc('get_rental_applicant_for_booking', {
     p_token: token,
     p_applicant_id: applicantId
   });
-  if (!error) return data || null;
-  if (!isMissingRpc(error, status)) throw error;
-
-  // Bisheriger Weg (alte Datenbank): nur Name und Status, keine Selbstauskunft
-  const { data: appRow, error: appErr } = await supabase
-    .from('rental_applicants')
-    .select('id, first_name, last_name, status')
-    .eq('id', applicantId)
-    .eq('process_id', processId)
-    .maybeSingle();
-  if (appErr) return null;
-  // Alte Datenbank: Bewerbungen sind für nicht angemeldete Besucher nicht lesbar. Wie bisher
-  // genügt dann die Bewerber-ID aus dem persönlichen Link (Name unbekannt).
-  const app = appRow || { id: applicantId, first_name: '', last_name: '', status: 'applied' };
-
-  const today = localDateString();
-  const { data: bks } = await supabase
-    .from('rental_viewing_bookings')
-    .select('id, viewing_id, start_time, end_time, viewing:rental_viewings(date, process_id)')
-    .eq('applicant_id', app.id)
-    .eq('status', 'booked');
-  const own = (bks || [])
-    .filter(b => b.viewing?.process_id === processId && b.viewing?.date >= today)
-    .sort((a, b) => `${a.viewing.date}${a.start_time}`.localeCompare(`${b.viewing.date}${b.start_time}`))[0];
-
-  return {
-    id: app.id,
-    first_name: app.first_name,
-    last_name: app.last_name,
-    can_book: !BLOCKED_STATUSES.includes(app.status),
-    booking: own ? {
-      id: own.id,
-      viewing_id: own.viewing_id,
-      date: own.viewing.date,
-      start_time: own.start_time,
-      end_time: own.end_time
-    } : null
-  };
+  if (error) throw error;
+  return data || null;
 };
 
 const PublicViewingBooking = () => {
@@ -142,6 +79,8 @@ const PublicViewingBooking = () => {
   const [myBooking, setMyBooking] = useState(null); // { id, viewing_id, date, start_time, end_time }
   const [justBooked, setJustBooked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Hinweis, wenn die Bestätigungs-/Absage-Mail nicht versendet werden konnte
+  const [mailWarning, setMailWarning] = useState(null);
 
   const processId = processInfo?.id;
 
@@ -157,7 +96,7 @@ const PublicViewingBooking = () => {
           if (!cancelled) setError(proc?.error || 'Mietobjekt ist nicht mehr aktiv oder Link ist ungültig.');
           return;
         }
-        const schedule = await fetchSchedule(token, proc.id);
+        const schedule = await fetchSchedule(token);
         if (cancelled) return;
         setProcessInfo(proc);
         setViewings(schedule.viewings);
@@ -180,7 +119,7 @@ const PublicViewingBooking = () => {
     let cancelled = false;
     const loadApplicant = async () => {
       try {
-        const info = await fetchApplicant(token, processId, applicantId);
+        const info = await fetchApplicant(token, applicantId);
         if (cancelled) return;
         setApplicantInfo(info);
         setMyBooking(info?.booking || null);
@@ -199,7 +138,7 @@ const PublicViewingBooking = () => {
   const refreshSchedule = async () => {
     if (!processId) return;
     try {
-      const schedule = await fetchSchedule(token, processId);
+      const schedule = await fetchSchedule(token);
       setViewings(schedule.viewings);
       setBookedSlots(schedule.booked);
     } catch (err) {
@@ -233,9 +172,11 @@ const PublicViewingBooking = () => {
   };
   const computedSlots = computeSlots();
 
+  // Liefert true, wenn die Mail versendet wurde. Fachliche Fehler (z. B. kein Postfach
+  // eingerichtet, SMTP-Fehler) meldet die Function mit HTTP 200 und success: false.
   const sendLettingEmail = async (action, booking) => {
     try {
-      const { error: emailErr } = await supabase.functions.invoke('send-letting-email', {
+      const { data, error: emailErr } = await supabase.functions.invoke('send-letting-email', {
         body: {
           action,
           bookingId: booking.id,
@@ -244,9 +185,18 @@ const PublicViewingBooking = () => {
           process_token: token
         }
       });
-      if (emailErr) console.error(`Failed to trigger ${action} email:`, emailErr);
+      if (emailErr) {
+        console.error(`Failed to trigger ${action} email:`, emailErr);
+        return false;
+      }
+      if (data?.success === false) {
+        console.warn(`${action} email not sent:`, data.error || data.warning);
+        return false;
+      }
+      return true;
     } catch (emailErr) {
       console.error(`Failed to trigger ${action} email:`, emailErr);
+      return false;
     }
   };
 
@@ -261,51 +211,20 @@ const PublicViewingBooking = () => {
 
     try {
       setIsSubmitting(true);
-      let booking = null;
+      setMailWarning(null);
 
-      const { data, error: rpcErr, status } = await supabase.rpc('book_viewing', {
+      const { data: booking, error: rpcErr } = await supabase.rpc('book_viewing', {
         p_token: token,
         p_applicant_id: applicantInfo.id,
         p_viewing_id: selectedViewing.id,
         p_start_time: selectedSlot.start
       });
 
-      if (rpcErr && !isMissingRpc(rpcErr, status)) {
+      if (rpcErr) {
         if (rpcErr.code === '23505') {
           throw new Error('Dieser Termin wurde gerade von einem anderen Bewerber gebucht. Bitte wählen Sie einen anderen Slot.');
         }
         throw rpcErr;
-      }
-
-      if (!rpcErr) {
-        booking = data;
-      } else {
-        // Bisheriger Weg, solange die Datenbank-Funktion noch nicht eingespielt ist
-        const { data: newBooking, error: bookingErr } = await supabase
-          .from('rental_viewing_bookings')
-          .insert([{
-            viewing_id: selectedViewing.id,
-            applicant_id: applicantInfo.id,
-            start_time: selectedSlot.start,
-            end_time: selectedSlot.end,
-            status: 'booked'
-          }])
-          .select()
-          .single();
-
-        if (bookingErr) {
-          if (bookingErr.code === '23505') {
-            throw new Error('Dieser Termin wurde gerade von einem anderen Bewerber gebucht. Bitte wählen Sie einen anderen Slot.');
-          }
-          throw bookingErr;
-        }
-        booking = {
-          id: newBooking.id,
-          viewing_id: newBooking.viewing_id,
-          date: selectedViewing.date,
-          start_time: newBooking.start_time,
-          end_time: newBooking.end_time
-        };
       }
 
       setMyBooking(booking);
@@ -313,7 +232,10 @@ const PublicViewingBooking = () => {
       setSelectedSlot(null);
 
       // Trigger email notification (Empfänger ermittelt die Function aus der Datenbank)
-      await sendLettingEmail('booking_confirmed', booking);
+      const mailSent = await sendLettingEmail('booking_confirmed', booking);
+      if (!mailSent) {
+        setMailWarning('Termin gebucht – die Bestätigungs-E-Mail konnte nicht versendet werden. Bitte notieren Sie sich den Termin.');
+      }
       refreshSchedule();
     } catch (err) {
       alert(err.message || 'Die Buchung ist fehlgeschlagen.');
@@ -329,31 +251,22 @@ const PublicViewingBooking = () => {
 
     try {
       setIsSubmitting(true);
+      setMailWarning(null);
       const booking = myBooking;
 
-      const { error: rpcErr, status } = await supabase.rpc('cancel_viewing_booking', {
+      const { error: rpcErr } = await supabase.rpc('cancel_viewing_booking', {
         p_token: token,
         p_booking_id: booking.id,
         p_applicant_id: applicantInfo?.id
       });
 
-      if (rpcErr && !isMissingRpc(rpcErr, status)) throw rpcErr;
-
-      if (rpcErr) {
-        // Bisheriger Weg, solange die Datenbank-Funktion noch nicht eingespielt ist
-        const { data: updated, error } = await supabase
-          .from('rental_viewing_bookings')
-          .update({ status: 'canceled', canceled_at: new Date().toISOString() })
-          .eq('id', booking.id)
-          .eq('applicant_id', applicantInfo?.id)
-          .select('id');
-
-        if (error) throw error;
-        if (!updated || updated.length === 0) throw new Error('Termin nicht gefunden oder bereits abgesagt.');
-      }
+      if (rpcErr) throw rpcErr;
 
       // Trigger email cancellation
-      await sendLettingEmail('booking_canceled', booking);
+      const mailSent = await sendLettingEmail('booking_canceled', booking);
+      if (!mailSent) {
+        setMailWarning('Termin abgesagt – die Absage-Bestätigung per E-Mail konnte nicht versendet werden.');
+      }
 
       setJustBooked(false);
       setMyBooking(null);
@@ -366,6 +279,13 @@ const PublicViewingBooking = () => {
       setIsSubmitting(false);
     }
   };
+
+  const renderMailWarning = () => (
+    <div style={{ textAlign: 'left', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', borderRadius: 'var(--radius-md)', padding: '12px 16px', marginBottom: '20px', fontSize: '0.85rem', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+      <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+      <span>{mailWarning}</span>
+    </div>
+  );
 
   const getGoogleCalendarLink = () => {
     if (!myBooking || !processInfo) return '#';
@@ -427,6 +347,8 @@ const PublicViewingBooking = () => {
             </div>
           </div>
 
+          {mailWarning && renderMailWarning()}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <a
               href={getGoogleCalendarLink()}
@@ -453,7 +375,7 @@ const PublicViewingBooking = () => {
 
         {/* Exposé / Header (Matching letting portal) */}
         <Card style={{ padding: '24px', marginBottom: '24px', background: 'linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%)', color: '#ffffff' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', tracking: '0.1em', fontWeight: 700, color: 'rgba(255, 255, 255, 0.9)' }}>Besichtigungsportal</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, color: 'rgba(255, 255, 255, 0.9)' }}>Besichtigungsportal</span>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#ffffff', marginTop: '6px' }}>{processInfo.listing_title}</h1>
           <p style={{ fontSize: '0.9rem', color: 'rgba(255, 255, 255, 0.85)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <MapPin size={14} /> {processInfo.street} {processInfo.house_number}, {processInfo.zip} {processInfo.city}
@@ -474,6 +396,9 @@ const PublicViewingBooking = () => {
             </div>
           </div>
         </Card>
+
+        {/* z. B. nach einer Absage, deren Bestätigungs-Mail nicht versendet werden konnte */}
+        {mailWarning && renderMailWarning()}
 
         {/* Applicant Verification Status */}
         {applicantLoading ? (
