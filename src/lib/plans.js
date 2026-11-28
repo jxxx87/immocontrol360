@@ -1,4 +1,4 @@
-// Tarife der Marketing-Website – EINE Quelle für Preise und Leistungen auf /preise, /paywall
+// Tarife der Marketing-Website – EINE Quelle für Preise und Leistungen auf /preise
 // und /abo-starten (Komplett-Check 2026-11-27, W1c-03/W1c-07/W1c-11).
 // Preise wie in der App (immo-web/src/components/subscription/PaywallModal.jsx); verbindlich ist der
 // im Stripe-Checkout angezeigte Betrag. Bei Preisänderungen Stripe, App und diese Datei gemeinsam anpassen.

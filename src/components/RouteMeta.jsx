@@ -22,9 +22,10 @@ const TITLES = {
     '/abo-starten': `Kostenlos testen | ${BRAND_NAME}`,
     '/checkout': `Kostenlos testen | ${BRAND_NAME}`,
     '/register-trial': `Kostenlos testen | ${BRAND_NAME}`,
-    '/paywall': `Abo abschließen | ${BRAND_NAME}`,
-    '/billing/success': `Abrechnung | ${BRAND_NAME}`,
-    '/billing/cancel': `Abrechnung | ${BRAND_NAME}`,
+    // Nur noch Weiterleitungen in die App (W7 D-10/D-11/D-12)
+    '/paywall': `Weiterleitung | ${BRAND_NAME}`,
+    '/billing/success': `Weiterleitung | ${BRAND_NAME}`,
+    '/billing/cancel': `Weiterleitung | ${BRAND_NAME}`,
     '/login': `Login | ${BRAND_NAME}`,
 };
 

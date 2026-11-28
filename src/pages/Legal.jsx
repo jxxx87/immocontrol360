@@ -79,7 +79,7 @@ const Legal = ({ type }) => {
                     <h2 className="text-2xl font-bold mb-4 mt-8 text-slate-800">2. Hosting und Content Delivery Networks (CDN)</h2>
                     <h3 className="text-xl font-semibold mb-2 text-slate-700">Externes Hosting</h3>
                     <p className="mb-4 leading-relaxed">
-                        Diese Website wird bei einem externen Dienstleister gehostet (Hostinger). Die personenbezogenen Daten, die auf dieser Website erfasst werden, werden auf den Servern des Hosters gespeichert. Davor handelt es sich v. a. um IP-Adressen, Kontaktanfragen, Meta- und Kommunikationsdaten, Webseitenzugriffe und sonstige Daten, die über eine Website generiert werden.
+                        Diese Website wird bei einem externen Dienstleister gehostet (Hostinger). Die personenbezogenen Daten, die auf dieser Website erfasst werden, werden auf den Servern des Hosters gespeichert. Hierbei handelt es sich v. a. um IP-Adressen, Kontaktanfragen, Meta- und Kommunikationsdaten, Webseitenzugriffe und sonstige Daten, die über eine Website generiert werden.
                     </p>
                     <p className="mb-6 leading-relaxed">
                         Der Einsatz des Hosters erfolgt zum Zwecke der Vertragserfüllung gegenüber unseren potenziellen und bestehenden Kunden (Art. 6 Abs. 1 lit. b DSGVO) und im Interesse einer sicheren, schnellen und effizienten Bereitstellung unseres Online-Angebots durch einen professionellen Anbieter (Art. 6 Abs. 1 lit. f DSGVO). Unser Hoster wird Ihre Daten nur insoweit verarbeiten, wie dies zur Erfüllung seiner Leistungspflichten erforderlich ist und unsere Weisungen in Bezug auf diese Daten befolgen.

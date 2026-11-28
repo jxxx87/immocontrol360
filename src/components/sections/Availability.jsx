@@ -46,7 +46,7 @@ const Availability = () => {
                             transition={{ delay: 0.2 }}
                             className="absolute left-1/2 z-10 w-40 sm:w-64"
                         >
-                            <PhoneMockup src="/images/w-MieterDashboard.png" alt="Mieter Dashboard Mobile" className="shadow-2xl" />
+                            <PhoneMockup src="/images/w-MieterDashboard.png" alt="Mieter-Dashboard auf dem Smartphone" className="shadow-2xl" />
                         </motion.div>
 
                         {/* Phone 2: Messages */}
@@ -57,7 +57,7 @@ const Availability = () => {
                             transition={{ delay: 0.4 }}
                             className="absolute left-1/2 z-20 w-40 sm:w-64"
                         >
-                            <PhoneMockup src="/images/w_Nachrichten.png" alt="Nachrichten Mobile" className="shadow-2xl border-slate-800" />
+                            <PhoneMockup src="/images/w_Nachrichten.png" alt="Nachrichten auf dem Smartphone" className="shadow-2xl border-slate-800" />
                         </motion.div>
                     </div>
                 </div>

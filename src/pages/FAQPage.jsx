@@ -163,8 +163,13 @@ const FAQPage = () => {
             const scrollPosition = window.scrollY + 150; // Offset
 
             for (const section of sections) {
-                if (section && section.offsetTop <= scrollPosition && (section.offsetTop + section.offsetHeight) > scrollPosition) {
+                if (!section) continue;
+                // Position im Dokument: offsetTop wäre relativ zum Container (position: relative) und rund
+                // um die Höhe des Hero-Bereichs zu klein, die Markierung spränge zu früh weiter (W7 D-5).
+                const top = section.getBoundingClientRect().top + window.scrollY;
+                if (top <= scrollPosition && (top + section.offsetHeight) > scrollPosition) {
                     setActiveCategory(section.id);
+                    break;
                 }
             }
         };
@@ -302,8 +307,8 @@ const FAQPage = () => {
                     </div>
                 </aside>
 
-                {/* Content */}
-                <main className="flex-1 min-w-0">
+                {/* Content (kein zweites <main>: MainLayout setzt bereits eines, W7 D-6) */}
+                <section aria-label="Fragen" className="flex-1 min-w-0">
                     {filteredCategories.length > 0 ? (
                         <div className="space-y-16">
                             {filteredCategories.map((cat) => (
@@ -340,7 +345,7 @@ const FAQPage = () => {
                             </button>
                         </div>
                     )}
-                </main>
+                </section>
             </div>
 
             {/* Contact Form Section */}

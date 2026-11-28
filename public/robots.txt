@@ -1,6 +1,6 @@
 # Marketing-Website immocontrol360.de
 # /app/ enthält im kombinierten Deploy die Web-App (eigene Adresse: app.immocontrol360.de) – nicht doppelt crawlen.
-# Seiten ohne Suchwert (Paywall, Billing) tragen selbst "noindex" und bleiben deshalb crawlbar.
+# Weiterleitungen in die App (/login, /paywall, /billing/*) tragen selbst "noindex" und bleiben deshalb crawlbar.
 User-agent: *
 Disallow: /app/
 

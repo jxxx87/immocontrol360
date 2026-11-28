@@ -6,10 +6,11 @@ import { APP_URL, BRAND_NAME } from './siteConfig';
 import { TRIAL_DAYS } from '../lib/plans';
 import OptimizedImage from './OptimizedImage';
 
-const Navbar = () => {
+// isLanding: reduzierte Kopfzeile der Kampagnenseiten – wird wie beim Footer von Landing.jsx
+// übergeben (eine Pfadprüfung verfehlte z. B. '/landing/' oder '/Landing', die dieselbe Seite zeigen)
+const Navbar = ({ isLanding = false }) => {
     const [scrolled, setScrolled] = useState(false);
     const location = useLocation();
-    const isLanding = location.pathname === '/landing' || location.pathname === '/investor';
     const loginUrl = `${APP_URL}/login`;
 
     // Das mobile Menü gehört zum aktuellen History-Eintrag: nach jedem Seitenwechsel

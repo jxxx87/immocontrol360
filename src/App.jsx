@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { MotionConfig } from 'framer-motion';
 import Home from './pages/Home';
 import Pricing from './pages/Pricing';
@@ -14,9 +14,6 @@ const FeaturesPage = lazy(() => import('./pages/FeaturesPage'));
 const FAQPage = lazy(() => import('./pages/FAQPage'));
 const Legal = lazy(() => import('./pages/Legal'));
 const CheckoutPage = lazy(() => import('./pages/CheckoutPage'));
-const Paywall = lazy(() => import('./pages/Paywall'));
-const Success = lazy(() => import('./pages/billing/Success'));
-const Cancel = lazy(() => import('./pages/billing/Cancel'));
 
 // Helper for external redirects
 const ExternalRedirect = ({ to }) => {
@@ -30,6 +27,18 @@ const ExternalRedirect = ({ to }) => {
       <a href={to} className="text-primary underline underline-offset-4">Weiter</a>
     </div>
   );
+};
+
+// Weiterleitung in die App; mit keepQuery bleiben Query-String und Anker erhalten (z. B. session_id von Stripe)
+const AppRedirect = ({ path, keepQuery = false }) => {
+  const { search, hash } = useLocation();
+  return <ExternalRedirect to={`${APP_URL}${path}${keepQuery ? `${search}${hash}` : ''}`} />;
+};
+
+// Interne Weiterleitung, die Query-String und Anker übernimmt (z. B. ?plan=business&cycle=yearly, W7 D-3)
+const RedirectKeepQuery = ({ to }) => {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: to, search, hash }} replace />;
 };
 
 const PageFallback = () => <div className="min-h-screen" aria-busy="true" />;
@@ -50,12 +59,12 @@ function App() {
 
             <Route path="/investor" element={<Landing />} />
 
-            {/* Billing Flow */}
-            <Route path="/billing/success" element={<Success />} />
-            <Route path="/billing/cancel" element={<Cancel />} />
-
-            {/* Paywall (after trial expires) */}
-            <Route path="/paywall" element={<Paywall />} />
+            {/* Alte Adressen ohne eigene Seite (W7 D-10/D-11/D-12): Stripe kehrt in die App zurück
+                (success_url <App>/billing/success, cancel_url <App>/settings?tab=billing), das Abo wird in der
+                App abgeschlossen. Nur noch Weiterleitungen, damit alte Links/Lesezeichen nicht auf der 404 landen. */}
+            <Route path="/billing/success" element={<AppRedirect path="/billing/success" keepQuery />} />
+            <Route path="/billing/cancel" element={<AppRedirect path="/settings?tab=billing" />} />
+            <Route path="/paywall" element={<AppRedirect path="/login" />} />
 
             {/* Legal Pages */}
             <Route path="/impressum" element={<Legal type="impressum" />} />
@@ -64,8 +73,8 @@ function App() {
 
             {/* Checkout Flow */}
             <Route path="/abo-starten" element={<CheckoutPage />} />
-            <Route path="/checkout" element={<Navigate to="/abo-starten" replace />} />
-            <Route path="/register-trial" element={<Navigate to="/abo-starten" replace />} />
+            <Route path="/checkout" element={<RedirectKeepQuery to="/abo-starten" />} />
+            <Route path="/register-trial" element={<RedirectKeepQuery to="/abo-starten" />} />
 
             {/* Login Redirect */}
             <Route path="/login" element={<ExternalRedirect to={`${APP_URL}/login`} />} />

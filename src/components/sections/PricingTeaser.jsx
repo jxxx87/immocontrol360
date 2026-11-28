@@ -25,7 +25,7 @@ const PricingTeaser = () => {
                         Klare Preise.<br />Keine Überraschungen.
                     </h2>
                     <p className="text-xl text-slate-600 mb-10 max-w-2xl mx-auto leading-relaxed">
-                        Wähle den Plan, der zu deinem Portfolio passt. Egal wieviele Einheiten – wir haben die passende Lösung.
+                        Wähle den Plan, der zu deinem Portfolio passt. Egal wie viele Einheiten – wir haben die passende Lösung.
                     </p>
 
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-6 mb-12">

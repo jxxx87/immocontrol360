@@ -14,7 +14,7 @@ import OptimizedImage from '../components/OptimizedImage';
 import { featureCategories } from '../data/featureData';
 import { TRIAL_DAYS } from '../data/faqData';
 import { SITE_URL } from '../components/siteConfig';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import ContactForm from '../components/sections/ContactForm';
 
 // Rausch-Textur lokal als Data-URI (früher von grainy-gradients.vercel.app geladen –
@@ -635,14 +635,18 @@ const FeatureModule = ({ module, index }) => {
     );
 };
 
+// Abstand beim Hinscrollen zu Kategorie/Modul: fixe Navbar + Sub-Navigation
+const SCROLL_OFFSET = 140;
+
 const FeaturesPageV2 = () => {
     const [searchQuery, setSearchQuery] = useState('');
     const [activeCategory, setActiveCategory] = useState(featureCategories[0].id);
+    const location = useLocation();
 
     const scrollToCategory = (id) => {
         const element = document.getElementById(id);
         if (element) {
-            const offset = 140; // Adjusted for taller sticky nav
+            const offset = SCROLL_OFFSET;
             const elementPosition = element.getBoundingClientRect().top;
             const offsetPosition = elementPosition + window.pageYOffset - offset;
             window.scrollTo({ top: offsetPosition, behavior: 'smooth' });
@@ -679,6 +683,20 @@ const FeaturesPageV2 = () => {
         window.addEventListener('scroll', handleScroll, { passive: true });
         return () => window.removeEventListener('scroll', handleScroll);
     }, [visibleCategoryIds]);
+
+    // Direktlinks auf Kategorie/Modul (z. B. /funktionen#nebenkosten): Die Seite wird nachgeladen und
+    // MainLayout scrollt beim Aufruf nach oben – daher kurz warten und dann selbst hinscrollen (wie FAQ)
+    useEffect(() => {
+        const id = location.hash.slice(1);
+        if (!id) return;
+        const timer = setTimeout(() => {
+            const element = document.getElementById(id);
+            if (!element) return; // z. B. durch die Suche ausgeblendet
+            window.scrollTo({ top: element.getBoundingClientRect().top + window.scrollY - SCROLL_OFFSET, behavior: 'smooth' });
+            if (featureCategories.some(cat => cat.id === id)) setActiveCategory(id);
+        }, 100);
+        return () => clearTimeout(timer);
+    }, [location]);
 
     return (
         <MainLayout>

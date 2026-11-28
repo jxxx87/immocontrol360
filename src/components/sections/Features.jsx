@@ -63,10 +63,10 @@ const Features = () => {
                         {/* Background blob */}
                         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[120%] h-[120%] bg-blue-50 rounded-full blur-3xl -z-10" />
 
-                        <LaptopMockup src="/images/w-Ticketboard.png" alt="Ticket Board" className="shadow-2xl rounded-xl relative z-10" />
+                        <LaptopMockup src="/images/w-Ticketboard.png" alt="Ticket-Board – Ansicht in der App" className="shadow-2xl rounded-xl relative z-10" />
                         {/* Floating Phone */}
                         <div className="hidden lg:block absolute -right-12 -bottom-12 w-48 z-20">
-                            <PhoneMockup src="/images/w_Ticketerstellen.png" alt="Ticket App" className="shadow-2xl" />
+                            <PhoneMockup src="/images/w_Ticketerstellen.png" alt="Ticket erstellen in der Mieter-App" className="shadow-2xl" />
                         </div>
                     </motion.div>
 
@@ -164,7 +164,7 @@ const Features = () => {
                         >
                             <LaptopMockup
                                 src={activeTab === 'buyhold' ? "/images/W_BuyandHold.png" : "/images/w_FixandFlip.png"}
-                                alt={activeTab === 'buyhold' ? "Buy and Hold Calculator" : "Fix and Flip Calculator"}
+                                alt={activeTab === 'buyhold' ? "Buy-&-Hold-Rechner – Ansicht in der App" : "Fix-&-Flip-Rechner – Ansicht in der App"}
                                 className="w-full shadow-2xl rounded-xl border border-white/20 bg-white/5 backdrop-blur-sm"
                             />
                         </motion.div>

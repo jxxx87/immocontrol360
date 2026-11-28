@@ -26,7 +26,7 @@ const Landing = () => {
             <meta name="description" content={`KPI-Dashboard, Mieterportal mit Tickets und Investorportal inkl. Deal-Analyse & Sanierungsrechner. ${TRIAL_DAYS} Tage kostenlos testen – ohne Kreditkarte.`} />
             <meta name="robots" content="noindex, follow" />
 
-            <Navbar /> {/* Navbar handles isLanding logic automatically via useLocation */}
+            <Navbar isLanding={true} />
             <main>
                 {/* HERO LANDING specific */}
                 <section className="pt-32 pb-20 bg-gradient-to-b from-blue-50 to-white overflow-hidden">
@@ -115,7 +115,7 @@ const Landing = () => {
                         <div className="grid md:grid-cols-3 gap-8 text-left">
                             <div className="bg-slate-800 p-8 rounded-xl border border-slate-700 hover:border-blue-500 transition-colors">
                                 <h3 className="text-xl font-bold mb-4 text-blue-400">01. KPI Dashboard</h3>
-                                <p className="text-slate-300 mb-4">Erfasse Mieten, Ausgaben und Kredite automatisch. Sehe Cashflow und Rendite auf einen Blick.</p>
+                                <p className="text-slate-300 mb-4">Erfasse Mieten, Ausgaben und Kredite an einem Ort. Sieh Cashflow und Rendite auf einen Blick.</p>
                                 <OptimizedImage src="/images/w_Dashboard.png" alt="Dashboard (Ausschnitt)" sizes={CARD_IMAGE_SIZES} className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
                             </div>
                             <div className="bg-slate-800 p-8 rounded-xl border border-slate-700 hover:border-blue-500 transition-colors">
