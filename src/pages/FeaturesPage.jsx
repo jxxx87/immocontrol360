@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import MainLayout from '../layouts/MainLayout';
 import { LaptopMockup, PhoneMockup } from '../components/Mockups';
+import OptimizedImage from '../components/OptimizedImage';
 import { featureCategories } from '../data/featureData';
 import { TRIAL_DAYS } from '../data/faqData';
 import { SITE_URL } from '../components/siteConfig';
@@ -605,14 +606,14 @@ const FeatureModule = ({ module, index }) => {
                         <div className="flex justify-center py-8">
                             <PhoneMockup className="shadow-[0_20px_50px_-12px_rgba(0,0,0,0.3)] group-hover:-translate-y-4 transition-transform duration-700">
                                 {visual.type === 'image'
-                                    ? <img src={visual.src} alt={`${module.title} – Ansicht in der App`} className="w-full h-full object-cover" loading="lazy" />
+                                    ? <OptimizedImage src={visual.src} alt={`${module.title} – Ansicht in der App`} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                                     : <div className="w-full h-full bg-slate-50" aria-hidden="true" inert>{visual.component}</div>}
                             </PhoneMockup>
                         </div>
                     ) : (
                         <LaptopMockup className="shadow-[0_30px_60px_-15px_rgba(0,0,0,0.2)] rounded-xl group-hover:scale-[1.02] transition-transform duration-700 bg-white">
                             {visual.type === 'image'
-                                ? <img src={visual.src} alt={`${module.title} – Ansicht in der App`} className="w-full h-full object-cover object-top" loading="lazy" />
+                                ? <OptimizedImage src={visual.src} alt={`${module.title} – Ansicht in der App`} sizes="(min-width: 1024px) 50vw, 100vw" className="w-full h-full object-cover object-top" loading="lazy" decoding="async" />
                                 : <div className="w-full h-full bg-white" aria-hidden="true" inert>{visual.component}</div>}
                         </LaptopMockup>
                     )}
@@ -622,7 +623,7 @@ const FeatureModule = ({ module, index }) => {
                         <div className="hidden md:block absolute -right-8 -bottom-16 w-1/3 z-20 hover:scale-110 transition-transform duration-500">
                             <PhoneMockup className="shadow-[0_20px_50px_-12px_rgba(0,0,0,0.4)] border-slate-900 border-[6px] rounded-[2.5rem]">
                                 {module.secondImage && module.secondImage.startsWith('/')
-                                    ? <img src={module.secondImage} alt={`${module.title} – mobile Ansicht`} className="w-full h-full object-cover" loading="lazy" />
+                                    ? <OptimizedImage src={module.secondImage} alt={`${module.title} – mobile Ansicht`} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                                     : <div className="w-full h-full" aria-hidden="true" inert><UI_Tickets_Mobile /></div>
                                 }
                             </PhoneMockup>

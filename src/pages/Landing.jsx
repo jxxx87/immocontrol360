@@ -2,15 +2,20 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { Check, PieChart, Users, TrendingUp } from 'lucide-react';
 import { LaptopMockup } from '../components/Mockups';
+import OptimizedImage from '../components/OptimizedImage';
 import FAQ from '../components/sections/FAQ';
 import Footer from '../components/Footer';
 import Navbar from '../components/Navbar';
 import { APP_URL, BRAND_NAME } from '../components/siteConfig';
+import { TRIAL_DAYS } from '../lib/plans';
 
 // Kampagnenseite (/landing, /investor): direkt zur Registrierung in der App.
 // Ohne Tarifwahl startet die Testphase wie auf /abo-starten mit "professional".
 const REGISTER_URL = `${APP_URL}/register?plan=professional`;
 const PAGE_TITLE = `Für Investoren: Skalieren ohne Chaos | ${BRAND_NAME}`;
+// Angezeigte Bildbreiten (Auswahl der passenden WebP-Größe): Hero halbe Breite ab md, Karten ein Drittel
+const HERO_IMAGE_SIZES = '(min-width: 768px) 50vw, 100vw';
+const CARD_IMAGE_SIZES = '(min-width: 768px) 30vw, 100vw';
 
 const Landing = () => {
     return (
@@ -18,7 +23,7 @@ const Landing = () => {
             {/* SEO (React-19-Metadaten): Kampagnenseiten werden nur über Anzeigen verlinkt und
                 überschneiden sich inhaltlich mit der Startseite – daher nicht indexieren */}
             <title>{PAGE_TITLE}</title>
-            <meta name="description" content="KPI-Dashboard, Mieterportal mit Tickets und Investorportal inkl. Deal-Analyse & Sanierungsrechner. 10 Tage kostenlos testen – ohne Kreditkarte." />
+            <meta name="description" content={`KPI-Dashboard, Mieterportal mit Tickets und Investorportal inkl. Deal-Analyse & Sanierungsrechner. ${TRIAL_DAYS} Tage kostenlos testen – ohne Kreditkarte.`} />
             <meta name="robots" content="noindex, follow" />
 
             <Navbar /> {/* Navbar handles isLanding logic automatically via useLocation */}
@@ -58,7 +63,7 @@ const Landing = () => {
                                 </ul>
 
                                 <a href={REGISTER_URL} className="btn-primary w-full sm:w-auto text-lg px-8 py-4 shadow-xl shadow-blue-500/20 hover:shadow-blue-500/30 mb-4 inline-flex items-center gap-2">
-                                    Jetzt 10 Tage kostenlos testen
+                                    Jetzt {TRIAL_DAYS} Tage kostenlos testen
                                 </a>
                                 <p className="text-sm text-slate-500">Keine Kreditkarte erforderlich. Der Test endet automatisch – keine Kündigung nötig.</p>
                             </motion.div>
@@ -74,6 +79,7 @@ const Landing = () => {
                                     className="shadow-2xl rounded-xl"
                                     loading="eager"
                                     fetchPriority="high"
+                                    sizes={HERO_IMAGE_SIZES}
                                 />
                             </motion.div>
                         </div>
@@ -110,17 +116,17 @@ const Landing = () => {
                             <div className="bg-slate-800 p-8 rounded-xl border border-slate-700 hover:border-blue-500 transition-colors">
                                 <h3 className="text-xl font-bold mb-4 text-blue-400">01. KPI Dashboard</h3>
                                 <p className="text-slate-300 mb-4">Erfasse Mieten, Ausgaben und Kredite automatisch. Sehe Cashflow und Rendite auf einen Blick.</p>
-                                <img src="/images/w_Dashboard.png" alt="Dashboard (Ausschnitt)" className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
+                                <OptimizedImage src="/images/w_Dashboard.png" alt="Dashboard (Ausschnitt)" sizes={CARD_IMAGE_SIZES} className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
                             </div>
                             <div className="bg-slate-800 p-8 rounded-xl border border-slate-700 hover:border-blue-500 transition-colors">
                                 <h3 className="text-xl font-bold mb-4 text-blue-400">02. Mieter & Tickets</h3>
                                 <p className="text-slate-300 mb-4">Mieter melden Schäden per App. Du hast ein Ticketsystem statt WhatsApp-Chaos.</p>
-                                <img src="/images/w-Ticketboard.png" alt="Ticket-Board (Ausschnitt)" className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
+                                <OptimizedImage src="/images/w-Ticketboard.png" alt="Ticket-Board (Ausschnitt)" sizes={CARD_IMAGE_SIZES} className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
                             </div>
                             <div className="bg-slate-800 p-8 rounded-xl border border-slate-700 hover:border-blue-500 transition-colors">
                                 <h3 className="text-xl font-bold mb-4 text-blue-400">03. Deal & Sanierung</h3>
                                 <p className="text-slate-300 mb-4">Prüfe neue Objekte (Hold & Flip). Kalkuliere Sanierungen auf Gewerk-Ebene.</p>
-                                <img src="/images/W_BuyandHold.png" alt="Buy-&-Hold-Rechner (Ausschnitt)" className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
+                                <OptimizedImage src="/images/W_BuyandHold.png" alt="Buy-&-Hold-Rechner (Ausschnitt)" sizes={CARD_IMAGE_SIZES} className="rounded-lg opacity-80 border border-slate-600" loading="lazy" decoding="async" />
                             </div>
                         </div>
                     </div>
@@ -133,7 +139,7 @@ const Landing = () => {
                 <section className="py-20 bg-white">
                     <div className="container max-w-3xl mx-auto text-center">
                         <a href={REGISTER_URL} className="btn-primary px-8 py-4 text-lg shadow-lg">
-                            Jetzt 10 Tage risikofrei testen
+                            Jetzt {TRIAL_DAYS} Tage risikofrei testen
                         </a>
                     </div>
                 </section>

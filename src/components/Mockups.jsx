@@ -1,8 +1,14 @@
 import React from 'react';
+import OptimizedImage from './OptimizedImage';
 
 // loading/fetchPriority steuerbar: Bilder im sichtbaren Startbereich (Hero) mit
 // loading="eager" und fetchPriority="high" übergeben, alles darunter bleibt lazy (W1b-10).
-export const LaptopMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority }) => {
+// Bilder aus public/images werden als WebP in passender Breite geladen (OptimizedImage);
+// sizes = angezeigte Breite, wenn das Gerät schmaler als die volle Seitenbreite dargestellt wird.
+const LAPTOP_SIZES = '(min-width: 1024px) 1024px, 100vw';
+const PHONE_SIZES = '300px';
+
+export const LaptopMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority, sizes = LAPTOP_SIZES }) => {
     return (
         <div className={`relative mx-auto ${className}`}>
             {/* Laptop Screen */}
@@ -17,9 +23,10 @@ export const LaptopMockup = ({ src, alt, className = '', children, loading = 'la
                     {children ? (
                         children
                     ) : (
-                        <img
+                        <OptimizedImage
                             src={src}
                             alt={alt}
+                            sizes={sizes}
                             className="w-full h-full object-cover object-top"
                             loading={loading}
                             decoding="async"
@@ -39,7 +46,7 @@ export const LaptopMockup = ({ src, alt, className = '', children, loading = 'la
     );
 };
 
-export const PhoneMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority }) => {
+export const PhoneMockup = ({ src, alt, className = '', children, loading = 'lazy', fetchPriority, sizes = PHONE_SIZES }) => {
     return (
         <div className={`relative mx-auto ${className}`} style={{ maxWidth: '300px' }}>
             <div className="relative bg-white rounded-[2.5rem] border-[8px] border-neutral-900 shadow-2xl overflow-hidden aspect-[9/19]">
@@ -51,9 +58,10 @@ export const PhoneMockup = ({ src, alt, className = '', children, loading = 'laz
                     {children ? (
                         children
                     ) : (
-                        <img
+                        <OptimizedImage
                             src={src}
                             alt={alt}
+                            sizes={sizes}
                             className="w-full h-full object-cover"
                             loading={loading}
                             decoding="async"

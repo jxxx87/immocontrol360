@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { Mail } from 'lucide-react';
 import { APP_URL, BRAND_NAME, SUPPORT_EMAIL } from './siteConfig';
+import OptimizedImage from './OptimizedImage';
 
 const Footer = ({ isLanding = false }) => {
     const year = new Date().getFullYear();
@@ -27,7 +28,7 @@ const Footer = ({ isLanding = false }) => {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-12 mb-16">
                     <div className="md:col-span-1">
                         <Link to="/" className="flex items-center gap-2 mb-6">
-                            <img src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" loading="lazy" />
+                            <OptimizedImage src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" loading="lazy" decoding="async" />
                         </Link>
                         <p className="text-neutral-500 mb-6">
                             Die Premium-Plattform für private und semi-professionelle Immobilieninvestoren. Skalieren ohne Chaos.

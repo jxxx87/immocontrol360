@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { Check } from 'lucide-react';
 import { LaptopMockup } from '../Mockups';
+import { TRIAL_DAYS } from '../../lib/plans';
 
 const Hero = () => {
     return (
@@ -34,7 +35,7 @@ const Hero = () => {
 
                         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
                             <Link to="/register-trial" className="btn-primary w-full sm:w-auto text-lg px-8 py-4 bg-white text-primary hover:bg-blue-50 border-none shadow-xl shadow-black/20 hover:shadow-black/30 hover:scale-105 transition-transform">
-                                Jetzt starten – 10 Tage kostenlos testen
+                                Jetzt starten – {TRIAL_DAYS} Tage kostenlos testen
                             </Link>
                             <Link to="/preise" className="px-8 py-4 w-full sm:w-auto text-lg rounded-lg font-semibold bg-white/10 hover:bg-white/20 border border-white/20 transition-all text-white backdrop-blur-sm">
                                 Preise ansehen

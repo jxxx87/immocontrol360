@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Check, ShieldCheck } from 'lucide-react';
+import { TRIAL_DAYS } from '../../lib/plans';
 
 const PricingTeaser = () => {
     return (
@@ -33,13 +34,14 @@ const PricingTeaser = () => {
                         </Link>
                         <div className="flex items-center gap-2 text-slate-600 font-medium">
                             <ShieldCheck className="text-green-500" size={20} />
-                            <span>10 Tage kostenlos testen</span>
+                            <span>{TRIAL_DAYS} Tage kostenlos testen</span>
                         </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-3xl mx-auto text-slate-700 font-medium">
                         <div className="flex items-center justify-center gap-2">
-                            <Check size={18} className="text-green-500" /> Monatlich kündbar
+                            {/* Gilt für Monats- und Jahresabo (Fristen laut AGB Ziffer 8) – nicht "monatlich kündbar" */}
+                            <Check size={18} className="text-green-500" /> Kündbar zum Ende des Abrechnungszeitraums
                         </div>
                         <div className="flex items-center justify-center gap-2">
                             <Check size={18} className="text-green-500" /> Keine Einrichtungsgebühr

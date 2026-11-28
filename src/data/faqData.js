@@ -39,8 +39,10 @@ export const faqCategories = [
             },
             {
                 id: 'kuendigung',
-                q: 'Kann ich jederzeit kündigen?',
-                a: 'Ja. Du kündigst dein Abo zum Ende eines Abrechnungszeitraums (Monat bzw. Jahr); ohne Kündigung verlängert es sich automatisch. Die genauen Kündigungsfristen findest du in unseren AGB. Die kostenlose Testphase endet dagegen von selbst und muss nicht gekündigt werden.',
+                // Frühere Frage "Kann ich jederzeit kündigen?" – deren Anker bleibt gültig (W1c-06)
+                legacyAnchors: ['kann-ich-jederzeit-k-ndigen'],
+                q: 'Wie kann ich kündigen?',
+                a: 'Du kündigst dein Abo in der App unter Einstellungen → Abrechnung & Abo („Abo verwalten“) im Kundenportal unseres Zahlungsdienstleisters Stripe. Die Kündigung wirkt zum Ende eines Abrechnungszeitraums (Monat bzw. Jahr); ohne Kündigung verlängert sich das Abo automatisch. Die genauen Kündigungsfristen findest du in unseren AGB. Die kostenlose Testphase endet dagegen von selbst und muss nicht gekündigt werden.',
             },
             {
                 id: 'onboarding',

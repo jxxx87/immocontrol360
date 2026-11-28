@@ -5,15 +5,30 @@
 # HTTP -> HTTPS leitet Hostinger bereits selbst weiter (301); bewusst keine eigene Regel hier,
 # damit hinter dem Hostinger-CDN keine Weiterleitungsschleife entstehen kann.
 
-# SPA-Fallback: unbekannte Pfade liefern index.html (Routing übernimmt React)
+# Echte 404 statt "Soft-404" (Komplett-Check W1c-19): Nur die Routen aus src/App.jsx liefern index.html
+# mit Status 200 (Regel unten). Alle anderen fehlenden Pfade – auch alte Build-Dateien unter /assets/ –
+# beantwortet der Server mit Status 404; als Seite dient ebenfalls index.html, React zeigt dort die
+# Seite "Diese Seite gibt es nicht" (NotFound, noindex).
+ErrorDocument 404 /index.html
+
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
+
+  # www.immocontrol360.de dauerhaft auf die Hauptdomain umleiten (Pfad und Query-String bleiben erhalten).
+  # Keine Schleife möglich: Das Ziel beginnt nicht mit "www.". Die App-Subdomain ist nicht betroffen.
+  RewriteCond %{HTTP_HOST} ^www\.immocontrol360\.de\.?(:[0-9]+)?$ [NC]
+  RewriteRule ^(.*)$ https://immocontrol360.de/$1 [R=301,L]
+
   RewriteRule ^index\.html$ - [L]
+
+  # Bekannte Seiten der React-App -> index.html (Status 200). "/" liefert index.html direkt (DirectoryIndex).
+  # WICHTIG: Liste synchron mit den Routen in src/App.jsx halten – eine neue Route, die hier fehlt,
+  # wird zwar angezeigt, antwortet aber mit Status 404 (Suchmaschinen nehmen sie dann nicht auf).
+  # Groß-/Kleinschreibung und abschließender Schrägstrich sind wie bei React Router egal.
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
-  RewriteCond %{REQUEST_FILENAME} !-l
-  RewriteRule . /index.html [L]
+  RewriteRule ^(preise|funktionen|faq|landing|investor|billing/success|billing/cancel|paywall|impressum|datenschutz|agb|abo-starten|checkout|register-trial|login)/?$ /index.html [NC,L]
 </IfModule>
 
 <IfModule mod_headers.c>
@@ -25,9 +40,10 @@
   # HSTS 180 Tage, bewusst ohne includeSubDomains und ohne preload
   Header always set Strict-Transport-Security "max-age=15552000"
 
-  # HTML immer beim Server nachfragen, damit ein neuer Deploy sofort ankommt
+  # HTML immer beim Server nachfragen, damit ein neuer Deploy sofort ankommt.
+  # "always": gilt auch für die 404-Antwort (index.html als ErrorDocument), damit kein Cache sie festhält.
   <FilesMatch "\.html?$">
-    Header set Cache-Control "no-cache"
+    Header always set Cache-Control "no-cache"
   </FilesMatch>
 
   # Von Vite gehashte Build-Dateien (assets/name-HASH.ext, 8-stelliger Hash) ändern ihren Namen bei jeder

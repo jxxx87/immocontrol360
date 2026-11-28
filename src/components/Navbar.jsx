@@ -3,6 +3,8 @@ import { Link, useLocation } from 'react-router-dom';
 import { Menu, X, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { APP_URL, BRAND_NAME } from './siteConfig';
+import { TRIAL_DAYS } from '../lib/plans';
+import OptimizedImage from './OptimizedImage';
 
 const Navbar = () => {
     const [scrolled, setScrolled] = useState(false);
@@ -29,7 +31,7 @@ const Navbar = () => {
             <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'bg-white/90 backdrop-blur-md shadow-sm py-3' : 'bg-transparent py-5'}`}>
                 <div className="container flex items-center justify-between">
                     <Link to="/" className="flex items-center gap-2">
-                        <img src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
+                        <OptimizedImage src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
                     </Link>
                     {/* Login auf allen Bildschirmbreiten (die Landingpages haben kein Mobile-Menü) */}
                     <div className="flex items-center gap-4">
@@ -47,7 +49,7 @@ const Navbar = () => {
             <div className="container flex items-center justify-between">
                 {/* Logo */}
                 <Link to="/" className="flex items-center gap-2">
-                    <img src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
+                    <OptimizedImage src="/images/logo.png" alt={BRAND_NAME} className="h-10 w-auto" />
                 </Link>
 
                 {/* Desktop Menu */}
@@ -64,7 +66,7 @@ const Navbar = () => {
                         Login
                     </a>
                     <Link to="/register-trial" className="btn-primary flex items-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30">
-                        10 Tage kostenlos testen <ArrowRight size={16} />
+                        {TRIAL_DAYS} Tage kostenlos testen <ArrowRight size={16} />
                     </Link>
                 </div>
 

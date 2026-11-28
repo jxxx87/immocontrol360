@@ -13,10 +13,13 @@ dist-ssr
 *.local
 
 # Umgebungsvariablen nicht einchecken (Vorlage mit Schlüsselnamen: .env.example).
-# Hinweis: Die bisher getrackte .env muss einmalig mit "git rm --cached .env" aus dem Index genommen werden.
+# Die früher getrackte .env ist per "git rm --cached .env" aus dem Index genommen (bleibt lokal liegen).
 .env
 .env.*
 !.env.example
+
+# Alte lokale Quellstand-Sicherungen (nicht Teil des Builds, per "git rm -r --cached backups" entfernt)
+backups/
 
 # Editor directories and files
 .vscode/*
