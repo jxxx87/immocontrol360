@@ -10,17 +10,17 @@ neu aufbauen (Testumgebung, Notfall, neues Projekt).
 
 | Datei | Inhalt |
 |---|---|
-| `baseline_public.sql` | Komplettes Schema `public` (74 Tabellen, 3 Sichten, 153 Funktionen, 291 Policies, Trigger, Indizes, Rechte, Kommentare, Realtime-Publikation) plus die 32 Storage-Policies und die Einstellungen der 9 Storage-Buckets. Keine Kundendaten. |
+| `baseline_public.sql` | Komplettes Schema `public` (74 Tabellen, 3 Sichten, 157 Funktionen, 291 Policies, Trigger, Indizes, Rechte, Kommentare, Realtime-Publikation) plus die 32 Storage-Policies und die Einstellungen der 9 Storage-Buckets. Keine Kundendaten. |
 | `seed_system_defaults.sql` | Globale Systemvorgaben ohne Personenbezug: 6 Verteilerschlüssel und 23 Kostenarten mit `user_id IS NULL`. |
 | `generate_baseline.sql` | Erzeugt beide Dateien aus dem Live-Katalog **und prüft sie**: das erzeugte DDL wird in derselben Transaktion in Ersatz-Schemata eingespielt und Objekt für Objekt mit dem Live-Stand verglichen; danach wird alles zurückgerollt. |
 | `extract_baseline.cjs` | Schreibt die Dateien aus dem gespeicherten Ergebnis; prüft Prüfsumme, Schlüssel-Freiheit und Prüfbericht. |
 
 ## Stand
 
-- Erzeugt am 2026-11-28, PostgreSQL 17.6, letzte eingetragene Migration `20261128033003`
-  (tenant_view_row_policies_w4) – enthält alle Korrekturwellen 1–4.
-- Prüfbericht des Laufs: Spalten 917/917, Constraints 344/344, Indizes 307/307, Funktionen 153/153,
-  Funktionsrechte 153/153, Policies 323/323 (inkl. Storage), Trigger 76/76, RLS 74/74, Tabellenrechte 77/77,
+- Erzeugt am 2026-11-28, PostgreSQL 17.6, letzte eingetragene Migration `20261128082403`
+  (reno_userid_policies_w5) – enthält alle Korrekturwellen 1–5.
+- Prüfbericht des Laufs: Spalten 915/915, Constraints 345/345, Indizes 307/307, Funktionen 157/157,
+  Funktionsrechte 157/157, Policies 323/323 (inkl. Storage), Trigger 86/86, RLS 74/74, Tabellenrechte 77/77,
   Kommentare 100/100, Sichten 3/3, Buckets 9/9, Standardrechte 3/3 – alles identisch bis auf bekannte Stellen:
   - `notify_push`: absichtlich eine **Vault-Fassung** (siehe unten), nicht der Live-Rumpf (im Prüfbericht
     beidseitig mit festem Fingerabdruck verglichen, erscheint daher nicht als Abweichung).
@@ -58,7 +58,7 @@ die Vorlage für Phase 0 auf Live (Schlüssel erneuern, Secret anlegen, Funktion
    `baseline_public.sql` als eingespielt markieren – sie stecken schon in der Baseline und dürfen **nicht**
    noch einmal laufen:
    ```bash
-   npx supabase migration repair --status applied $(ls supabase/migrations | sed 's/_.*//' | awk '$1 <= 20261128033003')
+   npx supabase migration repair --status applied $(ls supabase/migrations | sed 's/_.*//' | awk '$1 <= 20261128082403')
    ```
 5. Neuere Migrationen normal einspielen (`npx supabase db push`).
 6. Edge Functions deployen (`supabase/functions`, `verify_jwt` laut `supabase/config.toml`) und deren Secrets setzen.

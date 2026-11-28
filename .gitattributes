@@ -1,0 +1,3 @@
+# Baseline-Dateien immer mit LF auschecken: baseline_public.sql enthält eine md5-Prüfsumme der
+# LF-Fassung (extract_baseline.cjs); mit CRLF (core.autocrlf=true, z. B. auf dem Laptop) passte sie nicht mehr.
+supabase/baseline/** text eol=lf

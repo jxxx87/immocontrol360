@@ -1,8 +1,8 @@
 -- =============================================================================
 -- ImmoControl360 · Ausgangsschema (Baseline) der Live-Datenbank – Schema public (+ Storage-Policies)
 -- Erzeugt mit supabase/baseline/generate_baseline.sql aus dem Live-Katalog (nur lesend).
--- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128033003
--- Inhalt: 74 Tabellen, 3 Sichten, 153 Funktionen, 291 Policies (public), 32 Storage-Policies
+-- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128082403
+-- Inhalt: 74 Tabellen, 3 Sichten, 157 Funktionen, 291 Policies (public), 32 Storage-Policies
 --
 -- NUR AUF EINER LEEREN DATENBANK (frisches Supabase-Projekt) ausführen, als eine Transaktion:
 --   psql "<db-url>" -v ON_ERROR_STOP=1 --single-transaction -f baseline_public.sql
@@ -136,11 +136,10 @@ create table public.claim_access_links (
     last_used_at timestamp with time zone,
     created_at timestamp with time zone default now() not null,
     created_by uuid,
-    token text,
-    pin text,
     is_active boolean default true,
     constraint claim_access_links_pkey PRIMARY KEY (id),
-    constraint claim_access_links_no_plaintext CHECK (((token IS NULL) AND (pin IS NULL)))
+    constraint claim_access_links_pin_hash_bcrypt CHECK ((pin_hash ~ '^\$2[abxy]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'::text)),
+    constraint claim_access_links_token_hash_sha256 CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
 );
 create table public.claim_events (
     id uuid default gen_random_uuid() not null,
@@ -2657,6 +2656,7 @@ declare
     v_process public.rental_processes%rowtype;
     v_tenant_id uuid;
     v_lease_id uuid;
+    v_salutation text;
 begin
     if v_uid is null then
         raise exception 'Nicht angemeldet.';
@@ -2694,8 +2694,19 @@ begin
         raise exception 'Für diese Einheit besteht bereits ein aktiver Mietvertrag, der den gewählten Mietbeginn überschneidet.';
     end if;
 
-    insert into public.tenants (user_id, first_name, last_name, email, phone, occupants)
-    values (v_uid, v_app.first_name, v_app.last_name, v_app.email, v_app.phone,
+    -- Anrede aus dem Bewerbungsportal als tenants.salutation; leer/unbekannt = keine Angabe (neutrale Briefanrede)
+    v_salutation := case lower(btrim(coalesce(v_app.salutation, '')))
+                        when 'frau' then 'female'
+                        when 'female' then 'female'
+                        when 'herr' then 'male'
+                        when 'male' then 'male'
+                        when 'divers' then 'diverse'
+                        when 'diverse' then 'diverse'
+                        else null
+                    end;
+
+    insert into public.tenants (user_id, salutation, first_name, last_name, email, phone, occupants)
+    values (v_uid, v_salutation, v_app.first_name, v_app.last_name, v_app.email, v_app.phone,
             coalesce(v_app.additional_persons_count, 0) + 1)
     returning id into v_tenant_id;
 
@@ -3050,8 +3061,8 @@ begin
 
   v_expires := now() + make_interval(days => v_days);
 
-  insert into public.claim_access_links (claim_id, token, pin, token_hash, pin_hash, expires_at, created_by, is_active)
-  values (p_claim_id, null, null, v_token_hash, extensions.crypt(v_pin, extensions.gen_salt('bf', 8)),
+  insert into public.claim_access_links (claim_id, token_hash, pin_hash, expires_at, created_by, is_active)
+  values (p_claim_id, v_token_hash, extensions.crypt(v_pin, extensions.gen_salt('bf', 8)),
           v_expires, v_uid, true)
   returning id into v_link_id;
 
@@ -3689,6 +3700,78 @@ AS $function$
   ), false)
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.floor_plans_user_id_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_kind text;
+    v_ref uuid;
+    v_old_kind text;
+    v_old_ref uuid;
+    v_owner uuid;
+begin
+    -- Nur direkte Änderungen angemeldeter Nutzer. ON DELETE SET NULL beim Löschen eines
+    -- Objekts/einer Einheit (läuft als Tabelleneigentümer), RPCs und Server bleiben unberührt.
+    if current_user <> 'authenticated' or auth.uid() is null then
+        return new;
+    end if;
+
+    -- Maßgeblich ist wie in den Policies die Zuordnung: Objekt, sonst Einheit.
+    if new.property_id is not null then
+        v_kind := 'property';
+        v_ref := new.property_id;
+    elsif new.unit_id is not null then
+        v_kind := 'unit';
+        v_ref := new.unit_id;
+    else
+        -- Ohne Zuordnung verlangt die Update-Policy ohnehin user_id = auth.uid().
+        return new;
+    end if;
+
+    -- Eigenes Konto oder Eigentümer der Zuordnung: wie beim Anlegen erlaubt.
+    if public.rls_user_ok(new.user_id, v_kind, v_ref) then
+        return new;
+    end if;
+
+    -- Ein anderes Konto nur, wenn user_id unverändert bleibt …
+    if new.user_id is distinct from old.user_id then
+        raise exception 'user_id kann nur auf das eigene Konto oder den Eigentümer der Daten geändert werden.'
+            using errcode = '42501';
+    end if;
+
+    -- … und die Zuordnung gleich bleibt (z. B. Plan eines Teammitglieds bearbeiten).
+    if old.property_id is not null then
+        v_old_kind := 'property';
+        v_old_ref := old.property_id;
+    elsif old.unit_id is not null then
+        v_old_kind := 'unit';
+        v_old_ref := old.unit_id;
+    end if;
+    if v_old_kind is not distinct from v_kind and v_old_ref is not distinct from v_ref then
+        return new;
+    end if;
+
+    -- Neu zugeordnet und die bisherige user_id passt nicht: Eigentümer der neuen Zuordnung,
+    -- sonst fiele der Plan beim Löschen des Objekts an das bisherige Konto zurück.
+    if v_kind = 'property' then
+        select po.user_id into v_owner
+          from public.properties pr
+          join public.portfolios po on po.id = pr.portfolio_id
+         where pr.id = v_ref;
+    else
+        select po.user_id into v_owner
+          from public.units u
+          join public.properties pr on pr.id = u.property_id
+          join public.portfolios po on po.id = pr.portfolio_id
+         where u.id = v_ref;
+    end if;
+    new.user_id := coalesce(v_owner, auth.uid());
+    return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.generate_claim_access_link(p_claim_id uuid, p_token text, p_pin text, p_expires_days integer DEFAULT 14)
  RETURNS uuid
  LANGUAGE plpgsql
@@ -3740,10 +3823,8 @@ begin
    where claim_id = p_claim_id
      and (is_active is distinct from false or revoked_at is null);
 
-  insert into public.claim_access_links (claim_id, token, pin, token_hash, pin_hash, expires_at, created_by, is_active)
+  insert into public.claim_access_links (claim_id, token_hash, pin_hash, expires_at, created_by, is_active)
   values (p_claim_id,
-          null,
-          null,
           encode(extensions.digest(v_token, 'sha256'), 'hex'),
           extensions.crypt(v_pin, extensions.gen_salt('bf', 8)),
           now() + make_interval(days => v_days),
@@ -6299,6 +6380,77 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.renovation_calculations_owner_follows_property()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_uid uuid := auth.uid();
+    v_owner uuid;
+begin
+    -- Nur direkte Änderungen angemeldeter Nutzer. ON DELETE SET NULL beim Löschen eines
+    -- Objekts (läuft als Tabelleneigentümer), RPCs (SECURITY DEFINER) und Server-Zugriffe
+    -- lassen user_id unverändert.
+    if current_user <> 'authenticated' or v_uid is null then
+        return new;
+    end if;
+
+    if new.property_id is null then
+        -- Objekt entfernt: Eine Kalkulation ohne Objekt sieht nur ihr user_id-Konto. Sie geht
+        -- an den Bearbeiter, sonst wäre sie für ihn unsichtbar und das Speichern scheitert.
+        new.user_id := v_uid;
+    elsif not public.rls_user_ok(new.user_id, 'property', new.property_id) then
+        -- Objekt gewechselt: user_id muss wie beim Anlegen zum Objekt passen (eigenes Konto
+        -- oder Portfolio-Eigentümer), sonst liest der bisherige Eigentümer weiter mit.
+        select po.user_id into v_owner
+          from public.properties pr
+          join public.portfolios po on po.id = pr.portfolio_id
+         where pr.id = new.property_id;
+        if v_owner is not null then
+            new.user_id := v_owner;
+        end if;
+    end if;
+
+    return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.renovation_projects_same_owner_on_move()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_old_owner uuid;
+    v_new_owner uuid;
+begin
+    -- Nur direkte Änderungen angemeldeter Nutzer; RPCs (SECURITY DEFINER), Server und Admin
+    -- bleiben unberührt.
+    if current_user <> 'authenticated' or auth.uid() is null then
+        return new;
+    end if;
+
+    select po.user_id into v_old_owner
+      from public.properties pr
+      join public.portfolios po on po.id = pr.portfolio_id
+     where pr.id = old.property_id;
+    select po.user_id into v_new_owner
+      from public.properties pr
+      join public.portfolios po on po.id = pr.portfolio_id
+     where pr.id = new.property_id;
+
+    -- Wie bei Objekten/Einheiten/Mietverträgen (set_owner_user_id): nur innerhalb desselben
+    -- Eigentümers. Sonst bliebe die alte user_id stehen und der bisherige Eigentümer behielte
+    -- über has_renovation_project_access Zugriff auf Projekt und Unterdaten.
+    if v_old_owner is null or v_new_owner is null or v_old_owner <> v_new_owner then
+        raise exception 'Sanierungsprojekte können nur zu Objekten desselben Eigentümers verschoben werden.'
+            using errcode = '42501';
+    end if;
+    return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.renovation_set_created_by()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -6324,6 +6476,54 @@ begin
     end if;
   end if;
   return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.renovation_user_id_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_kind text;
+    v_ref uuid;
+begin
+    -- Nur direkte Änderungen angemeldeter Nutzer; RPCs (SECURITY DEFINER), Server und Admin
+    -- bleiben unberührt.
+    if current_user <> 'authenticated' or auth.uid() is null then
+        return new;
+    end if;
+
+    -- Übergeordneter Datensatz wie in der jeweiligen Insert-Policy
+    case tg_table_name
+        when 'renovation_project_trades', 'renovation_project_subtrades',
+             'renovation_invoices', 'renovation_tasks' then
+            v_kind := 'renovation_project';
+            v_ref := new.project_id;
+        when 'renovation_milestones' then
+            v_kind := 'renovation_project';
+            select t.project_id into v_ref
+              from public.renovation_project_trades t
+             where t.id = new.project_trade_id;
+        when 'renovation_calc_trades' then
+            v_kind := 'renovation_calculation';
+            v_ref := new.calculation_id;
+        when 'renovation_calc_subtrades' then
+            v_kind := 'renovation_calculation';
+            select t.calculation_id into v_ref
+              from public.renovation_calc_trades t
+             where t.id = new.calc_trade_id;
+        else
+            raise exception 'renovation_user_id_guard: Tabelle % ist nicht vorgesehen', tg_table_name;
+    end case;
+
+    -- Neue user_id: eigenes Konto, Eigentümer oder user_id des Projekts/der Kalkulation
+    -- (wie beim Anlegen). Ein beliebiges fremdes Konto nicht.
+    if not public.rls_user_ok(new.user_id, v_kind, v_ref) then
+        raise exception 'user_id kann nur auf das eigene Konto oder den Eigentümer der Daten geändert werden.'
+            using errcode = '42501';
+    end if;
+    return new;
 end;
 $function$
 ;
@@ -9063,6 +9263,7 @@ CREATE TRIGGER trigger_update_document_templates_updated_at BEFORE UPDATE ON pub
 CREATE TRIGGER push_on_document AFTER INSERT ON public.documents FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_document();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.economic_units FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.expenses FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
+CREATE TRIGGER trg_floor_plans_user_id_guard BEFORE UPDATE ON public.floor_plans FOR EACH ROW WHEN (((old.user_id IS DISTINCT FROM new.user_id) OR (old.property_id IS DISTINCT FROM new.property_id) OR (old.unit_id IS DISTINCT FROM new.unit_id))) EXECUTE FUNCTION public.floor_plans_user_id_guard();
 CREATE TRIGGER trg_invoices_protect_issued BEFORE DELETE OR UPDATE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.protect_issued_invoice();
 CREATE TRIGGER trg_lease_notes_set_meta BEFORE INSERT OR UPDATE ON public.lease_notes FOR EACH ROW EXECUTE FUNCTION public.lease_notes_set_meta();
 CREATE TRIGGER trigger_lease_rent_periods_before_write BEFORE INSERT OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.lease_rent_periods_before_write();
@@ -9084,17 +9285,26 @@ CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.portfolios FOR EAC
 CREATE TRIGGER profiles_protect_stripe_connect BEFORE INSERT OR UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION public.profiles_protect_stripe_connect();
 CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER trigger_push_subscriptions_release_token BEFORE INSERT OR UPDATE OF fcm_token, user_id ON public.push_subscriptions FOR EACH ROW EXECUTE FUNCTION public.push_subscriptions_release_token();
+CREATE TRIGGER trg_renovation_calc_subtrades_user_id_guard BEFORE UPDATE ON public.renovation_calc_subtrades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
+CREATE TRIGGER trg_renovation_calc_trades_user_id_guard BEFORE UPDATE ON public.renovation_calc_trades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_calculations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_calculations_owner BEFORE UPDATE ON public.renovation_calculations FOR EACH ROW WHEN ((old.property_id IS DISTINCT FROM new.property_id)) EXECUTE FUNCTION public.renovation_calculations_owner_follows_property();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_invoices_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER trg_renovation_invoices_user_id_guard BEFORE UPDATE ON public.renovation_invoices FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_milestone_templates FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
+CREATE TRIGGER trg_renovation_milestones_user_id_guard BEFORE UPDATE ON public.renovation_milestones FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_project_subtrades_user_id_guard BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_trades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_project_trades_user_id_guard BEFORE UPDATE ON public.renovation_project_trades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_projects_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER trg_renovation_projects_same_owner BEFORE UPDATE ON public.renovation_projects FOR EACH ROW WHEN ((old.property_id IS DISTINCT FROM new.property_id)) EXECUTE FUNCTION public.renovation_projects_same_owner_on_move();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_subtrades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_tasks_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER trg_renovation_tasks_user_id_guard BEFORE UPDATE ON public.renovation_tasks FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_trades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER trigger_rent_ledger_block_claimed_delete BEFORE DELETE ON public.rent_ledger FOR EACH ROW EXECUTE FUNCTION public.rent_ledger_block_claimed_delete();
 CREATE TRIGGER block_claim_rent_payments_modification BEFORE INSERT OR DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.protect_claim_rent_payments();
@@ -9833,7 +10043,7 @@ END)
     with check ((
 CASE
     WHEN (property_id IS NULL) THEN (user_id = ( SELECT auth.uid() AS uid))
-    ELSE (public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text))
+    ELSE ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)) AND (public.rls_user_ok(user_id, 'property'::text, property_id) OR public.rls_user_ok(user_id, 'renovation_calculation'::text, id)))
 END AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'immobilien'::text, 'write'::text) OR public.has_unit_access(unit_id, 'investorportal'::text, 'write'::text))));
 create policy renovation_invoices_delete on public.renovation_invoices as permissive for delete to authenticated
     using ((public.has_renovation_project_access(project_id, 'immobilien'::text, 'write'::text) OR public.has_renovation_project_access(project_id, 'investorportal'::text, 'write'::text)));
@@ -9906,7 +10116,7 @@ create policy renovation_projects_select on public.renovation_projects as permis
     using (((user_id = ( SELECT auth.uid() AS uid)) OR public.has_property_access(property_id, 'immobilien'::text, 'read'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'read'::text)));
 create policy renovation_projects_update on public.renovation_projects as permissive for update to authenticated
     using ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)))
-    with check (((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'immobilien'::text, 'write'::text) OR public.has_unit_access(unit_id, 'investorportal'::text, 'write'::text))));
+    with check (((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'immobilien'::text, 'write'::text) OR public.has_unit_access(unit_id, 'investorportal'::text, 'write'::text)) AND (public.rls_user_ok(user_id, 'property'::text, property_id) OR public.rls_user_ok(user_id, 'renovation_project'::text, id))));
 create policy renovation_subtrades_delete on public.renovation_subtrades as permissive for delete to authenticated
     using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_subtrades_insert on public.renovation_subtrades as permissive for insert to authenticated
@@ -10555,6 +10765,8 @@ grant execute on function public.floor_plan_storey_labels(jsonb) to service_role
 revoke all on function public.floor_plan_total_area_mm2(jsonb) from public, anon, authenticated, service_role;
 grant execute on function public.floor_plan_total_area_mm2(jsonb) to authenticated;
 grant execute on function public.floor_plan_total_area_mm2(jsonb) to service_role;
+revoke all on function public.floor_plans_user_id_guard() from public, anon, authenticated, service_role;
+grant execute on function public.floor_plans_user_id_guard() to service_role;
 revoke all on function public.generate_claim_access_link(uuid,text,text,integer) from public, anon, authenticated, service_role;
 grant execute on function public.generate_claim_access_link(uuid,text,text,integer) to authenticated;
 grant execute on function public.generate_claim_access_link(uuid,text,text,integer) to service_role;
@@ -10695,9 +10907,15 @@ grant execute on function public.record_claim_payment(uuid,date,numeric,text,uui
 revoke all on function public.register_trial_rate_check(text) from public, anon, authenticated, service_role;
 grant execute on function public.register_trial_rate_check(text) to authenticated;
 grant execute on function public.register_trial_rate_check(text) to service_role;
+revoke all on function public.renovation_calculations_owner_follows_property() from public, anon, authenticated, service_role;
+grant execute on function public.renovation_calculations_owner_follows_property() to service_role;
+revoke all on function public.renovation_projects_same_owner_on_move() from public, anon, authenticated, service_role;
+grant execute on function public.renovation_projects_same_owner_on_move() to service_role;
 revoke all on function public.renovation_set_created_by() from public, anon, authenticated, service_role;
 grant execute on function public.renovation_set_created_by() to authenticated;
 grant execute on function public.renovation_set_created_by() to service_role;
+revoke all on function public.renovation_user_id_guard() from public, anon, authenticated, service_role;
+grant execute on function public.renovation_user_id_guard() to service_role;
 revoke all on function public.rent_ledger_block_claimed_delete() from public, anon, authenticated, service_role;
 grant execute on function public.rent_ledger_block_claimed_delete() to service_role;
 revoke all on function public.reverse_appended_claim(uuid) from public, anon, authenticated, service_role;
@@ -10853,8 +11071,8 @@ comment on table public.renovation_tasks is 'Projektbezogene Aufgaben – option
 comment on table public.renovation_trades is 'Benutzer-eigene Gewerke-Templates (Einstellungen)';
 comment on table public.stripe_webhook_events is 'Ereignisprotokoll des Stripe-Webhooks (Edge Function stripe-webhook, nur service_role): je Stripe-Ereignis (event.id) Status, Versuche, Ergebnis-Code und kurze Fehlermeldung. Kein Ereignisinhalt, keine Personendaten.';
 comment on table public.tenant_change_log is 'Änderungsprotokoll der Mieter-Stammdaten: Aktualisierung über den Mieterdaten-Link (source token_link, geschrieben von update_tenant_by_token) und Selbständerungen im Mieterportal (source tenant_portal, Trigger trg_tenants_portal_change_log). App-Konten dürfen nur lesen.';
-comment on column public.claim_access_links.token is 'Veraltet: immer NULL (Klartext wird nicht gespeichert, siehe token_hash). Wird später entfernt.';
-comment on column public.claim_access_links.pin is 'Veraltet: immer NULL (Klartext wird nicht gespeichert, siehe pin_hash). Wird später entfernt.';
+comment on column public.claim_access_links.token_hash is 'SHA-256 (hex, klein) des Portal-Tokens; Prüfung in claim_portal_check_access. Klartext wird nie gespeichert.';
+comment on column public.claim_access_links.pin_hash is 'bcrypt-Hash der Portal-PIN (extensions.crypt/gen_salt(''bf'', 8)); Prüfung in claim_portal_check_access. Klartext wird nie gespeichert.';
 comment on column public.claims.tenant_id is 'Mieter der Forderung; bewusst nullable: delete_tenant_completely löst den Bezug (Lösch-Regel D2-17), die Forderung bleibt über lease_id zugeordnet.';
 comment on column public.claims.interest_rate is 'Verzugszinssatz in Prozent p. a. (5.0000 = 5 %).';
 comment on column public.cloud_connections.access_token is 'Veraltet: Klartext nur im Übergangsbetrieb (bis 08b_cloud_tokens_finalize). Maßgeblich ist der Vault.';
@@ -11069,4 +11287,4 @@ alter default privileges for role postgres in schema public grant delete, insert
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to postgres;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to service_role;
 
--- Prüfsumme (md5 des Inhalts vor dieser Zeile): 2a87b40a0dd891e86fb61fd41134081b
+-- Prüfsumme (md5 des Inhalts vor dieser Zeile): 2464c53455a7277f40e991958c9f1e04
