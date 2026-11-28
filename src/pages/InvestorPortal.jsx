@@ -38,6 +38,7 @@ import { supabase } from '../lib/supabase';
 import { generateClientPdf } from '../lib/pdfGenerator';
 import { usePdfTemplate } from '../lib/usePdfTemplate';
 import { translateError } from '../lib/errorTranslator';
+import { parseNum, round2, parseLocalDate, calculateCurrentDebt, getLoanSnapshot } from '../lib/loanSchedule';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { useViewMode } from '../context/ViewModeContext';
@@ -46,7 +47,6 @@ import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 
 // ─── Reine Rechenfunktionen (ohne React-State) ──────────────────────────────
 
-const MAX_LOAN_MONTHS = 600; // 50 Jahre
 const MAX_FIXED_YEARS = 50;
 const DEFAULT_FIXED_YEARS = 10;
 const DEFAULT_AFA_RATE = 2;
@@ -54,18 +54,11 @@ const DEFAULT_BUILDING_SHARE = 80;
 const DEFAULT_TAX_RATE = 42;
 const PROPERTY_SAVE_DELAY_MS = 600;
 
-// Zahl aus Eingabe/DB-Wert; leer oder ungültig -> null (eine eingegebene 0 bleibt 0)
-const parseNum = (v) => {
-    if (v === '' || v === null || v === undefined) return null;
-    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
-    return Number.isFinite(n) ? n : null;
-};
 // Standardwert nur für leere/ungültige Eingaben – 0 % bleibt 0 %
 const numOr = (v, def) => {
     const n = parseNum(v);
     return n === null ? def : n;
 };
-const round2 = (v) => Math.round((v + Number.EPSILON) * 100) / 100;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -73,98 +66,13 @@ const toLocalDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pa
 // Heutiges Datum als 'YYYY-MM-DD' in lokaler Zeit (toISOString wäre UTC und zwischen 0 und 2 Uhr noch der Vortag)
 const localTodayStr = () => toLocalDateStr(new Date());
 const dateStr = (v) => (v ? String(v).slice(0, 10) : '');
-// 'YYYY-MM-DD' als lokales Datum (nicht UTC)
-const parseLocalDate = (value) => {
-    if (!value) return null;
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return isNaN(d.getTime()) ? null : d;
-};
 // Volle Monate zwischen zwei Daten (der Tag im Monat zählt mit)
 const fullMonthsBetween = (from, to) => {
     let months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
     if (to.getDate() < from.getDate()) months -= 1;
     return months;
 };
-// i-ter Ratentermin ab Startdatum; Tag wird auf das Monatsende begrenzt (wie auf der Darlehen-Seite)
-const paymentDateAt = (start, i) => {
-    const y = start.getFullYear();
-    const m0 = start.getMonth() + i;
-    const lastDay = new Date(y, m0 + 1, 0).getDate();
-    return new Date(y, m0, Math.min(start.getDate(), lastDay));
-};
-
-// Monatliche Rate wie auf der Darlehen-Seite: feste Rate oder Darlehensbetrag × (Zins + anf. Tilgung) / 12
-const getLoanMonthlyPayment = (loan) => {
-    const fixed = parseNum(loan.fixed_annuity);
-    if (fixed !== null && fixed > 0) return round2(fixed);
-    const amount = parseNum(loan.loan_amount);
-    const rate = parseNum(loan.interest_rate);
-    const repayment = parseNum(loan.initial_repayment_rate);
-    if (!(amount > 0) || rate === null || repayment === null) return null;
-    const payment = round2((amount * (rate + repayment)) / 100 / 12);
-    return payment > 0 ? payment : null;
-};
-
-// Aktuelle Restschuld – dieselbe Rechnung wie der Tilgungsplan der Darlehen-Seite (Loans.jsx), damit Cockpit
-// und Darlehen-Seite dieselbe Restschuld zeigen: Raten bis einschließlich Stichtag laufen regulär, danach gilt
-// die tatsächliche Restschuld und es wird nur ab dem Stichtag weiter getilgt. Altbestand ohne Stichtag gilt
-// (wie dort) ab dem Startdatum; neue Einträge verlangen den Stichtag.
-const calculateCurrentDebt = (loan, today = new Date()) => {
-    const original = parseNum(loan.loan_amount) || 0;
-    const start = parseLocalDate(loan.start_date);
-    const actual = parseNum(loan.actual_residual_debt);
-    let actualDate = parseLocalDate(loan.actual_residual_debt_date);
-    if (actual !== null && !actualDate && start) {
-        actualDate = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
-    }
-    const hasReset = actual !== null && !!actualDate;
-    const until = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const resetApplies = hasReset && actualDate <= until;
-
-    const annualRate = parseNum(loan.interest_rate);
-    const payment = getLoanMonthlyPayment(loan);
-    if (!start || annualRate === null || payment === null) {
-        return Math.max(0, round2(resetApplies ? actual : original));
-    }
-
-    let balance = round2(original);
-    let resetDone = false;
-    for (let i = 0; i < MAX_LOAN_MONTHS; i++) {
-        const date = paymentDateAt(start, i);
-        if (hasReset && !resetDone && date > actualDate) {
-            if (actualDate > until) break;
-            balance = round2(actual);
-            resetDone = true;
-        }
-        if (date > until) break;
-        if (balance <= 0.005) {
-            if (hasReset && !resetDone) continue;
-            break;
-        }
-        const interest = round2((balance * annualRate) / 100 / 12);
-        if (payment <= interest + 0.005) {
-            if (hasReset && !resetDone) continue;
-            break;
-        }
-        const principal = Math.min(round2(payment - interest), balance);
-        balance = round2(balance - principal);
-    }
-    return Math.max(0, balance);
-};
-
-// Kennzahlen eines Darlehens für den laufenden Monat: getilgte Darlehen zählen nicht mehr mit,
-// die Rate ist auf Restschuld + Monatszins begrenzt (letzte Rate)
-const getLoanSnapshot = (loan, today = new Date()) => {
-    const debt = calculateCurrentDebt(loan, today);
-    const rate = (parseNum(loan.interest_rate) || 0) / 100;
-    if (debt <= 0) return { debt: 0, payment: 0, interest: 0, repayment: 0, rate };
-    const nominal = getLoanMonthlyPayment(loan) || 0;
-    const interest = (debt * rate) / 12;
-    const payment = Math.min(nominal, debt + interest);
-    return { debt, payment, interest, repayment: Math.max(0, payment - interest), rate };
-};
+// Darlehen (Rate, Restschuld, Monatswerte) – gemeinsam mit Darlehen-Seite und Objektliste: src/lib/loanSchedule.js
 
 // Einheitliche Definition "laufender Mietvertrag" (Einnahmen, Leerstand, Optimierungen):
 // Status aktiv und der Stichtag liegt innerhalb der Vertragslaufzeit

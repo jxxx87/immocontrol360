@@ -10,10 +10,12 @@
  * - Besteht bereits ein laufendes Abo (DB + Stripe), wird KEIN zweites Abo angelegt,
  *   sondern das Stripe-Kundenportal (Planwechsel) zurückgegeben (`already_subscribed`).
  * - Gespeicherter stripe_customer_id wird wiederverwendet; Redirect-Ziele nur eigene Origins.
+ * - Wave 3 (E3-13, E3-21): Preis-IDs nur noch in ../_shared/stripePlans.ts (gemeinsam mit
+ *   stripe-webhook); eingebautes Deno.serve statt deno.land/std@0.131.0.
+ *   Ausrollen: index.ts UND ../_shared/stripePlans.ts hochladen (siehe supabase/config.toml).
  */
 
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
+import { priceIdFor } from "../_shared/stripePlans.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -24,24 +26,6 @@ const STRIPE_SECRET = Deno.env.get("STRIPE_SECRET_KEY") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-
-// ─── STRIPE PRICE ID MAPPING ───
-// Hinweis: identisch in stripe-webhook (PRICE_TO_PLAN) gepflegt.
-const PRICE_IDS: Record<string, Record<string, string>> = {
-    starter: {
-        monthly: "price_1T1GauFpRUY7TQZUpmxwYOJb",
-        yearly: "price_1T1l3oFpRUY7TQZUtwi16wzf",
-    },
-    professional: {
-        monthly: "price_1T1GbJFpRUY7TQZUPASgpSTz",
-        yearly: "price_1T1l37FpRUY7TQZUwCuCfubf",
-    },
-    business: {
-        monthly: "price_1T1GbhFpRUY7TQZUtvTFLgI7",
-        yearly: "price_1T1l1xFpRUY7TQZUIEG7ATgZ",
-    },
-};
-const BILLING_PERIODS = new Set(["monthly", "yearly"]);
 
 // Stripe-Status, bei denen ein Abo noch läuft bzw. noch verwaltet werden muss
 // (kein zweites Abo anlegen). 'incomplete' verfällt nach 23 h von selbst → neuer Checkout erlaubt,
@@ -224,7 +208,7 @@ function json(body: unknown, status = 200): Response {
     });
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }
@@ -243,11 +227,10 @@ serve(async (req: Request) => {
         const plan_id = typeof body?.plan_id === "string" ? body.plan_id : "";
         const billing_period = typeof body?.billing_period === "string" ? body.billing_period : "";
 
-        const planPrices = PRICE_IDS[plan_id];
-        if (!planPrices || !BILLING_PERIODS.has(billing_period)) {
+        const priceId = priceIdFor(plan_id, billing_period);
+        if (!priceId) {
             return json({ error: 'invalid_plan', message: 'Ungültiger Tarif oder Abrechnungszeitraum.' }, 400);
         }
-        const priceId = planPrices[billing_period];
 
         const userId = authUser.id;
         const email = authUser.email;

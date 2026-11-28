@@ -15,6 +15,8 @@
 //    gerechnet, sondern ein Fehler gemeldet.
 // =============================================================================
 
+import { DEFAULT_TEMPLATES } from './defaultTemplates';
+
 const DAY_MS = 86400000;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
 const FAR_FUTURE = '9999-12-31';
@@ -238,7 +240,22 @@ export const KEY_TYPE_INFO = {
     equal: { label: 'Gleichverteilung', short: 'Gleich', unit: 'Einh.' },
     mea: { label: 'Miteigentumsanteile', short: 'MEA', unit: 'MEA' },
     custom: { label: 'Verbrauch / Einzelwerte', short: 'Verbr.', unit: 'Verbr.' },
-    direct: { label: 'Direktzuordnung', short: 'Direkt', unit: '€' }
+    direct: { label: 'Direktzuordnung', short: 'Direkt', unit: '€' },
+    heating_split: { label: 'HeizkostenV (Grund-/Verbrauchskosten)', short: 'HeizkV', unit: '' }
+};
+
+// Eingebauter Schlüssel für Heiz- und Warmwasserkosten (kein Datensatz in distribution_keys):
+// Grundkosten nach Wohnfläche, Verbrauchskosten nach erfasstem Verbrauch je Einheit.
+// Der Verbrauchsanteil (consumption_share am Kostenposten) muss nach §§ 7, 8 HeizkostenV
+// zwischen 50 und 70 % liegen und wird ausdrücklich eingetragen (kein stiller Standardwert).
+export const HEATING_SPLIT_KEY_ID = 'heizkostenv';
+export const HEATING_SPLIT_MIN_SHARE = 50;
+export const HEATING_SPLIT_MAX_SHARE = 70;
+
+export const parseConsumptionShare = (value) => {
+    const n = parseNumber(value);
+    if (n === null || n < HEATING_SPLIT_MIN_SHARE || n > HEATING_SPLIT_MAX_SHARE) return null;
+    return n;
 };
 
 const LEGACY_KEYS = {
@@ -254,6 +271,7 @@ const LEGACY_KEYS = {
 export const resolveDistributionKey = (item, distributionKeys = []) => {
     const keyVal = item?.distribution_key || null;
     if (item?.unit_id) return { id: keyVal, name: 'Direkt (Einheit)', type: 'unit_direct', resolved: true };
+    if (keyVal === HEATING_SPLIT_KEY_ID) return { id: keyVal, name: KEY_TYPE_INFO.heating_split.label, type: 'heating_split', resolved: true };
     const dk = (distributionKeys || []).find(k => k.id === keyVal);
     if (dk) {
         if (KEY_TYPE_INFO[dk.calculation_type]) return { id: dk.id, name: dk.name, type: dk.calculation_type, resolved: true };
@@ -380,6 +398,78 @@ export const computeDistribution = ({ costItems = [], houseUnits = [], occupancy
                 res.cellWeights[u.id] = cw;
                 res.cellCents[u.id] = splitByWeights(cents, cw, cw);
             });
+            return;
+        }
+
+        // HeizkostenV: Grundkosten nach Wohnfläche + Verbrauchskosten nach Verbrauch, je Teil
+        // cent-genau verteilt (Größte-Reste-Verfahren); Summe beider Teile = Gesamtkosten.
+        if (t === 'heating_split') {
+            const share = parseConsumptionShare(item.consumption_share);
+            if (share === null) return fail(`Verbrauchsanteil fehlt oder liegt nicht zwischen ${HEATING_SPLIT_MIN_SHARE} und ${HEATING_SPLIT_MAX_SHARE} % (§§ 7, 8 HeizkostenV) – bitte in Schritt „Kosten" eintragen.`);
+            const missingArea = houseUnits.filter(u => parseNumber(u.sqm) === null);
+            if (missingArea.length) return fail(`Wohnfläche fehlt für: ${missingArea.map(unitName).join(', ')} (die Grundkosten werden nach Wohnfläche verteilt; bitte in den Einheiten hinterlegen).`);
+            const values = item.unit_values || {};
+            const missingCons = houseUnits.filter(u => parseNumber(values[u.id]) === null);
+            if (missingCons.length) return fail(`Verbrauchswerte fehlen für: ${missingCons.map(unitName).join(', ')} (in Schritt „Kosten" eintragen oder aus Zählerständen übernehmen).`);
+            const negative = houseUnits.filter(u => parseNumber(values[u.id]) < 0);
+            if (negative.length) return fail(`Negative Verbrauchswerte bei: ${negative.map(unitName).join(', ')}.`);
+            const areaWeights = {};
+            const consWeights = {};
+            houseUnits.forEach(u => {
+                areaWeights[u.id] = Math.max(0, parseNumber(u.sqm) || 0);
+                consWeights[u.id] = parseNumber(values[u.id]);
+            });
+            const areaTotal = Object.values(areaWeights).reduce((s, x) => s + x, 0);
+            const consTotal = Object.values(consWeights).reduce((s, x) => s + x, 0);
+            if (!(areaTotal > 0)) return fail('Die Summe der Wohnflächen ist 0 – die Grundkosten können nicht verteilt werden.');
+            if (!(consTotal > 0)) return fail('Die Summe der Verbrauchswerte ist 0 – die Verbrauchskosten können nicht verteilt werden.');
+            const zero = houseUnits.filter(u => !(areaWeights[u.id] > 0));
+            if (zero.length) res.warning = `Ohne Fläche (0 m²), tragen keine Grundkosten: ${zero.map(unitName).join(', ')}.`;
+
+            const sign = totalCents < 0 ? -1 : 1;
+            const consCents = sign * Math.round((Math.abs(totalCents) * share) / 100);
+            const baseCents = totalCents - consCents;
+            const allocatePart = (cents, weights) => {
+                const part = { unitCents: {}, cellCents: {} };
+                const flat = [];
+                houseUnits.forEach(u => {
+                    part.unitCents[u.id] = 0;
+                    part.cellCents[u.id] = {};
+                    const w = weights[u.id] || 0;
+                    if (!(w > 0)) return;
+                    const cw = dayWeightsFor(u.id);
+                    const cwSum = Object.values(cw).reduce((s, x) => s + x, 0);
+                    Object.keys(cw).forEach(k => {
+                        if (cw[k] > 0) flat.push({ uid: u.id, cell: k, weight: (w * cw[k]) / cwSum });
+                    });
+                });
+                const alloc = allocateCents(cents, flat.map(f => f.weight));
+                flat.forEach((f, i) => {
+                    part.unitCents[f.uid] += alloc[i];
+                    part.cellCents[f.uid][f.cell] = (part.cellCents[f.uid][f.cell] || 0) + alloc[i];
+                });
+                return part;
+            };
+            const basePart = allocatePart(baseCents, areaWeights);
+            const consPart = allocatePart(consCents, consWeights);
+            houseUnits.forEach(u => {
+                res.unitCents[u.id] = basePart.unitCents[u.id] + consPart.unitCents[u.id];
+                const cells = {};
+                [basePart.cellCents[u.id], consPart.cellCents[u.id]].forEach(src => {
+                    Object.entries(src).forEach(([k, c]) => { cells[k] = (cells[k] || 0) + c; });
+                });
+                res.cellCents[u.id] = cells;
+                if (areaWeights[u.id] > 0 || consWeights[u.id] > 0) res.cellWeights[u.id] = dayWeightsFor(u.id);
+            });
+            res.basis.unitLabel = '';
+            res.split = {
+                consumptionShare: share,
+                baseShare: 100 - share,
+                baseCents,
+                consumptionCents: consCents,
+                area: { total: areaTotal, unitValues: areaWeights, unitLabel: 'm²', unitCents: basePart.unitCents, cellCents: basePart.cellCents },
+                consumption: { total: consTotal, unitValues: consWeights, unitLabel: item.consumption_unit || 'Verbr.', unitCents: consPart.unitCents, cellCents: consPart.cellCents }
+            };
             return;
         }
 
@@ -599,6 +689,27 @@ const describeItemForCell = (row, cell, occ, d) => {
     };
     if (!d || row.isCustom || d.status !== 'ok') return base;
     const t = d.key.type;
+    if (t === 'heating_split' && d.split) {
+        // Ohne Handkorrektur: Grund- und Verbrauchskosten als eigene Zeilen ausweisen
+        if (!row.overridden) {
+            const s = d.split;
+            const part = (kind, share, keyName, cents, info) => {
+                const shareCents = info.cellCents?.[occ.unitId]?.[cell.key] || 0;
+                const totalCost = centsToEuro(cents);
+                return {
+                    kind, label: `${row.label} – ${kind === 'base' ? 'Grundkosten' : 'Verbrauchskosten'} (${formatNumberDE(share, 2)} %)`,
+                    keyName, totalCost, basisTotal: info.total, basisUnit: info.unitValues?.[occ.unitId] ?? null,
+                    unitLabel: info.unitLabel, costPerBasis: info.total > 0 ? totalCost / info.total : null,
+                    timeText: base.timeText, shareCents, share: centsToEuro(shareCents)
+                };
+            };
+            base.parts = [
+                part('base', s.baseShare, 'Wohnfläche', s.baseCents, s.area),
+                part('consumption', s.consumptionShare, 'Verbrauch', s.consumptionCents, s.consumption)
+            ];
+        }
+        return base;
+    }
     if (t === 'persons') {
         base.basisTotal = d.basis.total;
         base.basisUnit = cell.personDays;
@@ -746,8 +857,8 @@ export const computeSettlement = ({
     }
     costItems.forEach(ci => {
         const d = distribution[ci.id];
-        if (isHeatingCostName(ci.category_name) && d?.status === 'ok' && d.key.type !== 'custom' && d.key.type !== 'unit_direct') {
-            issues.push({ level: 'info', text: `${ci.category_name}: Heiz- und Warmwasserkosten sind nach der HeizkostenV überwiegend (50–70 %) nach Verbrauch zu verteilen. Gewählt ist „${d.key.name}".` });
+        if (isHeatingCostName(ci.category_name) && d?.status === 'ok' && !['custom', 'unit_direct', 'heating_split'].includes(d.key.type)) {
+            issues.push({ level: 'info', text: `${ci.category_name}: Heiz- und Warmwasserkosten sind nach der HeizkostenV überwiegend (50–70 %) nach Verbrauch zu verteilen. Gewählt ist „${d.key.name}". Für die Aufteilung in Grund- und Verbrauchskosten steht der Schlüssel „${KEY_TYPE_INFO.heating_split.label}" zur Verfügung.` });
         }
     });
     const deadline = settlementDeadline(periodEnd);
@@ -871,9 +982,16 @@ ${heatRow}
 
 const fmtBasis = (v, label) => (v === null || v === undefined || !(v > 0) ? '--' : `${formatNumberDE(v, 2)} ${label}`.trim());
 
+// Zeilen für Detailblatt und Detailansicht: HeizkostenV-Positionen erscheinen als
+// Grund- und Verbrauchskosten (Summe beider Zeilen = Anteil der Position)
+export const expandItemParts = (items) => (items || []).flatMap(it => (Array.isArray(it.parts) && it.parts.length
+    ? it.parts.map(p => ({ ...it, ...p, rowId: `${it.rowId ?? it.label}:${p.kind}`, parts: null, isPart: true }))
+    : [it]));
+
 const buildDetailTableHtml = (page) => {
     const hasManual = (page.items || []).some(it => it.manual);
-    const rows = (page.items || []).map(it => {
+    const hasHeatingSplit = (page.items || []).some(it => Array.isArray(it.parts) && it.parts.length);
+    const rows = expandItemParts(page.items).map(it => {
         const keyText = it.status === 'error' ? `${it.keyName || 'Schlüssel'} – ${it.message}` : (it.keyName || '');
         return `<tr>
 <td style="${TD} font-weight: bold;">${escapeHtml(it.label)}${it.manual ? ' *' : ''}</td>
@@ -886,9 +1004,12 @@ const buildDetailTableHtml = (page) => {
 <td style="${TD} text-align: right; font-weight: bold;">${escapeHtml(formatEUR(it.share))}</td>
 </tr>`;
     }).join('');
-    const footnote = hasManual
+    const footnote = (hasManual
         ? '<p style="font-size: 8pt; margin-top: 6px;">* Betrag manuell festgelegt bzw. direkt zugeordnet.</p>'
-        : '';
+        : '')
+        + (hasHeatingSplit
+            ? '<p style="font-size: 8pt; margin-top: 6px;">Heiz-/Warmwasserkosten nach HeizkostenV aufgeteilt: Grundkosten nach Wohnfläche, Verbrauchskosten nach dem erfassten Verbrauch der Einheiten (Anteile in Prozent je Zeile).</p>'
+            : '');
     return `<table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 8pt;">
 <thead><tr style="border-bottom: 2px solid #000; font-weight: bold; background-color: #f1f5f9;">
 <th style="padding: 6px; text-align: left; width: 19%;">Kostenart</th>
@@ -905,16 +1026,12 @@ const buildDetailTableHtml = (page) => {
 </tbody></table>${footnote}`;
 };
 
-const DEFAULT_FOOTER = '<div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name">Vermieter Name</span><br><span data-type="mention" data-id="vermieter_adresse">Vermieter Adresse</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt">Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung">Vermieter Bankverbindung</span></div></div>';
-const DEFAULT_HEADER = '<div class="letter-sender"><span data-type="mention" data-id="vermieter_name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name">Mieter-Name</span></strong><br><span data-type="mention" data-id="mieter_adresse">Mieter-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Datum: <strong><span data-type="mention" data-id="erstellungsdatum">Erstellungsdatum</span></strong><br>Abrechnungsjahr: <strong><span data-type="mention" data-id="abrechnungsjahr">Abrechnungsjahr</span></strong><br>Nutzungszeitraum: <strong><span data-type="mention" data-id="nutzungszeitraum">Nutzungszeitraum</span></strong></div></div>';
-
-export const DEFAULT_UTILITY_TEMPLATE =
-    `<div class="letter-page">${DEFAULT_HEADER}<div class="letter-subject">Betriebskostenabrechnung <span data-type="mention" data-id="abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name">Einheit</span>)</div><div class="letter-body"><p>Sehr geehrte(r) <span data-type="mention" data-id="mieter_name">Mieter-Name</span>,</p><p>anbei erhalten Sie die Betriebskostenabrechnung für den Abrechnungszeitraum <span data-type="mention" data-id="abrechnungszeitraum">Abrechnungszeitraum</span>. Die Gesamtkosten und Ihr Abrechnungsergebnis stellen sich wie folgt dar:</p><p><span data-type="mention" data-id="nebenkosten_tabelle">Nebenkosten-Tabelle</span></p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen entnehmen Sie bitte der Folgeseite.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name">Vermieter Name</span></strong></p></div>${DEFAULT_FOOTER}</div>` +
-    `<div class="letter-page">${DEFAULT_HEADER}<div class="letter-subject">Detaillierte Aufstellung der Umlagen</div><div class="letter-body"><p>Nachfolgend finden Sie die Einzelpositionen und deren Berechnungsgrundlage:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle">Nebenkosten-Detailtabelle</span></p></div>${DEFAULT_FOOTER}</div>`;
+// Standardvorlage: gemeinsame Quelle mit dem Vorlagen-Editor (lib/defaultTemplates.js)
+export const DEFAULT_UTILITY_TEMPLATE = DEFAULT_TEMPLATES.utility_costs.content_html;
 
 // Nur Druck-Anpassungen; die Briefgeometrie kommt aus index.css (.letter-page usw.),
 // weil das PDF im Hauptdokument gerendert wird – dieselben Regeln wie im Vorlagen-Editor.
-// Seitenhöhe 295 mm statt 297 mm: html2pdf rundet die Blatthöhe auf 1122 px ab und
+// Seitenhöhe 295 mm statt 297 mm: die PDF-Erzeugung (lib/htmlToPdf) rundet die Blatthöhe auf 1122 px ab und
 // würde sonst einen Streifen auf eine zusätzliche Leerseite schneiden; der Umbruch
 // vor jeder Folgeseite (Abstandshalter ≈ 7 px) setzt jede Seite exakt an den Blattanfang.
 export const SETTLEMENT_DOC_CSS = `
@@ -1085,7 +1202,16 @@ export const buildCalculationSnapshot = ({ result, costItems, periodStart, perio
             id: ci.id, name: ci.category_name, amount: centsToEuro(toCents(ci.amount)),
             key_name: d?.key?.name || null, key_type: d?.key?.type || null, unit_id: ci.unit_id || null,
             basis_total: d?.basis?.total ?? null, unit_label: d?.basis?.unitLabel || '',
-            basis_by_unit: d?.basis?.unitValues || {}, status: d?.status || null
+            basis_by_unit: d?.basis?.unitValues || {}, status: d?.status || null,
+            ...(d?.split ? {
+                heating_split: {
+                    consumption_share: d.split.consumptionShare, base_cents: d.split.baseCents,
+                    consumption_cents: d.split.consumptionCents,
+                    area_total: d.split.area.total, area_by_unit: d.split.area.unitValues,
+                    consumption_total: d.split.consumption.total, consumption_by_unit: d.split.consumption.unitValues,
+                    consumption_unit: d.split.consumption.unitLabel
+                }
+            } : {})
         };
     }),
     sum_check: result.sumCheck.map(sc => ({
@@ -1104,7 +1230,14 @@ export const buildCalculationSnapshot = ({ result, costItems, periodStart, perio
             label: it.label, keyName: it.keyName, keyType: it.keyType, status: it.status, message: it.message,
             manual: it.manual, totalCost: it.totalCost, basisTotal: it.basisTotal, basisUnit: it.basisUnit,
             unitLabel: it.unitLabel, costPerBasis: it.costPerBasis, timeText: it.timeText,
-            share: it.share, shareCents: it.shareCents
+            share: it.share, shareCents: it.shareCents,
+            ...(Array.isArray(it.parts) && it.parts.length ? {
+                parts: it.parts.map(pt => ({
+                    kind: pt.kind, label: pt.label, keyName: pt.keyName, totalCost: pt.totalCost,
+                    basisTotal: pt.basisTotal, basisUnit: pt.basisUnit, unitLabel: pt.unitLabel,
+                    costPerBasis: pt.costPerBasis, timeText: pt.timeText, share: pt.share, shareCents: pt.shareCents
+                }))
+            } : {})
         })),
         totalCents: p.totalCents,
         prepay: {

@@ -1,5 +1,6 @@
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/create_claim_multi_rpc.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
+-- Hinweis (2026-11-27, Wave 3 CLAIMS-DB): beide Fassungen von create_claim_from_rent_ledgers (6 und 7 Parameter) sind ungenutzt und werden per Migration *_claims_db.sql gelöscht. Maßgeblich ist create_claim_advanced.
 -- ============================================================================
 -- RPC: create_claim_from_rent_ledgers
 -- ============================================================================

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -12,132 +13,18 @@ import RateInput from '../components/ui/RateInput';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 import { Plus, Trash2, Edit2, ChevronDown, ChevronRight, Calculator, AlertCircle } from 'lucide-react';
 import ExportDropdown from '../components/ExportDropdown';
+import { parseNum, round2, parseLocalDate, getMonthlyPayment, generateSchedule } from '../lib/loanSchedule';
 
 // --- Berechnungen (ohne React-State) ---
-const MAX_MONTHS = 600; // 50 Jahre
-
-const parseNum = (v) => {
-    if (v === '' || v === null || v === undefined) return null;
-    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
-    return Number.isFinite(n) ? n : null;
-};
-const round2 = (v) => Math.round((v + Number.EPSILON) * 100) / 100;
+// Tilgungsplan, Rate und Restschuld kommen aus src/lib/loanSchedule.js (gemeinsam mit Cockpit und Objektliste)
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const toLocalDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-// 'YYYY-MM-DD' als lokales Datum (nicht UTC)
-const parseLocalDate = (value) => {
-    if (!value) return null;
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return isNaN(d.getTime()) ? null : d;
-};
 const formatDateDE = (value) => {
     const d = parseLocalDate(value);
     return d ? d.toLocaleDateString('de-DE') : 'Kein Datum';
 };
 const eur = (v) => (Number.isFinite(v) ? v : 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
-
-// i-ter Ratentermin ab Startdatum; Tag wird auf das Monatsende begrenzt (31.01. -> 28./29.02. -> 31.03.)
-const paymentDateAt = (start, i) => {
-    const y = start.getFullYear();
-    const m0 = start.getMonth() + i;
-    const lastDay = new Date(y, m0 + 1, 0).getDate();
-    return new Date(y, m0, Math.min(start.getDate(), lastDay));
-};
-
-// Monatliche Rate: feste Rate oder Darlehensbetrag × (Zins + anf. Tilgung) / 12 – dieselbe Formel wie im Tilgungsplan
-const getMonthlyPayment = (loan) => {
-    const fixed = parseNum(loan.fixed_annuity);
-    if (fixed !== null && fixed > 0) return round2(fixed);
-    const amount = parseNum(loan.loan_amount);
-    const rate = parseNum(loan.interest_rate);
-    const repayment = parseNum(loan.initial_repayment_rate);
-    if (!(amount > 0) || rate === null || repayment === null) return null;
-    const payment = round2((amount * (rate + repayment)) / 100 / 12);
-    return payment > 0 ? payment : null;
-};
-
-/**
- * Tilgungsplan je Monat (Zins/Tilgung auf Cent gerundet, letzte Rate auf Restschuld + Zins begrenzt).
- * Tatsächliche Restschuld: Raten bis einschließlich Stichtag laufen regulär, danach gilt der Ist-Wert;
- * die nächste Rate folgt am nächsten regulären Ratentag. Liegt der Stichtag nach untilDate, gilt der reguläre Plan.
- */
-const generateSchedule = (loan, untilDate = null) => {
-    const original = parseNum(loan.loan_amount) || 0;
-    const start = parseLocalDate(loan.start_date);
-    const actual = parseNum(loan.actual_residual_debt);
-    let actualDate = parseLocalDate(loan.actual_residual_debt_date);
-    let notice = null;
-    // Altbestand: Ist-Restschuld ohne Datum galt bisher ab dem Startdatum – so beibehalten, aber kennzeichnen
-    if (actual !== null && !actualDate && start) {
-        actualDate = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
-        notice = 'Tatsächliche Restschuld ohne „Gültig ab“-Datum – wird ab Startdatum angesetzt. Bitte Datum ergänzen.';
-    }
-    const hasReset = actual !== null && !!actualDate;
-    const until = untilDate ? new Date(untilDate.getFullYear(), untilDate.getMonth(), untilDate.getDate()) : null;
-    const resetApplies = hasReset && (!until || actualDate <= until);
-    const result = { rows: [], issue: null, notice, balance: round2(resetApplies ? actual : original), resetAt: null, resetAmount: null };
-
-    const annualRate = parseNum(loan.interest_rate);
-    const payment = getMonthlyPayment(loan);
-    if (!start) {
-        result.issue = 'Startdatum fehlt';
-        return result;
-    }
-    if (annualRate === null || payment === null) {
-        result.issue = 'Rate fehlt: feste Rate oder Zinssatz + Tilgung (mit Darlehensbetrag) angeben';
-        return result;
-    }
-
-    let balance = round2(original);
-    let resetDone = false;
-    let pendingIssue = null;
-    for (let i = 0; i < MAX_MONTHS; i++) {
-        const date = paymentDateAt(start, i);
-        if (hasReset && !resetDone && date > actualDate) {
-            if (until && actualDate > until) break;
-            balance = round2(actual);
-            resetDone = true;
-            result.resetAt = actualDate;
-            result.resetAmount = balance;
-        }
-        if (until && date > until) break;
-        if (balance <= 0.005) {
-            if (hasReset && !resetDone) continue; // regulärer Plan getilgt, Ist-Wert folgt erst zum Stichtag
-            break;
-        }
-
-        const interest = round2((balance * annualRate) / 100 / 12);
-        if (payment <= interest + 0.005) {
-            const msg = payment < interest - 0.005
-                ? 'Die Rate deckt die monatlichen Zinsen nicht – die Restschuld würde wachsen.'
-                : 'Die Rate entspricht nur den Zinsen (tilgungsfrei) – keine Tilgung.';
-            // Bis zum Stichtag der tatsächlichen Restschuld ohne Plan weiter, danach mit dem Ist-Wert
-            if (hasReset && !resetDone) {
-                pendingIssue = msg;
-                continue;
-            }
-            result.issue = msg;
-            break;
-        }
-        const principal = Math.min(round2(payment - interest), balance);
-        const endBalance = round2(balance - principal);
-        result.rows.push({
-            date,
-            interest,
-            principal,
-            payment: round2(interest + principal),
-            startBalance: balance,
-            endBalance
-        });
-        balance = endBalance;
-    }
-    if (!result.issue && !resetDone && pendingIssue) result.issue = pendingIssue;
-    result.balance = balance;
-    return result;
-};
 
 // Gruppenschlüssel: Wirtschaftseinheit (direkt oder über das Objekt) bzw. Objekt
 const loanGroupInfo = (loan, propsById) => {
@@ -266,6 +153,17 @@ const Loans = () => {
     const { user } = useAuth();
     const userId = user?.id;
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
+
+    // Schreibrecht je Portfolio des Datensatzes (Freigabe „Finanzen" oder „Investorportal" mit
+    // Schreibrecht, wie die RLS von loans); ohne Portfolio: aktueller Bereich. Die Datenbank prüft zusätzlich.
+    const canWriteLoans = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId
+            ? perm.canWrite('finanzen', portfolioId) || perm.canWrite('investorportal', portfolioId)
+            : perm.canWrite('finanzen') || perm.canWrite('investorportal');
+    };
+    const canCreateLoans = canWriteLoans(selectedPortfolioID || null);
 
     const [loans, setLoans] = useState([]);
     const [properties, setProperties] = useState([]);
@@ -415,6 +313,10 @@ const Loans = () => {
                 setIsSaving(false);
                 return alert("Portfolio-Zuweisung fehlgeschlagen. Bitte ordnen Sie der Wirtschaftseinheit zuerst eine Immobilie in einem Portfolio zu.");
             }
+            if (!canWriteLoans(derivedPortfolioId)) {
+                setIsSaving(false);
+                return alert('Für dieses Portfolio haben Sie nur Leserechte. Darlehen können nur mit Schreibrecht „Finanzen“ angelegt oder geändert werden.');
+            }
 
             const payload = {
                 portfolio_id: derivedPortfolioId,
@@ -451,10 +353,11 @@ const Loans = () => {
         }
     };
 
-    const handleDelete = async (id) => {
+    const handleDelete = async (loan) => {
+        if (!canWriteLoans(loan.portfolio_id)) return alert('Für dieses Portfolio haben Sie nur Leserechte.');
         if (!confirm("Darlehen wirklich löschen?")) return;
         try {
-            const { error } = await supabase.from('loans').delete().eq('id', id);
+            const { error } = await supabase.from('loans').delete().eq('id', loan.id);
             if (error) throw error;
             fetchData();
         } catch (error) {
@@ -565,7 +468,7 @@ const Loans = () => {
                         properties={properties.map(p => ({ id: p.id, label: `${p.street} ${p.house_number}` }))}
                         totalRows={Object.values(groupedLoans).reduce((s, g) => s + g.loans.length, 0)}
                     />
-                    <Button icon={Plus} onClick={openAdd}>Neues Darlehen</Button>
+                    {canCreateLoans && <Button icon={Plus} onClick={openAdd}>Neues Darlehen</Button>}
                 </div>
             </div>
 
@@ -720,12 +623,18 @@ const Loans = () => {
                                                             <Button variant="ghost" size="sm" onClick={() => openSchedule(loan)} title="Tilgungsplan">
                                                                 <Calculator size={16} />
                                                             </Button>
-                                                            <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten">
-                                                                <Edit2 size={16} />
-                                                            </Button>
-                                                            <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan.id)} title="Löschen">
-                                                                <Trash2 size={16} />
-                                                            </Button>
+                                                            {canWriteLoans(loan.portfolio_id) ? (
+                                                                <>
+                                                                    <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten">
+                                                                        <Edit2 size={16} />
+                                                                    </Button>
+                                                                    <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan)} title="Löschen">
+                                                                        <Trash2 size={16} />
+                                                                    </Button>
+                                                                </>
+                                                            ) : (
+                                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', alignSelf: 'center' }} title="Freigabe nur zum Lesen">Nur lesen</span>
+                                                            )}
                                                         </div>
                                                     </td>
                                                 </tr>
@@ -783,24 +692,32 @@ const Loans = () => {
                                                 <Button variant="ghost" size="sm" onClick={() => openSchedule(loan)} title="Tilgungsplan" style={{ flex: 1 }}>
                                                     <Calculator size={16} style={{ marginRight: '4px' }} /> Plan
                                                 </Button>
-                                                <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten" style={{ flex: 1 }}>
-                                                    <Edit2 size={16} style={{ marginRight: '4px' }} /> Bearbeiten
-                                                </Button>
-                                                <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan.id)} title="Löschen">
-                                                    <Trash2 size={16} />
-                                                </Button>
+                                                {canWriteLoans(loan.portfolio_id) ? (
+                                                    <>
+                                                        <Button variant="ghost" size="sm" onClick={() => openEdit(loan)} title="Bearbeiten" style={{ flex: 1 }}>
+                                                            <Edit2 size={16} style={{ marginRight: '4px' }} /> Bearbeiten
+                                                        </Button>
+                                                        <Button variant="ghost" size="sm" style={{ color: 'var(--danger-color)' }} onClick={() => handleDelete(loan)} title="Löschen">
+                                                            <Trash2 size={16} />
+                                                        </Button>
+                                                    </>
+                                                ) : (
+                                                    <span style={{ flex: 1, fontSize: '0.8rem', color: 'var(--text-secondary)', alignSelf: 'center', textAlign: 'center' }}>Nur lesen (Freigabe)</span>
+                                                )}
                                             </div>
                                         </div>
                                     ))}
                                 </div>
-                                <div style={{ marginTop: '1rem' }}>
-                                    <Button size="sm" variant="secondary" icon={Plus} onClick={() => {
-                                        setEditingLoan(null);
-                                        // WE-Gruppen haben im Auswahlfeld den Wert we_<id>
-                                        setLoanForm({ ...getEmptyForm(), property_id: group.isWE ? `we_${pid}` : pid });
-                                        setIsModalOpen(true);
-                                    }}>Weiteres Darlehen hinzufügen</Button>
-                                </div>
+                                {canWriteLoans(group.loans[0]?.portfolio_id || null) && (
+                                    <div style={{ marginTop: '1rem' }}>
+                                        <Button size="sm" variant="secondary" icon={Plus} onClick={() => {
+                                            setEditingLoan(null);
+                                            // WE-Gruppen haben im Auswahlfeld den Wert we_<id>
+                                            setLoanForm({ ...getEmptyForm(), property_id: group.isWE ? `we_${pid}` : pid });
+                                            setIsModalOpen(true);
+                                        }}>Weiteres Darlehen hinzufügen</Button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </Card>
@@ -827,10 +744,12 @@ const Loans = () => {
                         >
                             <option value="">Bitte wählen...</option>
                             {(() => {
-                                // Build grouped options: WE groups first, then standalone properties
+                                // Build grouped options: WE groups first, then standalone properties.
+                                // Neuanlage nur in Portfolios mit Schreibrecht (beim Bearbeiten ist das Feld gesperrt)
                                 const weGroups = {};
                                 const standalone = [];
-                                properties.forEach(p => {
+                                const selectable = editingLoan ? properties : properties.filter(p => canWriteLoans(p.portfolio_id));
+                                selectable.forEach(p => {
                                     if (p.economic_unit_id) {
                                         if (!weGroups[p.economic_unit_id]) {
                                             weGroups[p.economic_unit_id] = [];
@@ -871,7 +790,7 @@ const Loans = () => {
                     <Input label="Bank / Co-Invest / sonstiges Darlehen" value={loanForm.bank_name} onChange={e => setLoanForm({ ...loanForm, bank_name: e.target.value })} />
                     <Input label="Kontonummer / Darlehens-Nr" value={loanForm.account_number} onChange={e => setLoanForm({ ...loanForm, account_number: e.target.value })} />
 
-                    <CurrencyInput label="Darlehensbetrag (€)" value={loanForm.loan_amount} onChange={e => setLoanForm({ ...loanForm, loan_amount: e.target.value })} />
+                    <CurrencyInput label="Darlehensbetrag (€)" value={loanForm.loan_amount} onValueChange={v => setLoanForm(prev => ({ ...prev, loan_amount: v ?? '' }))} />
                     <Input
                         label="Startdatum (Bezieht sich auf Tilgungsbeginn)"
                         type="date"
@@ -885,7 +804,7 @@ const Loans = () => {
                     <RateInput label="Zinssatz (%)" value={loanForm.interest_rate} onChange={e => setLoanForm({ ...loanForm, interest_rate: e.target.value })} />
                     <RateInput label="Anf. Tilgung (%)" value={loanForm.initial_repayment_rate} onChange={e => setLoanForm({ ...loanForm, initial_repayment_rate: e.target.value })} />
 
-                    <CurrencyInput label="Feste Rate (mtl. €) [Optional]" allowDecimals value={loanForm.fixed_annuity} onChange={e => setLoanForm({ ...loanForm, fixed_annuity: e.target.value })} />
+                    <CurrencyInput label="Feste Rate (mtl. €) [Optional]" allowDecimals value={loanForm.fixed_annuity} onValueChange={v => setLoanForm(prev => ({ ...prev, fixed_annuity: v ?? '' }))} />
                     <div style={{ display: 'flex', alignItems: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                         <AlertCircle size={16} style={{ marginRight: '5px' }} />
                         <span>Wenn leer, wird Rate aus Zins + Tilgung berechnet.</span>
@@ -893,7 +812,8 @@ const Loans = () => {
 
                     <div style={{ gridColumn: 'span 2', borderTop: '1px solid var(--border-color)', paddingTop: '1rem', marginTop: '0.5rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                         <div style={{ gridColumn: 'span 2', fontWeight: 600, fontSize: '0.9rem', marginBottom: '-0.5rem' }}>Anpassung der Restschuld (Sondertilgung, Tilgungsaussetzung etc.)</div>
-                        <CurrencyInput label="Tatsächliche Restschuld (€) [Optional]" allowDecimals value={loanForm.actual_residual_debt} onChange={e => setLoanForm({ ...loanForm, actual_residual_debt: e.target.value })} />
+                        {/* onValueChange: ein geleertes Feld bleibt leer (null) statt 0 – sonst würde Restschuld 0 gespeichert */}
+                        <CurrencyInput label="Tatsächliche Restschuld (€) [Optional]" allowDecimals value={loanForm.actual_residual_debt} onValueChange={v => setLoanForm(prev => ({ ...prev, actual_residual_debt: v ?? '' }))} />
                         <Input
                             label="Gültig ab Datum"
                             type="date"

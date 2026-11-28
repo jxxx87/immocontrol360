@@ -13,16 +13,19 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
 import { useViewMode } from '../context/ViewModeContext';
 import {
     addDaysISO, buildCalculationSnapshot, buildLetterData, buildUnitOccupancy, centsToEuro,
-    computeMeterConsumption, computeSettlement, convertLegacyUnitCosts, formatCents, formatDateDE,
-    formatEUR, formatNumberDE, isValidISODate, localISODate, parseNumber, periodsOverlap,
+    computeMeterConsumption, computeSettlement, convertLegacyUnitCosts, expandItemParts, formatCents, formatDateDE,
+    formatEUR, formatNumberDE, HEATING_SPLIT_KEY_ID, HEATING_SPLIT_MAX_SHARE, HEATING_SPLIT_MIN_SHARE,
+    isValidISODate, KEY_TYPE_INFO, localISODate, parseConsumptionShare, parseNumber, periodsOverlap,
     renderSettlementDocument, resolveDistributionKey, settlementDeadline, settlementYearLabel,
     toCents, validatePeriod
 } from '../lib/utilitySettlement';
+import { loadHtml2Pdf } from '../lib/htmlToPdf';
 
 // Zeitstempel (created_at, finalized_at) als lokales Datum
 const formatTimestamp = (ts) => (ts ? formatDateDE(localISODate(new Date(ts))) : '–');
@@ -87,36 +90,6 @@ const mergeBookedCosts = (existing, fresh) => {
 
 const bookedTotalCents = (items) => items.filter(isBookedItem).reduce((s, ci) => s + toCents(ci.amount), 0);
 
-// ── html2pdf (nicht in package.json -> weiterhin von cdnjs, jetzt mit Fehlerbehandlung) ──
-const HTML2PDF_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js';
-const HTML2PDF_TIMEOUT_MS = 20000;
-let html2pdfLoading = null;
-
-const loadHtml2Pdf = () => {
-    if (window.html2pdf) return Promise.resolve(window.html2pdf);
-    if (html2pdfLoading) return html2pdfLoading;
-    html2pdfLoading = new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        let timer = null;
-        const fail = () => {
-            clearTimeout(timer);
-            html2pdfLoading = null;
-            script.remove();
-            reject(new Error('Die PDF-Komponente konnte nicht geladen werden. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.'));
-        };
-        script.src = HTML2PDF_SRC;
-        script.async = true;
-        script.onload = () => {
-            clearTimeout(timer);
-            if (window.html2pdf) resolve(window.html2pdf); else fail();
-        };
-        script.onerror = fail;
-        timer = setTimeout(fail, HTML2PDF_TIMEOUT_MS);
-        document.head.appendChild(script);
-    });
-    return html2pdfLoading;
-};
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Vor dem Rendern auf die Briefschrift warten (sonst Umbruch mit Ersatzschrift)
@@ -158,7 +131,7 @@ const renderPdf = async (docHtml, filename) => {
 const safeFilePart = (s) => String(s || '').trim()
     .replace(/[^\wäöüÄÖÜß-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 
-const KEY_ABBR = { area: 'Fläche', persons: 'Pers.', units: 'Einh.', equal: 'Gleich', custom: 'Verbr.', mea: 'MEA', direct: 'Direkt' };
+const KEY_ABBR = { area: 'Fläche', persons: 'Pers.', units: 'Einh.', equal: 'Gleich', custom: 'Verbr.', mea: 'MEA', direct: 'Direkt', heating_split: 'HeizkV' };
 const keyOptionLabel = (k) => (k.name || KEY_ABBR[k.calculation_type] || 'Schlüssel');
 
 const ISSUE_STYLE = {
@@ -266,7 +239,14 @@ const EMPTY_OPTIONS = { includeHeatingPrepay: null, vacancyPersons: 1 };
 const UtilityCosts = () => {
     const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const perm = usePermission();
     const { isMobile } = useViewMode();
+
+    // Schreibrecht „Nebenkosten" im Portfolio des Objekts (Freigaben); die Datenbank prüft zusätzlich per RLS
+    const canWriteNk = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite('nebenkosten', portfolioId) : perm.canWrite('nebenkosten');
+    };
 
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState('');
@@ -394,6 +374,14 @@ const UtilityCosts = () => {
     const propertiesById = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties]);
     const portfoliosById = useMemo(() => Object.fromEntries((portfolios || []).map(p => [p.id, p])), [portfolios]);
 
+    // Portfolio einer Objektzeile (Einzelobjekt oder Wirtschaftseinheit) bzw. einer Abrechnung
+    const groupPortfolioId = (group) => (group?.isGroup ? group.properties?.[0]?.portfolio_id : group?.portfolio_id) || null;
+    const settlementPortfolioId = (s) => propertiesById[s?.property_id]?.portfolio_id
+        || (s?.economic_unit_id ? properties.find(p => p.economic_unit_id === s.economic_unit_id)?.portfolio_id : null)
+        || null;
+    const canWriteSettlement = (s) => canWriteNk(settlementPortfolioId(s));
+    const READ_ONLY_NOTICE = 'Für dieses Objekt haben Sie nur Leserechte (Freigabe). Nebenkostenabrechnungen können nur mit Schreibrecht „Nebenkosten“ angelegt, geändert oder gelöscht werden.';
+
     const houseUnitsFor = (propKey) => {
         if (!propKey) return [];
         if (propKey.startsWith('we_')) {
@@ -519,6 +507,11 @@ const UtilityCosts = () => {
     };
 
     const startNewSettlement = (propertyId) => {
+        const group = groupedProperties.find(g => g.id === propertyId);
+        if (!canWriteNk(group ? groupPortfolioId(group) : (propertiesById[propertyId]?.portfolio_id || null))) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         resetWizardState();
         setWizardPropertyId(propertyId);
         const year = new Date().getFullYear() - 1;
@@ -559,6 +552,10 @@ const UtilityCosts = () => {
     };
 
     const editSettlement = (settlement) => {
+        if (!canWriteSettlement(settlement)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         if (settlement.status === 'done') {
             const msg = getSnapshot(settlement)
                 ? 'Diese Abrechnung ist abgeschlossen und festgeschrieben.\n\nZur Bearbeitung wieder öffnen? Das festgeschriebene Ergebnis bleibt gültig, bis Sie die Abrechnung erneut fertigstellen. Beim Speichern als Entwurf wird die Festschreibung aufgehoben.'
@@ -793,6 +790,11 @@ const UtilityCosts = () => {
             setIsCreateKeyModalOpen(true);
             return;
         }
+        if (value === HEATING_SPLIT_KEY_ID) {
+            updateCostItem(item.id, ci => ({ ...ci, distribution_key: value, key_name: KEY_TYPE_INFO.heating_split.label, key_type: 'heating_split' }));
+            setExpandedValues(prev => ({ ...prev, [item.id]: true }));
+            return;
+        }
         const dk = distributionKeys.find(k => k.id === value);
         updateCostItem(item.id, ci => ({ ...ci, distribution_key: value, key_name: dk?.name || null, key_type: dk?.calculation_type || null }));
         if (dk && (dk.calculation_type === 'custom' || dk.calculation_type === 'direct')) {
@@ -913,6 +915,10 @@ const UtilityCosts = () => {
                 return;
             }
         }
+        if (!canWriteNk(propertiesById[actualPropertyId]?.portfolio_id || null)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
 
         setSaving(true);
         try {
@@ -984,6 +990,10 @@ const UtilityCosts = () => {
     };
 
     const deleteSettlement = async (s) => {
+        if (!canWriteSettlement(s)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         const msg = s.status === 'done'
             ? 'Diese Abrechnung ist abgeschlossen. Möchten Sie sie wirklich endgültig löschen?'
             : 'Möchten Sie diese Abrechnung wirklich löschen?';
@@ -1199,7 +1209,7 @@ const UtilityCosts = () => {
                 const u = propertyUnits.find(x => x.id === item.unit_id);
                 return <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Direkt: {u?.unit_name || 'Einheit'}</span>;
             }
-            const known = distributionKeys.some(k => k.id === item.distribution_key);
+            const known = item.distribution_key === HEATING_SPLIT_KEY_ID || distributionKeys.some(k => k.id === item.distribution_key);
             const resolved = resolveDistributionKey(item, distributionKeys);
             return (
                 <select value={item.distribution_key || ''} onChange={e => onKeyChange(item, e.target.value)} style={style}>
@@ -1209,6 +1219,7 @@ const UtilityCosts = () => {
                         </option>
                     )}
                     {distributionKeys.map(k => <option key={k.id} value={k.id}>{keyOptionLabel(k)}</option>)}
+                    <option value={HEATING_SPLIT_KEY_ID}>{KEY_TYPE_INFO.heating_split.label}</option>
                     <option disabled>─────</option>
                     <option value="NEW_KEY" style={{ fontWeight: 'bold' }}>+ Neu</option>
                 </select>
@@ -1219,7 +1230,7 @@ const UtilityCosts = () => {
             const d = result?.distribution?.[item.id];
             if (!d) return null;
             const t = d.key?.type;
-            const needsValues = t === 'custom' || t === 'direct';
+            const needsValues = t === 'custom' || t === 'direct' || t === 'heating_split';
             return (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', marginTop: '4px' }}>
                     {d.status === 'error' && <span style={{ fontSize: '0.75rem', color: 'var(--danger-color)' }}>{d.message}</span>}
@@ -1227,7 +1238,7 @@ const UtilityCosts = () => {
                     {needsValues && (
                         <button type="button" onClick={() => setExpandedValues(prev => ({ ...prev, [item.id]: !prev[item.id] }))}
                             style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.75rem', padding: 0, textDecoration: 'underline' }}>
-                            {expandedValues[item.id] ? 'Werte je Einheit ausblenden' : (t === 'direct' ? 'Beträge je Einheit eintragen' : 'Verbrauchswerte je Einheit eintragen')}
+                            {expandedValues[item.id] ? 'Werte je Einheit ausblenden' : (t === 'direct' ? 'Beträge je Einheit eintragen' : (t === 'heating_split' ? 'Verbrauchsanteil und Verbrauchswerte eintragen' : 'Verbrauchswerte je Einheit eintragen'))}
                         </button>
                     )}
                     {item.booking_count > 0 && <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>{item.booking_count} Buchung(en)</span>}
@@ -1238,21 +1249,41 @@ const UtilityCosts = () => {
         const renderValuesPanel = (item) => {
             const d = result?.distribution?.[item.id];
             const t = d?.key?.type;
-            if ((t !== 'custom' && t !== 'direct') || !expandedValues[item.id]) return null;
+            if ((t !== 'custom' && t !== 'direct' && t !== 'heating_split') || !expandedValues[item.id]) return null;
             const isDirect = t === 'direct';
+            const isHeatingSplit = t === 'heating_split';
+            const share = parseConsumptionShare(item.consumption_share);
             const values = item.unit_values || {};
             const sum = propertyUnits.reduce((s, u) => s + (parseNumber(values[u.id]) || 0), 0);
             const sel = meterTypeSel[item.id] || item.meter_type || meterTypes[0] || '';
             return (
                 <div style={{ marginTop: '8px', padding: '10px 12px', backgroundColor: 'var(--background-color)', borderRadius: '8px', border: '1px dashed var(--border-color)' }}>
                     <div style={{ fontWeight: 600, fontSize: '0.82rem', marginBottom: '4px' }}>
-                        {isDirect ? 'Beträge je Einheit (Direktzuordnung)' : 'Verbrauchswerte je Einheit'}
+                        {isDirect ? 'Beträge je Einheit (Direktzuordnung)' : (isHeatingSplit ? 'Aufteilung nach HeizkostenV' : 'Verbrauchswerte je Einheit')}
                     </div>
                     <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                         {isDirect
                             ? 'Tragen Sie je Einheit den direkt zuzuordnenden Betrag ein. Die Summe sollte den Gesamtkosten entsprechen; eine Differenz wird in der Summenprobe angezeigt.'
-                            : 'Verteilt wird nach dem Verbrauch jeder Einheit des Hauses im Abrechnungszeitraum (auch nicht abgerechneter Einheiten). Werte aus Zählerständen übernehmen oder manuell eintragen.'}
+                            : (isHeatingSplit
+                                ? `Der Verbrauchsanteil wird nach dem Verbrauch jeder Einheit des Hauses verteilt, der Rest (Grundkosten) nach Wohnfläche. Nach §§ 7, 8 HeizkostenV muss der Verbrauchsanteil zwischen ${HEATING_SPLIT_MIN_SHARE} und ${HEATING_SPLIT_MAX_SHARE} % liegen.`
+                                : 'Verteilt wird nach dem Verbrauch jeder Einheit des Hauses im Abrechnungszeitraum (auch nicht abgerechneter Einheiten). Werte aus Zählerständen übernehmen oder manuell eintragen.')}
                     </p>
+                    {isHeatingSplit && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                            <label htmlFor={`consumption-share-${item.id}`} style={{ fontSize: '0.82rem', flex: '1 1 140px' }}>Verbrauchsanteil</label>
+                            <input id={`consumption-share-${item.id}`} type="number" step="any" min={HEATING_SPLIT_MIN_SHARE} max={HEATING_SPLIT_MAX_SHARE}
+                                placeholder={`${HEATING_SPLIT_MIN_SHARE}–${HEATING_SPLIT_MAX_SHARE}`}
+                                value={item.consumption_share ?? ''}
+                                onChange={e => updateCostItem(item.id, ci => ({ ...ci, consumption_share: e.target.value === '' ? null : parseFloat(e.target.value) }))}
+                                style={{ width: '120px', padding: '6px 8px', borderRadius: '6px', border: `1px solid ${share === null ? 'var(--danger-color)' : 'var(--border-color)'}`, textAlign: 'right', fontSize: '0.85rem' }} />
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', minWidth: '30px' }}>%</span>
+                            {share !== null && (
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', flexBasis: '100%' }}>
+                                    Grundkosten {formatNumberDE(100 - share, 2)} % nach Wohnfläche, Verbrauchskosten {formatNumberDE(share, 2)} % nach Verbrauch.
+                                </span>
+                            )}
+                        </div>
+                    )}
                     {!isDirect && (meterTypes.length > 0 ? (
                         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '8px' }}>
                             <select value={sel} onChange={e => setMeterTypeSel(prev => ({ ...prev, [item.id]: e.target.value }))}
@@ -1941,7 +1972,7 @@ const UtilityCosts = () => {
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
-                                                                        {page.items.map(it => (
+                                                                        {expandItemParts(page.items).map(it => (
                                                                             <tr key={it.rowId} className="table-row" style={{ borderBottom: '1px solid var(--border-color)' }}>
                                                                                 <td style={cellStyle} title={it.label}>{it.label}{it.manual ? ' *' : ''}</td>
                                                                                 <td style={{ ...cellStyle, color: it.status === 'error' ? 'var(--danger-color)' : undefined }} title={it.status === 'error' ? it.message : it.keyName}>
@@ -2219,9 +2250,15 @@ const UtilityCosts = () => {
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{propSettlements.length} Abrechnung(en)</span>
-                                        <Button size="sm" icon={Plus} onClick={(e) => { e.stopPropagation(); startNewSettlement(prop.id); }}>
-                                            Neue Abrechnung
-                                        </Button>
+                                        {canWriteNk(groupPortfolioId(prop)) ? (
+                                            <Button size="sm" icon={Plus} onClick={(e) => { e.stopPropagation(); startNewSettlement(prop.id); }}>
+                                                Neue Abrechnung
+                                            </Button>
+                                        ) : (
+                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--text-secondary)' }} title="Freigabe nur zum Lesen">
+                                                <Lock size={12} /> Nur lesen
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
 
@@ -2298,22 +2335,32 @@ const UtilityCosts = () => {
                                                                                     display: 'flex',
                                                                                     flexDirection: 'column', padding: '4px'
                                                                                 }}>
-                                                                                    <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
-                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
-                                                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
-                                                                                        <Edit2 size={14} /> {s.status === 'done' ? 'Wieder öffnen / bearbeiten' : 'Bearbeiten'}
-                                                                                    </button>
+                                                                                    {canWriteSettlement(s) ? (
+                                                                                        <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
+                                                                                            style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--text-primary)', borderRadius: '4px' }}
+                                                                                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f3f4f6'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
+                                                                                            <Edit2 size={14} /> {s.status === 'done' ? 'Wieder öffnen / bearbeiten' : 'Bearbeiten'}
+                                                                                        </button>
+                                                                                    ) : (
+                                                                                        <div style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                                                            <Lock size={14} /> Nur lesen (Freigabe)
+                                                                                        </div>
+                                                                                    )}
                                                                                     <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
                                                                                     <div style={{ padding: '4px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
                                                                                         PDF herunterladen{s.status !== 'done' ? ' (Entwurf)' : ''}
                                                                                     </div>
                                                                                     {renderPdfMenuItems(s, false)}
-                                                                                    <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                                                                                    <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s); }}
-                                                                                        style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
-                                                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
-                                                                                        <Trash2 size={14} /> Löschen
-                                                                                    </button>
+                                                                                    {canWriteSettlement(s) && (
+                                                                                        <>
+                                                                                            <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+                                                                                            <button onClick={() => { setOpenSettlementMenuId(null); deleteSettlement(s); }}
+                                                                                                style={{ textAlign: 'left', padding: '8px 12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.875rem', color: 'var(--danger-color)', borderRadius: '4px' }}
+                                                                                                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#fef2f2'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}>
+                                                                                                <Trash2 size={14} /> Löschen
+                                                                                            </button>
+                                                                                        </>
+                                                                                    )}
                                                                                 </div>
                                                                             </>,
                                                                             document.body
@@ -2352,9 +2399,15 @@ const UtilityCosts = () => {
 
                                                         <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
                                                             <div style={{ position: 'relative', display: 'block', width: '100%' }}>
-                                                                <Button variant="secondary" size="sm" icon={Edit2} onClick={() => editSettlement(s)} style={{ width: '100%', justifyContent: 'center', marginBottom: '8px' }}>
-                                                                    {s.status === 'done' ? 'Wieder öffnen' : 'Bearbeiten'}
-                                                                </Button>
+                                                                {canWriteSettlement(s) ? (
+                                                                    <Button variant="secondary" size="sm" icon={Edit2} onClick={() => editSettlement(s)} style={{ width: '100%', justifyContent: 'center', marginBottom: '8px' }}>
+                                                                        {s.status === 'done' ? 'Wieder öffnen' : 'Bearbeiten'}
+                                                                    </Button>
+                                                                ) : (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                                                        <Lock size={14} /> Nur lesen (Freigabe)
+                                                                    </div>
+                                                                )}
 
                                                                 <div style={{ display: 'flex', gap: '8px' }}>
                                                                     <Button variant="ghost" size="sm" icon={FileText} onClick={(e) => {
@@ -2363,7 +2416,9 @@ const UtilityCosts = () => {
                                                                     }} style={{ flex: 1 }}>
                                                                         Optionen
                                                                     </Button>
-                                                                    <Button variant="ghost" size="sm" icon={Trash2} onClick={() => deleteSettlement(s)} style={{ color: 'var(--danger-color)' }} />
+                                                                    {canWriteSettlement(s) && (
+                                                                        <Button variant="ghost" size="sm" icon={Trash2} onClick={() => deleteSettlement(s)} style={{ color: 'var(--danger-color)' }} />
+                                                                    )}
                                                                 </div>
 
                                                                 {openSettlementMenuId === s.id && (
@@ -2386,10 +2441,12 @@ const UtilityCosts = () => {
                                                                                 <button onClick={() => setOpenSettlementMenuId(null)} style={{ border: 'none', background: 'none' }}><X size={16} /></button>
                                                                             </div>
 
-                                                                            <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
-                                                                                style={{ textAlign: 'left', padding: '12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid var(--border-color)' }}>
-                                                                                <Edit2 size={16} /> {s.status === 'done' ? 'Wieder öffnen / bearbeiten' : 'Bearbeiten'}
-                                                                            </button>
+                                                                            {canWriteSettlement(s) && (
+                                                                                <button onClick={() => { setOpenSettlementMenuId(null); editSettlement(s); }}
+                                                                                    style={{ textAlign: 'left', padding: '12px', border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', color: 'var(--text-primary)', borderBottom: '1px solid var(--border-color)' }}>
+                                                                                    <Edit2 size={16} /> {s.status === 'done' ? 'Wieder öffnen / bearbeiten' : 'Bearbeiten'}
+                                                                                </button>
+                                                                            )}
 
                                                                             <div style={{ padding: '8px 12px', fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, backgroundColor: 'var(--bg-secondary)' }}>
                                                                                 PDF herunterladen{s.status !== 'done' ? ' (Entwurf)' : ''}

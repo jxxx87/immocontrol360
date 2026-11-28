@@ -1400,7 +1400,7 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
             return (
                 <div style={{ margin: '0 0 12px', padding: '10px 14px', borderRadius: '8px', backgroundColor: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.25)', fontSize: '0.85rem', color: 'var(--text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                     <span>
-                        Bei {hidden.leases} Bestandsmietvertr{hidden.leases !== 1 ? 'ägen' : 'ag'} liegt der Mietbeginn deutlich vor der Erfassung in ImmoControl360.
+                        Bei {hidden.leases} Bestandsmietvertr{hidden.leases !== 1 ? 'ägen' : 'ag'} beginnt die Mietkonto-Führung in ImmoControl360 erst nach dem Mietbeginn (hinterlegter Buchungsbeginn bzw. Erfassung des Vertrags).
                         {' '}{hidden.count} offene{hidden.count !== 1 ? '' : 'r'} Monat{hidden.count !== 1 ? 'e' : ''} vor dem Buchungsbeginn ({eur(hidden.amount)}) {hidden.count !== 1 ? 'werden' : 'wird'} nicht als Rückstand gezählt.
                     </span>
                     <Button size="sm" variant="secondary" onClick={onToggleBeforeBookingStart}>Einblenden</Button>

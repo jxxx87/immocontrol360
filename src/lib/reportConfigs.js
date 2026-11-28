@@ -15,12 +15,14 @@ export const REPORT_CONFIGS = {
         columns: [
             { key: 'adresse', label: 'Straße + Hausnr.', always: true },
             { key: 'einheiten', label: 'Einheiten', compact: true },
-            { key: 'kaufpreis', label: 'Kaufpreis', compact: true, format: 'currency' },
+            // Schlüssel 'kaufpreis' bleibt (Export-Auswahl), befüllt wird die Gesamtinvestition des Objekts
+            { key: 'kaufpreis', label: 'Gesamtinvestition', compact: true, format: 'currency' },
             { key: 'marktpreis', label: 'Marktpreis', compact: true, format: 'currency' },
             { key: 'restschuld', label: 'Restschuld', compact: true, format: 'currency' },
             { key: 'miete_monat', label: 'Miete Ist (Monat)', compact: true, format: 'currency' },
             { key: 'bankrate', label: 'Bankrate (Monat)', compact: true, format: 'currency' },
-            { key: 'cashflow_monat', label: 'Cashflow (Monat)', compact: true, format: 'currency' },
+            // Miete Ist minus Bankrate, ohne Bewirtschaftungskosten
+            { key: 'cashflow_monat', label: 'Miete − Bankrate (Monat)', compact: true, format: 'currency' },
             { key: 'wohnflaeche', label: 'Wohnfläche', detail: true, format: 'area' },
             { key: 'leerstand', label: 'Leerstand', detail: true },
             { key: 'ltv', label: 'LTV', detail: true, format: 'percent' },
@@ -93,17 +95,19 @@ export const REPORT_CONFIGS = {
         hasCoverPage: true,
         sumColumns: ['kaufpreis', 'marktpreis', 'restschuld', 'miete_monat', 'bankrate', 'cashflow_monat'],
         extraOptions: [
-            { key: 'mieterliste_anhaengen', label: 'Mieterliste anonymisiert anhängen', default: false },
+            { key: 'mieterliste_anhaengen', label: 'Mieterliste pseudonymisiert anhängen', default: false },
             { key: 'transaktionen_anhaengen', label: 'Transaktionen anhängen', default: false },
         ],
         columns: [
             { key: 'objekt', label: 'Objekt', always: true },
-            { key: 'kaufpreis', label: 'Kaufpreis', compact: true, format: 'currency' },
+            // Schlüssel 'kaufpreis' bleibt (Export-Auswahl), befüllt wird die Gesamtinvestition des Objekts
+            { key: 'kaufpreis', label: 'Gesamtinvestition', compact: true, format: 'currency' },
             { key: 'marktpreis', label: 'Marktpreis', compact: true, format: 'currency' },
             { key: 'restschuld', label: 'Restschuld', compact: true, format: 'currency' },
             { key: 'miete_monat', label: 'Miete Ist (Monat)', compact: true, format: 'currency' },
             { key: 'bankrate', label: 'Bankrate (Monat)', compact: true, format: 'currency' },
-            { key: 'cashflow_monat', label: 'Cashflow (Monat)', compact: true, format: 'currency' },
+            // Miete Ist minus Bankrate, ohne Bewirtschaftungskosten
+            { key: 'cashflow_monat', label: 'Miete − Bankrate (Monat)', compact: true, format: 'currency' },
             { key: 'dscr', label: 'DSCR', compact: true, format: 'decimal' },
             { key: 'einheiten', label: 'Einheiten', detail: true },
             { key: 'wohnflaeche', label: 'Wohnfläche', detail: true, format: 'area' },

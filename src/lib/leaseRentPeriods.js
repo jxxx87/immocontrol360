@@ -231,6 +231,9 @@ export const translateLeaseDeleteError = (error) => {
 
 // -----------------------------------------------------------------------------
 // Überschneidung mit anderen Verträgen derselben Einheit
+// Die Datenbank prüft dieselbe Regel (Trigger trg_leases_check_overlap, Migration
+// 09_tenant-mgmt): Zeiträume inklusive, offenes Ende = unbegrenzt, „beendet ohne
+// Enddatum" belegt nicht. Bei Änderungen dort mit anpassen.
 // -----------------------------------------------------------------------------
 export const findOverlappingLeases = async ({ unitId, startDate, endDate, excludeLeaseId = null }) => {
     const { data, error } = await supabase
@@ -257,6 +260,16 @@ export const describeLease = (l) => {
 };
 
 // -----------------------------------------------------------------------------
+// Anrede des Mieters (Spalte tenants.salutation; NULL = keine Angabe → neutrale Briefanrede)
+// -----------------------------------------------------------------------------
+export const TENANT_SALUTATIONS = ['female', 'male', 'diverse'];
+export const TENANT_SALUTATION_OPTIONS = [
+    { value: '', label: 'Keine Angabe (neutrale Anrede)' },
+    { value: 'female', label: 'Frau' },
+    { value: 'male', label: 'Herr' }
+];
+
+// -----------------------------------------------------------------------------
 // Daten für "Dokument erstellen" (Vorlagen-Editor). Nur vorhandene Spalten.
 // Anschrift: Kontaktadresse des Mieters, sonst die Adresse des Mietobjekts.
 // -----------------------------------------------------------------------------
@@ -269,6 +282,8 @@ export const buildTemplateTenantData = ({ lease, tenant, unit, property }) => {
     return {
         first_name: t.first_name || '',
         last_name: t.last_name || '',
+        // Anrede für die Briefanrede (tenants.salutation: 'female' | 'male' | 'diverse'; fehlt = neutral)
+        gender: TENANT_SALUTATIONS.includes(t.salutation) ? t.salutation : null,
         street: hasOwnAddress ? t.street : (p.street || ''),
         house_number: hasOwnAddress ? (t.house_number || '') : (p.house_number || ''),
         zip: hasOwnAddress ? (t.postal_code || '') : (p.zip || ''),

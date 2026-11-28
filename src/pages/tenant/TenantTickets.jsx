@@ -895,19 +895,33 @@ const TicketVerlauf = ({ ticket, userId, comments, loadingComments, commentsErro
     );
 };
 
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
 // Empfänger eines Ticket-Kommentars ermitteln:
-// 1. Eigentümer des Objekts (properties.user_id – auch ohne bisherige Nachrichten)
+// 1. Eigentümer des Objekts (über get_my_landlord_info – auch ohne bisherige Nachrichten)
 // 2. Verwalter, der in diesem Ticket zuletzt geschrieben hat
 // 3. Gesprächspartner der jüngsten eigenen Unterhaltung
 const resolveTicketRecipient = async (ticket, userId, comments) => {
     if (ticket.property_id) {
-        const { data: property, error } = await supabase
-            .from('properties')
-            .select('user_id')
-            .eq('id', ticket.property_id)
-            .maybeSingle();
-        if (error) console.error('Error loading property owner:', error);
-        if (property?.user_id && property.user_id !== userId) return property.user_id;
+        // Nur die Vermieter-ID zum Ticket-Objekt (keine ganze Objektzeile)
+        const { data: info, error: infoError, status: infoStatus } = await supabase
+            .rpc('get_my_landlord_info', { p_property_id: ticket.property_id });
+        if (!infoError) {
+            if (info?.landlord_user_id && info.landlord_user_id !== userId) return info.landlord_user_id;
+        } else if (isMissingRpc(infoError, infoStatus)) {
+            // Bisheriger Weg (Funktion noch nicht eingespielt)
+            const { data: property, error } = await supabase
+                .from('properties')
+                .select('user_id')
+                .eq('id', ticket.property_id)
+                .maybeSingle();
+            if (error) console.error('Error loading property owner:', error);
+            if (property?.user_id && property.user_id !== userId) return property.user_id;
+        } else {
+            console.error('Error loading landlord:', infoError);
+        }
     }
 
     const lastOther = [...comments].reverse().find(m => m.sender_id !== userId);

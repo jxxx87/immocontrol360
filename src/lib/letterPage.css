@@ -1,0 +1,163 @@
+/* ── Briefseite DIN 5008 / A4 – EINZIGE Quelle der Seitengeometrie ─────────────────────────
+   Eingebunden
+   - global über index.css (@import): Vorlagen-Editor, Live-Vorschau und die im Hauptdokument
+     gerenderten Dokumente (z. B. Nebenkostenabrechnung),
+   - als Text (lib/letterDocumentCss.js, Import mit ?inline) ins Druckfenster des Vorlagen-Editors
+     und – auf .ic-invoice-doc begrenzt – in die Rechnungen.
+   Nur flache Regeln (keine @media/@page, keine Dark-Mode-Regeln), damit sie sich per Präfix auf
+   einen Container begrenzen lassen. Druck- und Editor-Besonderheiten stehen beim jeweiligen
+   Verwender und überschreiben diese Regeln gezielt. */
+
+.letter-page {
+  width: 210mm !important;
+  height: 297mm !important;
+  min-height: 297mm !important;
+  max-height: 297mm !important;
+  padding: 20mm 20mm 35mm 25mm !important;
+  margin: 0 auto !important;
+  background: #ffffff !important;
+  color: #000000 !important;
+  /* Seitenrand als Schatten-Linie statt border: belegt keinen Platz, die Inhaltsfläche
+     ist damit exakt so groß wie auf dem gedruckten Blatt (border-box hätte 2px abgezogen) */
+  border: none !important;
+  box-shadow: 0 0 0 1px #cbd5e1, 0 4px 20px rgba(0, 0, 0, 0.08) !important;
+  border-radius: 4px !important;
+  font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif !important;
+  font-size: 11pt !important;
+  line-height: 1.5 !important;
+  box-sizing: border-box !important;
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  text-align: left !important;
+  overflow: hidden !important;
+}
+
+.letter-page > p {
+  min-height: 1.2em;
+  margin-bottom: 1em;
+}
+
+/* Leerzeilen (leere Absätze): gleiche Höhe wie gefüllte Absätze */
+.letter-page p:empty,
+.letter-page p:has(> br:only-child),
+.letter-body p:empty,
+.letter-body p:has(> br:only-child) {
+  min-height: 1.6em;
+  margin-bottom: 1em !important;
+}
+
+/* Absenderzeile (Rücksendeangabe) */
+.letter-sender {
+  font-size: 8pt;
+  color: #555555;
+  border-bottom: 1px solid #cccccc;
+  padding-bottom: 2mm;
+  margin-bottom: 5mm;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Folgt direkt eine Trennlinie, zeichnet diese die Linie */
+.letter-sender:has(+ hr),
+.letter-sender:has(+ .editor-hr) {
+  border-bottom: none !important;
+  padding-bottom: 0 !important;
+  margin-bottom: 3mm !important;
+}
+
+/* Trennlinie im Dokument/Editor */
+.editor-hr,
+.letter-page hr {
+  border: none;
+  border-top: 1px solid #cccccc;
+  margin: 2mm 0 5mm 0;
+  width: 100%;
+  display: block;
+  height: 0;
+}
+
+/* Kopfzeile: Empfänger und Datum/Metadaten */
+.letter-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10mm;
+}
+
+.letter-recipient {
+  width: 85mm;
+  font-size: 10pt;
+  line-height: 1.4;
+  color: #111111;
+  text-align: left;
+}
+
+.letter-date {
+  font-size: 10pt;
+  color: #333333;
+  text-align: right;
+}
+
+/* Betreff und Objekt */
+.letter-subject {
+  font-size: 13pt;
+  font-weight: bold;
+  margin-bottom: 4mm;
+  color: #000000;
+  text-align: left;
+}
+
+.letter-object {
+  font-size: 10pt;
+  color: #444444;
+  margin-bottom: 8mm;
+  padding-bottom: 2mm;
+  border-bottom: 1px dotted #e2e8f0;
+  text-align: left;
+}
+
+/* Textbereich – margin-bottom schafft Abstand zur Fußzeile.
+   Fußzeile: bottom 10mm + height 18mm = 28mm vom Seitenende; Seiten-padding-bottom 35mm.
+   Mit 12mm margin bleibt eine klare Lücke vor der Fußzeile. Breite/Abstände aus dem
+   Layout-Editor (Inline-Stil) gelten in Editor und Druck gleichermaßen. */
+.letter-body {
+  flex-grow: 1;
+  flex-shrink: 1;
+  min-height: 0;
+  overflow: hidden;
+  margin-bottom: 12mm;
+  font-size: 11pt;
+  line-height: 1.6;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.letter-body p {
+  margin-bottom: 1em !important;
+  min-height: 1.6em;
+}
+
+/* Fußzeile – absolut am Seitenende verankert (wie Word) */
+.letter-footer {
+  position: absolute !important;
+  bottom: 10mm !important;
+  left: 25mm !important;
+  right: 20mm !important;
+  height: 18mm !important;
+  margin-top: 0 !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  border-top: 1px solid #dddddd !important;
+  padding-top: 3mm !important;
+  font-size: 8pt !important;
+  color: #666666 !important;
+  line-height: 1.4 !important;
+  text-align: left !important;
+  box-sizing: border-box !important;
+  background-color: #ffffff !important;
+}
+
+.footer-col {
+  width: 30%;
+}

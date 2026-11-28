@@ -44,6 +44,7 @@ const PdfTemplateEditor = lazyPage(() => import('./pages/pdf-template/PdfTemplat
 const Login = lazyPage(() => import('./pages/auth/Login'));
 const Register = lazyPage(() => import('./pages/auth/Register'));
 const PasswordRecovery = lazyPage(() => import('./components/layout/PasswordRecovery'));
+const NotFound = lazyPage(() => import('./pages/NotFound'));
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PortfolioProvider } from './context/PortfolioContext';
 import { PermissionProvider } from './context/PermissionContext';
@@ -173,9 +174,10 @@ function App() {
                       <Route path="tenant/announcements" element={ten(<TenantAnnouncements />)} />
                       <Route path="tenant/documents" element={ten(<TenantDocuments />)} />
                       <Route path="tenant/stammdaten" element={ten(<TenantStamdaten />)} />
+
+                      {/* Unbekannte Adresse: Hinweisseite im Layout (nicht angemeldet → Login über ProtectedRoute) */}
+                      <Route path="*" element={<NotFound />} />
                     </Route>
-                    {/* Catch-all route to redirect back to main index */}
-                    <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                   </Suspense>
                   <ToastContainer />

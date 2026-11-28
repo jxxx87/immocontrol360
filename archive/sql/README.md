@@ -8,17 +8,37 @@ Sie bleiben hier nur als Nachschlagewerk („Woher kommt diese Funktion/Policy?"
 
 - Mehrere Dateien würden den heutigen Live-Stand zurückdrehen (z. B. `update_rls.sql` ersetzt alle Policies
   durch Pauschalregeln, `update_rls_claims_portal.sql` und `supabase_migration_stripe_*.sql` installieren alte
-  Fassungen von RPCs, `sync_rent_ledgers_rpc.sql` überschreibt historische Sollmieten, `teardown_claims.sql`
-  löscht das Forderungs-Schema).
+  Fassungen von RPCs, `sync_rent_ledgers_rpc.sql` überschreibt historische Sollmieten,
+  `draft_claims_migration_v4.sql` würde die heutigen Lösch-Sperren der Forderungen überschreiben).
 - Einige sind nicht idempotent (`ADD COLUMN` ohne `IF NOT EXISTS`, `CREATE POLICY` ohne `DROP … IF EXISTS`).
 
-Jede Datei beginnt deshalb mit einer Schutzzeile, die eine Ausführung sofort abbricht:
+**Der heutige Stand der Datenbank steht vollständig in `supabase/baseline/baseline_public.sql`** (aus dem
+Live-Katalog erzeugt und geprüft, siehe `supabase/baseline/README.md`). Für „Wie sieht Tabelle/Funktion X heute
+aus?" dort nachsehen, nicht hier.
+
+## Schutz gegen versehentliches Ausführen
+
+Jede Datei beginnt mit zwei Schutzzeilen:
 
 ```sql
+\set ON_ERROR_STOP on
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (...)'; END $$;
 ```
 
-(Hinweis: `psql -f` ohne `ON_ERROR_STOP` würde nach dem Fehler weiterlaufen – also auch dort nicht ausführen.)
+- `psql -f`: Die erste Zeile schaltet „bei Fehler abbrechen" ein, die zweite löst den Fehler aus – psql bricht
+  ab, bevor irgendein weiterer Befehl läuft.
+- Supabase-SQL-Editor, `node-postgres` u. ä.: Die Zeile `\set …` ist dort kein gültiges SQL. Der ganze Text wird
+  abgelehnt, es läuft gar nichts.
+
+Stand 27.11.2026: Die beiden Schutzzeilen tragen bisher nur `create_floor_plans.sql`,
+`create_utility_settlements.sql`, `draft_claims_migration.sql`, `draft_claims_migration_v4.sql`,
+`supabase_migration_portfolio_shares.sql` und `update_rls_additive.sql`. Die übrigen Dateien haben nur die
+`DO`-Zeile – dort wäre `psql -f` ohne `ON_ERROR_STOP` nach dem Fehler weitergelaufen. Also auch dort nicht ausführen.
+
+Gelöscht (ohne Nachschlagewert, gefährlich beim Ausführen; in der Git-Historie weiterhin vorhanden):
+`teardown_claims.sql` (löschte das gesamte Forderungs-Schema per `DROP … CASCADE`) und
+`test_claims_migration.sql` (schrieb eine Testforderung in das Konto des ersten echten Vermieters).
+Tests laufen heute nur noch in Transaktionen mit `ROLLBACK`.
 
 ## Wie Datenbank-Änderungen heute laufen
 
@@ -34,7 +54,7 @@ Migration in die Historie ein. Keine Node-Skripte mit direkter `pg`-Verbindung (
 | `create_claim_multi_rpc.sql`, `create_claim_rpc.sql` | `immo-web/` |
 | `draft_claims_migration.sql`, `_v2`, `_v3`, `_v4` | `immo-web/` |
 | `supabase_migration_*.sql`, `supabase_setup.sql` | `immo-web/` |
-| `sync_rent_ledgers_rpc.sql`, `teardown_claims.sql`, `tenant_management_adjustments.sql`, `test_claims_migration.sql` | `immo-web/` |
+| `sync_rent_ledgers_rpc.sql`, `tenant_management_adjustments.sql` | `immo-web/` |
 | `update_rls.sql`, `update_rls_additive.sql`, `update_rls_claims_portal.sql` | `immo-web/` |
 | `create_utility_settlements.sql` | `immo-web/scripts/` |
 | `sql_step1_table.sql`, `sql_step2_functions.sql`, `sql_step3_triggers.sql` | `immo-web/supabase/` |
@@ -42,4 +62,5 @@ Migration in die Historie ein. Keine Node-Skripte mit direkter `pg`-Verbindung (
 | `fix_rls_policies.sql` | SQL-Teil aus dem gelöschten Skript `fix_rls.cjs` |
 | `update_invitations_rpc.sql` | SQL-Teil aus dem gelöschten Skript `update_invitations_rpc.cjs` (`get_pending_invitations`, `decline_portfolio_share`) |
 
-Zeilenangaben aus älteren Prüfberichten verschieben sich durch die zwei Schutzzeilen um +2.
+Zeilenangaben aus älteren Prüfberichten verschieben sich durch die Schutzzeilen um +2 (bzw. +3/+4 in den sechs
+oben genannten Dateien).

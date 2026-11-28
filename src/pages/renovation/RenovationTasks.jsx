@@ -44,7 +44,7 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
                 *, project:renovation_projects(name, property:properties(street, house_number, city)),
                 trade:renovation_project_trades(name)
             `).order('created_at', { ascending: false }),
-            supabase.from('renovation_projects').select('id, name, property_id, trades:renovation_project_trades(id, name)').order('created_at', { ascending: false }),
+            supabase.from('renovation_projects').select('id, name, property_id, user_id, property:properties(portfolio:portfolios(user_id)), trades:renovation_project_trades(id, name)').order('created_at', { ascending: false }),
         ]);
         const err = tasksRes.error || projRes.error;
         if (err) {
@@ -139,10 +139,14 @@ const RenovationTasks = ({ onTaskChange } = {}) => {
         setSaving(true);
         try {
             if (editingTask) {
-                // user_id beim Bearbeiten nicht überschreiben (Ersteller bleibt erhalten)
+                // user_id beim Bearbeiten nicht überschreiben (Zuordnung bleibt erhalten)
                 assertWrite(await supabase.from('renovation_tasks').update(payload).eq('id', editingTask.id).select('id'), 'Aufgabe speichern');
             } else {
-                assertWrite(await supabase.from('renovation_tasks').insert({ ...payload, user_id: user.id }).select('id'), 'Aufgabe anlegen');
+                // user_id = Portfolio-Eigentümer bzw. Eigentümer des Projekts, nicht das Konto eines
+                // Teammitglieds (ON DELETE CASCADE); beides lässt die Datenbank zu (rls_user_ok).
+                // Den Ersteller hält die Datenbank in renovation_tasks.created_by fest.
+                const dataOwner = selProject?.property?.portfolio?.user_id || selProject?.user_id || user.id;
+                assertWrite(await supabase.from('renovation_tasks').insert({ ...payload, user_id: dataOwner }).select('id'), 'Aufgabe anlegen');
             }
             setShowModal(false);
             await fetchAll();

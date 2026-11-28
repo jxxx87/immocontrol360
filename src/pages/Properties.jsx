@@ -15,64 +15,18 @@ import { translateError } from '../lib/errorTranslator';
 import { useViewMode } from '../context/ViewModeContext';
 import { useSubscription } from '../context/SubscriptionContext';
 import ExportDropdown from '../components/ExportDropdown';
+import { getLoanSnapshot } from '../lib/loanSchedule';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
-// Loan Helper functions
-// Hinweis: Die Restschuld-Logik existiert zusätzlich in Loans.jsx und InvestorPortal.jsx – Änderungen dort mitziehen.
-const calculateCurrentDebt = (loan) => {
-    const originalAmount = parseFloat(loan.loan_amount || 0);
-    const interestRate = parseFloat(loan.interest_rate || 0) / 100;
-    let monthlyPayment = parseFloat(loan.fixed_annuity || 0);
-
-    if (!monthlyPayment) {
-        const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
-        monthlyPayment = (originalAmount * (interestRate + repaymentRate)) / 12;
-    }
-
-    const hasActual = loan.actual_residual_debt !== null && loan.actual_residual_debt !== undefined && loan.actual_residual_debt !== '';
-    const amount = hasActual ? (parseFloat(loan.actual_residual_debt) || 0) : originalAmount;
-
-    // Ist-Restschuld ohne Stichtag: Wert unverändert verwenden. Ab Darlehensbeginn weiterzutilgen
-    // würde die bereits reduzierte Restschuld ein zweites Mal tilgen (Restschuld zu niedrig).
-    if (hasActual && !loan.actual_residual_debt_date) return amount;
-
-    const startDateStr = hasActual ? loan.actual_residual_debt_date : loan.start_date;
-    if (!startDateStr) return amount;
-
-    const startDate = new Date(startDateStr);
-    if (isNaN(startDate.getTime())) return amount;
-
-    // Ohne Rate keine Tilgung rechnen (sonst würden nur Zinsen aufgeschlagen)
-    if (!(monthlyPayment > 0)) return amount;
-
-    const validUntil = new Date(); // TODAY
-
-    let currentBalance = amount;
-    let currentDate = new Date(startDate);
-
-    let months = 0;
-    while (currentBalance > 0.01 && months < 600) {
-        if (currentDate > validUntil) break;
-        const monthlyInterest = currentBalance * interestRate / 12;
-        const principal = monthlyPayment - monthlyInterest;
-        const endBalance = currentBalance - principal;
-
-        currentBalance = endBalance < 0 ? 0 : endBalance;
-        currentDate.setMonth(currentDate.getMonth() + 1);
-        months++;
-    }
-
-    return currentBalance;
-};
-
-const calculateMonthlyPayment = (loan) => {
-    if (loan.fixed_annuity) return parseFloat(loan.fixed_annuity);
-    const originalAmount = parseFloat(loan.loan_amount || 0);
-    const interestRate = parseFloat(loan.interest_rate || 0) / 100;
-    const repaymentRate = parseFloat(loan.initial_repayment_rate || 0) / 100;
-    return (originalAmount * (interestRate + repaymentRate)) / 12;
-};
+// Darlehen: Restschuld und aktuelle Monatsrate wie auf der Darlehen-Seite und im Cockpit (src/lib/loanSchedule.js).
+// Getilgte Darlehen zählen mit 0 € Rate, die letzte Rate ist auf Restschuld + Zins begrenzt.
+const sumLoanFigures = (loanList, now = new Date()) => loanList.reduce((acc, loan) => {
+    const snapshot = getLoanSnapshot(loan, now);
+    acc.debt += snapshot.debt;
+    acc.payment += snapshot.payment;
+    return acc;
+}, { debt: 0, payment: 0 });
 
 // ---------------------------------------------------------------------------
 // Gemeinsame Helfer: Stichtag, Vermietungsstatus, Ist-Miete (Liste, Detail, Export)
@@ -152,12 +106,86 @@ const validateImageFile = (file) => {
     return null;
 };
 
-// Relativer Bilder-Pfad einer Einheit – muss der Ordnerstruktur von cloud-sync entsprechen
-const getUnitImagesRelativePath = (property, unitName) => {
+// Ein Name ergibt genau EIN Cloud-Ordnersegment: '/' und '\' würden sonst Unterordner erzeugen.
+// Gleiche Regel wie folderSegment in cloud-sync (ebenso in TenantDetail.jsx und sync-applicant-files).
+const cloudFolderSegment = (value) => String(value ?? '').replace(/[\\/]/g, '-');
+
+// Relativer Ordner einer Einheit – muss der Ordnerstruktur von cloud-sync entsprechen
+const getUnitFolderRelativePath = (property, unitName) => {
     if (!property || !unitName) return '';
     return property.economic_unit_id
-        ? `Einheiten/${property.house_number || 'Ohne Hausnummer'}/${unitName}/Bilder`
-        : `Einheiten/${unitName}/Bilder`;
+        ? `Einheiten/${cloudFolderSegment(property.house_number || 'Ohne Hausnummer')}/${cloudFolderSegment(unitName)}`
+        : `Einheiten/${cloudFolderSegment(unitName)}`;
+};
+
+// Relativer Bilder-Pfad einer Einheit
+const getUnitImagesRelativePath = (property, unitName) => {
+    const unitFolder = getUnitFolderRelativePath(property, unitName);
+    return unitFolder ? `${unitFolder}/Bilder` : '';
+};
+
+// Fehler von supabase.functions.invoke auswerten (Status, Fehlercode, Meldung)
+const readFunctionError = async (err) => {
+    const info = { status: err?.context?.status ?? err?.status ?? null, code: '', message: err?.message || String(err) };
+    try {
+        if (err?.context && typeof err.context.json === 'function') {
+            const body = await err.context.json();
+            if (body?.code) info.code = String(body.code);
+            if (body?.error) info.message = String(body.error);
+        }
+    } catch {
+        // Antwort ohne JSON-Inhalt
+    }
+    return info;
+};
+
+// Clouds, in denen cloud-sync die Ordner eines Portfolios anlegt: die zugewiesene Verbindung,
+// sonst je Anbieter die älteste Verbindung. null = Verbindungen konnten nicht gelesen werden.
+const loadCloudFolderTargets = async (portfolioId) => {
+    try {
+        const [connRes, linkRes] = await Promise.all([
+            supabase.from('cloud_connections').select('id, provider').order('created_at', { ascending: true }),
+            portfolioId
+                ? supabase.from('portfolio_cloud_links').select('cloud_connection_id').eq('portfolio_id', portfolioId).maybeSingle()
+                : Promise.resolve({ data: null, error: null })
+        ]);
+        if (connRes.error) throw connRes.error;
+        if (linkRes.error) throw linkRes.error;
+        const connections = connRes.data || [];
+        const linkedId = linkRes.data?.cloud_connection_id;
+        const linked = linkedId ? connections.find(c => c.id === linkedId) : null;
+        if (linked) return [linked];
+        const oldestPerProvider = new Map();
+        connections.forEach(c => {
+            if (c.provider && !oldestPerProvider.has(c.provider)) oldestPerProvider.set(c.provider, c);
+        });
+        return Array.from(oldestPerProvider.values());
+    } catch (e) {
+        console.error('Error loading cloud connections:', e);
+        return null;
+    }
+};
+
+// Cloud-Ordner nach einer Umbenennung mitziehen (cloud-drive "move"), damit Bilder und Dokumente
+// nicht in einem verwaisten Ordner liegen bleiben. Liefert Hinweise für den Nutzer.
+const moveCloudFolder = async (targets, fromPath, toPath) => {
+    const notices = [];
+    if (!targets || !fromPath || !toPath || fromPath === toPath) return notices;
+    for (const conn of targets) {
+        const { error } = await supabase.functions.invoke('cloud-drive', {
+            body: { action: 'move', provider: conn.provider, connectionId: conn.id, fromPath, toPath }
+        });
+        if (!error) continue;
+        const info = await readFunctionError(error);
+        // Kein Ordner unter dem alten Namen vorhanden -> nichts zu verschieben
+        if (info.status === 404 && info.code === 'source_not_found') continue;
+        console.error('Cloud folder move error:', info.status, info.code);
+        const label = PROVIDER_LABELS[conn.provider] || conn.provider;
+        notices.push(info.status === 409
+            ? `${label}: Der Cloud-Ordner „${fromPath}“ wurde nicht umbenannt, weil „${toPath}“ bereits existiert. Bitte führen Sie die Ordner bei Bedarf selbst zusammen.`
+            : `${label}: Der Cloud-Ordner „${fromPath}“ konnte nicht in „${toPath}“ umbenannt werden. Bereits abgelegte Bilder und Dokumente bleiben im bisherigen Ordner.`);
+    }
+    return notices;
 };
 
 // ---------------------------------------------------------------------------
@@ -311,22 +339,25 @@ const collectPropertyDependencies = async (propertyId) => {
 const DOWNLOAD_LINK_TTL_MS = 30 * 60 * 1000;
 const downloadLinkCache = new Map();
 
-const getCachedDownloadLink = (provider, itemId) => {
-    const entry = downloadLinkCache.get(`${provider}:${itemId}`);
+// connectionId wählt genau die zugewiesene Verbindung (mehrere Konten desselben Anbieters)
+const downloadLinkKey = (provider, itemId, connectionId) => `${provider}:${connectionId || ''}:${itemId}`;
+
+const getCachedDownloadLink = (provider, itemId, connectionId) => {
+    const entry = downloadLinkCache.get(downloadLinkKey(provider, itemId, connectionId));
     return entry?.url && Date.now() - entry.ts < DOWNLOAD_LINK_TTL_MS ? entry.url : null;
 };
 
-const rememberDownloadLink = (provider, itemId, url) => {
-    if (url) downloadLinkCache.set(`${provider}:${itemId}`, { url, ts: Date.now() });
+const rememberDownloadLink = (provider, itemId, url, connectionId) => {
+    if (url) downloadLinkCache.set(downloadLinkKey(provider, itemId, connectionId), { url, ts: Date.now() });
 };
 
-const forgetDownloadLink = (provider, itemId) => {
-    downloadLinkCache.delete(`${provider}:${itemId}`);
+const forgetDownloadLink = (provider, itemId, connectionId) => {
+    downloadLinkCache.delete(downloadLinkKey(provider, itemId, connectionId));
 };
 
-const fetchDownloadLink = (provider, itemId) => {
-    const key = `${provider}:${itemId}`;
-    const cachedUrl = getCachedDownloadLink(provider, itemId);
+const fetchDownloadLink = (provider, itemId, connectionId) => {
+    const key = downloadLinkKey(provider, itemId, connectionId);
+    const cachedUrl = getCachedDownloadLink(provider, itemId, connectionId);
     if (cachedUrl) return Promise.resolve(cachedUrl);
     const pending = downloadLinkCache.get(key);
     if (pending?.promise) return pending.promise;
@@ -335,6 +366,7 @@ const fetchDownloadLink = (provider, itemId) => {
         body: {
             action: 'get_download_link',
             provider,
+            ...(connectionId ? { connectionId } : {}),
             itemId
         }
     }).then(({ data, error }) => {
@@ -355,11 +387,11 @@ const fetchDownloadLink = (provider, itemId) => {
 
 
 // CloudImage Component
-const CloudImage = ({ provider, itemId, initialUrl = null, fallbackIcon, style, premiumView = false }) => {
+const CloudImage = ({ provider, connectionId = null, itemId, initialUrl = null, fallbackIcon, style, premiumView = false }) => {
     const FallbackIcon = fallbackIcon;
     const resolvedProvider = provider || 'onedrive';
-    const [imgSrc, setImgSrc] = useState(() => (itemId ? (initialUrl || getCachedDownloadLink(resolvedProvider, itemId)) : null));
-    const [loading, setLoading] = useState(() => !!itemId && !initialUrl && !getCachedDownloadLink(resolvedProvider, itemId));
+    const [imgSrc, setImgSrc] = useState(() => (itemId ? (initialUrl || getCachedDownloadLink(resolvedProvider, itemId, connectionId)) : null));
+    const [loading, setLoading] = useState(() => !!itemId && !initialUrl && !getCachedDownloadLink(resolvedProvider, itemId, connectionId));
 
     useEffect(() => {
         let isMounted = true;
@@ -373,14 +405,14 @@ const CloudImage = ({ provider, itemId, initialUrl = null, fallbackIcon, style, 
             }
             // Die Liste liefert bei manchen Anbietern bereits einen Vorschau-Link -> kein Zusatzaufruf
             if (initialUrl) {
-                rememberDownloadLink(resolvedProvider, itemId, initialUrl);
+                rememberDownloadLink(resolvedProvider, itemId, initialUrl, connectionId);
                 if (isMounted) {
                     setImgSrc(initialUrl);
                     setLoading(false);
                 }
                 return;
             }
-            const url = await fetchDownloadLink(resolvedProvider, itemId);
+            const url = await fetchDownloadLink(resolvedProvider, itemId, connectionId);
             if (isMounted) {
                 setImgSrc(url);
                 setLoading(false);
@@ -388,10 +420,10 @@ const CloudImage = ({ provider, itemId, initialUrl = null, fallbackIcon, style, 
         };
         loadThumbnail();
         return () => { isMounted = false; };
-    }, [itemId, resolvedProvider, initialUrl]);
+    }, [itemId, resolvedProvider, initialUrl, connectionId]);
 
     const handleImageError = () => {
-        forgetDownloadLink(resolvedProvider, itemId);
+        forgetDownloadLink(resolvedProvider, itemId, connectionId);
         setImgSrc(null);
     };
 
@@ -480,6 +512,7 @@ const LocalImagePreview = ({ file }) => {
 // CloudImageManager Component
 const CloudImageManager = ({
     provider,
+    connectionId = null,
     propertyFolderName,
     relativePath,
     currentThumbnailId,
@@ -514,6 +547,7 @@ const CloudImageManager = ({
                 body: {
                     action: 'list',
                     provider: provider || 'onedrive',
+                    ...(connectionId ? { connectionId } : {}),
                     path: fullPath
                 }
             });
@@ -534,7 +568,7 @@ const CloudImageManager = ({
 
     useEffect(() => {
         fetchImages();
-    }, [provider, propertyFolderName, relativePath, isNewEntity]);
+    }, [provider, connectionId, propertyFolderName, relativePath, isNewEntity]);
 
     const resetFileInput = () => {
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -575,6 +609,7 @@ const CloudImageManager = ({
             const formData = new FormData();
             formData.append('action', 'upload');
             formData.append('provider', provider || 'onedrive');
+            if (connectionId) formData.append('connectionId', connectionId);
             formData.append('path', fullPath);
             formData.append('file', file);
 
@@ -602,11 +637,12 @@ const CloudImageManager = ({
                 body: {
                     action: 'delete',
                     provider: provider || 'onedrive',
+                    ...(connectionId ? { connectionId } : {}),
                     itemId: imgId
                 }
             });
             if (error) throw error;
-            forgetDownloadLink(provider || 'onedrive', imgId);
+            forgetDownloadLink(provider || 'onedrive', imgId, connectionId);
             if (imgId === currentThumbnailId) {
                 onSelectThumbnail(null);
             }
@@ -786,6 +822,7 @@ const CloudImageManager = ({
                                     {/* Google liefert in der Liste bereits den Vorschau-Link (identisch zu get_download_link) */}
                                     <CloudImage
                                         provider={provider}
+                                        connectionId={connectionId}
                                         itemId={img.id}
                                         initialUrl={provider === 'googledrive' ? (img.thumbnailUrl || null) : null}
                                         fallbackIcon={Home}
@@ -897,9 +934,9 @@ const getPropertyFolderName = (property, allProperties = []) => {
             const parts = Object.keys(groupedByStreet).map(street => {
                 const nums = groupedByStreet[street];
                 if (nums.length > 0) {
-                    return `${street} ${nums.join(' & ')}`;
+                    return `${cloudFolderSegment(street)} ${nums.map(cloudFolderSegment).join(' & ')}`;
                 }
-                return street;
+                return cloudFolderSegment(street);
             });
             const displayNames = parts.slice(0, 2).join(' | ');
             const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
@@ -907,7 +944,7 @@ const getPropertyFolderName = (property, allProperties = []) => {
         }
     }
 
-    return `${property.street || ''} ${property.house_number || ''}`.trim();
+    return `${cloudFolderSegment(property.street)} ${cloudFolderSegment(property.house_number)}`.trim();
 };
 
 const Properties = () => {
@@ -937,6 +974,9 @@ const Properties = () => {
     const [pendingUnitThumbnailIndex, setPendingUnitThumbnailIndex] = useState(null);
     const [propertyProvider, setPropertyProvider] = useState('onedrive');
     const [unitProvider, setUnitProvider] = useState('onedrive');
+    // Verbindungs-ID zum Anbieter (mehrere Konten desselben Anbieters möglich)
+    const [propertyConnectionId, setPropertyConnectionId] = useState(null);
+    const [unitConnectionId, setUnitConnectionId] = useState(null);
     const fetchRequestRef = React.useRef(0);
     const propertyProviderRequestRef = React.useRef(0);
     const unitProviderRequestRef = React.useRef(0);
@@ -1140,16 +1180,20 @@ const Properties = () => {
             const connData = connRes.error ? [] : (connRes.data || []);
             const linkData = linkRes.error ? [] : (linkRes.data || []);
             const providerMap = {};
-            const defaultProvider = connData.length > 0 ? connData[0].provider : 'onedrive';
+            const connectionMap = {};
+            const defaultConnection = connData.length > 0 ? connData[0] : null;
+            const defaultProvider = defaultConnection ? defaultConnection.provider : 'onedrive';
             linkData.forEach(link => {
                 const conn = connData.find(c => c.id === link.cloud_connection_id);
                 if (conn) {
                     providerMap[link.portfolio_id] = conn.provider;
+                    connectionMap[link.portfolio_id] = conn.id;
                 }
             });
 
             // Calculate Aggregations
-            const today = getLocalDateString();
+            const now = new Date();
+            const today = getLocalDateString(now);
             const propertiesWithStats = (data || []).map(p => {
                 const propUnits = (p.units || []).map(u => withRentInfo(u, today));
                 const totalUnits = propUnits.length;
@@ -1160,14 +1204,14 @@ const Properties = () => {
                 const vacantUnits = propUnits.filter(u => u.status === 'vacant').length;
 
                 // Calculate Loan Stats
-                const propLoans = loanData.filter(l => l.property_id === p.id);
-                const remainingDebt = propLoans.reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
-                const monthlyLoanPayment = propLoans.reduce((sum, l) => sum + calculateMonthlyPayment(l), 0);
+                const { debt: remainingDebt, payment: monthlyLoanPayment } = sumLoanFigures(loanData.filter(l => l.property_id === p.id), now);
 
                 return {
                     ...p,
                     units: propUnits,
                     cloud_provider: providerMap[p.portfolio_id] || defaultProvider,
+                    // Genau diese Verbindung für Titelbilder (sonst nähme cloud-drive die älteste des Anbieters)
+                    cloud_connection_id: connectionMap[p.portfolio_id] || defaultConnection?.id || null,
                     remaining_debt: remainingDebt,
                     monthly_loan_payment: monthlyLoanPayment,
                     stats: {
@@ -1254,6 +1298,7 @@ const Properties = () => {
         // Nur übernehmen, wenn inzwischen kein anderes Portfolio gewählt wurde
         if (requestId === propertyProviderRequestRef.current) {
             setPropertyProvider(conn?.provider || 'onedrive');
+            setPropertyConnectionId(conn?.id || null);
         }
     };
 
@@ -1262,12 +1307,13 @@ const Properties = () => {
         const conn = await resolveCloudConnection(portfolioId);
         if (requestId === unitProviderRequestRef.current) {
             setUnitProvider(conn?.provider || 'onedrive');
+            setUnitConnectionId(conn?.id || null);
         }
     };
 
     // Ordner in den verbundenen Clouds anlegen und lokal gewählte Bilder hochladen.
     // Liefert Hinweise für den Nutzer (statt Fehler stillschweigend zu verschlucken).
-    const syncFoldersAndUploadImages = async ({ propertyId, files, provider, targetPath, thumbnailIndex, table, rowId }) => {
+    const syncFoldersAndUploadImages = async ({ propertyId, files, provider, connectionId = null, targetPath, thumbnailIndex, table, rowId }) => {
         const notices = [];
         let connectedProviders = [];
         try {
@@ -1314,6 +1360,8 @@ const Properties = () => {
                 const formData = new FormData();
                 formData.append('action', 'upload');
                 formData.append('provider', provider);
+                // Dieselbe Verbindung, in der cloud-sync die Ordner angelegt hat
+                if (connectionId) formData.append('connectionId', connectionId);
                 formData.append('path', targetPath);
                 formData.append('file', file);
 
@@ -1341,6 +1389,56 @@ const Properties = () => {
             if (thumbError) {
                 console.error('Error saving thumbnail:', thumbError);
                 notices.push('Das Titelbild konnte nicht gespeichert werden.');
+            }
+        }
+        return notices;
+    };
+
+    // Nach dem Bearbeiten einer Immobilie: Cloud-Ordner umbenennen, wenn sich die Adresse geändert hat.
+    // Ändert sich die Zusammensetzung der Wirtschaftseinheit, müssten Ordner zusammengeführt werden –
+    // dann wird nichts verschoben, sondern nur darauf hingewiesen.
+    const renameCloudFoldersAfterPropertyEdit = async ({ editingProperty, portfolioId, street, houseNumber, finalEconomicUnitId, membershipChanged }) => {
+        const oldHouseNumber = (editingProperty.house_number || '').trim();
+        const addressChanged = street !== (editingProperty.street || '').trim() || houseNumber !== oldHouseNumber;
+        if (!addressChanged && !membershipChanged) return [];
+
+        const targets = await loadCloudFolderTargets(portfolioId);
+        if (targets === null) {
+            return ['Die Cloud-Verbindungen konnten nicht geprüft werden. Falls zu dieser Immobilie Cloud-Ordner bestehen, benennen Sie diese bitte selbst um.'];
+        }
+        if (targets.length === 0) return [];
+
+        const oldFolderName = getPropertyFolderName(editingProperty, properties);
+        if (membershipChanged) {
+            return [`Hinweis: Durch die geänderte Wirtschaftseinheit ändert sich der Cloud-Ordner dieser Immobilie. Bereits abgelegte Bilder und Dokumente bleiben im bisherigen Ordner „${oldFolderName}“ und werden nicht automatisch verschoben.`];
+        }
+
+        // Neuer Ordnername wie in cloud-sync (bei Wirtschaftseinheiten aus allen Mitgliedern, nach Straße sortiert)
+        let newFolderName = `${cloudFolderSegment(street)} ${cloudFolderSegment(houseNumber)}`.trim();
+        let otherMembers = [];
+        if (finalEconomicUnitId) {
+            const { data: members, error: membersError } = await supabase
+                .from('properties')
+                .select('id, street, house_number, economic_unit_id')
+                .eq('economic_unit_id', finalEconomicUnitId)
+                .order('street');
+            if (membersError || !members || members.length === 0) {
+                return [`Der Cloud-Ordner „${oldFolderName}“ konnte nicht umbenannt werden, weil die Wirtschaftseinheit nicht gelesen werden konnte. Bitte benennen Sie ihn bei Bedarf selbst um.`];
+            }
+            newFolderName = getPropertyFolderName({ economic_unit_id: finalEconomicUnitId }, members);
+            otherMembers = members.filter(m => m.id !== editingProperty.id);
+        }
+
+        const notices = await moveCloudFolder(targets, oldFolderName, newFolderName);
+
+        // Wirtschaftseinheit: Einheiten liegen unter "Einheiten/<Hausnummer>" – bei neuer Hausnummer mitziehen
+        if (finalEconomicUnitId && houseNumber !== oldHouseNumber && notices.length === 0) {
+            const oldSegment = cloudFolderSegment(editingProperty.house_number || 'Ohne Hausnummer');
+            const newSegment = cloudFolderSegment(houseNumber || 'Ohne Hausnummer');
+            if (otherMembers.some(m => cloudFolderSegment(m.house_number || 'Ohne Hausnummer') === oldSegment)) {
+                notices.push(`Hinweis: Der Cloud-Ordner „${newFolderName}/Einheiten/${oldSegment}“ gehört auch zu einem anderen Objekt der Wirtschaftseinheit und wurde daher nicht umbenannt.`);
+            } else {
+                notices.push(...(await moveCloudFolder(targets, `${newFolderName}/Einheiten/${oldSegment}`, `${newFolderName}/Einheiten/${newSegment}`)));
             }
         }
         return notices;
@@ -1389,6 +1487,14 @@ const Properties = () => {
             alert('Bitte geben Sie Straße und Hausnummer an.');
             return;
         }
+        // Schrägstriche würden in der Cloud-Ablage zusätzliche Unterordner erzeugen (nur neue/geänderte Werte prüfen)
+        const originalStreet = (editingProperty?.street || '').trim();
+        const originalHouseNumber = (editingProperty?.house_number || '').trim();
+        if ((/[\\/]/.test(street) && (isNew || street !== originalStreet))
+            || (/[\\/]/.test(houseNumber) && (isNew || houseNumber !== originalHouseNumber))) {
+            alert('Straße und Hausnummer dürfen keine Schrägstriche („/“ oder „\\“) enthalten, da daraus der Ordner in der Cloud-Ablage gebildet wird. Bitte schreiben Sie z. B. „12-14“ statt „12/14“.');
+            return;
+        }
         const formInvestment = parseFloat(propertyForm.total_investment_cost) || 0;
         const formEquity = parseFloat(propertyForm.equity_invested) || 0;
         if (formInvestment < 0 || formEquity < 0) {
@@ -1429,9 +1535,6 @@ const Properties = () => {
         }
         // Neu hinzukommende Mitglieder: deren eigene Werte gehen in die WE ein (statt still auf 0 gesetzt zu werden)
         const joiningMembers = finalEconomicUnitId ? memberProps.filter(p => p.economic_unit_id !== finalEconomicUnitId) : [];
-        const addJoiningValues = propertyForm._add_member_values !== false;
-        const joiningInvestment = joiningMembers.reduce((sum, p) => sum + (parseFloat(p.total_investment_cost) || 0), 0);
-        const joiningEquity = joiningMembers.reduce((sum, p) => sum + (parseFloat(p.equity_invested) || 0), 0);
         const removedMembers = (originalWeId && finalEconomicUnitId)
             ? properties.filter(p => p.economic_unit_id === originalWeId && p.id !== editingPropertyId && !memberIds.includes(p.id))
             : [];
@@ -1443,114 +1546,36 @@ const Properties = () => {
         try {
             setIsSaving(true);
 
-            // 1. Wirtschaftseinheit (Gesamtwerte) – user_id nur beim Anlegen, nie beim Ändern
-            if (finalEconomicUnitId) {
-                const weValues = {
-                    total_investment_cost: formInvestment + (addJoiningValues ? joiningInvestment : 0),
-                    equity_invested: formEquity + (addJoiningValues ? joiningEquity : 0),
-                    updated_at: new Date().toISOString()
-                };
-                // Ein von RLS blockiertes Update liefert 0 Zeilen ohne Fehler -> abbrechen, bevor Mitgliedswerte auf 0 gesetzt werden
-                const updateEconomicUnitValues = async () => {
-                    const { data: weRows, error: weUpdateError } = await supabase
-                        .from('economic_units')
-                        .update(weValues)
-                        .eq('id', finalEconomicUnitId)
-                        .select('id');
-                    if (weUpdateError) throw weUpdateError;
-                    if (!weRows || weRows.length === 0) {
-                        throw createUserError('Die Gesamtwerte der Wirtschaftseinheit konnten nicht gespeichert werden (keine Berechtigung oder nicht mehr vorhanden). Es wurde nichts geändert.');
-                    }
-                };
-                const weExists = economicUnits.some(eu => eu.id === finalEconomicUnitId);
-                if (weExists) {
-                    await updateEconomicUnitValues();
-                } else {
-                    const { error: weError } = await supabase.from('economic_units').insert([{
-                        id: finalEconomicUnitId,
-                        user_id: getPortfolioOwnerId(portfolioId) || user.id,
-                        ...weValues
-                    }]);
-                    if (weError) {
-                        // Zeile existiert bereits (z. B. nicht geladen) -> nur Werte aktualisieren
-                        if (weError.code !== '23505') throw weError;
-                        await updateEconomicUnitValues();
-                    }
-                }
-            }
-
-            // 2. Immobilie
-            const propData = {
-                street,
-                house_number: houseNumber,
-                zip: (propertyForm.zip || '').trim(),
-                city: (propertyForm.city || '').trim(),
-                construction_year: parseInt(propertyForm.construction_year) || null,
-                property_type: propertyForm.property_type,
-                total_investment_cost: finalEconomicUnitId ? 0 : formInvestment,
-                equity_invested: finalEconomicUnitId ? 0 : formEquity,
-                economic_unit_id: finalEconomicUnitId,
-                thumbnail_image: propertyForm.thumbnail_image || null
-            };
-
-            if (isNew) {
-                // Neue Objekte gehören dem Eigentümer des Portfolios (auch wenn ein Freigabe-Nutzer anlegt)
-                const { data: insertData, error: insertError } = await supabase
-                    .from('properties')
-                    .insert([{ ...propData, user_id: getPortfolioOwnerId(portfolioId) || user.id, portfolio_id: portfolioId }])
-                    .select('id')
-                    .single();
-                if (insertError) throw insertError;
-                currentPropId = insertData?.id;
-            } else {
-                // Kein user_id/portfolio_id im Update: Eigentümer und Portfolio bleiben unverändert
-                const { data: updatedRows, error: updateError } = await supabase
-                    .from('properties')
-                    .update(propData)
-                    .eq('id', editingPropertyId)
-                    .select('id');
-                if (updateError) throw updateError;
-                if (!updatedRows || updatedRows.length === 0) {
-                    throw createUserError('Die Immobilie konnte nicht gespeichert werden (keine Berechtigung oder nicht mehr vorhanden).');
-                }
-            }
-
-            // 3. Mitglieder der Wirtschaftseinheit (Fehler werden gemeldet, die Immobilie ist bereits gespeichert)
-            // .select('id'): von RLS blockierte Zeilen fehlen in der Antwort und werden so ebenfalls gemeldet
-            const findUnchanged = (list, rows, err) => {
-                if (err) return list;
-                const changedIds = new Set((rows || []).map(r => r.id));
-                return list.filter(p => !changedIds.has(p.id));
-            };
-
-            if (finalEconomicUnitId && joiningMembers.length > 0) {
-                const { data: joinedRows, error: memberError } = await supabase.from('properties')
-                    .update({
-                        economic_unit_id: finalEconomicUnitId,
-                        total_investment_cost: 0,
-                        equity_invested: 0
-                    })
-                    .in('id', joiningMembers.map(p => p.id))
-                    .select('id');
-                const notJoined = findUnchanged(joiningMembers, joinedRows, memberError);
-                if (notJoined.length > 0) {
-                    console.error('Error updating economic unit members:', memberError);
-                    notices.push(`Die Immobilie wurde gespeichert, aber folgende Objekte konnten der Wirtschaftseinheit nicht zugeordnet werden: ${formatPropertyList(notJoined)}. Bitte prüfen Sie die Zuordnung und die Gesamtwerte.`);
-                }
-            }
+            // 1.–3. Wirtschaftseinheit (Gesamtwerte), Immobilie und Mitglieder (Zuordnen mit Einzelwert 0, Lösen)
+            // in EINER Datenbank-Transaktion: scheitert ein Schritt (z. B. fehlende Berechtigung), bleibt alles
+            // unverändert. Die Werte neu zugeordneter Objekte addiert die Datenbank aus dem aktuellen Stand.
+            // Eigentümer und Portfolio bestehender Objekte bleiben unverändert; neue Objekte und Wirtschafts-
+            // einheiten gehören dem Eigentümer des Portfolios (auch wenn ein Freigabe-Nutzer anlegt).
+            const { data: savedId, error: saveError } = await supabase.rpc('save_property_economic_unit', {
+                p_property_id: isNew ? null : editingPropertyId,
+                p_portfolio_id: portfolioId,
+                p_property: {
+                    street,
+                    house_number: houseNumber,
+                    zip: (propertyForm.zip || '').trim(),
+                    city: (propertyForm.city || '').trim(),
+                    construction_year: parseInt(propertyForm.construction_year) || null,
+                    property_type: propertyForm.property_type || null,
+                    total_investment_cost: formInvestment,
+                    equity_invested: formEquity,
+                    thumbnail_image: propertyForm.thumbnail_image || null
+                },
+                p_we_id: finalEconomicUnitId,
+                p_join_ids: joiningMembers.map(p => p.id),
+                p_remove_ids: removedMembers.map(p => p.id),
+                p_add_member_values: propertyForm._add_member_values !== false
+            });
+            if (saveError) throw saveError;
+            if (!savedId) throw createUserError('Die Immobilie konnte nicht gespeichert werden. Es wurde nichts geändert.');
+            currentPropId = savedId;
 
             if (removedMembers.length > 0) {
-                const { data: removedRows, error: removeError } = await supabase.from('properties')
-                    .update({ economic_unit_id: null })
-                    .in('id', removedMembers.map(p => p.id))
-                    .select('id');
-                const notRemoved = findUnchanged(removedMembers, removedRows, removeError);
-                if (notRemoved.length > 0) {
-                    console.error('Error removing economic unit members:', removeError);
-                    notices.push(`Folgende Objekte konnten nicht aus der Wirtschaftseinheit gelöst werden: ${formatPropertyList(notRemoved)}`);
-                } else {
-                    notices.push(`Aus der Wirtschaftseinheit entfernt: ${formatPropertyList(removedMembers)}. Bitte tragen Sie dort die Einzelwerte für Gesamtinvestition und Eigenkapital ein und prüfen Sie die Gesamtwerte der Wirtschaftseinheit.`);
-                }
+                notices.push(`Aus der Wirtschaftseinheit entfernt: ${formatPropertyList(removedMembers)}. Bitte tragen Sie dort die Einzelwerte für Gesamtinvestition und Eigenkapital ein und prüfen Sie die Gesamtwerte der Wirtschaftseinheit.`);
             }
 
             // 4. Wirtschaftseinheit verlassen: verwaiste WE aufräumen bzw. auf Gesamtwerte hinweisen
@@ -1563,10 +1588,23 @@ const Properties = () => {
                 }
             }
 
+            // 5a. Cloud (nur Bearbeiten): Ordner nach geänderter Adresse umbenennen, damit Bilder und
+            //     Dokumente nicht im alten Ordner verwaisen
+            if (!isNew && editingProperty) {
+                notices.push(...(await renameCloudFoldersAfterPropertyEdit({
+                    editingProperty,
+                    portfolioId,
+                    street,
+                    houseNumber,
+                    finalEconomicUnitId,
+                    membershipChanged: joiningMembers.length > 0 || removedMembers.length > 0 || leavingWe || (!!finalEconomicUnitId && !originalWeId)
+                })));
+            }
+
             // 5. Cloud: Ordnerstruktur und Bilder (nur bei Neuanlage)
             if (isNew && currentPropId) {
                 // Ordnername wie in cloud-sync (bei Wirtschaftseinheit "WG: ..."), damit die Bilder auffindbar sind
-                let folderName = `${street} ${houseNumber}`.trim();
+                let folderName = `${cloudFolderSegment(street)} ${cloudFolderSegment(houseNumber)}`.trim();
                 if (finalEconomicUnitId && newPropertyImages.length > 0) {
                     const { data: weMembers, error: weMembersError } = await supabase
                         .from('properties')
@@ -1581,6 +1619,7 @@ const Properties = () => {
                     propertyId: currentPropId,
                     files: newPropertyImages,
                     provider: propertyProvider,
+                    connectionId: propertyConnectionId,
                     targetPath: `${folderName}/Bilder`,
                     thumbnailIndex: pendingPropertyThumbnailIndex,
                     table: 'properties',
@@ -1743,6 +1782,19 @@ const Properties = () => {
             }
 
             const notices = [];
+            // Umbenannte Einheit: Cloud-Ordner (mit Bildern und Mietverhältnissen) mitziehen
+            const originalUnitName = editingUnitOriginalName || '';
+            if (!isNew && originalUnitName && unitName !== originalUnitName.trim()) {
+                const propFolderName = getPropertyFolderName(property, properties);
+                const fromPath = `${propFolderName}/${getUnitFolderRelativePath(property, originalUnitName)}`;
+                const toPath = `${propFolderName}/${getUnitFolderRelativePath(property, unitName)}`;
+                const targets = await loadCloudFolderTargets(property.portfolio_id);
+                if (targets === null) {
+                    notices.push(`Die Cloud-Verbindungen konnten nicht geprüft werden. Falls der Cloud-Ordner „${fromPath}“ besteht, benennen Sie ihn bitte selbst um.`);
+                } else {
+                    notices.push(...(await moveCloudFolder(targets, fromPath, toPath)));
+                }
+            }
             // Trigger sync to ensure folders are created and upload files if needed
             if (isNew && currentUnitId) {
                 const propFolderName = getPropertyFolderName(property, properties);
@@ -1750,6 +1802,7 @@ const Properties = () => {
                     propertyId: property.id,
                     files: newUnitImages,
                     provider: unitProvider,
+                    connectionId: unitConnectionId,
                     targetPath: `${propFolderName}/${getUnitImagesRelativePath(property, unitName)}`,
                     thumbnailIndex: pendingUnitThumbnailIndex,
                     table: 'units',
@@ -2127,8 +2180,7 @@ const Properties = () => {
         Object.values(groups).forEach(g => {
             const weRow = economicUnits.find(eu => eu.id === g.economic_unit_id);
             const weLoans = (loans || []).filter(l => l.economic_unit_id === g.economic_unit_id && !l.property_id);
-            const weRemainingDebt = weLoans.reduce((sum, l) => sum + calculateCurrentDebt(l), 0);
-            const weMonthlyLoanPayment = weLoans.reduce((sum, l) => sum + calculateMonthlyPayment(l), 0);
+            const { debt: weRemainingDebt, payment: weMonthlyLoanPayment } = sumLoanFigures(weLoans);
 
             g.remaining_debt += weRemainingDebt;
             g.monthly_loan_payment += weMonthlyLoanPayment;
@@ -2753,6 +2805,7 @@ const Properties = () => {
                                             <div style={{ position: 'relative', height: '140px', width: '100%', backgroundColor: 'rgba(0,0,0,0.2)' }}>
                                                 <CloudImage
                                                     provider={property.cloud_provider}
+                                                    connectionId={property.cloud_connection_id}
                                                     itemId={property.thumbnail_image}
                                                     fallbackIcon={Building2}
                                                     premiumView={true}
@@ -3026,6 +3079,7 @@ const Properties = () => {
                     </p>
                     <CloudImageManager
                         provider={propertyProvider}
+                        connectionId={propertyConnectionId}
                         propertyFolderName={editingPropertyId ? getPropertyFolderName(properties.find(p => p.id === editingPropertyId), properties) : ''}
                         relativePath="Bilder"
                         currentThumbnailId={propertyForm.thumbnail_image}
@@ -3094,12 +3148,13 @@ const Properties = () => {
                     </p>
                     {editingUnitNameChanged && (
                         <div style={{ marginBottom: 'var(--spacing-sm)', padding: '8px 10px', borderRadius: 'var(--radius-md)', border: '1px solid var(--warning-color)', backgroundColor: 'rgba(245, 158, 11, 0.08)', fontSize: '0.8rem' }}>
-                            Hinweis: Bereits hochgeladene Bilder liegen im Cloud-Ordner „Einheiten/{editingUnitOriginalName}“ und werden beim Umbenennen nicht automatisch verschoben.
+                            Hinweis: Der Cloud-Ordner „Einheiten/{editingUnitOriginalName}“ (mit bereits hochgeladenen Bildern und Dokumenten) wird beim Speichern auf den neuen Namen umbenannt.
                         </div>
                     )}
                     {/* Bilder-Ordner der gespeicherten Einheit – nicht des live getippten Namens */}
                     <CloudImageManager
                         provider={unitProvider}
+                        connectionId={unitConnectionId}
                         propertyFolderName={currentPropertyForUnit ? getPropertyFolderName(currentPropertyForUnit, properties) : ''}
                         relativePath={editingUnitId ? getUnitImagesRelativePath(currentPropertyForUnit, editingUnitOriginalName) : ''}
                         currentThumbnailId={unitForm.thumbnail_image}

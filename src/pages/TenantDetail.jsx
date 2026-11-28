@@ -21,6 +21,8 @@ import {
     deleteRentPeriod, checkLeaseDeletion, describeDeletionBlock, deletionConfirmText,
     translateLeaseDeleteError, findOverlappingLeases, describeLease, buildTemplateTenantData
 } from '../lib/leaseRentPeriods';
+import { validateUploadFile, prepareUploadBody } from '../lib/storageFiles';
+import { translateError } from '../lib/errorTranslator';
 
 // Status der Forderungen (wie im Forderungsmodul / ClaimDetail)
 const CLAIM_STATUS = {
@@ -49,6 +51,12 @@ const LEASE_TYPE_LABELS = { normal: 'Normalmietvertrag', staffel: 'Staffelmietve
 
 const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'];
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+// Dokumente der Mieterakte (Bucket "documents"): gleiche Prüfung wie Documents.jsx (storageFiles.js)
+const TENANT_DOCUMENT_RULE = {
+    label: 'PDF, PNG, JPG, DOC und DOCX',
+    maxBytes: MAX_UPLOAD_BYTES,
+    extensions: ALLOWED_UPLOAD_EXTENSIONS
+};
 
 const RETRO_CONFIRM_LABEL = 'Ich habe verstanden, dass die Änderung rückwirkend auf alle Monate seit Vertragsbeginn wirkt.';
 
@@ -90,6 +98,30 @@ const readFunctionErrorMessage = async (err) => {
     }
     return err?.message || String(err);
 };
+// Status, Fehlercode und Meldung in einem Schritt (die Antwort lässt sich nur einmal lesen)
+const readFunctionError = async (err) => {
+    const info = { status: getFunctionErrorStatus(err), code: '', message: err?.message || String(err) };
+    try {
+        if (err?.context && typeof err.context.json === 'function') {
+            const body = await err.context.json();
+            if (body?.code) info.code = String(body.code);
+            if (body?.error) info.message = String(body.error);
+        }
+    } catch {
+        // Antwort ohne JSON-Inhalt
+    }
+    return info;
+};
+
+// Ein Name ergibt genau EIN Cloud-Ordnersegment: '/' und '\' würden sonst Unterordner erzeugen.
+// Gleiche Regel wie folderSegment in cloud-sync (ebenso in Properties.jsx und sync-applicant-files).
+const cloudFolderSegment = (value) => String(value ?? '').replace(/[\\/]/g, '-');
+
+// Tabelle/Spalte (noch) nicht vorhanden – z. B. lease_cloud_folders vor dem Einspielen der Migration
+const isMissingTableError = (error) => ['42P01', '42703', 'PGRST204', 'PGRST205'].includes(String(error?.code || ''));
+
+// Pfad ohne leere Segmente (Form, in der er in lease_cloud_folders gespeichert wird)
+const normalizeCloudPath = (path) => String(path || '').split('/').filter(Boolean).join('/');
 
 const buildTenantForm = (t = {}) => ({
     first_name: t.first_name || '',
@@ -190,6 +222,11 @@ const TenantDetail = () => {
     const [cloudError, setCloudError] = useState(null);
     const [cloudFolderMissing, setCloudFolderMissing] = useState(false);
     const [tenantCloudPath, setTenantCloudPath] = useState('');
+    const [cloudCoUserNotice, setCloudCoUserNotice] = useState(false);
+    // Ordner dieses Mietverhältnisses: gemerkter Ordner (lease_cloud_folders) und Ordner aus den aktuellen Namen
+    const cloudPathsRef = useRef({ primary: '', fallback: '' });
+    const leaseFolderRef = useRef(null); // { connectionId, path } – zuletzt bekannter Eintrag in lease_cloud_folders
+    const leaseFolderSupportedRef = useRef(true);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
@@ -214,8 +251,16 @@ const TenantDetail = () => {
     const [paymentForm, setPaymentForm] = useState({ amount: '', date: '', note: '' });
     const [writeOffForm, setWriteOffForm] = useState({ reason: '' });
 
-    // Interne Notizen (nur lokal im Browser)
+    // Interne Notizen: in der Datenbank (lease_notes, nicht für Mieter sichtbar). Fehlt die Tabelle
+    // noch (Migration nicht eingespielt), wie bisher nur lokal im Browser.
     const [notes, setNotes] = useState('');
+    const [notesMode, setNotesMode] = useState('loading'); // 'loading' | 'db' | 'local' | 'unavailable'
+    const [notesStatus, setNotesStatus] = useState(null); // null | 'pending' | 'saving' | 'saved' | 'error'
+    const [notesError, setNotesError] = useState(null);
+    const notesLeaseRef = useRef(null);      // Mietverhältnis, zu dem die angezeigten Notizen gehören
+    const notesTimerRef = useRef(null);
+    const notesPendingRef = useRef(null);    // { leaseId, value } – noch nicht gesendete Änderung
+    const notesChainRef = useRef(Promise.resolve()); // Speichervorgänge nacheinander
 
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef(null);
@@ -225,40 +270,156 @@ const TenantDetail = () => {
     const currentPeriod = rentPeriods.supported === true ? getEffectivePeriod(rentPeriods.periods, today) : null;
     const currentRent = currentPeriod || lease;
 
+    const localNotesKey = (id) => `tenant_notes_${id}`;
+    const readLocalNotes = (id) => {
+        try {
+            return localStorage.getItem(localNotesKey(id)) || '';
+        } catch {
+            return '';
+        }
+    };
+    const removeLocalNotes = (id) => {
+        try {
+            localStorage.removeItem(localNotesKey(id));
+        } catch {
+            // Speicher nicht verfügbar (privates Fenster o. Ä.)
+        }
+    };
+
+    // Notizen speichern; Anfragen laufen nacheinander, damit keine ältere Fassung eine neuere überholt
+    const persistNotes = (targetLeaseId, value) => {
+        notesChainRef.current = notesChainRef.current.then(async () => {
+            if (notesLeaseRef.current === targetLeaseId) setNotesStatus('saving');
+            const { error: saveError } = await supabase
+                .from('lease_notes')
+                .upsert({ lease_id: targetLeaseId, notes: value }, { onConflict: 'lease_id' });
+            if (!saveError) removeLocalNotes(targetLeaseId);
+            if (notesLeaseRef.current !== targetLeaseId) return;
+            if (saveError) {
+                setNotesStatus('error');
+                setNotesError('Die Notizen konnten nicht gespeichert werden: ' + translateError(saveError));
+            } else if (!notesPendingRef.current) {
+                setNotesStatus('saved');
+                setNotesError(null);
+            }
+        });
+        return notesChainRef.current;
+    };
+
+    const flushPendingNotes = () => {
+        if (notesTimerRef.current) {
+            clearTimeout(notesTimerRef.current);
+            notesTimerRef.current = null;
+        }
+        const pending = notesPendingRef.current;
+        notesPendingRef.current = null;
+        if (pending) persistNotes(pending.leaseId, pending.value);
+    };
+
+    const loadNotes = async (targetLeaseId) => {
+        const localValue = readLocalNotes(targetLeaseId);
+        const { data, error: notesLoadError } = await supabase
+            .from('lease_notes')
+            .select('notes')
+            .eq('lease_id', targetLeaseId)
+            .maybeSingle();
+        if (notesLeaseRef.current !== targetLeaseId) return;
+        if (notesLoadError) {
+            if (isMissingTableError(notesLoadError)) {
+                setNotes(localValue);
+                setNotesMode('local');
+            } else {
+                // Nicht bearbeitbar, damit keine leere Fassung gespeicherte Notizen überschreibt
+                setNotes('');
+                setNotesMode('unavailable');
+                setNotesError('Die Notizen konnten nicht geladen werden: ' + translateError(notesLoadError));
+            }
+            return;
+        }
+        if (data) {
+            setNotes(data.notes || '');
+            setNotesMode('db');
+            return;
+        }
+        // Noch kein Eintrag: bisher nur in diesem Browser gespeicherte Notizen einmalig übernehmen
+        setNotes(localValue);
+        setNotesMode('db');
+        if (localValue.trim()) persistNotes(targetLeaseId, localValue);
+    };
+
     useEffect(() => {
         if (!leaseId || userRole === 'tenant') return;
-        let savedNotes = '';
-        try {
-            savedNotes = localStorage.getItem(`tenant_notes_${leaseId}`) || '';
-        } catch {
-            savedNotes = '';
-        }
-        // Notizen beim Wechsel des Mietverhältnisses immer neu setzen (nicht vom vorherigen übernehmen)
-        setNotes(savedNotes);
+        // Notizen beim Wechsel des Mietverhältnisses immer neu laden (nicht vom vorherigen übernehmen)
+        notesLeaseRef.current = leaseId;
+        setNotes('');
+        setNotesMode('loading');
+        setNotesStatus(null);
+        setNotesError(null);
+        loadNotes(leaseId);
         loadTenantData();
+        // Beim Verlassen noch nicht gesendete Änderungen speichern
+        return () => flushPendingNotes();
     }, [leaseId, userRole]);
 
-    const loadCloudFiles = async (provider, path) => {
+    // Ordner dieses Mietverhältnisses merken (lease_cloud_folders): Eine spätere Umbenennung von Mieter
+    // oder Einheit führt dann nicht zu einem neuen, leeren Ordner. Fehler sind unkritisch – der Pfad
+    // wird dann wie bisher aus den Namen gebildet.
+    const rememberLeaseCloudFolder = async (connectionId, path) => {
+        const folderPath = normalizeCloudPath(path);
+        if (!leaseFolderSupportedRef.current || !user?.id || !connectionId || !folderPath) return;
+        const known = leaseFolderRef.current;
+        if (known && known.connectionId === connectionId && known.path === folderPath) return;
+        const { error: upsertError } = await supabase
+            .from('lease_cloud_folders')
+            .upsert({
+                lease_id: leaseId,
+                cloud_connection_id: connectionId,
+                user_id: user.id,
+                folder_path: folderPath,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'lease_id,cloud_connection_id' });
+        if (!upsertError) {
+            leaseFolderRef.current = { connectionId, path: folderPath };
+        } else if (isMissingTableError(upsertError)) {
+            leaseFolderSupportedRef.current = false;
+        }
+    };
+
+    // path = gemerkter Ordner (falls vorhanden), fallbackPath = Ordner aus den aktuellen Namen
+    const loadCloudFiles = async (connection, path, fallbackPath = '') => {
+        if (!connection || !path) return;
         setLoadingCloud(true);
         setCloudLoadingMessage('Lese Cloud-Ordner...');
         setCloudError(null);
         setCloudFolderMissing(false);
+        const listFolder = (folderPath) => supabase.functions.invoke('cloud-drive', {
+            body: { action: 'list', provider: connection.provider, connectionId: connection.id, path: folderPath }
+        });
+        // Nur ein echter 404 "Ordner nicht gefunden" bedeutet "Ordner fehlt"; alle anderen Fehler werden angezeigt
+        const isFolderMissing = (info) => info.status === 404 && (!info.code || info.code === 'folder_not_found');
         try {
-            const { data, error: fnError } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'list', provider, path }
-            });
+            let usedPath = path;
+            let { data, error: fnError } = await listFolder(path);
+            let errorInfo = fnError ? await readFunctionError(fnError) : null;
+            // Gemerkter Ordner existiert nicht mehr -> Ordner aus den aktuellen Namen versuchen
+            if (errorInfo && isFolderMissing(errorInfo) && fallbackPath && fallbackPath !== path) {
+                usedPath = fallbackPath;
+                ({ data, error: fnError } = await listFolder(fallbackPath));
+                errorInfo = fnError ? await readFunctionError(fnError) : null;
+            }
+            setTenantCloudPath(usedPath);
 
-            if (fnError) {
-                // Nur ein echter 404 bedeutet "Ordner fehlt"; alle anderen Fehler werden angezeigt
-                if (getFunctionErrorStatus(fnError) === 404) {
+            if (errorInfo) {
+                if (isFolderMissing(errorInfo)) {
                     setCloudFolderMissing(true);
                     setCloudFiles([]);
                     return;
                 }
-                throw new Error(await readFunctionErrorMessage(fnError));
+                throw new Error(errorInfo.message);
             }
             if (data?.error) throw new Error(data.error);
             setCloudFiles(data?.files || []);
+            rememberLeaseCloudFolder(connection.id, usedPath);
         } catch (err) {
             console.error('Error loading cloud files:', err);
             setCloudError(err.message || String(err));
@@ -269,9 +430,16 @@ const TenantDetail = () => {
         }
     };
 
+    const reloadCloudFiles = () => {
+        const connection = lease?.unit?.property?.cloud_connection;
+        const { primary, fallback } = cloudPathsRef.current;
+        if (connection) loadCloudFiles(connection, primary || tenantCloudPath, fallback);
+    };
+
     const handleCreateCloudFolder = async () => {
         const prop = lease?.unit?.property;
-        if (!prop?.cloud_connection || !tenantCloudPath) return;
+        const connection = prop?.cloud_connection;
+        if (!connection || !tenantCloudPath) return;
         if (!window.confirm('Der Cloud-Ordner für dieses Mietverhältnis existiert noch nicht.\n\nJetzt die Ordnerstruktur für dieses Objekt in der Cloud anlegen?')) return;
 
         setLoadingCloud(true);
@@ -279,7 +447,7 @@ const TenantDetail = () => {
         setCloudError(null);
         try {
             const syncRes = await supabase.functions.invoke('cloud-sync', {
-                body: { provider: prop.cloud_connection.provider, action: 'create', propertyId: prop.id }
+                body: { provider: connection.provider, connectionId: connection.id, action: 'create', propertyId: prop.id }
             });
             if (syncRes.error) throw new Error(await readFunctionErrorMessage(syncRes.error));
             if (syncRes.data?.error) throw new Error(syncRes.data.error);
@@ -289,7 +457,10 @@ const TenantDetail = () => {
             setCloudLoadingMessage('Lade Cloud-Dateien...');
             return;
         }
-        await loadCloudFiles(prop.cloud_connection.provider, tenantCloudPath);
+        // Angelegt wird der Ordner aus den aktuellen Namen
+        const createdPath = cloudPathsRef.current.fallback || tenantCloudPath;
+        cloudPathsRef.current = { primary: createdPath, fallback: createdPath };
+        await loadCloudFiles(connection, createdPath);
     };
 
     const loadTenantData = async () => {
@@ -459,10 +630,12 @@ const TenantDetail = () => {
             const prop = leaseData.unit?.property;
             if (prop) {
                 if (prop.economic_unit_id) {
+                    // Gleiche Reihenfolge wie cloud-sync (nach Straße), sonst entsteht ein anderer Ordnername
                     const { data: siblingProps } = await supabase
                         .from('properties')
                         .select('street, house_number')
-                        .eq('economic_unit_id', prop.economic_unit_id);
+                        .eq('economic_unit_id', prop.economic_unit_id)
+                        .order('street');
 
                     const groupedByStreet = {};
                     (siblingProps || []).forEach(m => {
@@ -475,36 +648,61 @@ const TenantDetail = () => {
                     const parts = Object.keys(groupedByStreet).map(street => {
                         const nums = groupedByStreet[street];
                         if (nums.length > 0) {
-                            return `${street} ${nums.join(' & ')}`;
+                            return `${cloudFolderSegment(street)} ${nums.map(cloudFolderSegment).join(' & ')}`;
                         }
-                        return street;
+                        return cloudFolderSegment(street);
                     });
                     const displayNames = parts.slice(0, 2).join(' | ');
                     const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
                     displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`;
                 } else {
-                    displayFolderName = `${prop.street} ${prop.house_number || ''}`.trim();
+                    displayFolderName = `${cloudFolderSegment(prop.street)} ${cloudFolderSegment(prop.house_number || '')}`.trim();
                 }
             }
 
-            const tenantFolderName = `${leaseData.tenant?.first_name || ''} ${leaseData.tenant?.last_name || ''}`.trim();
+            // Jeder Name ergibt genau ein Ordnersegment (gleiche Regel wie cloud-sync)
+            const tenantFolderName = cloudFolderSegment(`${leaseData.tenant?.first_name || ''} ${leaseData.tenant?.last_name || ''}`.trim());
             const unitName = leaseData.unit?.unit_name || '';
             let fullCloudPath = '';
             if (displayFolderName && unitName && tenantFolderName) {
                 if (prop?.economic_unit_id) {
-                    const houseNumber = prop.house_number || 'Ohne Hausnummer';
-                    fullCloudPath = `${displayFolderName}/Einheiten/${houseNumber}/${unitName}/Mietverhältnisse/${tenantFolderName}`;
+                    const houseNumber = cloudFolderSegment(prop.house_number || 'Ohne Hausnummer');
+                    fullCloudPath = `${displayFolderName}/Einheiten/${houseNumber}/${cloudFolderSegment(unitName)}/Mietverhältnisse/${tenantFolderName}`;
                 } else {
-                    fullCloudPath = `${displayFolderName}/Einheiten/${unitName}/Mietverhältnisse/${tenantFolderName}`;
+                    fullCloudPath = `${displayFolderName}/Einheiten/${cloudFolderSegment(unitName)}/Mietverhältnisse/${tenantFolderName}`;
                 }
             }
 
-            setTenantCloudPath(fullCloudPath);
+            // Gemerkter Ordner dieses Mietverhältnisses (bleibt nach Umbenennung von Mieter/Einheit gültig)
+            const cloudConnection = prop?.cloud_connection || null;
+            let storedFolderPath = '';
+            leaseFolderRef.current = null;
+            if (cloudConnection && leaseFolderSupportedRef.current) {
+                const { data: folderRow, error: folderError } = await supabase
+                    .from('lease_cloud_folders')
+                    .select('folder_path')
+                    .eq('lease_id', leaseId)
+                    .eq('cloud_connection_id', cloudConnection.id)
+                    .maybeSingle();
+                if (folderError) {
+                    if (isMissingTableError(folderError)) leaseFolderSupportedRef.current = false;
+                    else console.error('Error loading lease cloud folder:', folderError);
+                } else if (folderRow?.folder_path) {
+                    storedFolderPath = folderRow.folder_path;
+                    leaseFolderRef.current = { connectionId: cloudConnection.id, path: storedFolderPath };
+                }
+            }
+            const primaryCloudPath = storedFolderPath || fullCloudPath;
+            cloudPathsRef.current = { primary: primaryCloudPath, fallback: fullCloudPath };
+            setTenantCloudPath(primaryCloudPath);
+
+            // Mitnutzer ohne eigene Cloud-Zuweisung: die Cloud des Eigentümers ist für ihn nicht nutzbar
+            setCloudCoUserNotice(!cloudConnection && !cloudLinkError && !!prop?.user_id && !!user?.id && prop.user_id !== user.id);
 
             if (cloudLinkError) {
                 setCloudError('Die Cloud-Verbindung konnte nicht geprüft werden: ' + cloudLinkError);
-            } else if (prop?.cloud_connection && fullCloudPath) {
-                loadCloudFiles(prop.cloud_connection.provider, fullCloudPath);
+            } else if (cloudConnection && primaryCloudPath) {
+                loadCloudFiles(cloudConnection, primaryCloudPath, fullCloudPath);
             }
 
             // Direkt "Bearbeiten" bzw. "Mietänderung" öffnen, wenn aus der Übersicht gewünscht
@@ -531,14 +729,22 @@ const TenantDetail = () => {
         }
     };
 
-    // Notizen lokal speichern
+    // Notizen ändern: in der Datenbank entprellt speichern, sonst (Altstand) lokal im Browser
     const handleSaveNotes = (val) => {
         setNotes(val);
-        try {
-            localStorage.setItem(`tenant_notes_${leaseId}`, val);
-        } catch {
-            // Speicher nicht verfügbar (privates Fenster o. Ä.)
+        if (notesMode === 'local') {
+            try {
+                localStorage.setItem(localNotesKey(leaseId), val);
+            } catch {
+                // Speicher nicht verfügbar (privates Fenster o. Ä.)
+            }
+            return;
         }
+        if (notesMode !== 'db') return;
+        notesPendingRef.current = { leaseId, value: val };
+        setNotesStatus('pending');
+        if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+        notesTimerRef.current = setTimeout(flushPendingNotes, 800);
     };
 
     const openRetroWarning = (config) => {
@@ -1143,10 +1349,12 @@ const TenantDetail = () => {
                 alert('Dieser Dateityp wird nicht unterstützt. Erlaubt sind PDF, PNG, JPG, DOC und DOCX.');
                 return;
             }
-            const provider = lease.unit.property.cloud_connection.provider;
+            const connection = lease.unit.property.cloud_connection;
             const formData = new FormData();
             formData.append('action', 'upload');
-            formData.append('provider', provider);
+            formData.append('provider', connection.provider);
+            // Genau die zugewiesene Verbindung (bei mehreren Konten desselben Anbieters)
+            formData.append('connectionId', connection.id);
             formData.append('path', tenantCloudPath);
             formData.append('file', file);
 
@@ -1157,7 +1365,7 @@ const TenantDetail = () => {
             if (fnError) throw new Error(await readFunctionErrorMessage(fnError));
             if (data?.error) throw new Error(data.error);
 
-            loadCloudFiles(provider, tenantCloudPath);
+            loadCloudFiles(connection, tenantCloudPath);
             alert('Dokument erfolgreich in die Cloud hochgeladen.');
         } catch (err) {
             console.error('Cloud upload error:', err);
@@ -1172,15 +1380,15 @@ const TenantDetail = () => {
         if (!window.confirm(`Möchten Sie '${item.name}' wirklich aus der Cloud löschen? Diese Aktion kann nicht rückgängig gemacht werden.`)) return;
         setLoadingCloud(true);
         try {
-            const provider = lease.unit.property.cloud_connection.provider;
+            const connection = lease.unit.property.cloud_connection;
             const { data, error: fnError } = await supabase.functions.invoke('cloud-drive', {
-                body: { action: 'delete', provider, itemId: item.id }
+                body: { action: 'delete', provider: connection.provider, connectionId: connection.id, itemId: item.id }
             });
 
             if (fnError) throw new Error(await readFunctionErrorMessage(fnError));
             if (data?.error) throw new Error(data.error);
 
-            loadCloudFiles(provider, tenantCloudPath);
+            loadCloudFiles(connection, tenantCloudPath);
             alert('Datei erfolgreich gelöscht.');
         } catch (err) {
             console.error('Cloud delete error:', err);
@@ -1194,12 +1402,9 @@ const TenantDetail = () => {
         setUploading(true);
         try {
             const file = files[0];
-            if (file.size > MAX_UPLOAD_BYTES) {
-                alert('Datei ist zu groß (max. 10 MB).');
-                return;
-            }
-            if (!ALLOWED_UPLOAD_EXTENSIONS.includes(getFileExtension(file.name))) {
-                alert('Dieser Dateityp wird nicht unterstützt. Erlaubt sind PDF, PNG, JPG, DOC und DOCX.');
+            const validationError = validateUploadFile(file, TENANT_DOCUMENT_RULE);
+            if (validationError) {
+                alert(validationError);
                 return;
             }
 
@@ -1211,9 +1416,12 @@ const TenantDetail = () => {
             // Originalname bleibt in documents.file_name, der Speicher-Schlüssel wird bereinigt
             const filePath = `${propertyId}/tenant/${tenantId}/${timestamp}_${sanitizeFileName(file.name)}`;
 
+            // Content-Type aus der Dateiendung (Browser melden für Office-Dateien oft '' bzw.
+            // application/octet-stream; der Bucket erlaubt nur bestimmte Typen)
+            const { body, contentType } = prepareUploadBody(file);
             const { error: uploadError } = await supabase.storage
                 .from('documents')
-                .upload(filePath, file, { contentType: file.type || undefined });
+                .upload(filePath, body, { contentType });
 
             if (uploadError) throw uploadError;
 
@@ -1226,7 +1434,7 @@ const TenantDetail = () => {
                     tenant_id: tenantId,
                     file_name: file.name,
                     file_path: filePath,
-                    mime_type: file.type,
+                    mime_type: contentType,
                     category: 'personal'
                 });
 
@@ -1644,7 +1852,8 @@ const TenantDetail = () => {
                                         return (
                                             <div
                                                 key={ticket.id}
-                                                onClick={() => navigate('/ticket-board')}
+                                                onClick={() => navigate('/ticket-board', { state: { openTicketId: ticket.id } })}
+                                                title="Ticket im Ticket-Board öffnen"
                                                 style={{
                                                     padding: '12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)',
                                                     display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer',
@@ -1676,19 +1885,36 @@ const TenantDetail = () => {
                     <Card title="Interne Notizen">
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                                Die Notizen werden nur lokal in diesem Browser gespeichert – nicht auf anderen Geräten und nicht für Mitnutzer sichtbar.
-                                Beim Löschen der Browserdaten gehen sie verloren. Mieter haben keinen Zugriff darauf.
+                                {notesMode === 'local'
+                                    ? 'Die Notizen werden nur lokal in diesem Browser gespeichert – nicht auf anderen Geräten und nicht für Mitnutzer sichtbar. Beim Löschen der Browserdaten gehen sie verloren. Mieter haben keinen Zugriff darauf.'
+                                    : 'Nur intern: sichtbar für Sie und Nutzer mit Zugriff auf die Mietverhältnisse dieses Portfolios, nicht für Mieter. Änderungen werden automatisch gespeichert.'}
                             </div>
                             <textarea
                                 value={notes}
                                 onChange={(e) => handleSaveNotes(e.target.value)}
-                                placeholder="Geben Sie hier wichtige Details, Absprachen oder Besonderheiten zum Mieter ein..."
+                                onBlur={flushPendingNotes}
+                                maxLength={20000}
+                                readOnly={notesMode === 'loading' || notesMode === 'unavailable' || (notesMode === 'db' && !canEditLease)}
+                                placeholder={notesMode === 'loading' ? 'Notizen werden geladen…' : 'Geben Sie hier wichtige Details, Absprachen oder Besonderheiten zum Mieter ein...'}
                                 style={{
                                     width: '100%', height: '110px', padding: '12px', borderRadius: 'var(--radius-md)',
                                     border: '1px solid var(--border-color)', outline: 'none', backgroundColor: 'rgba(0,0,0,0.01)',
                                     fontSize: '0.88rem', fontFamily: 'inherit', resize: 'vertical', lineHeight: 1.4
                                 }}
                             />
+                            {notesError ? (
+                                <div style={tileErrorStyle}>
+                                    <AlertCircle size={14} /> {notesError}
+                                </div>
+                            ) : notesMode === 'db' && !canEditLease ? (
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    Nur lesend – Sie haben kein Schreibrecht für Mietverhältnisse in diesem Portfolio.
+                                </div>
+                            ) : notesMode === 'db' && notesStatus ? (
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    {notesStatus === 'saved' ? 'Gespeichert.' : 'Wird gespeichert…'}
+                                </div>
+                            ) : null}
                         </div>
                     </Card>
                 </div>
@@ -1923,7 +2149,7 @@ const TenantDetail = () => {
                                             </div>
                                             <div>{cloudError}</div>
                                             {tenantCloudPath && (
-                                                <Button size="xs" variant="secondary" onClick={() => loadCloudFiles(lease.unit.property.cloud_connection.provider, tenantCloudPath)} style={{ alignSelf: 'flex-start' }}>Erneut versuchen</Button>
+                                                <Button size="xs" variant="secondary" onClick={reloadCloudFiles} style={{ alignSelf: 'flex-start' }}>Erneut versuchen</Button>
                                             )}
                                         </div>
                                     ) : cloudFolderMissing ? (
@@ -1989,6 +2215,12 @@ const TenantDetail = () => {
                                     {cloudError ? (
                                         <div style={tileErrorStyle}>
                                             <AlertCircle size={14} /> {cloudError}
+                                        </div>
+                                    ) : cloudCoUserNotice ? (
+                                        // Mitnutzer: die Cloud-Verbindung des Eigentümers ist nur für diesen nutzbar
+                                        <div style={{ fontSize: '0.75rem', color: 'var(--warning-color)', backgroundColor: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.15)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'flex-start', gap: '6px', marginBottom: '4px' }}>
+                                            <AlertCircle size={14} style={{ flexShrink: 0, marginTop: '1px' }} />
+                                            <span>Die Cloud-Ablage des Eigentümers steht Mitnutzern nicht zur Verfügung. Dokumente werden daher in der App-Ablage gespeichert. Eine eigene Cloud können Sie diesem Portfolio unter Einstellungen &gt; Cloud-Verbindungen zuweisen.</span>
                                         </div>
                                     ) : (
                                         <div style={{ fontSize: '0.75rem', color: 'var(--warning-color)', backgroundColor: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.15)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>

@@ -400,7 +400,8 @@ const TenantDataUpdatePortal = () => {
                     {/* Datenschutzhinweis */}
                     <p style={{ fontSize: '0.8rem', color: '#64748b', lineHeight: 1.5, marginTop: '32px', marginBottom: 0 }}>
                         Ihre Angaben werden an Ihren Vermieter übermittelt und in dessen Mieterverwaltung (ImmoControlPro360)
-                        gespeichert. Informationen zur Verarbeitung Ihrer Daten erhalten Sie bei Ihrem Vermieter sowie in der{' '}
+                        gespeichert. Ihr Vermieter sieht dabei, welche Angaben Sie geändert haben (bisheriger und neuer Wert).
+                        Der Link kann nur einmal verwendet werden. Informationen zur Verarbeitung Ihrer Daten erhalten Sie bei Ihrem Vermieter sowie in der{' '}
                         <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb' }}>Datenschutzerklärung</a>.
                     </p>
 

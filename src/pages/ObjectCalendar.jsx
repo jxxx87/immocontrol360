@@ -8,6 +8,10 @@ import { supabase } from '../lib/supabase';
 import { usePdfTemplate, fetchPdfTemplate } from '../lib/usePdfTemplate';
 import { translateError } from '../lib/errorTranslator';
 import { openSansFontFaceCss } from '../lib/fontFaces';
+import {
+    toIso, parseIsoLocal, isIsoDate, addDays, planHorizonIso, buildRecurringDates,
+    parseIcs, summarizeRecurringSeries, planSeriesExtension, seriesEndingBefore
+} from '../lib/calendarRecurrence';
 
 // ── Constants ────────────────────────────────────────────────
 const WEEKDAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -42,19 +46,11 @@ const INSERT_CHUNK = 500;
 const PLAN_HINT_DAYS = 60;
 
 // ── Helpers ──────────────────────────────────────────────────
-const toIso = (d) => { const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`; };
-// 'YYYY-MM-DD' als lokales Datum lesen (new Date('YYYY-MM-DD') wäre UTC-Mitternacht)
-const parseIsoLocal = (iso) => { const [y, m, d] = String(iso || '').split('-').map(Number); return new Date(y, (m || 1) - 1, d || 1); };
-const isIsoDate = (iso) => /^\d{4}-\d{2}-\d{2}$/.test(iso || '') && toIso(parseIsoLocal(iso)) === iso;
+// Datums- und Serienlogik (toIso, parseIsoLocal, Serien, ICS) liegt in src/lib/calendarRecurrence.js
 const fmtIso = (iso, opts) => parseIsoLocal(iso).toLocaleDateString('de-DE', opts);
 const getMondayOfWeek = (d) => { const date = new Date(d); const day = date.getDay(); date.setDate(date.getDate() - (day === 0 ? 6 : day - 1)); return date; };
-const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
-// Gleicher Tag n Monate später; fehlt der Tag im Zielmonat (29.–31.), wird der Monatsletzte genommen
-const addMonthsClamped = (base, n) => { const y = base.getFullYear(); const m = base.getMonth() + n; const last = new Date(y, m + 1, 0).getDate(); return new Date(y, m, Math.min(base.getDate(), last)); };
 const isOverdue = (eventDate) => { const end = parseIsoLocal(eventDate); end.setDate(end.getDate() + 2); end.setHours(0, 0, 0, 0); return new Date() >= end; };
 const normalizeWeekday = (v) => { const n = Number(v); return v !== null && v !== '' && Number.isInteger(n) && n >= 0 && n <= 6 ? n : 1; };
-// Serien und Reinigungsplan werden rollierend bis Ende des Folgejahres angelegt
-const planHorizonIso = (baseYear) => `${baseYear + 1}-12-31`;
 
 // Farbwerte kommen aus der DB (Mieter/Teammitglieder können sie ändern) und landen in
 // style-Attributen des Druckfensters bzw. werden mit Alpha-Suffix kombiniert → nur #rrggbb.
@@ -91,31 +87,6 @@ const normalizeSettings = (row) => {
     };
 };
 
-const unescapeIcsText = (s) => s.replace(/\\n/gi, ' ').replace(/\\([,;\\])/g, '$1').trim();
-
-const parseIcs = (text) => {
-    // Gefaltete Zeilen (RFC 5545, Fortsetzung beginnt mit Leerzeichen/Tab) entfalten
-    const unfolded = String(text).replace(/\r\n?/g, '\n').replace(/\n[ \t]/g, '');
-    const events = []; let withRule = 0;
-    const blocks = unfolded.split('BEGIN:VEVENT');
-    for (let i = 1; i < blocks.length; i++) {
-        const block = blocks[i].split('END:VEVENT')[0].replace(/BEGIN:VALARM[\s\S]*?END:VALARM/g, '');
-        const summary = unescapeIcsText(block.match(/^SUMMARY(?:;[^:\n]*)?:(.*)$/m)?.[1] || '').slice(0, 200);
-        const dt = block.match(/^DTSTART(?:;[^:\n]*)?:(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?/m);
-        if (!dt) continue;
-        // UTC-Zeitpunkte (…Z) in das lokale Datum umrechnen, sonst Datum unverändert übernehmen
-        const date = dt[7]
-            ? toIso(new Date(Date.UTC(+dt[1], +dt[2] - 1, +dt[3], +dt[4], +dt[5], +dt[6])))
-            : `${dt[1]}-${dt[2]}-${dt[3]}`;
-        if (!isIsoDate(date)) continue;
-        if (/^RRULE[;:]/m.test(block)) withRule++;
-        let wt = 'sonstiger'; const l = summary.toLowerCase();
-        if (l.includes('rest')) wt = 'restmuell'; else if (l.includes('bio')) wt = 'bio'; else if (l.includes('papier')) wt = 'papier'; else if (l.includes('gelb') || l.includes('wertstoff')) wt = 'gelbe_tonne';
-        events.push({ date, title: summary || 'Mülltermin', wasteType: wt });
-    }
-    return { events, withRule };
-};
-
 // Reinigungstermine im Zeitraum [fromIso, toIsoDate] mit Mieter-Rotation ab startUnitIdx
 const generateCleaningEvents = (fromIso, toIsoDate, units, settings, startUnitIdx = 0) => {
     if (!settings?.cleaning_active || settings.cleaning_performer === 'janitor' || !units.length) return [];
@@ -139,20 +110,27 @@ const generateCleaningEvents = (fromIso, toIsoDate, units, settings, startUnitId
     return events;
 };
 
-// Termine einer wiederkehrenden Aufgabe vom Start bis endIso
-const buildRecurringDates = (startIso, rule, endIso) => {
-    const start = parseIsoLocal(startIso); const end = parseIsoLocal(endIso);
-    const dates = [];
-    for (let i = 0; i < 1000; i++) {
-        const d = rule === 'weekly' ? addDays(start, 7 * i) : rule === 'biweekly' ? addDays(start, 14 * i) : addMonthsClamped(start, i);
-        if (d > end) break;
-        dates.push(toIso(d));
-    }
-    return dates;
-};
-
 const fetchHistoryRows = (propertyId) => supabase.from('objektkalender_history').select('*').eq('property_id', propertyId).order('event_date', { ascending: false }).limit(100);
 const fetchCleaningPlanEnd = (propertyId) => supabase.from('objektkalender_events').select('event_date').eq('property_id', propertyId).eq('event_type', 'cleaning').order('event_date', { ascending: false }).limit(1);
+
+// Abfrage seitenweise vollständig laden (sonst schneidet das Server-Zeilenlimit still ab)
+const PAGE_SIZE = 1000;
+const fetchAllPages = async (buildQuery) => {
+    const rows = [];
+    for (let from = 0, guard = 0; guard < 50; guard++, from += PAGE_SIZE) {
+        const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+        if (error) return { data: null, error };
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE_SIZE) break;
+    }
+    return { data: rows, error: null };
+};
+// Termine wiederkehrender Zusatzaufgaben ab fromIso; daraus wird je Serie der letzte Termin bestimmt
+const fetchRecurringTaskRows = (propertyId, fromIso) => fetchAllPages(() => supabase.from('objektkalender_events')
+    .select('id, title, recurrence_rule, assigned_unit_id, assigned_unit_name, color, push_enabled, event_date')
+    .eq('property_id', propertyId).eq('event_type', 'custom').eq('recurring', true)
+    .gte('event_date', fromIso)
+    .order('event_date', { ascending: true }).order('id', { ascending: true }));
 
 // ── Glass style helpers ──────────────────────────────────────
 const glass = { background: 'var(--glass-bg)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', border: '1px solid var(--glass-border)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--glass-shadow)' };
@@ -180,6 +158,7 @@ const ObjectCalendar = () => {
     const [events, setEvents] = useState([]);
     const [history, setHistory] = useState([]);
     const [cleaningPlanEnd, setCleaningPlanEnd] = useState(undefined);
+    const [customSeries, setCustomSeries] = useState([]); // wiederkehrende Zusatzaufgaben (je Serie letzter Termin)
     const [loading, setLoading] = useState(true);
     const [eventsLoading, setEventsLoading] = useState(true);
     const [propsError, setPropsError] = useState(null);
@@ -297,6 +276,18 @@ const ObjectCalendar = () => {
         return () => { cancelled = true; };
     }, [user, selectedPropertyId, rangeFrom, rangeTo, reloadKey, eventsReloadKey]);
 
+    // ── Serien wiederkehrender Zusatzaufgaben (für „Plan fortschreiben") ──
+    // Betrachtet werden Termine ab Anfang des Vorjahres; ältere, längst beendete Serien bleiben außen vor.
+    const seriesFromIso = `${thisYear - 1}-01-01`;
+    useEffect(() => {
+        if (!user || !isInvestor || !selectedPropertyId) { setCustomSeries([]); return; }
+        let cancelled = false;
+        fetchRecurringTaskRows(selectedPropertyId, seriesFromIso).then(({ data, error }) => {
+            if (!cancelled) setCustomSeries(error ? [] : summarizeRecurringSeries(data));
+        });
+        return () => { cancelled = true; };
+    }, [user, isInvestor, selectedPropertyId, seriesFromIso, reloadKey, eventsReloadKey]);
+
     const refreshHistory = async () => {
         if (!selectedPropertyId) return;
         const { data, error } = await fetchHistoryRows(selectedPropertyId);
@@ -391,14 +382,72 @@ const ObjectCalendar = () => {
         }
     };
 
+    // ── Wiederkehrende Zusatzaufgaben fortschreiben ──────────
+    // Serien, die am bisherigen Planungshorizont (Jahresende) enden, werden im bisherigen Takt bis
+    // zum neuen Horizont verlängert (nur Termine ab heute). Bereits vorhandene Zusatzaufgaben am selben
+    // Tag mit gleichem Titel und gleicher Einheit werden nicht doppelt angelegt.
+    const extendRecurringTasks = async () => {
+        const pid = selectedPropertyId;
+        const horizonIso = planHorizonIso(thisYear);
+        const { data: rows, error } = await fetchRecurringTaskRows(pid, seriesFromIso);
+        if (error) return { error, created: 0, series: 0 };
+        const planned = [];
+        summarizeRecurringSeries(rows).forEach(s => {
+            planSeriesExtension(s, { horizonIso, todayIso: today }).forEach(date => planned.push({ s, date }));
+        });
+        if (!planned.length) return { error: null, created: 0, series: 0 };
+
+        const taskKey = (date, title, unitId) => `${eventKey(date, title)}|${unitId || ''}`;
+        const minDate = planned.reduce((m, p) => (p.date < m ? p.date : m), planned[0].date);
+        const { data: singles, error: singleErr } = await fetchAllPages(() => supabase.from('objektkalender_events')
+            .select('id, event_date, title, assigned_unit_id')
+            .eq('property_id', pid).eq('event_type', 'custom').not('recurring', 'is', true)
+            .gte('event_date', minDate).lte('event_date', horizonIso)
+            .order('event_date', { ascending: true }).order('id', { ascending: true }));
+        if (singleErr) return { error: singleErr, created: 0, series: 0 };
+        const existing = new Set([...(rows || []), ...(singles || [])].map(r => taskKey(r.event_date, r.title, r.assigned_unit_id)));
+        const fresh = planned.filter(({ s, date }) => {
+            const k = taskKey(date, s.title, s.assignedUnitId);
+            if (existing.has(k)) return false;
+            existing.add(k);
+            return true;
+        });
+        if (!fresh.length) return { error: null, created: 0, series: 0 };
+
+        const toInsert = fresh.map(({ s, date }) => ({
+            user_id: user.id, property_id: pid, event_type: 'custom', title: s.title, color: safeColor(s.color, EC.custom),
+            event_date: date, recurring: true, recurrence_rule: s.rule, assigned_unit_id: s.assignedUnitId,
+            assigned_unit_name: s.assignedUnitName, push_enabled: s.pushEnabled, status: 'pending'
+        }));
+        const seriesCount = new Set(fresh.map(f => f.s.key)).size;
+        let created = 0;
+        for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
+            const chunk = toInsert.slice(i, i + INSERT_CHUNK);
+            const { error: insErr } = await supabase.from('objektkalender_events').insert(chunk);
+            if (insErr) return { error: insErr, created, series: seriesCount };
+            created += chunk.length;
+        }
+        return { error: null, created, series: seriesCount };
+    };
+
     const handleExtendPlan = async () => {
-        if (!savedSettings || saving || loading) return;
+        if (saving || loading || !selectedPropertyId) return;
         setSaving(true);
         try {
-            const res = await regenerateCleaningPlan(savedSettings);
+            const problems = [];
+            // Reinigungsplan nur, wenn die Mieter-Rotation aktiv ist (sonst würden offene Termine entfernt)
+            if (savedSettings?.cleaning_active && savedSettings.cleaning_performer !== 'janitor') {
+                const res = await regenerateCleaningPlan(savedSettings);
+                if (res.error) problems.push(`Der Reinigungsplan konnte nicht fortgeschrieben werden: ${res.userMessage || translateError(res.error)}`);
+            }
+            const tasks = await extendRecurringTasks();
+            if (tasks.error) {
+                problems.push(`Die wiederkehrenden Zusatzaufgaben konnten nicht${tasks.created ? ' vollständig' : ''} fortgeschrieben werden${tasks.created ? ` (${tasks.created} Termine angelegt)` : ''}: ${translateError(tasks.error)}`);
+            }
             setEventsReloadKey(k => k + 1);
             await refreshCleaningPlanEnd();
-            if (res.error) alert(`Der Reinigungsplan konnte nicht fortgeschrieben werden: ${res.userMessage || translateError(res.error)}`);
+            if (problems.length) alert(problems.join('\n\n'));
+            else if (tasks.created) alert(`${tasks.created} Folgetermine für ${tasks.series} wiederkehrende Zusatzaufgabe(n) bis ${fmtIso(planHorizonIso(thisYear), { day: '2-digit', month: '2-digit', year: 'numeric' })} angelegt.`);
         } finally {
             setSaving(false);
         }
@@ -491,7 +540,10 @@ const ObjectCalendar = () => {
         try {
             let text;
             try { text = await file.text(); } catch { alert('Die Datei konnte nicht gelesen werden.'); return; }
-            const { events: parsed, withRule } = parseIcs(text);
+            // Serien (RRULE) werden ab heute bis zum Planungshorizont aufgelöst
+            const horizonIso = planHorizonIso(thisYear);
+            const { events: parsed, expandedRules, unsupportedRules, truncated } = parseIcs(text, { fromIso: today, untilIso: horizonIso, maxEvents: ICS_MAX_EVENTS });
+            if (truncated) { alert(`Die Datei enthält zu viele Termine (maximal ${ICS_MAX_EVENTS} bis ${fmtIso(horizonIso, { day: '2-digit', month: '2-digit', year: 'numeric' })}).`); return; }
             if (!parsed.length) { alert('Keine Termine gefunden.'); return; }
             // Vergangene Termine würden sofort als „überfällig“ erscheinen → nicht übernehmen
             const upcoming = parsed.filter(p => p.date >= today);
@@ -503,7 +555,7 @@ const ObjectCalendar = () => {
             if (unique.length) {
                 const minDate = unique.reduce((m, p) => (p.date < m ? p.date : m), unique[0].date);
                 const maxDate = unique.reduce((m, p) => (p.date > m ? p.date : m), unique[0].date);
-                const { data: existing, error: exErr } = await supabase.from('objektkalender_events').select('event_date, title').eq('property_id', selectedPropertyId).eq('event_type', 'waste').gte('event_date', minDate).lte('event_date', maxDate);
+                const { data: existing, error: exErr } = await fetchAllPages(() => supabase.from('objektkalender_events').select('id, event_date, title').eq('property_id', selectedPropertyId).eq('event_type', 'waste').gte('event_date', minDate).lte('event_date', maxDate).order('event_date', { ascending: true }).order('id', { ascending: true }));
                 if (exErr) { alert(`Vorhandene Termine konnten nicht geprüft werden, der Import wurde abgebrochen: ${translateError(exErr)}`); return; }
                 const existingKeys = new Set((existing || []).map(x => eventKey(x.event_date, x.title)));
                 fresh = unique.filter(p => !existingKeys.has(eventKey(p.date, p.title)));
@@ -512,7 +564,8 @@ const ObjectCalendar = () => {
             const notes = [];
             if (skippedPast) notes.push(`${skippedPast} vergangene Termine übersprungen`);
             if (duplicates) notes.push(`${duplicates} bereits vorhandene/doppelte Termine übersprungen`);
-            if (withRule) notes.push(`${withRule} Termine mit Wiederholungsregel wurden nur einmal übernommen`);
+            if (expandedRules) notes.push(`${expandedRules} Serie(n) mit Wiederholungsregel bis ${fmtIso(horizonIso, { day: '2-digit', month: '2-digit', year: 'numeric' })} übernommen`);
+            if (unsupportedRules) notes.push(`${unsupportedRules} Termine mit nicht unterstützter Wiederholungsregel wurden nur einmal übernommen`);
             const noteText = notes.length ? `\n\nHinweis: ${notes.join('; ')}.` : '';
             if (!fresh.length) { alert(`Keine neuen Mülltermine importiert.${noteText}`); return; }
 
@@ -816,15 +869,30 @@ const ObjectCalendar = () => {
     };
 
     const renderPlanHint = () => {
-        if (!isInvestor || loading || !savedSettings?.cleaning_active || savedSettings.cleaning_performer === 'janitor' || !units.length || cleaningPlanEnd === undefined) return null;
-        if (cleaningPlanEnd && cleaningPlanEnd >= toIso(addDays(new Date(), PLAN_HINT_DAYS))) return null;
+        if (!isInvestor || loading) return null;
+        const hintIso = toIso(addDays(new Date(), PLAN_HINT_DAYS));
+        const fmtDate = (iso) => fmtIso(iso, { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const cleaningDue = !!savedSettings?.cleaning_active && savedSettings.cleaning_performer !== 'janitor' && units.length > 0
+            && cleaningPlanEnd !== undefined && !(cleaningPlanEnd && cleaningPlanEnd >= hintIso);
+        const seriesDue = seriesEndingBefore(customSeries, hintIso, planHorizonIso(thisYear));
+        if (!cleaningDue && !seriesDue.length) return null;
+        const lines = [];
+        if (cleaningDue) {
+            lines.push(cleaningPlanEnd
+                ? `Der Reinigungsplan ist nur bis ${fmtDate(cleaningPlanEnd)} angelegt.`
+                : 'Für die Treppenhausreinigung sind noch keine Termine angelegt.');
+        }
+        if (seriesDue.length === 1) {
+            lines.push(`Die wiederkehrende Zusatzaufgabe „${seriesDue[0].title}“ ist nur bis ${fmtDate(seriesDue[0].lastDate)} angelegt.`);
+        } else if (seriesDue.length > 1) {
+            const names = seriesDue.slice(0, 3).map(s => `„${s.title}“`).join(', ');
+            lines.push(`${seriesDue.length} wiederkehrende Zusatzaufgaben enden bald (${names}${seriesDue.length > 3 ? ' …' : ''}).`);
+        }
         return (
             <div style={{ ...glassBlue({ padding: '12px 16px', marginBottom: '16px' }), display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.83rem', flexWrap: 'wrap' }}>
                 <Sparkles size={16} color={EC.cleaning} style={{ flexShrink: 0 }} />
                 <span style={{ flex: 1, minWidth: '200px' }}>
-                    {cleaningPlanEnd
-                        ? `Der Reinigungsplan ist nur bis ${fmtIso(cleaningPlanEnd, { day: '2-digit', month: '2-digit', year: 'numeric' })} angelegt.`
-                        : 'Für die Treppenhausreinigung sind noch keine Termine angelegt.'}
+                    {lines.map((line, i) => <div key={i}>{line}</div>)}
                 </span>
                 <Button size="sm" onClick={handleExtendPlan} disabled={saving}>{saving ? 'Wird erstellt…' : 'Plan fortschreiben'}</Button>
             </div>
@@ -889,7 +957,7 @@ const ObjectCalendar = () => {
                     </div>
                     <div><label style={labelSt}>Einheit</label><select style={selectSt} value={taskForm.assigned_unit_id} onChange={e => setTaskForm(p => ({ ...p, assigned_unit_id: e.target.value }))}><option value="">– Keine –</option>{units.map(u => <option key={u.id} value={u.id}>{u.unit_name}</option>)}</select></div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: '0.85rem' }}>Wiederkehrend</span><button style={toggleSt(taskForm.recurring)} onClick={() => setTaskForm(p => ({ ...p, recurring: !p.recurring }))}><div style={toggleDot(taskForm.recurring)} /></button></div>
-                    {taskForm.recurring && <div><label style={labelSt}>Frequenz</label><select style={selectSt} value={taskForm.recurrence_rule} onChange={e => setTaskForm(p => ({ ...p, recurrence_rule: e.target.value }))}><option value="weekly">Wöchentlich</option><option value="biweekly">Alle 2 Wochen</option><option value="monthly">Monatlich</option></select><div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Termine werden bis Ende des Folgejahres angelegt.</div></div>}
+                    {taskForm.recurring && <div><label style={labelSt}>Frequenz</label><select style={selectSt} value={taskForm.recurrence_rule} onChange={e => setTaskForm(p => ({ ...p, recurrence_rule: e.target.value }))}><option value="weekly">Wöchentlich</option><option value="biweekly">Alle 2 Wochen</option><option value="monthly">Monatlich</option></select><div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Termine werden bis Ende des Folgejahres angelegt; danach lässt sich die Serie über „Plan fortschreiben“ verlängern.</div></div>}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: '0.85rem' }}>Push-Erinnerung</span><button style={toggleSt(taskForm.push_enabled)} onClick={() => setTaskForm(p => ({ ...p, push_enabled: !p.push_enabled }))}><div style={toggleDot(taskForm.push_enabled)} /></button></div>
                 </div>
                 <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '20px' }}>

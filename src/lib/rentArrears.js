@@ -15,6 +15,7 @@ export const RENT_TOLERANCE = 1;
 // Liegt der Mietbeginn mehr als so viele Monate vor der Erfassung des Vertrags in der App, gilt er als
 // Bestandsmietvertrag (z. B. Excel-Import mit echtem Einzugsdatum): Rückstände werden dann standardmäßig
 // erst ab dem Buchungsbeginn (Monat der Erfassung) gezählt. Ältere Monate bleiben per Schalter einblendbar.
+// Ist leases.booking_start_date gesetzt (Import: erster Tag des Importmonats), gilt stattdessen dieser Stichtag.
 export const BESTAND_THRESHOLD_MONTHS = 3;
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -158,7 +159,8 @@ export const leaseBookingStartMonth = (lease) => {
     if (!start) return null;
     const startM = toMonthStr(start);
 
-    // Künftige Spalte (falls in der DB angelegt): ausdrücklicher Buchungsbeginn je Vertrag
+    // Ausdrücklicher Buchungsbeginn je Vertrag (leases.booking_start_date, „Mietkonto geführt ab“) hat
+    // Vorrang; ohne Wert gilt die Heuristik über den Erfassungszeitpunkt
     const explicit = parseDateOnly(lease?.booking_start_date);
     if (explicit) {
         const explicitM = toMonthStr(explicit);
@@ -250,6 +252,95 @@ export const computeArrears = ({ leases = [], index, mahnKeys, today = new Date(
     return { entries, totalOverdue, hiddenEntries, hidden: summarizeHidden(hiddenEntries) };
 };
 
+/**
+ * Offener Saldo EINES Mietvertrags, z. B. vor dem Ausstellen einer Mietschuldenfreiheitsbescheinigung.
+ * Anders als computeArrears().totalOverdue zählen hier ALLE überfälligen Monate (auch solche im
+ * Mahnverfahren), ausgebuchte Monate (Status 'loss') und offene Forderungsakten (claim_totals_view.total_due).
+ * Mietkonto und Forderungsakten werden getrennt ausgewiesen (nicht addiert: eine Forderungsakte kann
+ * dieselben Monate enthalten). Monate vor dem Buchungsbeginn (Bestandsmieter, Mietkonto dort nicht
+ * geführt) werden nicht geprüft, sondern nur gemeldet.
+ */
+export const summarizeLeaseBalance = ({ lease, ledgerRows = [], payments = [], claimTotals = [], today = new Date() } = {}) => {
+    const leaseId = lease?.id || null;
+    const ownLedger = (ledgerRows || []).filter(r => r && r.lease_id === leaseId);
+    const index = buildRentIndex({ ledgerRows: ownLedger, payments: (payments || []).filter(p => p && p.lease_id === leaseId) });
+    const arrears = computeArrears({ leases: leaseId ? [lease] : [], index, today });
+
+    const rentOpen = round2(arrears.entries.reduce((s, e) => s + e.open, 0));
+    const openMonths = arrears.entries.map(e => e.monthStr);
+
+    const writtenOff = ownLedger
+        .filter(r => r.status === 'loss' && r.period_month)
+        .map(r => ({ monthStr: String(r.period_month).slice(0, 7), open: round2(num(r.expected_rent) - num(r.paid_amount)) }))
+        .filter(e => e.open > RENT_TOLERANCE)
+        .sort((a, b) => (a.monthStr < b.monthStr ? -1 : 1));
+    const writtenOffOpen = round2(writtenOff.reduce((s, e) => s + e.open, 0));
+
+    const openClaims = (claimTotals || []).filter(c => c && num(c.total_due) > RENT_TOLERANCE);
+    const claimsOpen = round2(openClaims.reduce((s, c) => s + num(c.total_due), 0));
+
+    return {
+        rentOpen,
+        openMonths,
+        writtenOffOpen,
+        writtenOffMonths: writtenOff.map(e => e.monthStr),
+        claimsOpen,
+        openClaimCount: openClaims.length,
+        hiddenMonths: arrears.hidden.count,
+        hiddenAmount: arrears.hidden.amount,
+        bookingStartMonth: arrears.entries[0]?.bookingStartMonth || (lease ? leaseBookingStartMonth(lease) : null),
+        hasOpen: rentOpen > RENT_TOLERANCE || writtenOffOpen > RENT_TOLERANCE || claimsOpen > RENT_TOLERANCE
+    };
+};
+
+// Forderungsakten, die für den Saldo keine Rolle spielen (storniert bzw. archiviert)
+const CLOSED_CLAIM_STATUSES = ['cancelled', 'archived'];
+
+/**
+ * Lädt Vertrag, Mietkonto, Zahlungen und offene Forderungsakten EINES Mietvertrags und liefert
+ * summarizeLeaseBalance(). Bei jedem Ladefehler: { error } – der Aufrufer darf dann NICHT von
+ * Schuldenfreiheit ausgehen.
+ */
+export const loadLeaseBalance = async (leaseId, { today = new Date() } = {}) => {
+    if (!leaseId) return { balance: null, error: new Error('Kein Mietvertrag zugeordnet.') };
+    try {
+        const { data: lease, error: leaseError } = await supabase.from('leases').select('*').eq('id', leaseId).maybeSingle();
+        if (leaseError) return { balance: null, error: leaseError };
+        if (!lease) return { balance: null, error: new Error('Der Mietvertrag wurde nicht gefunden (keine Berechtigung?).') };
+
+        const [ledgerRes, paymentRes, claimRes] = await Promise.all([
+            fetchAllRows('rent_ledger', 'id, lease_id, period_month, due_date, expected_rent, paid_amount, status', q => q.eq('lease_id', leaseId)),
+            fetchAllRows('rent_payments', 'id, lease_id, period_month, amount', q => q.eq('lease_id', leaseId)),
+            fetchAllRows('claims', 'id, status', q => q.eq('lease_id', leaseId))
+        ]);
+        if (ledgerRes.error && !isMissingRelationError(ledgerRes.error)) return { balance: null, error: ledgerRes.error };
+        if (paymentRes.error) return { balance: null, error: paymentRes.error };
+        if (claimRes.error && !isMissingRelationError(claimRes.error)) return { balance: null, error: claimRes.error };
+
+        const claimIds = (claimRes.data || []).filter(c => !CLOSED_CLAIM_STATUSES.includes(c.status)).map(c => c.id);
+        let claimTotals = [];
+        for (let i = 0; i < claimIds.length; i += 100) {
+            const { data, error } = await supabase
+                .from('claim_totals_view')
+                .select('claim_id, total_due')
+                .in('claim_id', claimIds.slice(i, i + 100));
+            if (error) return { balance: null, error };
+            claimTotals = claimTotals.concat(data || []);
+        }
+        // Forderungsakte ohne Beträge: nicht als „bezahlt“ werten
+        if (claimTotals.length < claimIds.length) {
+            return { balance: null, error: new Error('Die Beträge der Forderungen konnten nicht vollständig geladen werden.') };
+        }
+
+        return {
+            balance: summarizeLeaseBalance({ lease, ledgerRows: ledgerRes.data || [], payments: paymentRes.data || [], claimTotals, today }),
+            error: null
+        };
+    } catch (error) {
+        return { balance: null, error };
+    }
+};
+
 // Zusammenfassung ausgeblendeter Monate vor dem Buchungsbeginn
 export const summarizeHidden = (hiddenEntries = []) => ({
     count: hiddenEntries.length,
@@ -278,15 +369,16 @@ export const isMissingRelationError = (error) =>
 
 /**
  * Lädt alle Zeilen einer Tabelle seitenweise (.range), damit die PostgREST-Zeilengrenze (Standard 1000)
- * nichts abschneidet. applyQuery setzt Filter/Sortierung; als Tiebreaker wird immer nach id sortiert.
+ * nichts abschneidet. applyQuery setzt Filter/Sortierung; als Tiebreaker wird immer nach orderColumn
+ * (Standard id) sortiert – Sichten ohne id-Spalte geben eine eindeutige Spalte an.
  */
-export const fetchAllRows = async (table, columns, applyQuery = (q) => q, pageSize = 1000) => {
+export const fetchAllRows = async (table, columns, applyQuery = (q) => q, pageSize = 1000, orderColumn = 'id') => {
     const rows = [];
     let total = null;
     for (let page = 0; page < 500; page++) {
         const from = rows.length;
         let query = supabase.from(table).select(columns, page === 0 ? { count: 'exact' } : undefined);
-        query = applyQuery(query).order('id', { ascending: true });
+        query = applyQuery(query).order(orderColumn, { ascending: true });
         const { data, error, count } = await query.range(from, from + pageSize - 1);
         if (error) return { data: rows, error };
         const chunk = data || [];

@@ -280,13 +280,19 @@ const ExportModal = ({
                         <Toggle value={groupByProperty} onChange={setGroupByProperty} label="Gruppieren nach Immobilie" />
                     )}
                     {config.dsgvoRelevant && (
-                        <div style={{ ...toggleRowStyle, borderTop: '1px solid var(--border-color)' }}>
-                            <span style={{ ...toggleLabelStyle, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <Shield size={14} color="var(--primary-color)" /> DSGVO anonymisieren
-                            </span>
-                            <button type="button" style={toggleSwitchStyle(dsgvoAnonymize)} onClick={() => setDsgvoAnonymize(!dsgvoAnonymize)}>
-                                <div style={toggleKnobStyle(dsgvoAnonymize)} />
-                            </button>
+                        <div style={{ borderTop: '1px solid var(--border-color)' }}>
+                            <div style={{ ...toggleRowStyle, borderTop: 'none' }}>
+                                <span style={{ ...toggleLabelStyle, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <Shield size={14} color="var(--primary-color)" /> DSGVO: Namen pseudonymisieren
+                                </span>
+                                <button type="button" aria-pressed={dsgvoAnonymize} aria-label="DSGVO: Namen pseudonymisieren" style={toggleSwitchStyle(dsgvoAnonymize)} onClick={() => setDsgvoAnonymize(!dsgvoAnonymize)}>
+                                    <div style={toggleKnobStyle(dsgvoAnonymize)} />
+                                </button>
+                            </div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.4, paddingBottom: '8px' }}>
+                                Namen werden durch „Mieter 1“, „Mieter 2“ … ersetzt, Kontaktdaten und Notizen durch ***.
+                                Objekt- und Einheitenangaben bleiben sichtbar; bei kleinen Objekten sind Personen ggf. bestimmbar.
+                            </div>
                         </div>
                     )}
                     {(config.extraOptions || []).map(opt => (

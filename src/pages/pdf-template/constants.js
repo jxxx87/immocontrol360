@@ -43,9 +43,8 @@ export const EL_TYPES = {
 export const MAX_FREETEXT = 5;
 export const MAX_LINES = 2;
 
-// App-weiter Standard der Akzentfarbe (Editor, Hook und Generator).
-// Hinweis: Der Spalten-Default accent_color in der DB weicht ab ('#f59e0b');
-// die App schreibt die Farbe aber immer explizit mit.
+// App-weiter Standard der Akzentfarbe (Editor, Hook und Generator); entspricht dem
+// Spalten-Default pdf_templates.accent_color (Migration wave3/13_INVOICES).
 export const DEFAULT_ACCENT = '#0ea5e9';
 
 // ─── Size limits per element (eine Quelle für Eingabefelder + Clamping) ─

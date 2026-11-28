@@ -34,6 +34,11 @@ oder über das Supabase-MCP-Werkzeug `apply_migration`. Keine Node-Skripte mit d
 (ohne Zertifikatsprüfung, an der Historie vorbei) mehr – Details in `SOP_DEPLOYS.md`. Alte lose SQL-Dateien
 liegen nur noch zum Nachschlagen in `archive/sql/` und dürfen **nicht** ausgeführt werden.
 
+**Ausgangsschema:** Die alte Migrationskette lässt sich auf einer leeren Datenbank nicht abspielen. Den
+vollständigen Live-Stand (Tabellen, Funktionen, Policies, Rechte, Storage-Policies) enthält
+`supabase/baseline/baseline_public.sql`; wie man damit eine Datenbank neu aufbaut und die Datei neu erzeugt,
+steht in `supabase/baseline/README.md`.
+
 ## Live stellen (Deployment)
 
 **Nicht** `git push origin master` – das aktualisiert nur den Quellcode auf GitHub, aber nicht die Webseite.
@@ -45,9 +50,15 @@ Live geht nur, was im Branch **`production`** liegt. Den befüllt ausschließlic
 ```
 
 Es baut `immowebsite` und `immo-web`, legt beide zusammen (Marketing-Seite in `/`, Web-App in `/app/`),
-schreibt die Quell-Commits beider Repos in die Commit-Nachricht und pusht das Ergebnis auf `production`.
-Hostinger stellt diesen Branch bereit. Bei einem Build- oder Git-Fehler bricht das Skript ab, ohne etwas zu
-veröffentlichen. Vorher am besten committen und `master` pushen, damit der Live-Stand einem Commit entspricht.
+schreibt die Quell-Commits beider Repos in die Commit-Nachricht und in `app/version.json` und pusht das
+Ergebnis auf `production`. Hostinger stellt diesen Branch bereit. Bei einem Build-, Lint-, Test- oder
+Git-Fehler bricht das Skript ab, ohne etwas zu veröffentlichen.
+
+Reihenfolge: **committen → `master` (immo-web) bzw. `landing-master` (immowebsite) pushen → `.\deploy_all.ps1`.**
+Das Skript bricht ab, wenn eines der Repos nicht committete Änderungen hat oder der Commit noch nicht auf
+GitHub liegt, damit der Live-Stand immer genau einem Commit entspricht. Vor dem Build laufen `npm run lint`
+und `npm test`. Nur im Notfall: `-AllowDirty` (baut trotzdem, markiert den Stand als nicht reproduzierbar)
+bzw. `-SkipChecks` (ohne Lint/Tests).
 
 Ausführliche Anleitung (inkl. Hostinger-Einstellungen): `SOP_DEPLOYS.md`.
 

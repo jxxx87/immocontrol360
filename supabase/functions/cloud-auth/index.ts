@@ -12,6 +12,12 @@
 // - Erneutes Verbinden desselben Kontos aktualisiert die vorhandene Zeile statt eine zweite anzulegen.
 // - Kleinere Scopes: OneDrive Files.ReadWrite (statt Files.ReadWrite.All), Google drive.file.
 //   Bestehende Verbindungen behalten ihre Berechtigung, niemand muss neu verbinden.
+//
+// Wave 3 (2026-11-27), Paket 08 CLOUD:
+// - M2-06: Tokens werden über cloud_store_tokens im Supabase Vault gespeichert (Rückfall auf die
+//   alten Spalten, solange die Migration fehlt); die neue Zeile wird zuerst ohne Tokens angelegt.
+// - CLOUD-unique: Ein paralleler zweiter Callback desselben Kontos (Unique-Verletzung 23505) wird
+//   als "vorhandene Verbindung aktualisieren" behandelt statt abzubrechen.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
 // ---------------------------------------------------------------------------
@@ -123,6 +129,76 @@ const requireUser = async (req: Request, admin: any) => {
   return { user, jwt }
 }
 
+// OAuth-Tokens liegen verschlüsselt im Supabase Vault (Wave 3, Befund M2-06). Gelesen und geschrieben
+// wird nur über die RPCs cloud_get_tokens / cloud_store_tokens (ausführbar nur für service_role).
+// Solange die Migration noch nicht eingespielt ist (PostgREST kennt die Funktion nicht), gelten wie
+// bisher die Spalten access_token/refresh_token. Fehlermeldungen werden nur mit Code geloggt.
+// deno-lint-ignore no-explicit-any
+const isMissingRpc = (error: any): boolean => error?.code === 'PGRST202' || error?.code === '42883'
+
+type CloudTokens = { accessToken: string | null; refreshToken: string | null }
+
+// deno-lint-ignore no-explicit-any
+const readTokens = async (admin: any, connectionId: string, userId: string): Promise<CloudTokens> => {
+  const { data, error } = await admin.rpc('cloud_get_tokens', { p_connection_id: connectionId, p_user_id: userId })
+  if (!error) {
+    const row = Array.isArray(data) ? data[0] : data
+    return { accessToken: row?.access_token || null, refreshToken: row?.refresh_token || null }
+  }
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  const { data: legacy, error: legacyError } = await admin
+    .from('cloud_connections')
+    .select('access_token, refresh_token')
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (legacyError) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  return { accessToken: legacy?.access_token || null, refreshToken: legacy?.refresh_token || null }
+}
+
+// Speichert ein neues Access-Token (refreshToken null = bisheriges behalten) samt Ablaufzeit.
+// Liefert false, wenn nicht gespeichert werden konnte (Ursache steht im Server-Log).
+const storeTokens = async (
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  connectionId: string,
+  userId: string,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: string,
+): Promise<boolean> => {
+  const { error } = await admin.rpc('cloud_store_tokens', {
+    p_connection_id: connectionId,
+    p_user_id: userId,
+    p_access_token: accessToken,
+    p_refresh_token: refreshToken,
+    p_expires_at: expiresAt,
+  })
+  if (!error) return true
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    return false
+  }
+  const update: Record<string, string> = { access_token: accessToken, expires_at: expiresAt }
+  if (refreshToken) update.refresh_token = refreshToken
+  const { error: legacyError } = await admin
+    .from('cloud_connections')
+    .update(update)
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+  if (legacyError) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    return false
+  }
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Ende des gemeinsamen Blocks
 // ---------------------------------------------------------------------------
@@ -206,7 +282,7 @@ Deno.serve(async (req: Request) => {
 
       const { data: connection, error } = await admin
         .from('cloud_connections')
-        .select('id, provider, account_email, access_token, refresh_token')
+        .select('id, provider, account_email')
         .eq('id', connectionId)
         .eq('user_id', user.id)
         .maybeSingle()
@@ -227,7 +303,16 @@ Deno.serve(async (req: Request) => {
             .neq('id', connection.id)
           sharedGrant = !!countError || (count ?? 0) > 0
         }
-        const token = connection.refresh_token || connection.access_token
+        let token: string | null = null
+        if (!sharedGrant) {
+          try {
+            const tokens = await readTokens(admin, connection.id, user.id)
+            token = tokens.refreshToken || tokens.accessToken
+          } catch {
+            // Ohne lesbares Token kein Widerruf – Hinweis auf manuellen Widerruf (revokeNote)
+            token = null
+          }
+        }
         if (!sharedGrant && token) {
           try {
             const res = await fetch('https://oauth2.googleapis.com/revoke', {
@@ -339,9 +424,13 @@ Deno.serve(async (req: Request) => {
       Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000,
     ).toISOString()
 
-    // Gleiches Konto erneut verbunden -> vorhandene Zeile(n) aktualisieren statt neue anzulegen
-    let connectionId: string | null = null
-    if (accountEmail) {
+    const accessToken: string = tokenResponse.access_token
+    const refreshToken: string | null =
+      typeof tokenResponse.refresh_token === 'string' && tokenResponse.refresh_token ? tokenResponse.refresh_token : null
+
+    // Vorhandene Verbindung(en) desselben Kontos (nur eigene) – älteste zuerst
+    const findExisting = async (): Promise<string[]> => {
+      if (!accountEmail) return []
       const { data: existing, error: existingError } = await admin
         .from('cloud_connections')
         .select('id')
@@ -350,36 +439,44 @@ Deno.serve(async (req: Request) => {
         .eq('account_email', accountEmail)
         .order('created_at', { ascending: true })
       if (existingError) throw dbError('Vorhandene Verbindung suchen', existingError)
-
-      if (existing && existing.length > 0) {
-        const update: Record<string, string> = { access_token: tokenResponse.access_token, expires_at: expiresAt }
-        if (tokenResponse.refresh_token) update.refresh_token = tokenResponse.refresh_token
-        const { error: updateError } = await admin
-          .from('cloud_connections')
-          .update(update)
-          // deno-lint-ignore no-explicit-any
-          .in('id', existing.map((r: any) => r.id))
-          .eq('user_id', user.id)
-        if (updateError) throw dbError('Verbindung aktualisieren', updateError)
-        connectionId = existing[0].id
+      // deno-lint-ignore no-explicit-any
+      return (existing || []).map((r: any) => String(r.id))
+    }
+    const updateExisting = async (ids: string[]) => {
+      for (const id of ids) {
+        const stored = await storeTokens(admin, id, user.id, accessToken, refreshToken, expiresAt)
+        if (!stored) throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht gespeichert werden.')
       }
+      return ids[0]
     }
 
+    // Gleiches Konto erneut verbunden -> vorhandene Zeile aktualisieren statt eine neue anzulegen
+    let connectionId: string | null = null
+    const existingIds = await findExisting()
+    if (existingIds.length > 0) connectionId = await updateExisting(existingIds)
+
     if (!connectionId) {
+      // Zeile zuerst ohne Tokens anlegen, Tokens danach verschlüsselt speichern
       const { data: inserted, error: insertError } = await admin
         .from('cloud_connections')
-        .insert({
-          user_id: user.id,
-          provider,
-          account_email: accountEmail,
-          access_token: tokenResponse.access_token,
-          refresh_token: tokenResponse.refresh_token || null,
-          expires_at: expiresAt,
-        })
+        .insert({ user_id: user.id, provider, account_email: accountEmail, expires_at: expiresAt })
         .select('id')
         .single()
-      if (insertError || !inserted) throw dbError('Verbindung speichern', insertError)
-      connectionId = inserted.id
+      if (insertError?.code === '23505') {
+        // Ein zweiter, gleichzeitiger Callback hat dieselbe Verbindung eben angelegt -> diese aktualisieren
+        const raceIds = await findExisting()
+        if (raceIds.length === 0) throw dbError('Verbindung speichern', insertError)
+        connectionId = await updateExisting(raceIds)
+      } else {
+        if (insertError || !inserted) throw dbError('Verbindung speichern', insertError)
+        const newId = String(inserted.id)
+        if (!(await storeTokens(admin, newId, user.id, accessToken, refreshToken, expiresAt))) {
+          // Keine Verbindung ohne Tokens zurücklassen
+          await admin.from('cloud_connections').delete().eq('id', newId).eq('user_id', user.id)
+          throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht gespeichert werden.')
+        }
+        connectionId = newId
+      }
     }
 
     // Keine Tokens in der Antwort

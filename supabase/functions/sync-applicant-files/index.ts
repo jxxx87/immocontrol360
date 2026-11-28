@@ -15,6 +15,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 //    Übertragung jederzeit erneut anstoßen (z. B. nach Verbinden einer Cloud).
 //  • Eine Datei wird nur gelöscht, wenn der Upload nachweislich geklappt hat.
 //    Was nicht übertragen werden kann, bleibt im Bucket (Hinweis in der Antwort).
+//
+// Wave 3 (2026-11-27), Paket 08 CLOUD:
+//  • E1-09: Ziel-Cloud wie im Cloud Explorer/cloud-sync: Zuweisung des Portfolios
+//    (portfolio_cloud_links), sonst nur die einzige Verbindung des Vermieters. Mehrere
+//    Verbindungen ohne Zuweisung -> Unterlagen bleiben vorerst im Speicher (statt in einer
+//    womöglich falschen Cloud zu landen).
+//  • M2-06: Tokens über cloud_get_tokens/cloud_store_tokens (Vault); Rückfall auf die alten
+//    Spalten, solange die Migration fehlt.
+//  • G18-12: '/' und '\' in Straße/Hausnummer/Einheit werden wie in cloud-sync zu '-'.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const corsHeaders = {
@@ -92,6 +101,72 @@ const fileExtension = (name: string): string => {
 
 // Google-Drive-Suchausdruck: Backslash und Hochkomma escapen
 const gq = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+// Ein Name ergibt genau EIN Ordnersegment – dieselbe Regel wie folderSegment in cloud-sync,
+// damit der Bewerberordner im selben Objekt-/Einheitenordner landet.
+const cloudFolderSegment = (value: unknown): string => String(value ?? '').replace(/[/\\]/g, '-')
+
+// ── OAuth-Tokens (Wave 3, M2-06) ─────────────────────────────────────────────
+// Verschlüsselt im Supabase Vault, nur über die RPCs cloud_get_tokens / cloud_store_tokens
+// (nur service_role). Solange die Migration fehlt, gelten die bisherigen Spalten.
+const isMissingRpc = (error: any): boolean => error?.code === 'PGRST202' || error?.code === '42883'
+
+async function readCloudTokens(supabaseAdmin: any, connectionId: string, userId: string) {
+  const { data, error } = await supabaseAdmin.rpc('cloud_get_tokens', { p_connection_id: connectionId, p_user_id: userId })
+  if (!error) {
+    const row = Array.isArray(data) ? data[0] : data
+    return { accessToken: (row?.access_token || null) as string | null, refreshToken: (row?.refresh_token || null) as string | null }
+  }
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud tokens not readable (code ${error.code || '-'})`)
+    return null
+  }
+  const { data: legacy, error: legacyError } = await supabaseAdmin
+    .from('cloud_connections')
+    .select('access_token, refresh_token')
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (legacyError) {
+    console.error(`Cloud tokens not readable (code ${legacyError.code || '-'})`)
+    return null
+  }
+  return { accessToken: (legacy?.access_token || null) as string | null, refreshToken: (legacy?.refresh_token || null) as string | null }
+}
+
+async function storeCloudTokens(
+  supabaseAdmin: any,
+  connectionId: string,
+  userId: string,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: string,
+): Promise<boolean> {
+  const { error } = await supabaseAdmin.rpc('cloud_store_tokens', {
+    p_connection_id: connectionId,
+    p_user_id: userId,
+    p_access_token: accessToken,
+    p_refresh_token: refreshToken,
+    p_expires_at: expiresAt,
+  })
+  if (!error) return true
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud token update failed (code ${error.code || '-'})`)
+    return false
+  }
+  const update: Record<string, string> = { access_token: accessToken, expires_at: expiresAt }
+  if (refreshToken) update.refresh_token = refreshToken
+  const { error: legacyError } = await supabaseAdmin
+    .from('cloud_connections')
+    .update(update)
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+  if (legacyError) {
+    console.error(`Cloud token update failed (code ${legacyError.code || '-'})`)
+    return false
+  }
+  return true
+}
 
 async function getCaller(req: Request, supabaseAdmin: any) {
   const header = req.headers.get('Authorization') || ''
@@ -239,54 +314,91 @@ serve(async (req) => {
       return pendingResponse('no allowed files')
     }
 
-    // 4. Resolve landlord's cloud connection (neueste Verbindung)
-    const { data: connectionData, error: connError } = await supabaseAdmin
+    // 4. Cloud des Vermieters bestimmen – wie Cloud Explorer und cloud-sync:
+    //    Zuweisung des Portfolios (portfolio_cloud_links), sonst nur die einzige Verbindung.
+    const { data: connections, error: connError } = await supabaseAdmin
       .from('cloud_connections')
-      .select('*')
+      .select('id, user_id, provider, expires_at, created_at')
       .eq('user_id', landlordId)
-      .order('created_at', { ascending: false })
-      .limit(1)
+      .order('created_at', { ascending: true })
 
-    if (connError || !connectionData || connectionData.length === 0) {
+    if (connError) {
+      return pendingResponse(`cloud connection lookup failed (${connError.code || '-'})`)
+    }
+    if (!connections || connections.length === 0) {
       return pendingResponse('no cloud connection')
     }
 
-    const connection = connectionData[0]
+    let connection: any = null
+    if (property.portfolio_id) {
+      const { data: link, error: linkError } = await supabaseAdmin
+        .from('portfolio_cloud_links')
+        .select('cloud_connection_id')
+        .eq('user_id', landlordId)
+        .eq('portfolio_id', property.portfolio_id)
+        .maybeSingle()
+      if (linkError) {
+        return pendingResponse(`portfolio cloud link lookup failed (${linkError.code || '-'})`)
+      }
+      if (link?.cloud_connection_id) {
+        connection = connections.find((c: any) => c.id === link.cloud_connection_id) || null
+      }
+    }
+    if (!connection && connections.length === 1) connection = connections[0]
+    if (!connection) {
+      // Mehrere Clouds, aber keine Zuweisung für dieses Portfolio: nicht raten
+      return pendingResponse('no cloud assigned to the portfolio')
+    }
+
     const provider = connection.provider
     if (provider !== 'onedrive' && provider !== 'googledrive') {
       return pendingResponse(`unsupported provider ${provider}`)
     }
-    let accessToken = connection.access_token
+    const tokens = await readCloudTokens(supabaseAdmin, connection.id, landlordId)
+    if (!tokens) {
+      return pendingResponse('cloud tokens not readable')
+    }
+    let accessToken = tokens.accessToken
 
     // Refresh cloud token if expired
     const expiresAt = new Date(connection.expires_at)
-    if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
+    if (!accessToken || Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
+      if (!tokens.refreshToken) {
+        return pendingResponse('no refresh token')
+      }
       const tokenUrl = provider === 'onedrive'
         ? 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
         : 'https://oauth2.googleapis.com/token'
-      const res = await fetch(tokenUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_ID' : 'GOOGLE_CLIENT_ID') ?? '',
-          client_secret: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_SECRET' : 'GOOGLE_CLIENT_SECRET') ?? '',
-          refresh_token: connection.refresh_token ?? '',
-          grant_type: 'refresh_token',
-        }),
-      })
+      let res: Response
+      try {
+        res = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_ID' : 'GOOGLE_CLIENT_ID') ?? '',
+            client_secret: Deno.env.get(provider === 'onedrive' ? 'ONEDRIVE_CLIENT_SECRET' : 'GOOGLE_CLIENT_SECRET') ?? '',
+            refresh_token: tokens.refreshToken,
+            grant_type: 'refresh_token',
+          }),
+        })
+      } catch (_err) {
+        return pendingResponse('token endpoint unreachable')
+      }
       const tokenResponse = await res.json().catch(() => ({}))
       if (!res.ok || !tokenResponse.access_token) {
         // Widerrufene/abgelaufene Verbindung: nichts löschen, Unterlagen bleiben im Speicher
         return pendingResponse(`token refresh failed (${res.status} ${tokenResponse.error || ''})`)
       }
-      accessToken = tokenResponse.access_token
+      accessToken = tokenResponse.access_token as string
       const newExpiresAt = new Date(Date.now() + (Number(tokenResponse.expires_in) || 3600) * 1000)
-      const { error: updErr } = await supabaseAdmin.from('cloud_connections').update({
-        access_token: accessToken,
-        refresh_token: tokenResponse.refresh_token || connection.refresh_token,
-        expires_at: newExpiresAt.toISOString()
-      }).eq('id', connection.id)
-      if (updErr) console.error('Cloud token update failed:', updErr.message)
+      await storeCloudTokens(
+        supabaseAdmin,
+        connection.id,
+        landlordId,
+        accessToken,
+        typeof tokenResponse.refresh_token === 'string' && tokenResponse.refresh_token ? tokenResponse.refresh_token : null,
+        newExpiresAt.toISOString(),
+      )
     }
 
     // Graph API helpers: Lesen (404 -> null) und Schreiben (jeder Fehler wirft)
@@ -360,15 +472,15 @@ serve(async (req) => {
       const parts = Object.keys(groupedByStreet).map(street => {
         const nums = groupedByStreet[street]
         if (nums.length > 0) {
-          return `${street} ${nums.join(' & ')}`
+          return `${cloudFolderSegment(street)} ${nums.map(cloudFolderSegment).join(' & ')}`
         }
-        return street
+        return cloudFolderSegment(street)
       })
       const displayNames = parts.slice(0, 2).join(' | ')
       const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames
       propertyFolderRaw = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`
     } else {
-      propertyFolderRaw = `${property.street} ${property.house_number || ''}`.trim()
+      propertyFolderRaw = `${cloudFolderSegment(property.street)} ${cloudFolderSegment(property.house_number || '')}`.trim()
     }
 
     // Alle Segmente einzeln bereinigt – keine Pfad-Zusammensetzung aus Rohwerten
@@ -376,7 +488,7 @@ serve(async (req) => {
     const segments = [
       cleanSegment(propertyFolderRaw, 'Objekt', provider),
       'Neuvermietung',
-      cleanSegment(unit.unit_name, 'Einheit', provider),
+      cleanSegment(cloudFolderSegment(unit.unit_name), 'Einheit', provider),
       cleanSegment(applicantRaw.replace(/^_+|_+$/g, ''), `Bewerber_${applicantId.slice(0, 8)}`, provider),
     ]
 

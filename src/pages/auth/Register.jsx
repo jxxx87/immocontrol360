@@ -5,7 +5,11 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../lib/supabase';
+import { translateError } from '../../lib/errorTranslator';
 import { AlertCircle, CheckCircle } from 'lucide-react';
+
+// Wie in Einstellungen, Passwort zurücksetzen und register-trial
+const MIN_PASSWORD_LENGTH = 10;
 
 // Erlaubte Tarife für die Testphase (wie in register-trial)
 const TRIAL_PLANS = {
@@ -39,8 +43,8 @@ const Register = () => {
             return setError('Passwörter stimmen nicht überein');
         }
 
-        if (password.length < 6) {
-            return setError('Passwort muss mindestens 6 Zeichen lang sein');
+        if (password.length < MIN_PASSWORD_LENGTH) {
+            return setError(`Das Passwort muss mindestens ${MIN_PASSWORD_LENGTH} Zeichen lang sein.`);
         }
 
         try {
@@ -56,7 +60,7 @@ const Register = () => {
                     body: { email: normalizedEmail, password, plan }
                 });
 
-                if (fnError) throw new Error(fnError.message || 'Verbindungsfehler');
+                if (fnError) throw fnError;
                 if (data && !data.success) throw new Error(data.error || 'Registrierung fehlgeschlagen');
 
                 if (data?.confirmation_required) {
@@ -97,9 +101,11 @@ const Register = () => {
 
         } catch (error) {
             console.error(error);
-            let msg = error.message;
-            if (msg.includes('already registered')) msg = 'Diese E-Mail wird bereits verwendet.';
-            setError('Registrierung fehlgeschlagen: ' + msg);
+            const raw = error?.message || '';
+            // Deutsche Meldungen (register-trial, eigene Texte) bleiben, englische Supabase-Texte werden übersetzt
+            setError(/already registered/i.test(raw)
+                ? 'Diese E-Mail wird bereits verwendet.'
+                : translateError(error));
         } finally {
             setLoading(false);
         }
@@ -156,7 +162,7 @@ const Register = () => {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
-                    placeholder="Min. 6 Zeichen"
+                    placeholder={`Min. ${MIN_PASSWORD_LENGTH} Zeichen`}
                 />
                 <Input
                     label="Passwort bestätigen"

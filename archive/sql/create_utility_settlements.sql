@@ -1,5 +1,7 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/scripts/create_utility_settlements.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
+-- Maßgeblich für utility_settlements: supabase/baseline/baseline_public.sql (Live-Stand vom 27.11.2026). Diese Datei ist überholt.
 -- Create utility_settlements table for Nebenkostenabrechnungen
 CREATE TABLE IF NOT EXISTS public.utility_settlements (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,

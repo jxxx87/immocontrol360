@@ -5,7 +5,7 @@ import { useAuth } from './AuthContext';
 const PortfolioContext = createContext();
 
 export const PortfolioProvider = ({ children }) => {
-    const { user } = useAuth();
+    const { user, isTenant } = useAuth();
     const [portfolios, setPortfolios] = useState([]);
     // Load initial selection from localStorage
     const [selectedPortfolioID, setSelectedPortfolioID] = useState(() => {
@@ -35,6 +35,14 @@ export const PortfolioProvider = ({ children }) => {
             if (!user) {
                 setPortfolios([]);
                 setSelectedPortfolioID('');
+                setLoading(false);
+                return;
+            }
+
+            // Mieterkonten haben keine Portfolios. Das Portfolio des Vermieters (u. a. Bankverbindung,
+            // Steuernummer) gehört nicht in den Browser des Mieters – das Mieterportal braucht es nicht.
+            if (isTenant) {
+                setPortfolios([]);
                 setLoading(false);
                 return;
             }
@@ -79,7 +87,7 @@ export const PortfolioProvider = ({ children }) => {
         };
 
         fetchPortfolios();
-    }, [user, refreshCounter]);
+    }, [user, isTenant, refreshCounter]);
 
 
     const value = {
@@ -97,6 +105,7 @@ export const PortfolioProvider = ({ children }) => {
     );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const usePortfolio = () => {
     return useContext(PortfolioContext);
 };

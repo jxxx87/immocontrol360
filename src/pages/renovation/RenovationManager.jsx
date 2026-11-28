@@ -386,7 +386,7 @@ const RenovationManager = () => {
             {activeTab === 'tasks' && <RenovationTasks onTaskChange={fetchOpenTasks} />}
             {activeTab === 'calculator' && <RenovationCalculator />}
             {activeTab === 'floorplan' && <FloorPlanLibrary />}
-            {activeTab === 'settings' && <RenovationSettings onSaved={fetchData} />}
+            {activeTab === 'settings' && <RenovationSettings />}
         </div>
     );
 };

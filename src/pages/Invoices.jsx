@@ -10,6 +10,7 @@ import LoadingOverlay from '../components/ui/LoadingOverlay';
 import { Plus, Printer, Edit2, Download, Loader2, X, FileText, MoreVertical, Eye, Lock, AlertTriangle, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { useAuth } from '../context/AuthContext';
 import {
     printInvoice,
@@ -128,6 +129,7 @@ const Invoices = () => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const perm = usePermission();
     const [invoices, setInvoices] = useState([]);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(null);
@@ -143,6 +145,14 @@ const Invoices = () => {
     const [filterSearch, setFilterSearch] = useState('');
 
     const hasPortfolioSelection = !!selectedPortfolioID && selectedPortfolioID !== 'all';
+
+    // Schreibrecht „Finanzen" im Portfolio der Rechnung (Freigaben); die Datenbank prüft zusätzlich per RLS
+    const canWriteInvoices = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite('finanzen', portfolioId) : perm.canWrite('finanzen');
+    };
+    const canCreateInvoice = canWriteInvoices(hasPortfolioSelection ? selectedPortfolioID : null);
+    const READ_ONLY_NOTICE = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Rechnungen können nur mit Schreibrecht „Finanzen“ ausgestellt oder storniert werden.';
 
     // Alle Rechnungen seitenweise laden (sonst schneidet das Server-Zeilenlimit ältere Rechnungen still ab);
     // Portfolio-Filter serverseitig.
@@ -275,6 +285,10 @@ const Invoices = () => {
 
     // ===== AUSSTELLEN (Entwurf -> festgeschrieben) =====
     const handleIssue = async (invoice) => {
+        if (!canWriteInvoices(invoice.portfolio_id)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         const portfolio = portfolios.find(p => p.id === invoice.portfolio_id);
         const missing = getInvoiceMissingFields(invoice, portfolio);
         const msg = (missing.length
@@ -296,6 +310,10 @@ const Invoices = () => {
 
     // ===== GUTSCHRIFT / STORNO (eigener Beleg, Original bleibt unverändert) =====
     const handleCredit = async (invoice) => {
+        if (!canWriteInvoices(invoice.portfolio_id)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         if (getInvoiceStatus(invoice) !== INVOICE_STATUS.ISSUED) {
             alert('Eine Gutschrift kann nur zu einer ausgestellten Rechnung erstellt werden.');
             return;
@@ -330,6 +348,15 @@ const Invoices = () => {
 
     const getMenuItems = (row) => {
         const status = getInvoiceStatus(row);
+        const writable = canWriteInvoices(row.portfolio_id);
+        if (status === INVOICE_STATUS.DRAFT && !writable) {
+            // Freigabe nur zum Lesen: ansehen und Vorschau, kein Bearbeiten/Ausstellen
+            return [
+                { key: 'view', label: 'Ansehen', icon: Eye, onClick: () => navigate(`/invoices/edit/${row.id}`) },
+                { key: 'print', label: 'Vorschau drucken (Entwurf)', icon: Printer, onClick: () => handlePrint(row), divider: true },
+                { key: 'pdf', label: 'Vorschau als PDF (Entwurf)', icon: Download, onClick: () => handlePDF(row) }
+            ];
+        }
         if (status === INVOICE_STATUS.DRAFT) {
             return [
                 { key: 'edit', label: 'Bearbeiten', icon: Edit2, onClick: () => navigate(`/invoices/edit/${row.id}`) },
@@ -343,7 +370,7 @@ const Invoices = () => {
             { key: 'print', label: 'Drucken', icon: Printer, onClick: () => handlePrint(row) },
             { key: 'pdf', label: 'Download PDF', icon: Download, onClick: () => handlePDF(row) }
         ];
-        if (status === INVOICE_STATUS.ISSUED) {
+        if (status === INVOICE_STATUS.ISSUED && writable) {
             items.push({ key: 'credit', label: 'Gutschrift / Storno erstellen', icon: FileText, onClick: () => handleCredit(row), divider: true });
         }
         if (status === INVOICE_STATUS.CREDITED && !creditedWithDocument.has(row.id)) {
@@ -417,7 +444,7 @@ const Invoices = () => {
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Rechnungen Fewo</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Erstellen und verwalten Sie Ihre Rechnungen</p>
                 </div>
-                <Button icon={Plus} onClick={() => navigate('/invoices/new')}>Neue Rechnung</Button>
+                {canCreateInvoice && <Button icon={Plus} onClick={() => navigate('/invoices/new')}>Neue Rechnung</Button>}
             </div>
 
             {loadError && (

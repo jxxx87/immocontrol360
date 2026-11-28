@@ -9,10 +9,8 @@
  *   Ein JWT mit role=anon (öffentlicher Schlüssel) zählt NICHT als angemeldet.
  * - `user_id` im Body wird ignoriert (alte App-Versionen schicken es weiterhin mit).
  * - return_url nur auf eigene Origins, sonst feste App-URL.
+ * - Wave 3 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0 (keine externen Importe mehr).
  */
-
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -104,7 +102,7 @@ function json(body: unknown, status = 200): Response {
     });
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }

@@ -1,5 +1,12 @@
 // cloud-drive: Datei-Proxy zu Microsoft OneDrive / Google Drive
-// Aktionen: list, upload, get_download_link, delete, create_folder
+// Aktionen: list, upload, get_download_link, delete, create_folder, move
+//
+// Wave 3 (2026-11-27), Paket 08 CLOUD:
+// - M2-06: Tokens nur noch über cloud_get_tokens/cloud_store_tokens (Vault), Rückfall auf die alten
+//   Spalten, solange die Migration fehlt.
+// - G12a-15: neue Aktion 'move' { fromPath, toPath } benennt einen ORDNER innerhalb des App-Ordners um
+//   bzw. verschiebt ihn (nach Umbenennen von Objekt/Einheit, damit Bilder/Dokumente nicht verwaisen).
+//   Gemerkte Ordner der Mietverhältnisse (lease_cloud_folders) werden dabei nachgeführt.
 //
 // Sicherheit (Komplett-Check 2026-11-27, Paket CLOUD):
 // - Der Nutzer wird ausschließlich aus dem Authorization-Header abgeleitet (Vertrag C2):
@@ -122,6 +129,76 @@ const requireUser = async (req: Request, admin: any) => {
   return { user, jwt }
 }
 
+// OAuth-Tokens liegen verschlüsselt im Supabase Vault (Wave 3, Befund M2-06). Gelesen und geschrieben
+// wird nur über die RPCs cloud_get_tokens / cloud_store_tokens (ausführbar nur für service_role).
+// Solange die Migration noch nicht eingespielt ist (PostgREST kennt die Funktion nicht), gelten wie
+// bisher die Spalten access_token/refresh_token. Fehlermeldungen werden nur mit Code geloggt.
+// deno-lint-ignore no-explicit-any
+const isMissingRpc = (error: any): boolean => error?.code === 'PGRST202' || error?.code === '42883'
+
+type CloudTokens = { accessToken: string | null; refreshToken: string | null }
+
+// deno-lint-ignore no-explicit-any
+const readTokens = async (admin: any, connectionId: string, userId: string): Promise<CloudTokens> => {
+  const { data, error } = await admin.rpc('cloud_get_tokens', { p_connection_id: connectionId, p_user_id: userId })
+  if (!error) {
+    const row = Array.isArray(data) ? data[0] : data
+    return { accessToken: row?.access_token || null, refreshToken: row?.refresh_token || null }
+  }
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  const { data: legacy, error: legacyError } = await admin
+    .from('cloud_connections')
+    .select('access_token, refresh_token')
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (legacyError) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  return { accessToken: legacy?.access_token || null, refreshToken: legacy?.refresh_token || null }
+}
+
+// Speichert ein neues Access-Token (refreshToken null = bisheriges behalten) samt Ablaufzeit.
+// Liefert false, wenn nicht gespeichert werden konnte (Ursache steht im Server-Log).
+const storeTokens = async (
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  connectionId: string,
+  userId: string,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: string,
+): Promise<boolean> => {
+  const { error } = await admin.rpc('cloud_store_tokens', {
+    p_connection_id: connectionId,
+    p_user_id: userId,
+    p_access_token: accessToken,
+    p_refresh_token: refreshToken,
+    p_expires_at: expiresAt,
+  })
+  if (!error) return true
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    return false
+  }
+  const update: Record<string, string> = { access_token: accessToken, expires_at: expiresAt }
+  if (refreshToken) update.refresh_token = refreshToken
+  const { error: legacyError } = await admin
+    .from('cloud_connections')
+    .update(update)
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+  if (legacyError) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    return false
+  }
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Gemeinsamer Block B – identisch in cloud-drive und cloud-sync
 // (Verbindung laden, Token erneuern, Anbieter-Aufrufe mit Drosselungs-Behandlung)
@@ -131,7 +208,8 @@ const APP_FOLDER = 'ImmoControlpro360'
 const INVALID_ONEDRIVE_CHARS = /["*:<>?\/\\|]/g
 // deno-lint-ignore no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
-const CONNECTION_COLUMNS = 'id, user_id, provider, account_email, access_token, refresh_token, expires_at, created_at'
+// Ohne Token-Spalten: Tokens kommen ausschließlich über readTokens (Block A)
+const CONNECTION_COLUMNS = 'id, user_id, provider, account_email, expires_at, created_at'
 const RECONNECT_MESSAGE =
   'Die Cloud-Verbindung ist abgelaufen oder wurde widerrufen. Bitte verbinden Sie das Konto unter Einstellungen > Cloud neu.'
 
@@ -142,6 +220,20 @@ const TOKEN_ENDPOINTS: Record<string, string> = {
 
 // Escaping für Google-Drive-Suchausdrücke (q): erst Backslash, dann Hochkomma
 const gq = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+// Tabelle/Spalte (noch) nicht vorhanden, z. B. lease_cloud_folders vor dem Einspielen der Migration
+// deno-lint-ignore no-explicit-any
+const isMissingTable = (error: any): boolean =>
+  ['42P01', '42703', 'PGRST204', 'PGRST205'].includes(String(error?.code || ''))
+
+// Pfad wie in der App gebildet (Segmente mit '/'), ohne leere Segmente; null = ungültig
+const normalizeRawPath = (p: unknown): string | null => {
+  if (typeof p !== 'string' || p.length > 2000) return null
+  const segments = p.split('/').filter((s) => s.length > 0)
+  if (segments.length === 0) return null
+  if (segments.some((s) => s === '.' || s === '..' || CONTROL_CHARS.test(s))) return null
+  return segments.join('/')
+}
 
 // Lädt eine Verbindung NUR aus den eigenen Verbindungen des Nutzers.
 // Mit connectionId: genau diese; sonst die älteste Verbindung des Anbieters (deterministisch).
@@ -182,14 +274,15 @@ const loadConnection = async (admin: any, userId: string, connectionId: unknown,
   return data[0]
 }
 
-// Liefert ein gültiges Access-Token; erneuert es bei Bedarf und speichert es per service_role.
+// Liefert ein gültiges Access-Token; erneuert es bei Bedarf und speichert es (Vault) per service_role.
 // deno-lint-ignore no-explicit-any
 const getValidAccessToken = async (admin: any, connection: any): Promise<string> => {
+  const tokens = await readTokens(admin, connection.id, connection.user_id)
   const expiresAtMs = connection.expires_at ? Date.parse(connection.expires_at) : NaN
-  if (connection.access_token && Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() > 5 * 60 * 1000) {
-    return connection.access_token
+  if (tokens.accessToken && Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() > 5 * 60 * 1000) {
+    return tokens.accessToken
   }
-  if (!connection.refresh_token) throw new HttpError(409, 'reconnect_required', RECONNECT_MESSAGE)
+  if (!tokens.refreshToken) throw new HttpError(409, 'reconnect_required', RECONNECT_MESSAGE)
 
   const isGoogle = connection.provider === 'googledrive'
   const clientId = Deno.env.get(isGoogle ? 'GOOGLE_CLIENT_ID' : 'ONEDRIVE_CLIENT_ID')
@@ -206,7 +299,7 @@ const getValidAccessToken = async (admin: any, connection: any): Promise<string>
       body: new URLSearchParams({
         client_id: clientId,
         client_secret: clientSecret,
-        refresh_token: connection.refresh_token,
+        refresh_token: tokens.refreshToken,
         grant_type: 'refresh_token',
       }),
     })
@@ -234,24 +327,20 @@ const getValidAccessToken = async (admin: any, connection: any): Promise<string>
   }
 
   const expiresIn = Number(tokenResponse.expires_in)
-  const newExpiresAt = new Date(Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000)
-  const update: Record<string, string> = {
-    access_token: tokenResponse.access_token,
-    expires_at: newExpiresAt.toISOString(),
-  }
-  if (tokenResponse.refresh_token) update.refresh_token = tokenResponse.refresh_token
-
-  const { error: updateError } = await admin
-    .from('cloud_connections')
-    .update(update)
-    .eq('id', connection.id)
-    .eq('user_id', connection.user_id)
-  if (updateError) console.error(`Token-Update fehlgeschlagen (Verbindung ${connection.id}):`, updateError.message)
-
-  connection.access_token = update.access_token
-  connection.expires_at = update.expires_at
-  if (update.refresh_token) connection.refresh_token = update.refresh_token
-  return update.access_token
+  const newExpiresAt = new Date(
+    Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000,
+  ).toISOString()
+  // Fehler beim Speichern sind hier nicht fatal: das neue Token gilt für diesen Aufruf trotzdem
+  await storeTokens(
+    admin,
+    connection.id,
+    connection.user_id,
+    tokenResponse.access_token,
+    typeof tokenResponse.refresh_token === 'string' && tokenResponse.refresh_token ? tokenResponse.refresh_token : null,
+    newExpiresAt,
+  )
+  connection.expires_at = newExpiresAt
+  return tokenResponse.access_token
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -371,7 +460,7 @@ const makeGoogleCall = (getToken: () => string) =>
 // Ende der gemeinsamen Blöcke
 // ---------------------------------------------------------------------------
 
-const ACTIONS = ['list', 'upload', 'get_download_link', 'delete', 'create_folder']
+const ACTIONS = ['list', 'upload', 'get_download_link', 'delete', 'create_folder', 'move']
 // OneDrive-IDs enthalten u. a. '!' (privat), Google-IDs nur [A-Za-z0-9_-]
 const ITEM_ID_RE = /^[A-Za-z0-9!._-]{1,256}$/
 const GOOGLE_FOLDER_MIME = 'application/vnd.google-apps.folder'
@@ -426,6 +515,52 @@ const isInsideOneDriveAppFolder = (item: any): boolean => {
   return rel === app || rel.startsWith(`${app}/`)
 }
 
+// 'move': Quelle und Ziel prüfen (je mindestens ein Segment, nicht in den eigenen Unterordner)
+const checkMovePaths = (from: string[], to: string[]) => {
+  if (from.length === 0 || to.length === 0) {
+    throw new HttpError(400, 'invalid_path', 'Quell- und Zielordner müssen angegeben werden.')
+  }
+  const fromKey = from.join('/').toLowerCase()
+  const toKey = to.join('/').toLowerCase()
+  if (toKey.startsWith(`${fromKey}/`)) {
+    throw new HttpError(400, 'invalid_target', 'Ein Ordner kann nicht in seinen eigenen Unterordner verschoben werden.')
+  }
+}
+
+const sourceNotFound = { error: 'Der Ordner wurde in der Cloud nicht gefunden.', code: 'source_not_found' }
+const targetParentNotFound = { error: 'Der Zielordner wurde in der Cloud nicht gefunden.', code: 'target_parent_not_found' }
+const TARGET_EXISTS_MESSAGE = 'Am Ziel existiert bereits ein Ordner oder eine Datei mit diesem Namen.'
+
+// Gemerkte Ordner der Mietverhältnisse (lease_cloud_folders) nach dem Umbenennen nachführen.
+// Fehlt die Tabelle noch (Migration nicht eingespielt), passiert nichts.
+// deno-lint-ignore no-explicit-any
+const updateLeaseFolderPaths = async (admin: any, userId: string, connectionId: string, fromRaw: string, toRaw: string) => {
+  const { data, error } = await admin
+    .from('lease_cloud_folders')
+    .select('lease_id, folder_path')
+    .eq('user_id', userId)
+    .eq('cloud_connection_id', connectionId)
+  if (error) {
+    if (!isMissingTable(error)) console.error(`Ordnerzuordnungen lesen fehlgeschlagen (Code ${error.code || '-'})`)
+    return
+  }
+  const now = new Date().toISOString()
+  // deno-lint-ignore no-explicit-any
+  for (const row of (data || []) as any[]) {
+    const current = typeof row.folder_path === 'string' ? row.folder_path : ''
+    if (current !== fromRaw && !current.startsWith(`${fromRaw}/`)) continue
+    const next = `${toRaw}${current.slice(fromRaw.length)}`
+    if (next.length > 2000) continue
+    const { error: updateError } = await admin
+      .from('lease_cloud_folders')
+      .update({ folder_path: next, updated_at: now })
+      .eq('lease_id', row.lease_id)
+      .eq('cloud_connection_id', connectionId)
+      .eq('user_id', userId)
+    if (updateError) console.error(`Ordnerzuordnung nachführen fehlgeschlagen (Code ${updateError.code || '-'})`)
+  }
+}
+
 Deno.serve(async (req: Request) => {
   const corsHeaders = buildCorsHeaders(req)
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -441,6 +576,8 @@ Deno.serve(async (req: Request) => {
     let path: unknown = ''
     let itemId: unknown = ''
     let folderName: unknown = ''
+    let fromPath: unknown = ''
+    let toPath: unknown = ''
     let providerParam: unknown = undefined
     let connectionId: unknown = undefined
     let fileToUpload: File | null = null
@@ -462,6 +599,8 @@ Deno.serve(async (req: Request) => {
         path = body?.path ?? ''
         itemId = body?.itemId ?? ''
         folderName = body?.folderName ?? ''
+        fromPath = body?.fromPath ?? ''
+        toPath = body?.toPath ?? ''
         providerParam = body?.provider
         connectionId = body?.connectionId
       }
@@ -470,6 +609,14 @@ Deno.serve(async (req: Request) => {
     }
 
     if (!ACTIONS.includes(action)) throw new HttpError(400, 'invalid_action', 'Unbekannte Aktion.')
+
+    // 'move': Pfade vor jedem Anbieter-Aufruf prüfen (Rohform für lease_cloud_folders)
+    const rawFrom = action === 'move' ? normalizeRawPath(fromPath) : null
+    const rawTo = action === 'move' ? normalizeRawPath(toPath) : null
+    if (action === 'move') {
+      if (!rawFrom || !rawTo) throw new HttpError(400, 'invalid_path', 'Ungültiger Ordnerpfad.')
+      if (rawFrom === rawTo) return respond({ success: true, moved: false })
+    }
 
     // Ältere App-Versionen schicken nur den Anbieter (Standard wie bisher: onedrive)
     const requestedProvider = providerParam || (connectionId ? undefined : 'onedrive')
@@ -621,6 +768,31 @@ Deno.serve(async (req: Request) => {
           json: { name: safeFolderName, folder: {}, '@microsoft.graph.conflictBehavior': 'rename' },
         })
         return respond({ success: true, folder: newFolder })
+      }
+
+      if (action === 'move') {
+        const from = splitPath(fromPath, true)
+        const to = splitPath(toPath, true)
+        checkMovePaths(from, to)
+        const source = await graph(`${oneDrivePath(from)}?$select=id,name,folder`)
+        if (!source?.id) return respond(sourceNotFound, 404)
+        if (!source.folder) throw new HttpError(400, 'not_a_folder', 'Es können nur Ordner umbenannt werden.')
+        // Gleiche ID = nur andere Groß-/Kleinschreibung desselben Ordners
+        const existing = await graph(`${oneDrivePath(to)}?$select=id`)
+        if (existing?.id && String(existing.id) !== String(source.id)) {
+          throw new HttpError(409, 'target_exists', TARGET_EXISTS_MESSAGE)
+        }
+        const parent = await graph(`${oneDrivePath(to.slice(0, -1))}?$select=id,folder`)
+        if (!parent?.id || !parent.folder) return respond(targetParentNotFound, 404)
+        const moved = await graph(`/me/drive/items/${encodeURIComponent(String(source.id))}`, {
+          method: 'PATCH',
+          json: { name: to[to.length - 1], parentReference: { id: String(parent.id) } },
+          conflictOk: true,
+        })
+        if (moved?.conflict) throw new HttpError(409, 'target_exists', TARGET_EXISTS_MESSAGE)
+        if (!moved) return respond(sourceNotFound, 404)
+        await updateLeaseFolderPaths(admin, user.id, connection.id, rawFrom as string, rawTo as string)
+        return respond({ success: true, moved: true })
       }
     }
 
@@ -814,6 +986,35 @@ Deno.serve(async (req: Request) => {
           json: { name: safeFolderName, mimeType: GOOGLE_FOLDER_MIME, parents: [parentId] },
         })
         return respond({ success: true, folder: newFolder })
+      }
+
+      if (action === 'move') {
+        const from = splitPath(fromPath, false)
+        const to = splitPath(toPath, false)
+        checkMovePaths(from, to)
+        const sourceId = await getFolderIdByPath(from)
+        if (!sourceId) return respond(sourceNotFound, 404)
+        // Google erlaubt doppelte Namen – trotzdem nie zwei gleichnamige Ordner erzeugen
+        const existingId = await getFolderIdByPath(to)
+        if (existingId && existingId !== sourceId) throw new HttpError(409, 'target_exists', TARGET_EXISTS_MESSAGE)
+        const parentId = await getFolderIdByPath(to.slice(0, -1))
+        if (!parentId) return respond(targetParentNotFound, 404)
+        const meta = await gdrive(`/files/${encodeURIComponent(sourceId)}`, { query: { fields: 'id, parents' } })
+        if (!meta) return respond(sourceNotFound, 404)
+        const parents: string[] = Array.isArray(meta.parents) ? meta.parents.map((p: unknown) => String(p)) : []
+        const query: Record<string, string> = { fields: 'id, name, parents' }
+        if (!parents.includes(parentId)) {
+          query.addParents = parentId
+          if (parents.length > 0) query.removeParents = parents.join(',')
+        }
+        const updated = await gdrive(`/files/${encodeURIComponent(sourceId)}`, {
+          method: 'PATCH',
+          json: { name: to[to.length - 1] },
+          query,
+        })
+        if (!updated) return respond(sourceNotFound, 404)
+        await updateLeaseFolderPaths(admin, user.id, connection.id, rawFrom as string, rawTo as string)
+        return respond({ success: true, moved: true })
       }
     }
 

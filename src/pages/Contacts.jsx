@@ -8,7 +8,10 @@ import Input from '../components/ui/Input';
 import { Plus, Phone, Mail, MapPin, Loader2, User, Search, MoreVertical, Edit2, Trash2, Send, Home, Filter, AlertCircle, MessageSquare, FileText, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
+import { hasSmtpSettings } from '../lib/smtpSettings';
 
 // E-Mail-Anhänge: Grenzen für Anzahl, Gesamtgröße und Dateitypen
 const MAX_ATTACHMENTS = 10;
@@ -74,7 +77,7 @@ const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
             onClick={(e) => e.stopPropagation()}
         >
             <div style={{ display: 'flex', flexDirection: 'column', padding: '4px' }}>
-                <button
+                {onEdit && <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onEdit(); }}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
@@ -87,7 +90,7 @@ const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                 >
                     <Edit2 size={16} /> Bearbeiten
-                </button>
+                </button>}
                 <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onMessage(); }}
                     style={{
@@ -102,8 +105,8 @@ const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
                 >
                     <Send size={16} /> Nachricht senden
                 </button>
-                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                <button
+                {onDelete && <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />}
+                {onDelete && <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onDelete(); }}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
@@ -116,7 +119,7 @@ const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                 >
                     <Trash2 size={16} /> Löschen
-                </button>
+                </button>}
             </div>
         </div>
     );
@@ -131,6 +134,8 @@ const ActionMenu = ({ onEdit, onDelete, onMessage }) => {
 
 const Contacts = () => {
     const { user } = useAuth();
+    const { portfolios, selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const navigate = useNavigate();
     const [contacts, setContacts] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -200,7 +205,7 @@ const Contacts = () => {
         try {
             const { data, error } = await supabase
                 .from('properties')
-                .select('id, street, house_number')
+                .select('id, street, house_number, portfolio_id')
                 .order('street', { ascending: true });
             if (!error && data) {
                 setProperties(data);
@@ -213,12 +218,7 @@ const Contacts = () => {
     const checkSmtpSettings = async () => {
         if (!user) return;
         try {
-            const { data } = await supabase
-                .from('user_smtp_settings')
-                .select('id')
-                .eq('user_id', user.id)
-                .maybeSingle();
-            setSmtpConfigured(!!data);
+            setSmtpConfigured(await hasSmtpSettings(user.id));
         } catch (err) {
             console.error('Error checking SMTP settings:', err);
         }
@@ -266,6 +266,42 @@ const Contacts = () => {
         });
     }, [contacts, filterType, filterPropertyId, searchTerm]);
 
+    // Neue Kontakte gehören dem Eigentümer des gewählten Portfolios, wenn es ein freigegebenes Portfolio
+    // mit Schreibrecht „kontakte" ist (sonst lägen sie beim Freigabe-Nutzer und wären für den Eigentümer
+    // unsichtbar). Ohne Portfolio-Auswahl bzw. im eigenen Portfolio: eigenes Konto.
+    const sharedContactPortfolio = useMemo(() => {
+        if (!user || !selectedPortfolioID) return null;
+        const portfolio = (portfolios || []).find(p => p.id === selectedPortfolioID);
+        if (!portfolio?.user_id || portfolio.user_id === user.id) return null;
+        if (!perm || perm.loadingPermissions || !perm.canWrite('kontakte', portfolio.id)) return null;
+        return portfolio;
+    }, [user, selectedPortfolioID, portfolios, perm]);
+    const newContactOwnerId = sharedContactPortfolio?.user_id || user?.id;
+
+    // Bearbeiten/Löschen je Kontakt (wie die RLS von contacts): eigene Kontakte immer; Kontakte eines
+    // anderen Eigentümers nur mit Schreibrecht „Kontakte" für eines seiner Portfolios. Mit einem Mieter
+    // verknüpfte Kontakte werden über den Mieter gepflegt (Schreibrecht „Mietverhältnisse" im Portfolio
+    // eines seiner Mietverträge). Die Datenbank prüft zusätzlich.
+    const propertyPortfolioById = useMemo(
+        () => Object.fromEntries(properties.map(p => [p.id, p.portfolio_id])),
+        [properties]
+    );
+    const canEditContact = (contact) => {
+        if (!user || !perm || perm.loadingPermissions) return true;
+        if (!contact?.user_id || contact.user_id === user.id) return true;
+        if (isLinkedTenantContact(contact)) {
+            return (contact.tenant?.leases || []).some(l => {
+                const portfolioId = propertyPortfolioById[l.unit?.property_id];
+                return !!portfolioId && perm.canWrite('mietverhaeltnisse', portfolioId);
+            });
+        }
+        // Fremde Kontakte mit Mieter-Bezug darf nur der Eigentümer ändern (RLS: tenant_id is null)
+        if (contact.tenant_id) return false;
+        return (portfolios || []).some(p => p.user_id === contact.user_id && perm.canWrite('kontakte', p.id));
+    };
+    // Verknüpfte Mieter-Kontakte werden nie direkt gelöscht (Hinweis in handleDelete)
+    const canDeleteContact = (contact) => isLinkedTenantContact(contact) || canEditContact(contact);
+
     const handleOpenAdd = () => {
         setEditingContact(null);
         setFormData({
@@ -300,12 +336,16 @@ const Contacts = () => {
             alert('Dieser Kontakt ist mit einem Mieter verknüpft und wird automatisch aus den Mieterdaten gepflegt. Bitte verwalten Sie den Mieter unter „Mietverhältnisse“.');
             return;
         }
+        if (!canEditContact(contact)) {
+            alert('Für diesen Kontakt haben Sie nur Leserechte (Freigabe).');
+            return;
+        }
         if (!window.confirm('Möchten Sie diesen Kontakt wirklich löschen?')) return;
         try {
             const { data, error } = await supabase.from('contacts').delete().eq('id', contact.id).select('id');
             if (error) throw error;
             if (!data || data.length === 0) {
-                alert('Der Kontakt konnte nicht gelöscht werden. Kontakte können nur vom Eigentümer gelöscht werden.');
+                alert('Der Kontakt konnte nicht gelöscht werden. Kontakte können nur vom Eigentümer oder von Nutzern mit Schreibrecht „Kontakte“ für ein Portfolio des Eigentümers gelöscht werden.');
                 return;
             }
             fetchContacts();
@@ -317,6 +357,7 @@ const Contacts = () => {
     const handleSave = async () => {
         if (isSaving) return;
         if (!formData.name) return alert('Name ist erforderlich.');
+        if (editingContact && !canEditContact(editingContact)) return alert('Für diesen Kontakt haben Sie nur Leserechte (Freigabe).');
         try {
             setIsSaving(true);
 
@@ -356,13 +397,13 @@ const Contacts = () => {
                         .select('id');
                     if (error) throw error;
                     if (!data || data.length === 0) {
-                        alert('Die Änderung konnte nicht gespeichert werden. Kontakte können nur vom Eigentümer bearbeitet werden.');
+                        alert('Die Änderung konnte nicht gespeichert werden. Kontakte können nur vom Eigentümer oder von Nutzern mit Schreibrecht „Kontakte“ für ein Portfolio des Eigentümers bearbeitet werden.');
                         return;
                     }
                 }
             } else {
                 const payload = {
-                    user_id: user.id,
+                    user_id: newContactOwnerId,
                     name: formData.name,
                     contact_type: formData.contact_type,
                     email: formData.email,
@@ -793,8 +834,8 @@ const Contacts = () => {
 
                                     {/* Action Menu */}
                                     <ActionMenu
-                                        onEdit={() => handleOpenEdit(contact)}
-                                        onDelete={() => handleDelete(contact)}
+                                        onEdit={canEditContact(contact) ? () => handleOpenEdit(contact) : null}
+                                        onDelete={canDeleteContact(contact) ? () => handleDelete(contact) : null}
                                         onMessage={() => handleMessage(contact)}
                                     />
                                 </div>
@@ -882,6 +923,15 @@ const Contacts = () => {
                         <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
                         <span>
                             Dieser Kontakt ist mit einem Mieter verknüpft. Name, Anschrift und Typ werden aus den Mieterdaten übernommen und können unter „Mietverhältnisse“ geändert werden. E-Mail und Telefon werden hier direkt im Mieter-Datensatz gespeichert.
+                        </span>
+                    </div>
+                )}
+                {!editingContact && sharedContactPortfolio && (
+                    <div style={{ display: 'flex', gap: '8px', padding: '10px 12px', marginBottom: 'var(--spacing-md)', backgroundColor: 'rgba(59, 130, 246, 0.06)', border: '1px solid rgba(59, 130, 246, 0.2)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                        <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                        <span>
+                            Der Kontakt wird im Bestand des Eigentümers des freigegebenen Portfolios „{sharedContactPortfolio.name}“ angelegt
+                            und ist für Sie sichtbar, solange die Freigabe besteht.
                         </span>
                     </div>
                 )}

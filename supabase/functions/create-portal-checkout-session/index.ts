@@ -14,6 +14,15 @@
  *   an den Vermieter einbehalten.
  * - Zahlarten Karte + SEPA-Lastschrift (Sofort ist bei Stripe abgekündigt); Session läuft nach
  *   31 Minuten ab, damit nicht mehrere offene Sessions lange parallel gültig bleiben.
+ *
+ * Wave 3 (E3-23, D1b-16):
+ * - Falsche PIN / gesperrter Link (RPC liefert {error, code}) → 403 mit der Meldung der RPC
+ *   (bisher fälschlich „kein offener Betrag“). Fachliche RPC-Fehler (P0001) mit ihrer Meldung.
+ * - Je Forderung nur EINE offene Checkout-Session: noch offene frühere Sessions werden vor dem
+ *   Anlegen einer neuen beendet (POST /v1/checkout/sessions/{id}/expire). Jede neue Session wird
+ *   als Systemnotiz (portal_event = checkout_started) in der Forderungsakte vermerkt.
+ * - metadata.quote_date = Berliner Kalendertag, zu dem der Betrag berechnet wurde; der Webhook
+ *   bucht die Zahlung zu diesem Stichtag (sonst fehlt bei Zahlung nach Mitternacht ein Tageszins).
  */
 
 // @ts-ignore
@@ -92,6 +101,98 @@ const serviceHeaders = {
     Authorization: `Bearer ${SUPABASE_KEY}`,
 };
 
+/** Kalenderdatum (YYYY-MM-DD) in Europe/Berlin – derselbe Stichtag wie claim_today() in der DB. */
+function berlinDate(ms: number = Date.now()): string {
+    return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Berlin" }).format(new Date(ms));
+}
+
+/** Prüft Token + PIN über get_public_claim_by_token; liefert die Forderungsdaten oder wirft PublicError. */
+async function loadClaimForPortal(token: string, pin: string): Promise<any> {
+    const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_public_claim_by_token`, {
+        method: "POST",
+        headers: { ...serviceHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ p_token: token, p_pin: pin })
+    });
+
+    if (!rpcRes.ok) {
+        const err = await rpcRes.json().catch(() => null);
+        console.warn("Portal credential check failed:", rpcRes.status, err?.hint ?? "");
+        // Fachliche Meldungen der RPC (RAISE EXCEPTION, P0001) dürfen an den Mieter gehen
+        if (err?.code === "P0001" && typeof err?.message === "string" && err.message) {
+            throw new PublicError(err.message, 403);
+        }
+        throw new PublicError("Zugriff verweigert.", 403);
+    }
+
+    const claimDetails = await rpcRes.json().catch(() => null);
+    // Falsche PIN / gesperrter Link: die RPC antwortet mit 200 und {error, code}
+    if (claimDetails?.error || claimDetails?.code) {
+        let message = typeof claimDetails.error === "string" && claimDetails.error ? claimDetails.error : "Zugriff verweigert.";
+        const attemptsLeft = Number(claimDetails.attempts_left);
+        if (claimDetails.code === "invalid_pin" && attemptsLeft > 0) {
+            message += ` Verbleibende Versuche: ${attemptsLeft}.`;
+        }
+        throw new PublicError(message, 403);
+    }
+    return claimDetails;
+}
+
+const CHECKOUT_SESSION_RE = /^cs_[A-Za-z0-9_]+$/;
+
+/** Beendet noch offene, früher gestartete Checkout-Sessions dieser Forderung (Fehler werden ignoriert). */
+async function expireOpenCheckoutSessions(claimId: string): Promise<void> {
+    const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/claim_events?claim_id=eq.${encodeURIComponent(claimId)}`
+        + `&event_type=eq.note_added&event_metadata->>portal_event=eq.checkout_started`
+        + `&select=event_metadata&order=event_date.desc&limit=20`,
+        { headers: serviceHeaders }
+    );
+    const rows = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(rows)) {
+        console.warn("Checkout-Sessions der Forderung nicht lesbar:", res.status);
+        return;
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const row of rows) {
+        const sessionId = row?.event_metadata?.session_id;
+        const expiresAt = Number(row?.event_metadata?.expires_at);
+        if (typeof sessionId !== "string" || !CHECKOUT_SESSION_RE.test(sessionId)) continue;
+        if (!Number.isFinite(expiresAt) || expiresAt <= nowSec) continue;
+        try {
+            // Bereits bezahlte oder abgelaufene Sessions lehnt Stripe ab – das ist hier gewollt
+            await stripePost(`/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {});
+            console.log(`Expired previous checkout session ${sessionId} for claim ${claimId}`);
+        } catch (_e) {
+            console.log(`Previous checkout session ${sessionId} not expired (already completed or expired)`);
+        }
+    }
+}
+
+/** Systemnotiz in der Forderungsakte: neue Online-Zahlung gestartet (für das Ablösen offener Sessions). */
+async function recordCheckoutStarted(claimId: string, landlordId: string, session: any, amount: number, quoteDate: string): Promise<void> {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/claim_events`, {
+        method: "POST",
+        headers: { ...serviceHeaders, "Content-Type": "application/json", Prefer: "return=minimal" },
+        body: JSON.stringify({
+            user_id: landlordId,
+            claim_id: claimId,
+            event_type: "note_added",
+            description: `Mieterportal: Online-Zahlung über ${amount.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} EUR gestartet (noch nicht bezahlt)`,
+            event_metadata: {
+                source: "claim_portal",
+                portal_event: "checkout_started",
+                session_id: session.id,
+                expires_at: session.expires_at,
+                amount,
+                quote_date: quoteDate,
+            },
+        }),
+    });
+    if (!res.ok) {
+        console.error(`Checkout-Notiz für Forderung ${claimId} nicht gespeichert:`, res.status);
+    }
+}
+
 serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
@@ -106,20 +207,15 @@ serve(async (req: Request) => {
             throw new PublicError("Bitte Zugangscode und PIN angeben.");
         }
 
-        // 1. Validate token & pin by calling get_public_claim_by_token RPC
-        const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_public_claim_by_token`, {
-            method: "POST",
-            headers: { ...serviceHeaders, "Content-Type": "application/json" },
-            body: JSON.stringify({ p_token: token, p_pin: pin })
-        });
-
-        if (!rpcRes.ok) {
-            console.warn("Portal credential check failed:", rpcRes.status);
-            await rpcRes.body?.cancel();
-            throw new PublicError("Zugriff verweigert.", 403);
+        // 1. Token + PIN prüfen und offenen Betrag laden. Stichtag = Berliner Kalendertag; liegt
+        //    Mitternacht zwischen Anfang und Ende der Abfrage, einmal neu laden (eindeutiger Stichtag).
+        let quoteDate = berlinDate();
+        let claimDetails = await loadClaimForPortal(token, pin);
+        const quoteDateAfter = berlinDate();
+        if (quoteDateAfter !== quoteDate) {
+            quoteDate = quoteDateAfter;
+            claimDetails = await loadClaimForPortal(token, pin);
         }
-
-        const claimDetails = await rpcRes.json().catch(() => null);
         const openAmount = Math.round(Number(claimDetails?.totals?.total_due ?? 0) * 100) / 100;
 
         if (!(openAmount > 0)) {
@@ -192,10 +288,15 @@ serve(async (req: Request) => {
             "payment_intent_data[metadata][claim_id]": claimId,
             "metadata[claim_id]": claimId,
             "metadata[claim_amount]": openAmount.toFixed(2),
+            "metadata[quote_date]": quoteDate,
             "metadata[payment_type]": "claim_checkout"
         };
 
+        // Nur eine offene Zahlung je Forderung: frühere, noch offene Sessions vorher beenden
+        await expireOpenCheckoutSessions(claimId);
+
         const session = await stripePost("/checkout/sessions", sessionParams);
+        await recordCheckoutStarted(claimId, landlordId, session, openAmount, quoteDate);
 
         return new Response(JSON.stringify({ url: session.url }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },

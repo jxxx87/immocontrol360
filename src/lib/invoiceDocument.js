@@ -4,7 +4,8 @@
 // dieselbe Schreibvorlage (document_templates type 'fewo_invoice'/'fewo_credit_note'),
 // derselbe Renderer, dieselbe Nummernvergabe und dieselben Status-Regeln.
 //
-// Status (Spalte invoices.status, Text ohne CHECK):
+// Status (Spalte invoices.status; mit dem DB-Trigger protect_issued_invoice sind ausgestellte Belege
+// auch in der Datenbank festgeschrieben – erlaubt bleibt nur issued -> credited):
 //   draft       Entwurf – frei änderbar, Druck mit Vermerk „ENTWURF"
 //   issued      ausgestellt – festgeschrieben, Korrektur nur per Gutschrift
 //   credited    ausgestellte Rechnung, zu der eine Gutschrift (Storno) erstellt wurde
@@ -16,6 +17,9 @@
 
 import { supabase } from './supabase';
 import { openSansFontFaceCss, fontOrigin } from './fontFaces';
+import { loadHtml2Pdf } from './htmlToPdf';
+import { DEFAULT_TEMPLATES } from './defaultTemplates';
+import { LETTER_PAGE_CSS, scopeLetterCss } from './letterDocumentCss';
 
 // ─── Status ──────────────────────────────────────────────────────────
 export const INVOICE_STATUS = Object.freeze({
@@ -147,7 +151,7 @@ const isSafeUrl = (value, attrName) => {
 };
 
 // Entfernt aktive Inhalte (Skripte, Event-Handler, javascript:-URLs, eingebettete Objekte) aus Vorlagen-HTML.
-// Wichtig: Das Druckfenster hat dieselbe Herkunft wie die App, und html2pdf klont den Inhalt ins App-Dokument.
+// Wichtig: Das Druckfenster hat dieselbe Herkunft wie die App, und die PDF-Erzeugung klont den Inhalt ins App-Dokument.
 export const sanitizeTemplateHtml = (html) => {
     if (!html) return '';
     if (typeof DOMParser === 'undefined') return String(html).replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -299,15 +303,10 @@ export const getInvoiceMissingFields = (inv, portfolio, { legacyCredit = false }
 };
 
 // ─── Standardvorlagen ────────────────────────────────────────────────
-const chip = (id, label) => `<span data-type="mention" data-id="${id}" data-label="${label}">${label}</span>`;
+// Gemeinsame Quelle mit dem Vorlagen-Editor (lib/defaultTemplates.js)
+export const DEFAULT_FEWO_INVOICE = DEFAULT_TEMPLATES.fewo_invoice.content_html;
 
-const FOOTER = `<div class="letter-footer"><div class="footer-col"><strong>Rechnungssteller</strong><br>${chip('vermieter_name', 'Vermieter Name')}<br>${chip('vermieter_adresse', 'Vermieter Anschrift')}</div><div class="footer-col"><strong>Kontakt &amp; Steuer</strong><br>${chip('vermieter_kontakt', 'Vermieter Kontakt')}<br>${chip('vermieter_steuer_angabe', 'Steuernummer / USt-IdNr.')}</div><div class="footer-col"><strong>Bankverbindung</strong><br>${chip('vermieter_bankverbindung', 'Vermieter Bankverbindung')}</div></div>`;
-
-const DATE_BOX_STYLE = 'text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;';
-
-export const DEFAULT_FEWO_INVOICE = `<div class="letter-page"><div class="letter-sender">${chip('vermieter_name', 'Vermieter Name')} · ${chip('vermieter_adresse', 'Vermieter Anschrift')}</div><div class="letter-header-row"><div class="letter-recipient"><strong>${chip('gast_name', 'Gast-Name')}</strong><br>${chip('gast_adresse', 'Gast-Adresse')}</div><div class="letter-date" style="${DATE_BOX_STYLE}">Rechnungsnummer: <strong>${chip('rechnungsnummer', 'Rechnungsnummer')}</strong><br>Rechnungsdatum: <strong>${chip('rechnungsdatum', 'Rechnungsdatum')}</strong><br>Leistungszeitraum: <strong>${chip('buchungszeitraum', 'Leistungszeitraum')}</strong></div></div><div class="letter-subject">Rechnung Nr. ${chip('rechnungsnummer', 'Rechnungsnummer')}</div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen in Rechnung zu stellen:</p><p>${chip('positions_tabelle', 'Rechnungspositionen-Tabelle')}</p><p>Bitte überweisen Sie den fälligen Gesamtbetrag innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Mit freundlichen Grüßen,</p><p><strong>${chip('vermieter_name', 'Vermieter Name')}</strong></p></div>${FOOTER}</div>`;
-
-export const DEFAULT_FEWO_CREDIT_NOTE = `<div class="letter-page"><div class="letter-sender">${chip('vermieter_name', 'Vermieter Name')} · ${chip('vermieter_adresse', 'Vermieter Anschrift')}</div><div class="letter-header-row"><div class="letter-recipient"><strong>${chip('gast_name', 'Gast-Name')}</strong><br>${chip('gast_adresse', 'Gast-Adresse')}</div><div class="letter-date" style="${DATE_BOX_STYLE}">Gutschriftsnummer: <strong>${chip('rechnungsnummer', 'Rechnungsnummer')}</strong><br>Datum: <strong>${chip('rechnungsdatum', 'Rechnungsdatum')}</strong><br>Zur Rechnung: <strong>${chip('original_rechnungsnummer', 'Ref-Rechnungsnummer')}</strong><br>Leistungszeitraum: <strong>${chip('buchungszeitraum', 'Leistungszeitraum')}</strong></div></div><div class="letter-subject">Gutschrift Nr. ${chip('rechnungsnummer', 'Rechnungsnummer')}</div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>hiermit erhalten Sie die Gutschrift (Stornierung) zu unserer Rechnung Nr. ${chip('original_rechnungsnummer', 'Ref-Rechnungsnummer')} vom ${chip('original_rechnungsdatum', 'Ref-Rechnungsdatum')}:</p><p>${chip('positions_tabelle', 'Rechnungspositionen-Tabelle')}</p><p>Der Gutschriftbetrag wird Ihrem Konto in den nächsten Tagen gutgeschrieben oder vereinbarungsgemäß verrechnet.</p><p>Mit freundlichen Grüßen,</p><p><strong>${chip('vermieter_name', 'Vermieter Name')}</strong></p></div>${FOOTER}</div>`;
+export const DEFAULT_FEWO_CREDIT_NOTE = DEFAULT_TEMPLATES.fewo_credit_note.content_html;
 
 // ─── Vorlagen laden ──────────────────────────────────────────────────
 // Portfolio-Vorlage (bevorzugt die des Portfolio-Eigentümers, sonst die zuletzt geänderte) -> globale Vorlage -> Standard.
@@ -361,27 +360,15 @@ export const fetchInvoiceTemplates = async (user, portfolioId, { ownerId = null 
 };
 
 // ─── Dokument-CSS (auf .ic-invoice-doc begrenzt) ─────────────────────
-// Steht im <body>, damit html2pdf (klont den Inhalt ins App-Dokument) dieselben Regeln mitnimmt.
-// Werte entsprechen der Editor-Darstellung in index.css (inkl. globalem Margin/Padding-Reset).
+// Steht im <body>, damit die PDF-Erzeugung (klont den Inhalt ins App-Dokument) dieselben Regeln mitnimmt.
+// Seitengeometrie aus derselben Quelle wie Editor und Druckfenster (lib/letterPage.css), auf den
+// Container begrenzt; hier nur Rechnungs-Besonderheiten (kein Schatten, Seitenumbrüche, Entwurfsvermerk).
 const SCOPED_CSS = `
 .ic-invoice-doc { position: relative; background: #ffffff; color: #000000; font-family: 'Open Sans', Arial, Helvetica, sans-serif; font-size: 11pt; line-height: 1.5; text-align: left; }
 .ic-invoice-doc *, .ic-invoice-doc *::before, .ic-invoice-doc *::after { box-sizing: border-box; margin: 0; padding: 0; }
-.ic-invoice-doc .letter-page { width: 210mm !important; height: 297mm !important; min-height: 297mm !important; max-height: 297mm !important; padding: 20mm 20mm 35mm 25mm !important; margin: 0 auto !important; background: #ffffff !important; color: #000000 !important; box-shadow: none !important; border: none !important; border-radius: 0 !important; font-family: 'Open Sans', Arial, Helvetica, sans-serif !important; font-size: 11pt !important; line-height: 1.5 !important; position: relative !important; display: flex !important; flex-direction: column !important; text-align: left !important; overflow: hidden !important; page-break-after: always; break-after: page; page-break-inside: avoid; }
+${scopeLetterCss(LETTER_PAGE_CSS, '.ic-invoice-doc')}
+.ic-invoice-doc .letter-page { box-shadow: none !important; border-radius: 0 !important; page-break-after: always; break-after: page; page-break-inside: avoid; }
 .ic-invoice-doc .letter-page:last-child { page-break-after: auto; break-after: auto; }
-.ic-invoice-doc .letter-page > p { min-height: 1.2em; margin-bottom: 1em; }
-.ic-invoice-doc .letter-page p:empty, .ic-invoice-doc .letter-page p:has(> br:only-child), .ic-invoice-doc .letter-body p:empty, .ic-invoice-doc .letter-body p:has(> br:only-child) { min-height: 1.6em; margin-bottom: 1em !important; }
-.ic-invoice-doc .letter-sender { font-size: 8pt; color: #555555; border-bottom: 1px solid #cccccc; padding-bottom: 2mm; margin-bottom: 5mm; text-transform: uppercase; letter-spacing: 0.5px; }
-.ic-invoice-doc .letter-sender:has(+ hr), .ic-invoice-doc .letter-sender:has(+ .editor-hr) { border-bottom: none !important; padding-bottom: 0 !important; margin-bottom: 3mm !important; }
-.ic-invoice-doc .editor-hr, .ic-invoice-doc .letter-page hr { border: none; border-top: 1px solid #cccccc; margin: 2mm 0 5mm 0; width: 100%; display: block; height: 0; }
-.ic-invoice-doc .letter-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10mm; }
-.ic-invoice-doc .letter-recipient { width: 85mm; font-size: 10pt; line-height: 1.4; color: #111111; text-align: left; }
-.ic-invoice-doc .letter-date { font-size: 10pt; color: #333333; text-align: right; }
-.ic-invoice-doc .letter-subject { font-size: 13pt; font-weight: bold; margin-bottom: 4mm; color: #000000; text-align: left; }
-.ic-invoice-doc .letter-object { font-size: 10pt; color: #444444; margin-bottom: 8mm; padding-bottom: 2mm; border-bottom: 1px dotted #e2e8f0; text-align: left; }
-.ic-invoice-doc .letter-body { flex-grow: 1; flex-shrink: 1; min-height: 0; overflow: hidden; margin-bottom: 12mm; font-size: 11pt; line-height: 1.6; text-align: left; }
-.ic-invoice-doc .letter-body p { margin-bottom: 1em !important; min-height: 1.6em; }
-.ic-invoice-doc .letter-footer { position: absolute !important; bottom: 10mm !important; left: 25mm !important; right: 20mm !important; height: 18mm !important; margin-top: 0 !important; display: flex !important; justify-content: space-between !important; border-top: 1px solid #dddddd !important; padding-top: 3mm !important; font-size: 8pt !important; color: #666666 !important; line-height: 1.4 !important; text-align: left !important; background-color: #ffffff !important; }
-.ic-invoice-doc .footer-col { width: 30%; }
 .ic-invoice-doc .variable-chip { background: transparent !important; border: none !important; padding: 0 !important; color: inherit !important; font-weight: inherit !important; font-size: inherit !important; display: inline !important; }
 .ic-invoice-doc table { width: 100%; border-collapse: collapse; }
 .ic-invoice-doc tr { break-inside: avoid; page-break-inside: avoid; }
@@ -648,47 +635,7 @@ export const printInvoice = async (inv, { user, portfolios = [], legacyCredit = 
     }
 };
 
-// ─── PDF (html2pdf, bis zur Aufnahme als npm-Paket von cdnjs) ────────
-const HTML2PDF_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js';
-const HTML2PDF_TIMEOUT_MS = 20000;
-let html2pdfLoading = null;
-
-const loadHtml2Pdf = () => {
-    if (window.html2pdf) return Promise.resolve(window.html2pdf);
-    if (html2pdfLoading) return html2pdfLoading;
-    html2pdfLoading = new Promise((resolve, reject) => {
-        const existing = document.querySelector(`script[src="${HTML2PDF_SRC}"]`);
-        const script = existing || document.createElement('script');
-        let timer = null;
-        const cleanup = () => {
-            clearTimeout(timer);
-            script.removeEventListener('load', onLoad);
-            script.removeEventListener('error', onError);
-        };
-        const fail = () => {
-            cleanup();
-            html2pdfLoading = null;
-            if (!existing && script.parentNode) script.parentNode.removeChild(script);
-            reject(new Error('Die PDF-Komponente konnte nicht geladen werden. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.'));
-        };
-        function onLoad() {
-            cleanup();
-            if (window.html2pdf) resolve(window.html2pdf);
-            else fail();
-        }
-        function onError() { fail(); }
-        script.addEventListener('load', onLoad);
-        script.addEventListener('error', onError);
-        timer = setTimeout(() => { if (window.html2pdf) onLoad(); else fail(); }, HTML2PDF_TIMEOUT_MS);
-        if (!existing) {
-            script.src = HTML2PDF_SRC;
-            script.async = true;
-            script.referrerPolicy = 'no-referrer';
-            document.head.appendChild(script);
-        }
-    });
-    return html2pdfLoading;
-};
+// ─── PDF (html2canvas + jsPDF aus dem App-Bundle, siehe lib/htmlToPdf.js) ────────
 
 // Erzeugt und lädt das PDF. Fehler werden an den Aufrufer weitergegeben; das Hilfs-iframe wird immer entfernt.
 export const downloadInvoicePdf = async (inv, { user, portfolios = [], legacyCredit = false } = {}) => {
@@ -786,13 +733,34 @@ export const issueInvoice = async (invoiceId) => {
     return data[0];
 };
 
+// Datenbank-Funktion (noch) nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
 // Korrektur einer ausgestellten Rechnung: eigener Gutschrift-Beleg (eigene Nummer aus dem Nummernkreis,
 // eigenes Datum, Bezug zur Rechnung, negative Beträge); das Original bleibt unverändert und wird als
-// 'credited' (storniert) markiert. Schlägt die Markierung fehl, wird die neue Gutschrift wieder entfernt.
+// 'credited' (storniert) markiert. Bevorzugt serverseitig in EINER Transaktion (create_credit_note,
+// die Datenbank schützt ausgestellte Belege vor Änderung und Löschung); ohne diese Funktion der
+// bisherige Weg in der App.
 export const createCreditNote = async (original) => {
     if (getInvoiceStatus(original) !== INVOICE_STATUS.ISSUED) {
         throw new Error('Eine Gutschrift kann nur zu einer ausgestellten Rechnung erstellt werden.');
     }
+    // Ohne RPC-Unterstützung des Clients (z. B. Abfrage-Stub der Unit-Tests) gilt der bisherige Weg
+    if (typeof supabase.rpc !== 'function') return createCreditNoteInApp(original);
+    const { data, error, status } = await supabase.rpc('create_credit_note', { p_invoice_id: original.id });
+    if (!error) {
+        const creditNote = Array.isArray(data) ? data[0] : data;
+        if (creditNote?.id) return creditNote;
+        throw new Error('Die Gutschrift wurde erstellt, konnte aber nicht geladen werden. Bitte laden Sie die Rechnungsliste neu.');
+    }
+    if (!isMissingRpc(error, status)) throw error;
+    return createCreditNoteInApp(original);
+};
+
+// Bisheriger Weg (ohne create_credit_note): Gutschrift anlegen, dann das Original markieren;
+// schlägt die Markierung fehl, wird die neue Gutschrift wieder entfernt.
+const createCreditNoteInApp = async (original) => {
     const negate = (v) => {
         const x = r2(-num(v));
         return Object.is(x, -0) ? 0 : x;

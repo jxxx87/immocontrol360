@@ -8,6 +8,12 @@ import { supabase } from '../../lib/supabase';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useSubscription } from '../../context/SubscriptionContext';
 
+const DEFAULT_OPENING_HOURS = 'Mo-Fr 9:00 - 17:00 Uhr';
+
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
 const Topbar = ({ onboardingLocked }) => {
     const { user, signOut, isTenant, roleData } = useAuth();
     const { portfolios, selectedPortfolioID, setSelectedPortfolioID } = usePortfolio();
@@ -15,7 +21,8 @@ const Topbar = ({ onboardingLocked }) => {
 
     const navigate = useNavigate();
     const { isMobile } = useViewMode();
-    const [openingHours, setOpeningHours] = React.useState({ visible: true, text: 'Mo-Fr 9:00 - 17:00 Uhr' });
+    // Erst nach dem Laden der Vermieter-Einstellung anzeigen (kein kurzes Aufblitzen ausgeblendeter Zeiten)
+    const [openingHours, setOpeningHours] = React.useState({ visible: false, text: DEFAULT_OPENING_HOURS });
 
     // Calculate remaining days
     const trialDaysLeft = subscription?.trial_ends_at
@@ -90,41 +97,64 @@ const Topbar = ({ onboardingLocked }) => {
 
 
     React.useEffect(() => {
-        if (isTenant && roleData?.property_id) {
-            const fetchOwnerSettings = async () => {
-                try {
-                    // Trace back to owner: property -> portfolio -> user_id
-                    const { data: propData } = await supabase
-                        .from('properties')
-                        .select('portfolio:portfolios(user_id)')
-                        .eq('id', roleData.property_id)
-                        .single();
+        if (!isTenant) return;
+        let cancelled = false;
 
-                    if (propData?.portfolio?.user_id) {
-                        const { data: profile, error: profError } = await supabase
-                            .from('profiles')
-                            .select('settings_opening_hours_visible, settings_opening_hours_text')
-                            .eq('id', propData.portfolio.user_id)
-                            .single();
+        // Öffnungszeiten des Vermieters: nur diese zwei Werte über die Datenbank-Funktion –
+        // nicht mehr die ganze Profil-/Portfolio-Zeile (Bankverbindung, Steuernummer …)
+        const fetchOwnerSettings = async () => {
+            let settings = null;
+            try {
+                const { data: info, error: infoError, status: infoStatus } = await supabase.rpc('get_my_landlord_info');
 
-                        if (profError) {
-                            console.warn('Could not fetch owner profile settings:', profError.message);
-                            return;
-                        }
+                if (!infoError) {
+                    if (info) {
+                        settings = { visible: info.opening_hours_visible, text: info.opening_hours_text };
+                    }
+                } else if (isMissingRpc(infoError, infoStatus)) {
+                    // Bisheriger Weg (Funktion noch nicht eingespielt): property -> portfolio -> Profil
+                    if (roleData?.property_id) {
+                        const { data: propData } = await supabase
+                            .from('properties')
+                            .select('portfolio:portfolios(user_id)')
+                            .eq('id', roleData.property_id)
+                            .maybeSingle();
 
-                        if (profile) {
-                            setOpeningHours({
-                                visible: profile.settings_opening_hours_visible !== false,
-                                text: profile.settings_opening_hours_text || 'Mo-Fr 9:00 - 17:00 Uhr'
-                            });
+                        if (propData?.portfolio?.user_id) {
+                            const { data: profile, error: profError } = await supabase
+                                .from('profiles')
+                                .select('settings_opening_hours_visible, settings_opening_hours_text')
+                                .eq('id', propData.portfolio.user_id)
+                                .maybeSingle();
+
+                            if (profError) {
+                                console.warn('Could not fetch owner profile settings:', profError.message);
+                            } else if (profile) {
+                                settings = {
+                                    visible: profile.settings_opening_hours_visible,
+                                    text: profile.settings_opening_hours_text
+                                };
+                            }
                         }
                     }
-                } catch (err) {
-                    console.error('Error fetching owner settings:', err);
+                } else {
+                    console.warn('Could not fetch owner opening hours:', infoError.message);
                 }
-            };
-            fetchOwnerSettings();
-        }
+            } catch (err) {
+                console.error('Error fetching owner settings:', err);
+            }
+
+            // Ohne Vermieter-Einstellung wie bisher die Standardzeiten
+            if (!cancelled) {
+                setOpeningHours({
+                    visible: settings?.visible !== false,
+                    text: settings?.text || DEFAULT_OPENING_HOURS
+                });
+            }
+        };
+
+        fetchOwnerSettings();
+        return () => { cancelled = true; };
     }, [isTenant, roleData]);
 
     const handleLogout = async () => {

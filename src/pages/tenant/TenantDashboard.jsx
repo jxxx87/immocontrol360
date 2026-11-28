@@ -9,15 +9,6 @@ import {
     Trash2, Sparkles, Brush
 } from 'lucide-react';
 
-// Nur die Spalten, die das Mieter-Dashboard braucht – keine Vermieter-internen Objektdaten
-// (Marktwert, Investition, Eigenkapital, AfA, Soll-Miete, user_id des Vermieters).
-const UNIT_COLUMNS = 'id, unit_name, floor, sqm, rooms, property_id, property:properties(id, street, house_number, zip, city)';
-const LEASE_COLUMNS = `id, status, start_date, end_date, cold_rent, service_charge, heating_cost, other_costs, deposit, payment_due_day, unit_id, unit:units(${UNIT_COLUMNS})`;
-
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
 const isActiveStatus = (status) => ['active', 'aktiv'].includes(String(status || '').toLowerCase());
 
 // Lokales Datum (nicht UTC) als YYYY-MM-DD
@@ -65,78 +56,23 @@ const TenantDashboard = () => {
                 setLoadError(null);
                 setNoTenancy(false);
 
-                let tenantId = roleData?.tenant_id;
                 let unitId = roleData?.unit_id;
                 let propertyId = roleData?.property_id;
-                let leaseList = [];
-                let tenantRow = null;
-                let roleUnit = null;
 
-                // 1. Eingeschränkte Mieter-Sicht über die Datenbank-Funktion
-                const { data: tenancy, error: tenancyError, status: tenancyStatus } = await supabase.rpc('get_my_tenancy');
-
-                if (!tenancyError) {
-                    if (!tenancy) {
-                        setNoTenancy(true);
-                        return;
-                    }
-                    tenantId = tenancy.tenant_id;
-                    unitId = tenancy.unit_id || unitId;
-                    propertyId = tenancy.property_id || propertyId;
-                    leaseList = tenancy.leases || [];
-                    tenantRow = tenancy.tenant || null;
-                    roleUnit = tenancy.role_unit || null;
-                } else {
-                    if (!isMissingRpc(tenancyError, tenancyStatus)) throw tenancyError;
-
-                    // Bisheriger Weg (Funktion noch nicht eingespielt) – mit expliziten Spaltenlisten
-                    if (!tenantId) {
-                        const { data: roles, error: rolesError } = await supabase
-                            .from('user_roles')
-                            .select('tenant_id, unit_id, property_id')
-                            .eq('user_id', user.id)
-                            .eq('role', 'tenant')
-                            .limit(1);
-                        if (rolesError) throw rolesError;
-
-                        if (roles && roles.length > 0) {
-                            tenantId = roles[0].tenant_id;
-                            unitId = roles[0].unit_id;
-                            propertyId = roles[0].property_id;
-                        }
-                    }
-
-                    if (!tenantId) {
-                        setNoTenancy(true);
-                        return;
-                    }
-
-                    const { data: leaseData, error: leaseError } = await supabase
-                        .from('leases')
-                        .select(LEASE_COLUMNS)
-                        .eq('tenant_id', tenantId)
-                        .order('start_date', { ascending: false });
-                    if (leaseError) throw leaseError;
-                    leaseList = leaseData || [];
-
-                    const { data: tenantData, error: tenantError } = await supabase
-                        .from('tenants')
-                        .select('id, first_name, last_name')
-                        .eq('id', tenantId)
-                        .maybeSingle();
-                    if (tenantError) throw tenantError;
-                    tenantRow = tenantData;
-
-                    if (leaseList.length === 0 && unitId) {
-                        const { data: unitData, error: unitError } = await supabase
-                            .from('units')
-                            .select(UNIT_COLUMNS)
-                            .eq('id', unitId)
-                            .maybeSingle();
-                        if (unitError) throw unitError;
-                        roleUnit = unitData;
-                    }
+                // 1. Eingeschränkte Mieter-Sicht über die Datenbank-Funktion – nur Adresse/Bezeichnung/Fläche
+                //    von Objekt und Einheit, keine Vermieter-internen Objektdaten. Keine direkten Abfragen
+                //    auf properties/units mehr (die zeilenweisen Mieter-Freigaben dort entfallen).
+                const { data: tenancy, error: tenancyError } = await supabase.rpc('get_my_tenancy');
+                if (tenancyError) throw tenancyError;
+                if (!tenancy) {
+                    setNoTenancy(true);
+                    return;
                 }
+                unitId = tenancy.unit_id || unitId;
+                propertyId = tenancy.property_id || propertyId;
+                const leaseList = tenancy.leases || [];
+                const tenantRow = tenancy.tenant || null;
+                const roleUnit = tenancy.role_unit || null;
 
                 // 2. Laufende Verträge (alle, z. B. Wohnung + Stellplatz); sonst letzter Vertrag mit Hinweis
                 const byStartDesc = (a, b) => String(b.start_date || '').localeCompare(String(a.start_date || ''));

@@ -53,6 +53,8 @@ export const SubscriptionProvider = ({ children }) => {
     const retryTimerRef = useRef(null);
 
     const userId = session?.user?.id || null;
+    // Nur An-/Abmeldung zählt: ein neues Session-Objekt (Token-Refresh, Tab-Fokus) löst kein Neuladen aus
+    const hasSession = session !== null && session !== undefined;
     // Nur die Zeile des aktuell angemeldeten Nutzers verwenden (z. B. nach Kontowechsel)
     const subscription = subscriptionRow && subscriptionRow.user_id === userId ? subscriptionRow : null;
 
@@ -102,7 +104,7 @@ export const SubscriptionProvider = ({ children }) => {
             initialAuthCheckedRef.current = true;
             const timer = setTimeout(() => fetchSubscription(0), 0);
             return () => clearTimeout(timer);
-        } else if (session === null && initialAuthCheckedRef.current) {
+        } else if (!hasSession && initialAuthCheckedRef.current) {
             // Session explicitly null after auth check completed
             const timer = setTimeout(() => {
                 setSubscription(null);
@@ -110,7 +112,7 @@ export const SubscriptionProvider = ({ children }) => {
                 setLoading(false);
             }, 0);
             return () => clearTimeout(timer);
-        } else if (session === null) {
+        } else if (!hasSession) {
             // First render – wait briefly for auth to resolve
             const timer = setTimeout(() => {
                 initialAuthCheckedRef.current = true;
@@ -119,7 +121,7 @@ export const SubscriptionProvider = ({ children }) => {
             }, 500);
             return () => clearTimeout(timer);
         }
-    }, [userId, session, fetchSubscription]);
+    }, [userId, hasSession, fetchSubscription]);
 
     // Laufende Wiederholungsversuche beim Abmelden/Unmount abbrechen
     useEffect(() => () => {

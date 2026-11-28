@@ -1,6 +1,10 @@
 /* Open Sans für die Briefseiten (Vorlagen-Editor) wird lokal ausgeliefert (@fontsource/open-sans,
    Import in main.jsx). Druckfenster nutzen dieselben Dateien über lib/fontFaces.js. */
 
+/* Briefseite DIN 5008 / A4: einzige Quelle der Seitengeometrie (auch Druckfenster und Rechnungen,
+   siehe lib/letterDocumentCss.js). @import muss vor allen anderen Regeln stehen. */
+@import './lib/letterPage.css';
+
 @keyframes spin {
   from {
     transform: rotate(0deg);
@@ -35,6 +39,8 @@
   /* Input Styling */
   --input-bg: #f1f5f9;
   /* Slate 100 - Soft grey for inputs */
+  --bg-secondary: #f1f5f9;
+  /* Zweite Fläche (Kopfzeilen, Kacheln, Platzhalter-Hintergründe) */
   --input-bg-hover: #e2e8f0;
   --input-placeholder: #94a3b8;
 
@@ -200,6 +206,7 @@ tbody tr:hover {
 
   /* Inputs - Dark Glass */
   --input-bg: rgba(255, 255, 255, 0.05);
+  --bg-secondary: rgba(255, 255, 255, 0.05);
   --input-bg-hover: rgba(255, 255, 255, 0.1);
   --input-placeholder: #64748b;
 
@@ -705,163 +712,18 @@ input.search-input-padding {
   padding: 0 !important;
 }
 
-/* DIN 5008 A4 Page Style */
-.letter-page {
-  width: 210mm !important;
-  height: 297mm !important;
-  min-height: 297mm !important;
-  max-height: 297mm !important;
-  padding: 20mm 20mm 35mm 25mm !important;
-  margin: 0 auto !important;
-  background: #ffffff !important;
-  color: #000000 !important;
-  /* Seitenrand als Schatten-Linie statt border: belegt keinen Platz, die Inhaltsfläche
-     ist damit exakt so groß wie auf dem gedruckten Blatt (border-box hätte 2px abgezogen) */
-  border: none !important;
-  box-shadow: 0 0 0 1px #cbd5e1, 0 4px 20px rgba(0, 0, 0, 0.08) !important;
-  border-radius: 4px !important;
-  font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif !important;
-  font-size: 11pt !important;
-  line-height: 1.5 !important;
-  box-sizing: border-box !important;
-  position: relative !important;
-  display: flex !important;
-  flex-direction: column !important;
-  text-align: left !important;
-  overflow: hidden !important;
-}
+/* Briefseite (Geometrie): lib/letterPage.css, oben per @import eingebunden. */
 
-.letter-page > p {
-  min-height: 1.2em;
-  margin-bottom: 1em;
-}
-
-/* Leerzeilen (empty paragraphs): gleiche Höhe wie gefüllte Absätze */
-.letter-page p:empty,
-.letter-page p:has(> br:only-child),
-.letter-body p:empty,
-.letter-body p:has(> br:only-child) {
-  min-height: 1.6em;
-  margin-bottom: 1em !important;
-}
-
-/* Dark mode compatibility for letter page sheet - keep white background for letter-page always so print view matches editor! */
+/* Dark Mode: das Blatt bleibt weiß (wie im Druck) */
 [data-theme="dark"] .letter-page {
   background: #ffffff !important;
   color: #000000 !important;
 }
 
-/* Sender line (Rücksendeangabe) */
-.letter-sender {
-  font-size: 8pt;
-  color: #555555;
-  border-bottom: 1px solid #cccccc;
-  padding-bottom: 2mm;
-  margin-bottom: 5mm;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-/* Fallback: Wenn ein HR direkt folgt, entfernen wir den Rahmen von .letter-sender, damit der HR die Linie zeichnet */
-.letter-sender:has(+ hr),
-.letter-sender:has(+ .editor-hr) {
-  border-bottom: none !important;
-  padding-bottom: 0 !important;
-  margin-bottom: 3mm !important;
-}
-
-/* Trennlinie im Dokument/Editor */
-.editor-hr,
-.letter-page hr {
-  border: none;
-  border-top: 1px solid #cccccc;
-  margin: 2mm 0 5mm 0;
-  width: 100%;
-  display: block;
-  height: 0;
-}
-
-/* Header Row for Recipient & Date/Metadata */
-.letter-header-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 10mm;
-}
-
-.letter-recipient {
-  width: 85mm;
-  font-size: 10pt;
-  line-height: 1.4;
-  color: #111111;
-  text-align: left;
-}
-
-.letter-date {
-  font-size: 10pt;
-  color: #333333;
-  text-align: right;
-}
-
-/* Subject & Object */
-.letter-subject {
-  font-size: 13pt;
-  font-weight: bold;
-  margin-bottom: 4mm;
-  color: #000000;
-  text-align: left;
-}
-
-.letter-object {
-  font-size: 10pt;
-  color: #444444;
-  margin-bottom: 8mm;
-  padding-bottom: 2mm;
-  border-bottom: 1px dotted #e2e8f0;
-  text-align: left;
-}
-
-/* Body Area – margin-bottom schafft Abstand zur Fußzeile.
-   Footer ist bei bottom:10mm + height:18mm = 28mm vom Seitenende.
-   Page padding-bottom: 35mm. Mit 12mm margin = klare Lücke vor Footer. */
-.letter-body {
-  flex-grow: 1;
-  flex-shrink: 1;
-  min-height: 0;
-  overflow: hidden;
-  margin-bottom: 12mm;
-  font-size: 11pt;
-  line-height: 1.6;
-  text-align: left;
-}
-
-.letter-body p {
-  margin-bottom: 1em !important;
-  min-height: 1.6em;
-}
-
-/* Footer Section - absolut verankert am Seitenende (wie Word) */
-.letter-footer {
-  position: absolute !important;
-  bottom: 10mm !important;
-  left: 25mm !important;
-  right: 20mm !important;
-  height: 18mm !important;
-  margin-top: 0 !important;
-  display: flex !important;
-  justify-content: space-between !important;
-  border-top: 1px solid #dddddd !important;
-  padding-top: 3mm !important;
-  font-size: 8pt !important;
-  color: #666666 !important;
-  line-height: 1.4 !important;
-  text-align: left !important;
-  box-sizing: border-box !important;
-  background-color: #ffffff !important;
-}
-
-.footer-col {
-  width: 30%;
+/* Trennlinie auf dem weißen Blatt: Farbe wie im Hellmodus. Die Briefseiten-Datei steht per @import
+   vor der allgemeinen Dark-Mode-Regel für hr, die die Linie sonst fast unsichtbar färben würde. */
+[data-theme="dark"] .letter-page hr {
+  border-color: #cccccc;
 }
 
 /* Variable Chip Style

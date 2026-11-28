@@ -1,5 +1,8 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/draft_claims_migration_v4.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
+-- Maßgeblich für claims, claim_items, claim_payments, claim_payment_allocations, claim_events, payment_plans, payment_plan_installments und deren Trigger: supabase/baseline/baseline_public.sql (Live-Stand vom 27.11.2026). Diese Datei ist überholt.
+-- Hinweis (2026-11-27, Wave 3 CLAIMS-DB): Die Live-Fassungen von protect_claim_item_original_amount() und verify_payment_allocations_sum() samt Triggern stehen jetzt reproduzierbar in der Migration *_claims_db.sql.
 -- ============================================================================
 -- SQL MIGRATION PROPOSAL V4: FORDERUNGSMANAGEMENT (CLAIMS)
 -- WICHTIG: Dies ist ein Entwurf. Noch nicht live ausführen!

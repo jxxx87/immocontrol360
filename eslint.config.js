@@ -28,6 +28,14 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+  // React-Contexts exportieren bewusst Provider UND zugehörigen Hook/Context aus einer Datei.
+  // Fast Refresh lädt solche Dateien dann komplett neu – für Contexts gewollt, daher hier keine Meldung.
+  {
+    files: ['src/context/**/*.{js,jsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
   // Node-Dateien (Build-/Tool-Konfiguration, Hilfsskripte): Node-Globals statt Browser-Globals
   {
     files: ['*.config.js', 'scripts/**/*.{js,mjs}'],

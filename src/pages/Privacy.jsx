@@ -34,8 +34,6 @@ const Privacy = () => {
             <ul style={listStyle}>
                 <li><strong>Supabase</strong> (Datenbank, Benutzerkonten und Anmeldung, Dateiablage): Dort werden Ihre Kontodaten sowie die Daten gespeichert, die Sie in der Anwendung erfassen (z.B. Objekt-, Mieter- und Vertragsdaten, Dokumente).</li>
                 <li><strong>Hostinger</strong> (Hosting): Die Web-App wird von Servern des Hosting-Anbieters Hostinger ausgeliefert. Dabei wird technisch bedingt Ihre IP-Adresse verarbeitet.</li>
-                <li><strong>Google Fonts</strong> (Google): Beim Aufruf der Anwendung sowie beim Drucken und Erstellen von Dokumenten werden Schriftarten (insbesondere „Open Sans“ für Briefvorlagen und Dokumente) von Servern von Google geladen. Dabei wird Ihre IP-Adresse an Google übermittelt.</li>
-                <li><strong>cdnjs</strong> (Cloudflare): Für die Erstellung von PDF-Dateien lädt die Anwendung eine Programmbibliothek über den Dienst cdnjs. Dabei wird Ihre IP-Adresse an Cloudflare übermittelt.</li>
                 <li><strong>Anmeldung mit Google</strong> (optional): Wenn Sie sich mit Ihrem Google-Konto anmelden, übermittelt Google die für die Anmeldung nötigen Profildaten (insbesondere Name und E-Mail-Adresse).</li>
                 <li><strong>Firebase Cloud Messaging</strong> (Google, nur Android-App): Wenn Sie Push-Benachrichtigungen erlauben, wird für Ihr Gerät eine Kennung (Push-Token) erzeugt, gespeichert und zum Zustellen der Benachrichtigungen verwendet.</li>
             </ul>

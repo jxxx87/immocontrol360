@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
@@ -43,6 +44,11 @@ const TicketKanban = () => {
     const [selectedTicketId, setSelectedTicketId] = useState(null);
     const imageUrlsRef = useRef({}); // cache signed URLs
     const selectedTicket = selectedTicketId ? tickets.find(t => t.id === selectedTicketId) || null : null;
+
+    // Aus der Mieterakte (TenantDetail) kann ein bestimmtes Ticket direkt geöffnet werden
+    const location = useLocation();
+    const navigate = useNavigate();
+    const openTicketRequestRef = useRef(location.state?.openTicketId || null);
 
     const columns = [
         { id: 'received', label: 'Eingegangen', color: '#F59E0B', bg: 'var(--col-bg-received, #FFFBEB)', icon: Clock },
@@ -138,6 +144,20 @@ const TicketKanban = () => {
     }, []);
 
     useEffect(() => { fetchData(); }, [fetchData]);
+
+    // Gewünschtes Ticket nach dem ersten Laden im Detailfenster öffnen, danach den Navigationszustand
+    // leeren (sonst öffnet es sich beim Zurückblättern erneut)
+    useEffect(() => {
+        const wantedId = openTicketRequestRef.current;
+        if (loading || !wantedId) return;
+        openTicketRequestRef.current = null;
+        if (tickets.some(t => t.id === wantedId)) {
+            setSelectedTicketId(wantedId);
+        } else if (!boardError) {
+            setBoardNotice('Das gewünschte Ticket wurde nicht gefunden (gelöscht oder keine Berechtigung).');
+        }
+        navigate(location.pathname, { replace: true, state: {} });
+    }, [loading, tickets, boardError, navigate, location.pathname]);
 
     // ── REALTIME ────────────────────────────────────────────────────
     useEffect(() => {

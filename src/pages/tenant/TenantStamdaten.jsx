@@ -3,6 +3,8 @@ import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { User, Lock, Key, CheckCircle, AlertCircle, Phone, Mail, Home, Calendar, ShieldCheck, Wallet } from 'lucide-react';
 
+const isActiveStatus = (status) => ['active', 'aktiv'].includes(String(status || '').toLowerCase());
+
 const TenantStamdaten = () => {
     const { user, roleData } = useAuth();
     const [loading, setLoading] = useState(true);
@@ -48,34 +50,30 @@ const TenantStamdaten = () => {
             }
 
             try {
-                // Nur die benötigten Spalten (keine Objekt-Finanzdaten des Vermieters)
-                const [tenantRes, leaseRes] = await Promise.all([
+                // Mieterdaten: nur die benötigten Spalten. Vertrag mit Einheit und Objektadresse über die
+                // eingeschränkte Mieter-Sicht get_my_tenancy (keine direkten Abfragen auf Objekt/Einheit)
+                const [tenantRes, tenancyRes] = await Promise.all([
                     supabase
                         .from('tenants')
                         .select('id, first_name, last_name, phone, email, street, house_number, postal_code, city')
                         .eq('id', tenantId)
                         .maybeSingle(),
-                    supabase
-                        .from('leases')
-                        .select('id, unit_id, start_date, end_date, cold_rent, service_charge, heating_cost, other_costs, payment_due_day, status, unit:units(unit_name, property:properties(street, house_number, zip, city))')
-                        .eq('tenant_id', tenantId)
-                        .eq('status', 'active')
-                        .order('start_date', { ascending: false })
-                        .limit(10)
+                    supabase.rpc('get_my_tenancy')
                 ]);
 
                 // Mieterdaten unabhängig von einem Fehler beim Vertrag anzeigen
                 if (tenantRes.error) throw tenantRes.error;
                 const tenant = tenantRes.data;
 
-                if (leaseRes.error) {
-                    console.error('Error fetching lease details:', leaseRes.error);
+                if (tenancyRes.error) {
+                    console.error('Error fetching lease details:', tenancyRes.error);
                     setMessage({ type: 'error', text: 'Die Angaben zum Mietverhältnis konnten nicht geladen werden.' });
                 }
 
+                // Laufende Verträge (die Funktion liefert sie zuerst, jeweils neuester Beginn vorn).
                 // Mehrere aktive Verträge (z. B. Wohnung + Stellplatz): Vertrag der zugeordneten Einheit, sonst den neuesten
-                const leases = leaseRes.error ? [] : (leaseRes.data || []);
-                const lease = leases.find(l => roleUnitId && l.unit_id === roleUnitId) || leases[0] || null;
+                const leases = tenancyRes.error ? [] : (tenancyRes.data?.leases || []).filter(l => isActiveStatus(l.status));
+                const lease = leases.find(l => roleUnitId && l.unit?.id === roleUnitId) || leases[0] || null;
                 setLeaseData(lease);
 
                 const prop = lease?.unit?.property;

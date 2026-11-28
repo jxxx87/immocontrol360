@@ -22,6 +22,9 @@ import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import Modal from '../../components/ui/Modal';
 import { openSansFontFaceCss, fontOrigin } from '../../lib/fontFaces';
+import { DEFAULT_TEMPLATES } from '../../lib/defaultTemplates';
+import { LETTER_PAGE_CSS, LETTER_CONTENT_CSS, editorTextFlowCss } from '../../lib/letterDocumentCss';
+import { loadLeaseBalance, RENT_TOLERANCE } from '../../lib/rentArrears';
 import { 
     Bold, Italic, Underline as UnderlineIcon, 
     AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -35,7 +38,7 @@ import {
 // Deutsche Variablen für globale Verwendung
 const GLOBAL_VARIABLES = [
     { id: 'mieter_name', label: 'Mieter Name', icon: '👤', description: 'Der vollständige Name des Hauptmieters.' },
-    { id: 'mieter_anrede', label: 'Briefanrede', icon: '✉️', description: 'Die vollständige Briefanrede inklusive Name (z.B. "Sehr geehrte/r Max Mustermann"). Bitte KEIN zusätzliches "Sehr geehrte/r" davor schreiben – die Variable enthält die Anrede bereits.' },
+    { id: 'mieter_anrede', label: 'Briefanrede', icon: '✉️', description: 'Die vollständige Briefanrede inklusive Name – je nach Anrede beim Mieter "Sehr geehrte Frau Mustermann" bzw. "Sehr geehrter Herr Mustermann", ohne Angabe "Sehr geehrte/r Max Mustermann". Bitte KEIN zusätzliches "Sehr geehrte/r" davor schreiben – die Variable enthält die Anrede bereits.' },
     { id: 'mieter_adresse', label: 'Mieter Adresse', icon: '🏠', description: 'Die vollständige Anschrift des Mieters für das Adressfeld.' },
     { id: 'objekt_name', label: 'Objektname', icon: '🏢', description: 'Der Name des Gebäudes oder Objekts.' },
     { id: 'einheit_name', label: 'Wohneinheit', icon: '🚪', description: 'Die Bezeichnung der Wohneinheit (z.B. "EG links" oder "Wohnung Nr. 5").' },
@@ -86,6 +89,7 @@ const INVOICE_VARIABLES = [
     { id: 'mwst_betrag', label: 'MwSt-Betrag', icon: '💸', description: 'Der berechnete Umsatzsteuerbetrag laut Rechnung (Steuersatz je Position aus den Rechnungsdaten).' },
     { id: 'brutto_betrag', label: 'Gesamtbetrag (Brutto)', icon: '💵', description: 'Der Endbetrag inklusive Umsatzsteuer.' },
     { id: 'original_rechnungsnummer', label: 'Ref-Rechnungsnummer', icon: '📎', description: 'Bei einer Stornierung oder Korrektur die Nummer der Originalrechnung.' },
+    { id: 'original_rechnungsdatum', label: 'Ref-Rechnungsdatum', icon: '📎', description: 'Bei einer Stornierung oder Korrektur das Datum der Originalrechnung.' },
     { id: 'positions_tabelle', label: 'Rechnungspositionen-Tabelle', icon: '📊', description: 'Eine Tabelle mit allen Rechnungspositionen wie Übernachtungskosten, Reinigung und Zusatzleistungen.' },
     { id: 'vermieter_name', label: 'Vermieter Name', icon: '👤', description: 'Der Name des Vermieters.' },
     { id: 'vermieter_adresse', label: 'Vermieter Anschrift', icon: '📮', description: 'Die vollständige Anschrift des leistenden Unternehmers (Pflichtangabe nach § 14 Abs. 4 UStG).' },
@@ -130,104 +134,7 @@ const EXTRA_VARIABLES = [
     { id: 'storno_nummer', label: 'Storno-Nummer' }
 ];
 
-const DEFAULT_TEMPLATES = {
-    payment_reminder: {
-        name: 'Zahlungserinnerung',
-        category: 'Mahnwesen',
-        subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_1: {
-        name: 'Mahnung (Stufe 1)',
-        category: 'Mahnwesen',
-        subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_2: {
-        name: 'Abmahnung (Stufe 2)',
-        category: 'Mahnwesen',
-        subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_final: {
-        name: 'Letzte Zahlungsaufforderung',
-        category: 'Mahnwesen',
-        subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Mietbeginn">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    utility_costs: {
-        name: 'Nebenkostenabrechnung',
-        category: 'Nebenkosten',
-        subject: 'Betriebskostenabrechnung für das Abrechnungsjahr',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Betriebskostenabrechnung für das Abrechnungsjahr <span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>anbei erhalten Sie die ordnungsgemäße Betriebskostenabrechnung für Ihr Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) für das Abrechnungsjahr <strong><span data-type="mention" data-id="abrechnungsjahr" data-label="Abrechnungsjahr">Abrechnungsjahr</span></strong>.</p><p>Die Abrechnung wurde auf der Grundlage der mietvertraglichen Vereinbarungen und der gesetzlichen Bestimmungen der Betriebskostenverordnung (BetrKV) erstellt. Ihr Nutzungszeitraum belief sich dabei auf <strong><span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Nutzungszeitraum</span></strong>.</p><p>Die Zusammenfassung der Gesamtkosten sowie das Abrechnungsergebnis entnehmen Sie bitte der nachfolgenden Aufstellung:</p><p><span data-type="mention" data-id="nebenkosten_tabelle" data-label="Umlagetabelle">Umlagetabelle</span></p><p>Daraus ergibt sich für Sie ein Saldo in Höhe von <strong><span data-type="mention" data-id="saldo_betrag" data-label="Saldo (Ergebnis)">Saldo (Ergebnis)</span></strong> als <strong><span data-type="mention" data-id="saldo_art" data-label="Saldo Art (Nachzahlung/Gutschrift)">Saldo Art (Nachzahlung/Gutschrift)</span></strong>.</p><p><strong>Zahlungshinweis:</strong> Im Falle einer Nachzahlung bitten wir Sie, den ausstehenden Betrag innerhalb von 30 Tagen auf unser bekanntes Vermieterkonto unter Angabe des Verwendungszwecks zu überweisen. Eine etwaige Gutschrift wird mit der nächsten fälligen Mietzahlung verrechnet oder auf Ihr uns bekanntes Konto ausgezahlt.</p><p>Die detaillierte Aufteilung der einzelnen Kostenpositionen, der Umlageschlüssel und der Berechnungsschritte können Sie dem beigefügten Berechnungsblatt (Seite 2) entnehmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-body"><p style="font-size: 12pt; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Betriebskostenabrechnung: Berechnungsblatt</p><p>Nachfolgend finden Sie die detaillierte Aufstellung der Betriebskosten, die Umlageschlüssel und die Berechnungsschritte für Ihren Nutzungszeitraum:</p><p><span data-type="mention" data-id="nebenkosten_detail_tabelle" data-label="Detaillierte Umlagetabelle">Detaillierte Umlagetabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    fewo_invoice: {
-        name: 'Fewo-Rechnung',
-        category: 'FEWO-Rechnungen',
-        subject: 'Rechnung über erbrachte Leistungen für Ihren Aufenthalt',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong><br><span data-type="mention" data-id="vermieter_steuer_angabe" data-label="Steuernummer / USt-IdNr.">Steuernummer / USt-IdNr.</span></div></div><div class="letter-subject">Rechnung Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>wir bedanken uns herzlich für Ihren Aufenthalt in unserem Hause. Vereinbarungsgemäß erlauben wir uns, Ihnen die erbrachten Leistungen in Rechnung zu stellen:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Bitte überweisen Sie den fälligen Gesamtbetrag innerhalb von 14 Tagen auf unser angegebenes Bankkonto.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    fewo_credit_note: {
-        name: 'Fewo-Gutschrift',
-        category: 'FEWO-Rechnungen',
-        subject: 'Gutschrift zu Ihrem Aufenthalt',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="gast_name" data-label="Gast-Name">Gast-Name</span></strong><br><span data-type="mention" data-id="gast_adresse" data-label="Gast-Adresse">Gast-Adresse</span></div><div class="letter-date" style="text-align: right; background-color: #f8fafc; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.4;">Nummer: <strong><span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span></strong><br>Datum: <strong><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></strong><br>Zeitraum: <strong><span data-type="mention" data-id="buchungszeitraum" data-label="Buchungszeitraum">Buchungszeitraum</span></strong><br><span data-type="mention" data-id="vermieter_steuer_angabe" data-label="Steuernummer / USt-IdNr.">Steuernummer / USt-IdNr.</span></div></div><div class="letter-subject">Gutschrift Nr. <span data-type="mention" data-id="rechnungsnummer" data-label="Rechnungsnummer">Rechnungsnummer</span> zur Rechnung Nr. <span data-type="mention" data-id="original_rechnungsnummer" data-label="Ref-Rechnungsnummer">Ref-Rechnungsnummer</span></div><div class="letter-body"><p>Sehr geehrte Damen und Herren,</p><p>vereinbarungsgemäß erhalten Sie nachfolgend die Gutschrift für Ihren Aufenthalt bzw. Ihre Buchung:</p><p><span data-type="mention" data-id="positions_tabelle" data-label="Rechnungspositionen-Tabelle">Rechnungspositionen-Tabelle</span></p><p>Der Gutschriftbetrag wird Ihrem Konto in den nächsten Tagen gutgeschrieben oder vereinbarungsgemäß verrechnet.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    lease_residential: {
-        name: 'Mietvertrag Wohnraum',
-        category: 'Verträge',
-        subject: 'Mietvertrag für Wohnraum',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietvertrag für Wohnraum</h2><p>Zwischen dem Vermieter: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>und dem Mieter: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> wird folgender Wohnraummietvertrag geschlossen:</p><p><b>§ 1 Mietobjekt</b><br>Vermietet wird die Wohnung in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>. Dem Mieter werden ____________ Schlüssel ausgehändigt.</p><p><b>§ 2 Mietzeit & Kündigung</b><br>Das Mietverhältnis beginnt am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong>. Es gilt die gesetzliche Kündigungsfrist. Ein Kündigungsverzicht von bis zu 24 Monaten kann vereinbart werden.</p><p><b>§ 3 Miete & Betriebskosten</b><br>Die monatliche Nettokaltmiete beträgt ________________ EUR. Die Vorauszahlung auf die Betriebskosten beträgt ________________ EUR, so dass sich ein monatlicher Gesamtbetrag von ________________ EUR ergibt. Die Abrechnung der Betriebskosten erfolgt jährlich.</p><p><b>§ 4 Mietkaution</b><br>Der Mieter leistet vor Übergabe eine Kaution in Höhe von 3 Nettokaltmieten (insgesamt ________________ EUR) auf ein Kautionskonto des Vermieters.</p><p><b>§ 5 Instandhaltung & Kleinreparaturen</b><br>Der Mieter trägt die Kosten für Kleinreparaturen an den ihm zugänglichen Installationsgegenständen bis zu einer Höhe von 120,00 EUR im Einzelfall, begrenzt auf maximal 8% der Jahresnettokaltmiete pro Jahr.</p><p><br>Ort, Datum: ___________________________<br><br><br>Unterschriften:<br><br>______________________ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ______________________<br>Vermieter &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mieter</p></div></div>`
-    },
-    lease_commercial: {
-        name: 'Mietvertrag Gewerbe',
-        category: 'Verträge',
-        subject: 'Mietvertrag für Gewerberäume',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietvertrag für Gewerberäume</h2><p>Zwischen dem Vermieter: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>und dem Mieter: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> wird folgender Gewerbemietvertrag geschlossen:</p><p><b>§ 1 Mietobjekt & Nutzungszweck</b><br>Vermietet werden die Gewerberäume in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>, Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>. Die Räume dürfen ausschließlich als ________________ genutzt werden.</p><p><b>§ 2 Mietzeit</b><br>Das Mietverhältnis beginnt am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong> und läuft fest bis zum ____________. Es verlängert sich um jeweils 1 Jahr, wenn es nicht 6 Monate vor Ablauf gekündigt wird.</p><p><b>§ 3 Miete & Wertsicherung (Indexierung)</b><br>Die monatliche Nettomiete beträgt ________________ EUR zzgl. gesetzlicher USt. Wertsicherung (Indexierung): ______________________________________________ (bitte vollständig ausformulieren – Bezugsindex mit Basisjahr, Schwellenwert, Art und Zeitpunkt der Anpassung – und vor Vertragsschluss rechtlich prüfen lassen).</p><p><b>§ 4 Betriebskosten</b><br>Der Mieter trägt alle Betriebskosten im Sinne des § 2 BetrKV sowie sämtliche auf das Gebäude und Grundstück entfallenden Sach- und Haftpflichtversicherungen sowie die Grundsteuer.</p><p><b>§ 5 Umbau & Instandhaltung</b><br>Bauliche Veränderungen durch den Mieter bedürfen der vorherigen schriftlichen Zustimmung des Vermieters. Der Mieter haftet für alle Schäden.</p><p><br>Ort, Datum: ___________________________<br><br><br>Unterschriften:<br><br>______________________ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ______________________<br>Vermieter &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mieter</p></div></div>`
-    },
-    lease_garage: {
-        name: 'Mietvertrag Garagen & Stellplätze',
-        category: 'Verträge',
-        subject: 'Mietvertrag für Stellplatz / Garage',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietvertrag für Garage / Stellplatz</h2><p>Zwischen dem Vermieter: <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br>und dem Mieter: <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> wird folgender Stellplatzmietvertrag geschlossen:</p><p><b>§ 1 Mietobjekt</b><br>Vermietet wird die Garage / der Stellplatz Nr. ____ in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p><b>§ 2 Mietzeit & Kündigung</b><br>Das Mietverhältnis beginnt am <strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong>. Es läuft auf unbestimmte Zeit und kann von beiden Parteien mit einer Frist von einem Monat zum Monatsende gekündigt werden.</p><p><b>§ 3 Miete & Zahlungsweise</b><br>Der monatliche Mietzins beträgt monatlich ________________ EUR. Er ist im Voraus bis spätestens zum dritten Werktag des Monats kostenfrei auf das Konto des Vermieters zu entrichten.</p><p><b>§ 4 Nutzung & Haftung</b><br>Die Garage / der Stellplatz darf ausschließlich zum Abstellen eines zugelassenen Kraftfahrzeugs genutzt werden. Die Lagerung von feuergefährlichen Stoffen oder Müll ist untersagt. Der Mieter haftet für jegliche Beschädigungen der Garage.</p><p><br>Ort, Datum: ___________________________<br><br><br>Unterschriften:<br><br>______________________ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ______________________<br>Vermieter &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Mieter</p></div></div>`
-    },
-    rent_increase: {
-        name: 'Mieterhöhungsschreiben',
-        category: 'Mieterhöhung',
-        subject: 'Mieterhöhungsverlangen – Bitte um Zustimmung nach § 558 BGB',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><hr class="editor-hr" /><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date"><span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mieterhöhungsverlangen – Bitte um Zustimmung nach § 558 BGB</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>für die von Ihnen gemietete Wohnung im Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) bitte ich Sie hiermit gemäß § 558 BGB um Ihre Zustimmung zur Erhöhung der Nettokaltmiete bis zur ortsüblichen Vergleichsmiete.</p><p>Ihre derzeitige Nettokaltmiete beträgt monatlich <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong>. Ich bitte Sie, einer Erhöhung um <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> auf monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> mit Wirkung ab dem <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> zuzustimmen.</p><p><strong>Begründung (§ 558a BGB):</strong> ______________________________________________ (bitte ergänzen, z.B. Mietspiegel mit genauer Bezeichnung und Einordnung der Wohnung, Sachverständigengutachten oder Benennung von drei Vergleichswohnungen).</p><p>Bitte senden Sie mir die beiliegende Zustimmungserklärung bis zum <strong><span data-type="mention" data-id="zustimmungs_frist" data-label="Zustimmungsfrist">Zustimmungsfrist</span></strong> unterschrieben zurück. Auf Ihr Sonderkündigungsrecht nach § 561 BGB weise ich hin.</p><p>Für Rückfragen stehen wir Ihnen gerne zur Verfügung.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br><span data-type="mention" data-id="vermieter_kontakt" data-label="Vermieter Kontakt">Vermieter Kontakt</span></div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    rent_increase_consent: {
-        name: 'Zustimmungserklärung',
-        category: 'Mieterhöhung',
-        subject: 'Zustimmungserklärung zur Mieterhöhung',
-        content_html: `<div class="letter-page"><div class="letter-body"><p style="font-size: 14px; font-weight: bold; text-align: center; margin-bottom: 20px;">Zustimmungserklärung zur Mieterhöhung</p><p>Hiermit stimme ich, <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong>, wohnhaft in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>), der Anpassung der Miete zu.</p><p>Der monatlichen Kaltmiete von bisher <strong><span data-type="mention" data-id="aktuelle_miete" data-label="Aktuelle Miete">Aktuelle Miete</span></strong> um den Anpassungsbetrag von <strong><span data-type="mention" data-id="erhoehungs_betrag" data-label="Erhöhungsbetrag">Erhöhungsbetrag</span></strong> auf zukünftig monatlich <strong><span data-type="mention" data-id="neue_miete" data-label="Neue Miete">Neue Miete</span></strong> stimme ich ab dem <strong><span data-type="mention" data-id="erhoehungs_datum" data-label="Wirksamkeitsdatum">Wirksamkeitsdatum</span></strong> ausdrücklich zu.</p><p><br><br>Ort, Datum: ___________________________<br><br><br><br>______________________________________<br>Unterschrift des Mieters / aller Mieter</p></div></div>`
-    },
-    landlord_confirmation: {
-        name: 'Wohnungsgeberbestätigung',
-        category: 'Bescheinigungen',
-        subject: 'Wohnungsgeberbestätigung nach § 19 BMG',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Wohnungsgeberbestätigung nach § 19 Bundesmeldegesetz (BMG)</h2><p>Hiermit wird der <strong>Einzug</strong> der nachfolgenden Personen in die unten bezeichnete Wohnung bestätigt:</p><p><b>Eingezogene Personen:</b><br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong></p><p><b>Einzugsdatum:</b><br><strong><span data-type="mention" data-id="einzug_datum" data-label="Einzugsdatum">Einzugsdatum</span></strong></p><p><b>Anschrift der Wohnung:</b><br><strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong>)</p><p><b>Name und Anschrift des Wohnungsgebers (Eigentümer / Vermieter):</b><br><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong><br><span data-type="mention" data-id="vermieter_adresse" data-label="Vermieter Anschrift">Vermieter Anschrift</span></p><p style="font-size: 9px; color: #475569; margin-top: 15px;">Hinweis: Die Ausstellung dieser Bestätigung entspricht der gesetzlichen Auskunftspflicht des Wohnungsgebers gem. § 19 BMG. Unrichtige Angaben können als Ordnungswidrigkeit geahndet werden.</p><p><br>Ort, Datum: ___________________________<br><br><br>______________________________________<br>Unterschrift des Wohnungsgebers</p></div></div>`
-    },
-    rent_clearance_certificate: {
-        name: 'Mietschuldenfreiheitsbescheinigung',
-        category: 'Bescheinigungen',
-        subject: 'Bescheinigung über Mietschuldenfreiheit',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Bescheinigung über Mietschuldenfreiheit</h2><p>Hiermit bestätige ich, <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong>, als Vermieter der Wohnung in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>), dass das Mietverhältnis mit <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> stets ordnungsgemäß verlaufen ist.</p><p>Die vereinbarte Miete sowie die fälligen Betriebskostenvorauszahlungen wurden bis zum heutigen Tag stets vollständig und fristgerecht entrichtet. Es bestehen zum aktuellen Zeitpunkt keinerlei Mietrückstände oder sonstige offene Forderungen aus dem genannten Mietverhältnis.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div></div>`
-    },
-    rental_guarantee: {
-        name: 'Mietbürgschaft',
-        category: 'Bescheinigungen',
-        subject: 'Mietbürgschaftserklärung (Selbstschuldnerisch)',
-        content_html: `<div class="letter-page"><div class="letter-body"><h2 style="text-align: center; font-size: 16px; font-weight: bold;">Mietbürgschaftserklärung (Selbstschuldnerisch)</h2><p>Für alle Forderungen aus dem Mietverhältnis über das Mietobjekt <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>) zwischen dem Vermieter <strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong> (Gläubiger) und dem Mieter <strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong> (Hauptschuldner) übernimmt der Bürge:</p><p>Bürge Name, Vorname: ___________________________<br>Anschrift: ___________________________</p><p>hiermit die selbstschuldnerische Bürgschaft unter Verzicht auf die Einrede der Vorausklage. Die Haftung erstreckt sich auf alle vertraglichen Verpflichtungen des Mieters (insb. Mietzahlungen, Nebenkosten, Schönheitsreparaturen sowie Schadensersatzansprüche) bis zu einem gesetzlich zulässigen Höchstbetrag von drei Nettokaltmieten (maximal __________________ EUR).</p><p><br>Ort, Datum: ___________________________<br><br><br>______________________________________<br>Unterschrift des Bürgen</p></div></div>`
-    },
-    termination_receipt: {
-        name: 'Kündigungsbestätigung',
-        category: 'Bescheinigungen',
-        subject: 'Bestätigung Ihrer Wohnungskündigung',
-        content_html: `<div class="letter-page"><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Briefanrede">Briefanrede</span>,</p><p>hiermit bestätige ich den Erhalt Ihrer schriftlichen Kündigung vom ______________ für das Mietverhältnis über die Wohnung/Einheit <strong><span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span></strong> in der <strong><span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></strong>.</p><p>Das Mietverhältnis endet vertragsgemäß mit Ablauf des ______________.</p><p>Bezüglich des Termins zur Wohnungsübergabe und Erstellung des Übergabeprotokolls werden wir uns rechtzeitig mit Ihnen in Verbindung setzen, um einen gemeinsamen Termin abzustimmen.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div></div>`
-    }
-};
+// Standardvorlagen: gemeinsame Quelle mit allen Druck-/PDF-Wegen (lib/defaultTemplates.js)
 
 // Ordnet Vorlagen (System und eigene) die zur Kategorie passende Variablen-Palette zu.
 // Einzige Quelle der Zuordnung (vorher zusätzlich je Systemvorlage, teils abweichend).
@@ -323,6 +230,7 @@ const EXAMPLE_VALUES = {
     mwst_betrag: '39,25 €',
     brutto_betrag: '600,00 €',
     original_rechnungsnummer: 'RE-2026-0399',
+    original_rechnungsdatum: '22.05.2026',
     storno_nummer: 'ST-2026-0001',
     aktuelle_miete: '650,00 €',
     neue_miete: '715,00 €',
@@ -566,6 +474,10 @@ const formatEuroValue = (value) => {
         : null;
 };
 
+const formatEuroAmount = (value) => Number(value || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+// 'YYYY-MM' -> 'MM.YYYY'
+const formatMonthList = (months = []) => months.map(m => `${String(m).slice(5, 7)}.${String(m).slice(0, 4)}`).join(', ');
+
 const getDateStrings = () => {
     const now = new Date();
     return {
@@ -618,10 +530,12 @@ const buildVariableValues = ({ tenant, portfolio, manualValues, group, dates }) 
     const fullName = joinParts([firstName, lastName], ' ');
     values.mieter_name = textValue(fullName);
     values.mieter_nachname = textValue(lastName);
+    // Anrede aus tenants.salutation (über buildTemplateTenantData als "gender"); ohne Angabe neutral
+    const gender = t.gender || t.salutation || null;
     let salutation = 'Sehr geehrte Damen und Herren';
     if (fullName) {
-        if (t.gender === 'female' && lastName) salutation = `Sehr geehrte Frau ${lastName}`;
-        else if (t.gender === 'male' && lastName) salutation = `Sehr geehrter Herr ${lastName}`;
+        if (gender === 'female' && lastName) salutation = `Sehr geehrte Frau ${lastName}`;
+        else if (gender === 'male' && lastName) salutation = `Sehr geehrter Herr ${lastName}`;
         else salutation = `Sehr geehrte/r ${fullName}`;
     }
     values.mieter_anrede = { text: salutation };
@@ -1006,11 +920,20 @@ const stripPastedBlockStyles = (html) => {
     }
 };
 
-// Bilder: nur Rasterformate (kein SVG), große Bilder vor dem Einbetten verkleinern.
+// Bilder (Logo, Unterschrift): nur Rasterformate (kein SVG). Sie werden als Data-URL in der Vorlage
+// gespeichert und deshalb klein gehalten: Kantenlänge höchstens 1000 px (genügt für Logo/Unterschrift
+// im Druck), je Bild höchstens ~400 KB, je Vorlage höchstens 2 MB Bilder und die ganze Vorlage
+// höchstens 3 MB (die Datenbank begrenzt content_html zusätzlich auf 5 MB).
 const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_IMAGE_INPUT_BYTES = 2 * 1024 * 1024;
-const MAX_IMAGE_EMBED_CHARS = 1.5 * 1024 * 1024;
-const MAX_IMAGE_EDGE_PX = 1600;
+const MAX_IMAGE_EMBED_CHARS = 400 * 1024;
+const MAX_IMAGE_EDGE_PX = 1000;
+// Stufen, falls ein Bild bei 1000 px noch über MAX_IMAGE_EMBED_CHARS liegt
+const IMAGE_EDGE_STEPS_PX = [MAX_IMAGE_EDGE_PX, 800, 600, 400];
+const MAX_TEMPLATE_IMAGE_CHARS = 2 * 1024 * 1024;
+const MAX_TEMPLATE_HTML_CHARS = 3 * 1024 * 1024;
+
+const formatMegabytes = (chars) => (chars / (1024 * 1024)).toLocaleString('de-DE', { maximumFractionDigits: 1 });
 
 const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1019,29 +942,58 @@ const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
     reader.readAsDataURL(file);
 });
 
-const downscaleImageDataUrl = (dataUrl, mimeType) => new Promise((resolve) => {
+const loadImageElement = (dataUrl) => new Promise((resolve) => {
     // Hinweis: "Image" ist hier die TipTap-Erweiterung, daher createElement('img')
     const img = document.createElement('img');
-    img.onload = () => {
-        const scale = Math.min(1, MAX_IMAGE_EDGE_PX / (img.naturalWidth || 1), MAX_IMAGE_EDGE_PX / (img.naturalHeight || 1));
-        if (scale >= 1 && dataUrl.length <= 400 * 1024) { resolve(dataUrl); return; }
-        try {
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+});
+
+// Verkleinert auf höchstens MAX_IMAGE_EDGE_PX und – falls nötig – stufenweise weiter, bis das Bild
+// unter MAX_IMAGE_EMBED_CHARS liegt. PNG/GIF werden als PNG (Transparenz, z. B. Unterschrift) und
+// ersatzweise als WebP (ebenfalls mit Transparenz) geschrieben, JPEG/WebP im eigenen Format.
+const downscaleImageDataUrl = async (dataUrl, mimeType) => {
+    const img = await loadImageElement(dataUrl);
+    if (!img || !img.naturalWidth || !img.naturalHeight) return dataUrl;
+    const longEdge = Math.max(img.naturalWidth, img.naturalHeight);
+    if (longEdge <= MAX_IMAGE_EDGE_PX && dataUrl.length <= MAX_IMAGE_EMBED_CHARS) return dataUrl;
+    const baseType = mimeType === 'image/jpeg' || mimeType === 'image/webp' ? mimeType : 'image/png';
+    const types = baseType === 'image/png' ? ['image/png', 'image/webp'] : [baseType];
+    let smallest = null;
+    try {
+        for (const edge of IMAGE_EDGE_STEPS_PX) {
+            const scale = Math.min(1, edge / longEdge);
             const canvas = document.createElement('canvas');
             canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
             canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
             canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-            const outType = mimeType === 'image/jpeg' || mimeType === 'image/webp' ? mimeType : 'image/png';
-            const out = canvas.toDataURL(outType, 0.85);
-            resolve(out && out.length < dataUrl.length ? out : dataUrl);
-        } catch {
-            resolve(dataUrl);
+            for (const type of types) {
+                // Kann der Browser ein Format nicht schreiben, liefert toDataURL PNG
+                const out = canvas.toDataURL(type, 0.85);
+                if (!out || !SAFE_DATA_IMAGE_RE.test(out)) continue;
+                if (out.length <= MAX_IMAGE_EMBED_CHARS) return out;
+                if (!smallest || out.length < smallest.length) smallest = out;
+            }
         }
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-});
+    } catch {
+        // Verkleinern nicht möglich: Ergebnis wird unten gegen die Größengrenze geprüft
+    }
+    return smallest || dataUrl;
+};
 
-const prepareImageForEmbedding = async (file) => {
+// Summe der eingebetteten Bilddaten (Data-URLs) eines Editor-Dokuments
+const sumEmbeddedImageChars = (doc) => {
+    let total = 0;
+    if (!doc) return total;
+    doc.descendants((node) => {
+        const src = node.type.name === 'image' ? node.attrs.src : null;
+        if (typeof src === 'string' && src.startsWith('data:')) total += src.length;
+    });
+    return total;
+};
+
+const prepareImageForEmbedding = async (file, { currentImageChars = 0 } = {}) => {
     if (!file) return null;
     if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
         alert('Bitte ein Bild im Format PNG, JPEG, WebP oder GIF verwenden.');
@@ -1055,39 +1007,21 @@ const prepareImageForEmbedding = async (file) => {
     const prepared = await downscaleImageDataUrl(dataUrl, file.type);
     if (!SAFE_DATA_IMAGE_RE.test(prepared)) return null;
     if (prepared.length > MAX_IMAGE_EMBED_CHARS) {
-        alert('Das Bild ist auch nach dem Verkleinern noch zu groß. Bitte ein kleineres Bild verwenden.');
+        alert('Das Bild ist auch nach dem Verkleinern noch zu groß (höchstens ca. 400 KB). Bitte ein kleineres Bild oder ein Bild mit weniger Details verwenden.');
+        return null;
+    }
+    if (currentImageChars + prepared.length > MAX_TEMPLATE_IMAGE_CHARS) {
+        alert(`Diese Vorlage enthält bereits Bilder mit zusammen ${formatMegabytes(currentImageChars)} MB. Je Vorlage sind höchstens ${formatMegabytes(MAX_TEMPLATE_IMAGE_CHARS)} MB Bilder möglich – bitte ein Bild entfernen oder ein kleineres verwenden.`);
         return null;
     }
     return prepared;
 };
 
-// ── Gemeinsame Inhalts-Stile (Editor, Live-Vorschau UND Druckfenster) ────────────────────
-// Eine Quelle für Listen, Tabellen und Markierungen – verhindert neue Abweichungen zwischen
-// Editor und Druck (das Druckfenster lädt index.css nicht).
-const LETTER_CONTENT_CSS = `
-    .letter-page ul, .letter-page ol { padding-left: 1.5em; margin: 0 0 1em 0; }
-    .letter-page ul { list-style-type: disc; }
-    .letter-page ol { list-style-type: decimal; }
-    .letter-page li > p { margin-bottom: 0.25em !important; min-height: 0 !important; }
-    .letter-page img.editor-image { max-width: 100%; }
-    .letter-page table:not(.invoice-table) { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: transparent !important; border: 1px solid #cbd5e1 !important; }
-    .letter-page table:not(.invoice-table) th { background-color: #f1f5f9 !important; color: #0f172a !important; font-weight: bold; border: 1px solid #cbd5e1 !important; padding: 8px 12px !important; }
-    .letter-page table:not(.invoice-table) td { border: 1px solid #cbd5e1 !important; padding: 8px 12px !important; color: #334155 !important; background-color: transparent !important; }
-    .letter-page .invoice-table { width: 100%; border-collapse: collapse; margin-bottom: 8mm; background-color: transparent !important; border: none !important; }
-    .letter-page .invoice-table th { border-bottom: 2px solid #000 !important; border-top: none !important; border-left: none !important; border-right: none !important; text-align: left; padding: 8px 0 !important; font-weight: 700; background-color: transparent !important; color: #000000 !important; }
-    .letter-page .invoice-table td { border-bottom: 1px solid #ddd !important; border-top: none !important; border-left: none !important; border-right: none !important; padding: 8px 0 !important; color: #000000 !important; background-color: transparent !important; }
-    .letter-page .totals { display: flex; justify-content: flex-end; margin-bottom: 20mm; }
-    .letter-page .totals-box { width: 80mm; }
-    .letter-page .t-row { display: flex; justify-content: space-between; margin-bottom: 4px; color: #000000; }
-    .letter-page .t-row.final { border-top: 2px solid #000; padding-top: 4px; margin-top: 4px; font-weight: 700; font-size: 11pt; color: #000000; }
-    .letter-page .tpl-block { margin: 0 0 1em 0; }
-    .letter-page .tpl-example-block { outline: 1px dashed #ca8a04; outline-offset: 2px; }
-    .letter-page .tpl-missing { color: #b91c1c !important; background-color: #fee2e2 !important; font-weight: 600; border-radius: 2px; }
-    .letter-page .tpl-example { background-color: #fef9c3; border-bottom: 1px dotted #ca8a04; }
-`;
-
-// Seiten-Stile des Druckfensters (A4, DIN 5008)
-const PRINT_PAGE_CSS = `
+// ── Druckfenster ────────────────────────────────────────────────────────────────────────────
+// Seitengeometrie (LETTER_PAGE_CSS) und Inhalts-Stile (LETTER_CONTENT_CSS) kommen aus derselben
+// Quelle wie im Editor (lib/letterDocumentCss.js – das Druckfenster lädt index.css nicht). Hier stehen
+// nur die Besonderheiten des Druckfensters (A4-Druck, Bildschirmansicht, Werkzeugleiste).
+const PRINT_WINDOW_CSS = `
     @page {
         size: A4;
         margin: 0;
@@ -1111,11 +1045,8 @@ const PRINT_PAGE_CSS = `
         .letter-page {
             box-shadow: none !important;
             border: none !important;
+            border-radius: 0 !important;
             margin: 0 !important;
-            padding: 20mm 20mm 35mm 25mm !important;
-            width: 210mm !important;
-            height: 297mm !important;
-            overflow: hidden !important;
             page-break-after: always !important;
             page-break-inside: avoid !important;
         }
@@ -1135,8 +1066,7 @@ const PRINT_PAGE_CSS = `
             background: #f1f5f9;
         }
         .letter-page {
-            margin: 0 auto 30px;
-            border-radius: 4px;
+            margin: 0 auto 30px !important;
         }
     }
     .tpl-toolbar { text-align: center; padding: 12px 0 20px; max-width: 210mm; margin: 0 auto; }
@@ -1146,161 +1076,248 @@ const PRINT_PAGE_CSS = `
     .tpl-notice[hidden] { display: none !important; }
     .tpl-notice-info { background: #fef9c3; border: 1px solid #fde047; color: #713f12; }
     .tpl-notice-warning { background: #fee2e2; border: 1px solid #fca5a5; color: #7f1d1d; }
+`;
 
-    /* DIN 5008 A4 Page Style */
-    .letter-page {
-        width: 210mm;
-        height: 297mm;
-        min-height: 297mm;
-        max-height: 297mm;
-        padding: 20mm 20mm 35mm 25mm;
-        background: #ffffff !important;
-        color: #000000 !important;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-        border: 1px solid #cbd5e1;
-        font-size: 11pt;
-        line-height: 1.5;
-        position: relative;
-        display: flex;
-        flex-direction: column;
-        text-align: left;
-        overflow: hidden;
-        box-sizing: border-box;
+// Skript des Druckfensters (läuft dort mit Einmal-Nonce, ES5). Nach Schrift und Bildern:
+// 1. Nachpaginierung: Ragt Inhalt über den Textbereich einer Seite hinaus (z. B. eine einzelne
+//    Tabelle oder ein Absatz, die/der im Editor nicht weiter aufgeteilt werden kann), wird er auf
+//    eine eingefügte Folgeseite (Textbereich + Fußzeile) verschoben – wie im Editor ganze Blöcke;
+//    ist schon der erste Block zu lang, wird er geteilt (Tabellen zeilenweise mit wiederholtem
+//    Tabellenkopf, Listen nach Punkten, Text nach Zeilen). Nichts wird abgeschnitten.
+// 2. Bleibt trotzdem etwas abgeschnitten (z. B. ein Bild höher als die Seite), erscheint eine
+//    Warnung und der Druckdialog öffnet sich nicht automatisch.
+const PRINT_WINDOW_SCRIPT = `
+(function () {
+    var btn = document.getElementById('tpl-print-btn');
+    if (btn) btn.addEventListener('click', function () { window.print(); });
+    var TOLERANCE = 1;
+    var BLOCK_DISPLAYS = { 'block': 1, 'flex': 1, 'grid': 1, 'table': 1, 'list-item': 1, 'flow-root': 1 };
+    function whenLoaded() {
+        return new Promise(function (resolve) {
+            if (document.readyState === 'complete') resolve();
+            else window.addEventListener('load', function () { resolve(); }, { once: true });
+        });
     }
-
-    .letter-page > p {
-        min-height: 1.2em;
-        margin-bottom: 1em;
+    function fontsReady() {
+        return (document.fonts && document.fonts.ready) ? document.fonts.ready.catch(function () {}) : Promise.resolve();
     }
-    /* Leerzeilen: gleiche Höhe wie gefüllte Absätze */
-    .letter-page p:empty,
-    .letter-page p:has(> br:only-child),
-    .letter-body p:empty,
-    .letter-body p:has(> br:only-child) {
-        min-height: 1.6em;
-        margin-bottom: 1em !important;
+    function pageList() {
+        return Array.prototype.slice.call(document.querySelectorAll('.preview-content > .letter-page'));
     }
-
-    .letter-sender {
-        font-size: 8pt;
-        color: #555555;
-        border-bottom: 1px solid #cccccc;
-        padding-bottom: 2mm;
-        margin-bottom: 5mm;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+    function childWithClass(parent, cls) {
+        for (var c = parent.firstElementChild; c; c = c.nextElementSibling) {
+            if (c.classList.contains(cls)) return c;
+        }
+        return null;
     }
-
-    .letter-sender:has(+ hr),
-    .letter-sender:has(+ .editor-hr) {
-        border-bottom: none !important;
-        padding-bottom: 0 !important;
-        margin-bottom: 3mm !important;
+    function elementChildren(el) {
+        var list = [];
+        for (var c = el.firstElementChild; c; c = c.nextElementSibling) list.push(c);
+        return list;
     }
-
-    .editor-hr,
-    .letter-page hr {
-        border: none;
-        border-top: 1px solid #cccccc;
-        margin: 2mm 0 5mm 0;
-        width: 100%;
-        display: block;
-        height: 0;
+    function bottomOf(node) { return node.getBoundingClientRect().bottom; }
+    function bodyLimit(body) { return body.getBoundingClientRect().top + body.clientHeight; }
+    function firstClipped(list, limit) {
+        for (var i = 0; i < list.length; i++) {
+            if (bottomOf(list[i]) > limit + TOLERANCE) return i;
+        }
+        return -1;
     }
-
-    .letter-header-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        margin-bottom: 10mm;
+    // Verschiebt "node" und alles danach (innerhalb von "root") in eine flache Kopie von "root";
+    // Vorfahren zwischen beiden werden dabei ebenfalls flach kopiert.
+    function splitAtNode(root, node) {
+        var path = [];
+        for (var n = node; n && n !== root; n = n.parentNode) path.unshift(n);
+        var right = root.cloneNode(false);
+        var target = right;
+        for (var i = 0; i < path.length; i++) {
+            var p = path[i];
+            var isLast = i === path.length - 1;
+            var after = [];
+            for (var s = p.nextSibling; s; s = s.nextSibling) after.push(s);
+            var holder = isLast ? p : p.cloneNode(false);
+            target.appendChild(holder);
+            for (var k = 0; k < after.length; k++) target.appendChild(after[k]);
+            target = holder;
+        }
+        return right;
     }
-
-    .letter-recipient {
-        width: 85mm;
-        font-size: 10pt;
-        line-height: 1.4;
-        color: #111111;
-        text-align: left;
+    // Bilder zählen als Inhalt der Zeile (Editor-Bilder sind display:block, stehen aber im Absatz)
+    function hasBlockChildren(el) {
+        for (var c = el.firstElementChild; c; c = c.nextElementSibling) {
+            if (c.tagName !== 'IMG' && BLOCK_DISPLAYS[window.getComputedStyle(c).display]) return true;
+        }
+        return false;
     }
-
-    .letter-date {
-        font-size: 10pt;
-        color: #333333;
-        text-align: right;
+    function splitTable(table, limit) {
+        var tbody = table.tBodies && table.tBodies[0];
+        if (!tbody) return null;
+        var rows = tbody.rows;
+        var idx = -1;
+        for (var i = 0; i < rows.length; i++) {
+            if (bottomOf(rows[i]) > limit + TOLERANCE) { idx = i; break; }
+        }
+        if (idx <= 0) return null;
+        var right = table.cloneNode(false);
+        if (table.tHead) right.appendChild(table.tHead.cloneNode(true));
+        var rightBody = tbody.cloneNode(false);
+        while (rows.length > idx) rightBody.appendChild(rows[idx]);
+        right.appendChild(rightBody);
+        var s = tbody.nextSibling;
+        while (s) { var next = s.nextSibling; right.appendChild(s); s = next; }
+        return right;
     }
-
-    .letter-subject {
-        font-size: 13pt;
-        font-weight: bold;
-        margin-bottom: 4mm;
-        color: #000000;
-        text-align: left;
+    function splitList(list, limit) {
+        var items = elementChildren(list);
+        var idx = firstClipped(items, limit);
+        if (idx < 0) return null;
+        var start = parseInt(list.getAttribute('start') || '1', 10) || 1;
+        var right;
+        if (idx > 0) {
+            right = splitAtNode(list, items[idx]);
+            if (list.tagName === 'OL') right.setAttribute('start', String(start + idx));
+            return right;
+        }
+        // Schon der erste Punkt ist zu lang: innerhalb des Punkts teilen, Fortsetzung ohne Aufzählungszeichen
+        var inner = splitBlock(items[0], limit);
+        if (!inner) return null;
+        inner.style.listStyleType = 'none';
+        right = list.cloneNode(false);
+        right.appendChild(inner);
+        var s = items[0].nextSibling;
+        while (s) { var next = s.nextSibling; right.appendChild(s); s = next; }
+        if (list.tagName === 'OL') right.setAttribute('start', String(start));
+        return right;
     }
-
-    .letter-object {
-        font-size: 10pt;
-        color: #444444;
-        margin-bottom: 8mm;
-        padding-bottom: 2mm;
-        border-bottom: 1px dotted #e2e8f0;
-        text-align: left;
+    // Erste Textstelle (bzw. erstes Bild), die unter dem Textbereich liegt; null, wenn davor nichts passt
+    function findInlineSplit(root, limit) {
+        var range = document.createRange();
+        var seenContent = false;
+        var walker = document.createTreeWalker(root, 5 /* SHOW_ELEMENT | SHOW_TEXT */);
+        var n;
+        while ((n = walker.nextNode())) {
+            if (n.nodeType === 3) {
+                var text = n.nodeValue || '';
+                if (!/\\S/.test(text)) continue;
+                range.selectNodeContents(n);
+                var box = range.getBoundingClientRect();
+                if (box.bottom <= limit + TOLERANCE) { seenContent = true; continue; }
+                for (var i = 0; i < text.length; i++) {
+                    if (!/\\S/.test(text.charAt(i))) continue;
+                    range.setStart(n, i);
+                    range.setEnd(n, i + 1);
+                    if (range.getBoundingClientRect().bottom > limit + TOLERANCE) {
+                        return seenContent ? { node: n, offset: i } : null;
+                    }
+                    seenContent = true;
+                }
+            } else if (n.tagName === 'IMG') {
+                if (bottomOf(n) > limit + TOLERANCE) return seenContent ? { node: n, offset: 0 } : null;
+                seenContent = true;
+            }
+        }
+        return null;
     }
-
-    .letter-body {
-        width: 100% !important;
-        max-width: 100% !important;
-        box-sizing: border-box !important;
-        flex-grow: 1;
-        flex-shrink: 1;
-        min-height: 0;
-        overflow: hidden;
-        margin-bottom: 12mm;
-        font-size: 11pt;
-        line-height: 1.6;
-        text-align: left;
+    function splitInline(el, limit) {
+        var point = findInlineSplit(el, limit);
+        if (!point) return null;
+        var node = point.node;
+        if (node.nodeType === 3 && point.offset > 0) node = node.splitText(point.offset);
+        var right = splitAtNode(el, node);
+        // Blocksatz: die nun letzte Zeile des ersten Teils bleibt im Blocksatz (wie vor der Teilung)
+        if (window.getComputedStyle(el).textAlign === 'justify') el.style.textAlignLast = 'justify';
+        return right;
     }
-
-    .letter-body p {
-        margin-bottom: 1em !important;
-        min-height: 1.6em;
+    // Teilt einen Block so, dass der erste Teil in den Textbereich passt; liefert den Rest (oder null)
+    function splitBlock(el, limit) {
+        var tag = el.tagName;
+        if (tag === 'TABLE') return splitTable(el, limit);
+        if (tag === 'UL' || tag === 'OL') return splitList(el, limit);
+        if (tag === 'IMG' || tag === 'HR') return null;
+        if (hasBlockChildren(el)) {
+            var kids = elementChildren(el);
+            var idx = firstClipped(kids, limit);
+            if (idx < 0) return null;
+            if (idx > 0) return splitAtNode(el, kids[idx]);
+            var inner = splitBlock(kids[0], limit);
+            if (!inner) return null;
+            var right = el.cloneNode(false);
+            right.appendChild(inner);
+            var s = kids[0].nextSibling;
+            while (s) { var next = s.nextSibling; right.appendChild(s); s = next; }
+            return right;
+        }
+        return splitInline(el, limit);
     }
-
-    .letter-footer {
-        position: absolute !important;
-        bottom: 10mm !important;
-        left: 25mm !important;
-        right: 20mm !important;
-        height: 18mm !important;
-        margin-top: 0 !important;
-        display: flex !important;
-        justify-content: space-between !important;
-        border-top: 1px solid #dddddd !important;
-        padding-top: 3mm !important;
-        font-size: 8pt !important;
-        color: #666666 !important;
-        line-height: 1.4 !important;
-        text-align: left !important;
-        box-sizing: border-box !important;
-        background-color: #ffffff !important;
+    function createFollowPage(page, body) {
+        var footer = childWithClass(page, 'letter-footer');
+        var next = page.cloneNode(false);
+        var nextBody = body.cloneNode(false);
+        next.appendChild(nextBody);
+        if (footer) next.appendChild(footer.cloneNode(true));
+        page.parentNode.insertBefore(next, page.nextSibling);
+        return nextBody;
     }
-
-    .footer-col {
-        width: 30%;
+    function moveFrom(node, target) {
+        while (node) { var next = node.nextSibling; target.appendChild(node); node = next; }
     }
-
-    /* Der Editor (ProseMirror) zeigt manuelle Zeilenumbrüche (literale \\n) via
-       white-space:pre-wrap an. Das Druckfenster nutzt sonst white-space:normal und
-       zieht sie auf eine Zeile zusammen. Hier für die DIN-5008-Textfelder angleichen –
-       Tabellen bewusst ausgenommen. */
-    .letter-sender,
-    .letter-recipient,
-    .letter-date,
-    .letter-subject,
-    .letter-object,
-    .letter-footer,
-    .footer-col {
-        white-space: pre-wrap;
+    function repaginate() {
+        var added = 0;
+        var pages = pageList();
+        for (var p = 0; p < pages.length && added < 200; p++) {
+            var body = childWithClass(pages[p], 'letter-body');
+            if (!body) continue;
+            var limit = bodyLimit(body);
+            var kids = elementChildren(body);
+            var idx = firstClipped(kids, limit);
+            if (idx < 0) continue;
+            if (idx > 0) {
+                moveFrom(kids[idx], createFollowPage(pages[p], body));
+            } else {
+                var rest = splitBlock(kids[0], limit);
+                if (!rest) continue;
+                var target = createFollowPage(pages[p], body);
+                target.appendChild(rest);
+                moveFrom(kids[0].nextSibling, target);
+            }
+            added++;
+            pages = pageList();
+        }
+        return added;
     }
+    function clippedPages() {
+        var hit = [];
+        pageList().forEach(function (page, idx) {
+            var body = childWithClass(page, 'letter-body');
+            if (body && firstClipped(elementChildren(body), bodyLimit(body)) >= 0) hit.push(idx + 1);
+        });
+        return hit;
+    }
+    var done = false;
+    function prepare() {
+        if (done) return 0;
+        done = true;
+        var added = 0;
+        try { added = repaginate(); } catch (e) { added = 0; }
+        var info = document.getElementById('tpl-repaginate-info');
+        if (info && added > 0) {
+            info.textContent = 'Hinweis: Ein Teil des Inhalts war länger als der Textbereich und wurde für den Druck auf ' + added + (added === 1 ? ' zusätzliche Seite' : ' zusätzliche Seiten') + ' umbrochen. Die Seitenaufteilung weicht dadurch vom Editor ab.';
+            info.hidden = false;
+        }
+        var hit = clippedPages();
+        var box = document.getElementById('tpl-overflow-warning');
+        if (box && hit.length) {
+            box.textContent = 'Achtung: Auf Seite ' + hit.join(', ') + ' ist ein Element (z. B. ein Bild) höher als der Textbereich und würde im Druck abgeschnitten. Bitte die Vorlage im Editor anpassen. Der Druckdialog wurde deshalb nicht automatisch geöffnet.';
+            box.hidden = false;
+        }
+        return hit.length;
+    }
+    window.addEventListener('beforeprint', prepare);
+    var limitTimer = new Promise(function (resolve) { setTimeout(resolve, 5000); });
+    Promise.race([whenLoaded().then(fontsReady), limitTimer]).then(function () {
+        if (!prepare()) setTimeout(function () { window.print(); }, 50);
+    });
+})();
 `;
 
 const createPrintNonce = () => {
@@ -1337,49 +1354,18 @@ const openPrintWindow = ({ bodyHtml, title, notices = [] }) => {
     <meta http-equiv="Content-Security-Policy" content="${csp}">
     <meta name="referrer" content="no-referrer">
     <title>${escapeHtml(title)}</title>
-    <style>${openSansFontFaceCss()}${PRINT_PAGE_CSS}${LETTER_CONTENT_CSS}</style>
+    <style>${openSansFontFaceCss()}${LETTER_PAGE_CSS}${LETTER_CONTENT_CSS}${editorTextFlowCss('.preview-content .letter-page')}${PRINT_WINDOW_CSS}</style>
 </head>
 <body>
     <div class="no-print tpl-toolbar">
         <button id="tpl-print-btn" type="button">🖨️ Als PDF drucken / speichern</button>
         <p>Drücke Strg+P oder klicke den Button. Wähle "Als PDF speichern" im Druckdialog.</p>
         ${noticeHtml}
+        <div id="tpl-repaginate-info" class="tpl-notice tpl-notice-info" hidden></div>
         <div id="tpl-overflow-warning" class="tpl-notice tpl-notice-warning" hidden></div>
     </div>
     <div class="preview-content">${bodyHtml}</div>
-    <script nonce="${nonce}">
-    (function () {
-        var btn = document.getElementById('tpl-print-btn');
-        if (btn) btn.addEventListener('click', function () { window.print(); });
-        function whenLoaded() {
-            return new Promise(function (resolve) {
-                if (document.readyState === 'complete') resolve();
-                else window.addEventListener('load', function () { resolve(); }, { once: true });
-            });
-        }
-        function fontsReady() {
-            return (document.fonts && document.fonts.ready) ? document.fonts.ready.catch(function () {}) : Promise.resolve();
-        }
-        function checkOverflow() {
-            var pages = document.querySelectorAll('.preview-content > .letter-page');
-            var hit = [];
-            Array.prototype.forEach.call(pages, function (page, idx) {
-                var body = page.querySelector('.letter-body');
-                if (body && body.scrollHeight > body.clientHeight + 1) hit.push(idx + 1);
-            });
-            var box = document.getElementById('tpl-overflow-warning');
-            if (box && hit.length) {
-                box.textContent = 'Achtung: Auf Seite ' + hit.join(', ') + ' ist der Inhalt länger als der Textbereich und würde im Druck abgeschnitten. Bitte die Vorlage im Editor kürzen oder auf eine weitere Seite verteilen. Der Druckdialog wurde deshalb nicht automatisch geöffnet.';
-                box.hidden = false;
-            }
-            return hit.length;
-        }
-        var limit = new Promise(function (resolve) { setTimeout(resolve, 5000); });
-        Promise.race([whenLoaded().then(fontsReady), limit]).then(function () {
-            if (!checkOverflow()) setTimeout(function () { window.print(); }, 50);
-        });
-    })();
-    </script>
+    <script nonce="${nonce}">${PRINT_WINDOW_SCRIPT}</script>
 </body>
 </html>`;
     const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
@@ -1414,7 +1400,7 @@ const collectUsedVariables = (doc) => {
 const TEMPLATE_HINTS = {
     rent_increase: 'Mieterhöhung: Bitte neue Miete, Erhöhungsbetrag, Wirksamkeitsdatum und Zustimmungsfrist selbst eintragen, die Begründung nach § 558a BGB ergänzen und Wartefrist sowie Kappungsgrenze (§ 558 BGB) vor dem Versand prüfen.',
     rent_increase_consent: 'Bitte die Werte der Mieterhöhung selbst eintragen – sie werden nicht automatisch berechnet.',
-    rent_clearance_certificate: 'Bitte vor dem Ausstellen den aktuellen Mietkontostand des Mieters prüfen. Die Bescheinigung bestätigt Schuldenfreiheit; es wird kein Saldo automatisch geprüft.'
+    rent_clearance_certificate: 'Die Bescheinigung bestätigt Schuldenfreiheit. Geprüft werden automatisch das Mietkonto dieses Vertrags und offene Forderungen (siehe unten); Forderungen außerhalb der App (z. B. Nebenkosten-Nachzahlungen ohne Forderungsakte) bitte selbst prüfen.'
 };
 
 const LetterNavigation = Extension.create({
@@ -1759,6 +1745,15 @@ export const DocumentTemplates = () => {
     const [creating, setCreating] = useState(false);
     const [dates] = useState(getDateStrings);
 
+    // Mietschuldenfreiheitsbescheinigung (nur Echtdaten-Modus): Saldo des Mietvertrags prüfen.
+    // Offene Beträge, ein Ladefehler oder ein fehlender Vertrag sperren den Druck, bis der Nutzer
+    // ausdrücklich bestätigt, dass er den Kontostand selbst geprüft hat.
+    const isClearanceDocument = isRealMode && activeType === 'rent_clearance_certificate';
+    const clearanceLeaseId = tenantState?.lease_id || null;
+    const clearanceOverrideKey = clearanceLeaseId || 'ohne-vertrag';
+    const [clearanceState, setClearanceState] = useState({ leaseId: null, status: 'idle', balance: null, error: null });
+    const [clearanceOverride, setClearanceOverride] = useState(null);
+
     // Custom template list from DB
     const [customTemplates, setCustomTemplates] = useState([]);
 
@@ -1774,6 +1769,10 @@ export const DocumentTemplates = () => {
     const loadSeqRef = useRef(0);
     const tickPendingRef = useRef(false);
     const previewContainerRef = useRef(null);
+    // Seitenansicht verkleinert per transform (nicht zoom): das Layout – und damit Zeilen- und
+    // Seitenumbrüche – bleibt in Originalgröße wie im Druck; nur die Darstellung wird skaliert.
+    const scaleFrameRef = useRef(null);
+    const scaleContentRef = useRef(null);
 
     // TipTap Editor initialization
     const editor = useEditor({
@@ -2111,7 +2110,7 @@ export const DocumentTemplates = () => {
                         const file = files[0];
                         if (file.type.startsWith('image/')) {
                             const dropCoordinates = view.posAtCoords({ left: event.clientX, top: event.clientY });
-                            prepareImageForEmbedding(file)
+                            prepareImageForEmbedding(file, { currentImageChars: sumEmbeddedImageChars(view.state.doc) })
                                 .then((src) => {
                                     if (!src || !dropCoordinates) return;
                                     const { schema } = view.state;
@@ -2521,7 +2520,8 @@ export const DocumentTemplates = () => {
 
     // Word-like Pagination: overflow:hidden + scrollHeight check
     // Overflow → move LAST child to next page. Underflow → pull FIRST child back.
-    // Maßstab der Seite (CSS-zoom bei kleineren Bildschirmen): Rects sind skaliert, CSS-Längen nicht
+    // Maßstab der Seitenansicht (transform: scale bei kleineren Bildschirmen): Rects sind skaliert,
+    // CSS-Längen, scrollHeight und clientHeight nicht
     const A4_WIDTH_PX = 210 * 96 / 25.4;
     const getPageScale = (domPage) => {
         const width = domPage ? domPage.getBoundingClientRect().width : 0;
@@ -2965,6 +2965,40 @@ export const DocumentTemplates = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [variableValues, editor, loading]);
 
+    // Höhe des skalierten Seitenrahmens = Inhaltshöhe × Maßstab (transform belegt keinen Platz)
+    useEffect(() => {
+        const frame = scaleFrameRef.current;
+        const content = scaleContentRef.current;
+        if (!frame || !content) return undefined;
+        const update = () => {
+            const scale = parseFloat(window.getComputedStyle(frame).getPropertyValue('--page-scale')) || 1;
+            frame.style.height = `${Math.ceil(content.offsetHeight * scale)}px`;
+        };
+        update();
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+        if (observer) observer.observe(content);
+        window.addEventListener('resize', update);
+        return () => {
+            if (observer) observer.disconnect();
+            window.removeEventListener('resize', update);
+        };
+    }, [loading]);
+
+    // Mietschuldenfreiheitsbescheinigung: Mietkonto und Forderungen des Vertrags laden
+    useEffect(() => {
+        if (!isClearanceDocument || !clearanceLeaseId) return undefined;
+        let cancelled = false;
+        setClearanceOverride(null);
+        setClearanceState({ leaseId: clearanceLeaseId, status: 'loading', balance: null, error: null });
+        loadLeaseBalance(clearanceLeaseId).then(({ balance, error }) => {
+            if (cancelled) return;
+            setClearanceState(error
+                ? { leaseId: clearanceLeaseId, status: 'error', balance: null, error: error?.message || String(error) }
+                : { leaseId: clearanceLeaseId, status: 'done', balance, error: null });
+        });
+        return () => { cancelled = true; };
+    }, [isClearanceDocument, clearanceLeaseId]);
+
     // Ungespeicherte Änderungen: beim Schließen/Neuladen des Browser-Tabs nachfragen
     useEffect(() => {
         if (!isDirty) return undefined;
@@ -3170,6 +3204,12 @@ export const DocumentTemplates = () => {
         }
         const config = activeConfigExact;
         const portfolioFilter = effectivePortfolioId === 'global' ? null : effectivePortfolioId;
+        // Größe begrenzen (eingebettete Bilder): sonst werden Laden, Speichern und Druck sehr langsam
+        const contentSize = editor.getHTML().length;
+        if (contentSize > MAX_TEMPLATE_HTML_CHARS) {
+            alert(`Die Vorlage ist zu groß zum Speichern (${formatMegabytes(contentSize)} MB, höchstens ${formatMegabytes(MAX_TEMPLATE_HTML_CHARS)} MB). Bitte Bilder entfernen oder durch kleinere ersetzen.`);
+            return;
+        }
         // Hinweis: Wird eine global/standardmäßig geladene Vorlage gespeichert, während ein Portfolio gewählt ist,
         // entsteht eine portfolio-spezifische Kopie (die globale Vorlage bleibt unverändert).
         if (portfolioFilter && diagnostics.loadSource && diagnostics.loadSource !== 'Datenbank (Portfolio)') {
@@ -3381,7 +3421,7 @@ export const DocumentTemplates = () => {
         input.value = '';
         if (!file || !editor) return;
         try {
-            const src = await prepareImageForEmbedding(file);
+            const src = await prepareImageForEmbedding(file, { currentImageChars: sumEmbeddedImageChars(editor.state.doc) });
             if (src) editor.chain().focus().setImage({ src }).run();
         } catch (err) {
             alert(err?.message || 'Das Bild konnte nicht eingefügt werden.');
@@ -3407,8 +3447,33 @@ export const DocumentTemplates = () => {
         });
     };
 
+    // Stand der Saldo-Prüfung für die Mietschuldenfreiheitsbescheinigung (null = keine Prüfung nötig)
+    const clearanceCheck = !isClearanceDocument
+        ? null
+        : (!clearanceLeaseId
+            ? { status: 'no-lease', balance: null, error: null }
+            : (clearanceState.leaseId === clearanceLeaseId ? clearanceState : { status: 'loading', balance: null, error: null }));
+    // Monate vor Beginn der Mietkontoführung mit rechnerisch offener Miete kann die App nicht prüfen
+    const clearanceHasUncheckedMonths = clearanceCheck?.status === 'done'
+        && clearanceCheck.balance?.hiddenMonths > 0 && clearanceCheck.balance?.hiddenAmount > RENT_TOLERANCE;
+    const clearanceNeedsConfirmation = !!clearanceCheck
+        && (clearanceCheck.status === 'no-lease' || clearanceCheck.status === 'error'
+            || (clearanceCheck.status === 'done' && clearanceCheck.balance?.hasOpen) || clearanceHasUncheckedMonths);
+    const clearanceConfirmed = clearanceOverride === clearanceOverrideKey;
+    // Mietkonto (offen + ausgebucht) und Forderungsakten können dieselben Monate enthalten: nicht addieren,
+    // sondern als Untergrenze das größere von beiden nennen
+    const clearanceLedgerOpen = clearanceCheck?.balance ? clearanceCheck.balance.rentOpen + clearanceCheck.balance.writtenOffOpen : 0;
+    const clearanceClaimsOpen = clearanceCheck?.balance ? clearanceCheck.balance.claimsOpen : 0;
+    const clearanceOpenOverlaps = clearanceLedgerOpen > RENT_TOLERANCE && clearanceClaimsOpen > RENT_TOLERANCE;
+    const clearanceBlocked = !!clearanceCheck
+        && (clearanceCheck.status === 'loading' || clearanceCheck.status === 'idle' || (clearanceNeedsConfirmation && !clearanceConfirmed));
+
     const handlePrintPreview = () => {
         if (!editor) return;
+        if (clearanceBlocked) {
+            alert('Die Bescheinigung kann erst gedruckt werden, wenn das Mietkonto geprüft ist bzw. Sie oben bestätigt haben, den Kontostand selbst geprüft zu haben.');
+            return;
+        }
         const resolved = resolveTemplateHtml(editor.getHTML(), variableValues);
         if (isRealMode && (resolved.missing.length > 0 || resolved.error)) {
             // Erst warnen; der Klick auf "Trotzdem öffnen" öffnet das Fenster (Pop-up-Blocker)
@@ -3420,7 +3485,7 @@ export const DocumentTemplates = () => {
 
     const confirmPrintAnyway = () => {
         setPrintWarning(null);
-        if (!editor) return;
+        if (!editor || clearanceBlocked) return;
         openPrintPreview(resolveTemplateHtml(editor.getHTML(), variableValues));
     };
 
@@ -3498,62 +3563,21 @@ export const DocumentTemplates = () => {
                     outline: none;
                     width: 100%;
                 }
-                /* A4 Seite im Editor – feste Höhe ist KRITISCH für Overflow-Erkennung */
+                /* Seitengeometrie: lib/letterPage.css (über index.css, dieselbe Quelle wie Druck und Rechnungen).
+                   Hier nur Editor-Besonderheiten, die die Inhaltsfläche nicht verändern. */
                 .ProseMirror > .letter-page,
                 .preview-live-container > .letter-page {
-                    display: flex !important;
-                    flex-direction: column !important;
                     margin: 0 auto 20px auto !important;
-                    width: 210mm !important;
-                    height: 297mm !important;
-                    min-height: 297mm !important;
-                    max-height: 297mm !important;
-                    padding: 20mm 20mm 35mm 25mm !important;
-                    background: #ffffff !important;
-                    border: 1px solid var(--border-color, #cbd5e1) !important;
-                    box-shadow: 0 2px 12px rgba(0,0,0,0.08) !important;
-                    overflow: hidden !important;
-                    position: relative !important;
-                    box-sizing: border-box !important;
-                    font-size: 11pt !important;
-                    line-height: 1.5 !important;
                 }
-                /* Body: Flexibler Bereich zwischen Header und Footer */
-                .ProseMirror .letter-body,
-                .preview-live-container .letter-body {
-                    flex: 1 1 auto !important;
-                    min-height: 0 !important;
-                    overflow: hidden !important;
-                    margin-bottom: 12mm !important;
-                    font-size: 11pt !important;
-                    line-height: 1.6 !important;
-                }
-                /* Footer: Am Seitenende fixiert, NICHT editierbar im Editor */
+                /* Fußzeile: im Editor nicht editierbar */
                 .ProseMirror .letter-footer,
                 .preview-live-container .letter-footer {
-                    position: absolute !important;
-                    bottom: 10mm !important;
-                    left: 25mm !important;
-                    right: 20mm !important;
-                    height: 18mm !important;
-                    margin-top: 0 !important;
-                    display: flex !important;
-                    justify-content: space-between !important;
-                    border-top: 1px solid #ddd !important;
-                    padding-top: 3mm !important;
-                    font-size: 8pt !important;
-                    color: #666 !important;
-                    box-sizing: border-box !important;
-                    background-color: #ffffff !important;
                     user-select: none !important;
                     cursor: default !important;
                     opacity: 0.7 !important;
                 }
-                .ProseMirror .footer-col,
-                .preview-live-container .footer-col {
-                    width: 30%;
-                }
                 ${LETTER_CONTENT_CSS}
+                ${editorTextFlowCss('.preview-live-container .letter-page')}
                 /* Platzhalter im Editor: hervorgehoben, aber ohne eigene Abstände/Schriftgröße,
                    damit der Seitenumbruch im Editor dem Druck entspricht (WYSIWYG). */
                 .ProseMirror .variable-chip {
@@ -3599,20 +3623,27 @@ export const DocumentTemplates = () => {
                 .tpl-banner-warning { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; }
                 .tpl-banner-error { background: #fee2e2; border: 1px solid #fca5a5; color: #7f1d1d; }
                 .tpl-banner button { cursor: pointer; }
+                /* Verkleinerte Seitenansicht: transform statt zoom – Messungen der Pagination (scrollHeight,
+                   clientHeight) und alle Zeilenumbrüche bleiben in Originalgröße wie im Druck. Der Rahmen
+                   nimmt die verkleinerte Größe ein (Höhe per JavaScript). */
+                .letter-scale-frame {
+                    --page-scale: 1;
+                    width: calc(210mm * var(--page-scale));
+                    flex-shrink: 0;
+                }
+                .letter-scale-content {
+                    width: 210mm;
+                    transform: scale(var(--page-scale));
+                    transform-origin: top left;
+                }
                 @media (max-width: 1450px) {
-                    .letter-page {
-                        zoom: 0.85;
-                    }
+                    .letter-scale-frame { --page-scale: 0.85; }
                 }
                 @media (max-width: 1300px) {
-                    .letter-page {
-                        zoom: 0.75;
-                    }
+                    .letter-scale-frame { --page-scale: 0.75; }
                 }
                 @media (max-width: 1100px) {
-                    .letter-page {
-                        zoom: 0.65;
-                    }
+                    .letter-scale-frame { --page-scale: 0.65; }
                 }
             `}</style>
             {/* Portfolio Selector & Add template button */}
@@ -3666,6 +3697,66 @@ export const DocumentTemplates = () => {
                         )}
                         {templateHint && (
                             <div style={{ marginTop: '4px' }}>{templateHint}</div>
+                        )}
+                    </div>
+                </div>
+            )}
+            {/* Mietschuldenfreiheitsbescheinigung: Ergebnis der Saldo-Prüfung */}
+            {clearanceCheck && (
+                <div className={`tpl-banner ${clearanceCheck.status === 'loading' || clearanceCheck.status === 'idle'
+                    ? 'tpl-banner-info'
+                    : (clearanceCheck.status === 'done' && !clearanceCheck.balance?.hasOpen
+                        ? (clearanceHasUncheckedMonths ? 'tpl-banner-warning' : 'tpl-banner-info')
+                        : 'tpl-banner-error')}`}>
+                    {clearanceCheck.status === 'loading' || clearanceCheck.status === 'idle'
+                        ? <Loader2 className="animate-spin" size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                        : <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />}
+                    <div style={{ flex: 1 }}>
+                        {(clearanceCheck.status === 'loading' || clearanceCheck.status === 'idle') && (
+                            <div><strong>Mietkonto wird geprüft …</strong> Bis zum Ende der Prüfung ist der Druck der Bescheinigung gesperrt.</div>
+                        )}
+                        {clearanceCheck.status === 'no-lease' && (
+                            <div><strong>Kein Mietvertrag zugeordnet – der Kontostand kann nicht geprüft werden.</strong> Die Bescheinigung nur ausstellen, wenn Sie den Kontostand selbst geprüft haben.</div>
+                        )}
+                        {clearanceCheck.status === 'error' && (
+                            <div><strong>Der Mietkontostand konnte nicht geprüft werden</strong> ({clearanceCheck.error}). Die Bescheinigung nur ausstellen, wenn Sie den Kontostand selbst geprüft haben.</div>
+                        )}
+                        {clearanceCheck.status === 'done' && clearanceCheck.balance?.hasOpen && (
+                            <>
+                                <div><strong>Offene Forderungen: {clearanceOpenOverlaps
+                                    ? `mindestens ${formatEuroAmount(Math.max(clearanceLedgerOpen, clearanceClaimsOpen))}`
+                                    : formatEuroAmount(clearanceLedgerOpen + clearanceClaimsOpen)} – Bescheinigung nicht ausstellen.</strong></div>
+                                <ul style={{ margin: '4px 0 0 0', paddingLeft: '18px', listStyleType: 'disc' }}>
+                                    {clearanceCheck.balance.rentOpen > RENT_TOLERANCE && (
+                                        <li>Mietkonto: {formatEuroAmount(clearanceCheck.balance.rentOpen)} offen ({formatMonthList(clearanceCheck.balance.openMonths)})</li>
+                                    )}
+                                    {clearanceCheck.balance.writtenOffOpen > RENT_TOLERANCE && (
+                                        <li>Ausgebuchte Mieten: {formatEuroAmount(clearanceCheck.balance.writtenOffOpen)} ({formatMonthList(clearanceCheck.balance.writtenOffMonths)})</li>
+                                    )}
+                                    {clearanceCheck.balance.claimsOpen > RENT_TOLERANCE && (
+                                        <li>Forderungsakten: {clearanceCheck.balance.openClaimCount} offen, zusammen {formatEuroAmount(clearanceCheck.balance.claimsOpen)} (kann dieselben Monate wie das Mietkonto enthalten)</li>
+                                    )}
+                                </ul>
+                            </>
+                        )}
+                        {clearanceCheck.status === 'done' && !clearanceCheck.balance?.hasOpen && (
+                            <div><strong>Mietkonto geprüft:</strong> keine offenen Mieten und keine offenen Forderungsakten zu diesem Vertrag.</div>
+                        )}
+                        {clearanceCheck.status === 'done' && clearanceCheck.balance?.hiddenMonths > 0 && (
+                            <div style={{ marginTop: '4px' }}>
+                                Nicht geprüft: {clearanceCheck.balance.hiddenMonths} Monat(e) vor Beginn der Mietkontoführung{clearanceCheck.balance.bookingStartMonth ? ` (${formatMonthList([clearanceCheck.balance.bookingStartMonth])})` : ''}{clearanceCheck.balance.hiddenAmount > RENT_TOLERANCE ? ` – laut Vertrag rechnerisch ${formatEuroAmount(clearanceCheck.balance.hiddenAmount)} ohne erfasste Zahlung` : ''}. Diesen Zeitraum bitte selbst prüfen{clearanceHasUncheckedMonths ? ' und unten bestätigen' : ''}.
+                            </div>
+                        )}
+                        {clearanceNeedsConfirmation && (
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginTop: '8px', cursor: 'pointer', fontWeight: 600 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={clearanceConfirmed}
+                                    onChange={e => setClearanceOverride(e.target.checked ? clearanceOverrideKey : null)}
+                                    style={{ marginTop: '2px' }}
+                                />
+                                <span>Ich habe den Kontostand selbst geprüft und stelle die Bescheinigung trotzdem aus.</span>
+                            </label>
                         )}
                     </div>
                 </div>
@@ -3937,7 +4028,9 @@ export const DocumentTemplates = () => {
                                 </p>
                                 {selectedVariable.id === 'mieter_anrede' && (
                                     <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px', listStyleType: 'disc', color: '#1e3a8a' }}>
-                                        <li>Mit Mietername: <em>„Sehr geehrte/r [Vorname Nachname]“</em></li>
+                                        <li>Anrede „Frau“: <em>„Sehr geehrte Frau [Nachname]“</em></li>
+                                        <li>Anrede „Herr“: <em>„Sehr geehrter Herr [Nachname]“</em></li>
+                                        <li>Ohne Anrede: <em>„Sehr geehrte/r [Vorname Nachname]“</em></li>
                                         <li>Ohne Name: <em>„Sehr geehrte Damen und Herren“</em></li>
                                     </ul>
                                 )}
@@ -4037,7 +4130,7 @@ export const DocumentTemplates = () => {
                                 <div className="tpl-banner tpl-banner-warning" style={{ marginBottom: 0 }}>
                                     <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
                                     <div>
-                                        Auf Seite {overflowPages.join(', ')} passt der Inhalt nicht in den Textbereich und würde im Druck abgeschnitten. Bitte den Absatz bzw. die Tabelle kürzen oder teilen.
+                                        Auf Seite {overflowPages.join(', ')} passt der Inhalt nicht in den Textbereich. In der PDF-Vorschau wird er automatisch auf eine Folgeseite umbrochen (nichts wird abgeschnitten) – die Seitenaufteilung weicht dann aber vom Editor ab. Für exakt gleiche Seiten den Absatz bzw. die Tabelle kürzen oder teilen.
                                     </div>
                                 </div>
                             )}
@@ -4330,7 +4423,14 @@ export const DocumentTemplates = () => {
                                         >
                                             {showLivePreview ? "Entwurf" : "Live-Vorschau"}
                                         </Button>
-                                        <Button variant="secondary" size="sm" icon={FileText} onClick={handlePrintPreview}>
+                                        <Button
+                                            variant="secondary"
+                                            size="sm"
+                                            icon={FileText}
+                                            onClick={handlePrintPreview}
+                                            disabled={clearanceBlocked}
+                                            title={clearanceBlocked ? 'Gesperrt: erst Mietkonto prüfen bzw. die Prüfung oben bestätigen.' : undefined}
+                                        >
                                             PDF-Vorschau
                                         </Button>
                                         {!activeConfig.isCustom && (
@@ -4579,12 +4679,16 @@ export const DocumentTemplates = () => {
                                              <div>Vorschau mit Beispieldaten (gelb markiert). Vermieterdaten stammen aus dem gewählten Portfolio, fehlende Angaben sind rot markiert. Echte Dokumente erstellst du über „Dokument erstellen“ beim Mieter.</div>
                                          </div>
                                      )}
-                                     {showLivePreview ? (
-                                         // Werte sind maskiert und das Ergebnis bereinigt (resolveTemplateHtml)
-                                         <div ref={previewContainerRef} className="preview-live-container" dangerouslySetInnerHTML={{ __html: livePreview?.html || '' }} />
-                                     ) : (
-                                         <EditorContent editor={editor} />
-                                     )}
+                                     <div ref={scaleFrameRef} className="letter-scale-frame">
+                                         <div ref={scaleContentRef} className="letter-scale-content">
+                                             {showLivePreview ? (
+                                                 // Werte sind maskiert und das Ergebnis bereinigt (resolveTemplateHtml)
+                                                 <div ref={previewContainerRef} className="preview-live-container" dangerouslySetInnerHTML={{ __html: livePreview?.html || '' }} />
+                                             ) : (
+                                                 <EditorContent editor={editor} />
+                                             )}
+                                         </div>
+                                     </div>
                                     {layoutPopover && showLayoutOutlines && !showLivePreview && (
                                         <div className="layout-popover" style={{
                                             position: 'fixed',

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import {
     generateClaimPdf, getDunningLevel, parseDeadlineDays, buildClaimPortalUrl, translateClaimError,
-    toLocalDateString, parseLocalDate, addMonthsClamped, num, round2, formatDateDE
+    toLocalDateString, parseLocalDate, addMonthsClamped, num, round2, formatDateDE, CLAIM_DOCUMENT_BUCKET
 } from '../lib/claimPdfGenerator';
 
 const STATUS_CONFIG = {
@@ -34,6 +34,14 @@ const INSTALLMENT_COUNT_OPTIONS = [2, 3, 4, 6, 12, 24];
 const MAX_INSTALLMENTS = 60;
 // Kennzeichnung des Historien-Eintrags, mit dem ein Ratenplan-Aufschlag als Kosten gebucht wurde
 const SURCHARGE_SOURCE = 'payment_plan_surcharge';
+// Gültigkeit eines neuen Mieterportal-Links (Tage)
+const PORTAL_LINK_DAYS = 14;
+
+// PostgREST: RPC existiert (noch) nicht – älterer Datenbank-Stand
+const isMissingRpcError = (err) => err?.code === 'PGRST202' || /could not find the function/i.test(String(err?.message || ''));
+
+// Erlass/Ausbuchung (settle_claim_item): Buchung ohne Geldeingang
+const isWaiverMeta = (meta) => meta?.waiver === true || meta?.waiver === 'true' || meta?.allocation_type === 'waiver';
 
 const getFirstOfNextMonth = () => {
     const d = new Date();
@@ -110,8 +118,11 @@ const ClaimDetail = () => {
     const [paymentPlan, setPaymentPlan] = useState(null);
     const [installments, setInstallments] = useState([]);
 
-    // Portal State
+    // Portal State: claimAccessLink = Status des aktiven Links (ohne Token/PIN).
+    // Token und PIN gibt es nur direkt nach dem Erzeugen (portalSecret, nur im Speicher dieser Seite).
     const [claimAccessLink, setClaimAccessLink] = useState(null);
+    const [portalSecret, setPortalSecret] = useState(null);
+    const [pdfNewPortalAccess, setPdfNewPortalAccess] = useState(false);
     const [paymentPlanRequests, setPaymentPlanRequests] = useState([]);
     const [isPortalModalOpen, setIsPortalModalOpen] = useState(false);
 
@@ -255,10 +266,11 @@ const ClaimDetail = () => {
                 setInstallments([]);
             }
 
-            // Fetch F) claim_access_links (nur aktiver, nicht widerrufener, nicht abgelaufener Link)
+            // Fetch F) claim_access_links (nur aktiver, nicht widerrufener, nicht abgelaufener Link).
+            // Nur Statusspalten: Token und PIN werden nicht (mehr) aus der Datenbank gelesen.
             const { data: linkData, error: linkError } = await supabase
                 .from('claim_access_links')
-                .select('id, claim_id, token, pin, expires_at, revoked_at, is_active, created_at')
+                .select('id, claim_id, expires_at, revoked_at, is_active, created_at')
                 .eq('claim_id', claimId)
                 .eq('is_active', true)
                 .is('revoked_at', null)
@@ -318,6 +330,15 @@ const ClaimDetail = () => {
 
     const isOwnClaim = !!(claim && user && claim.user_id === user.id);
 
+    // Token und PIN des aktiven Links sind nur bekannt, wenn er auf dieser Seite gerade erzeugt wurde
+    const portalSecretActive = !!(portalSecret && claimAccessLink && portalSecret.linkId === claimAccessLink.id);
+
+    const openPdfModal = () => {
+        // Bestehender Link ohne bekannte PIN: für das neue Schreiben standardmäßig neuen Zugang erzeugen
+        setPdfNewPortalAccess(!!claimAccessLink && !portalSecretActive);
+        setIsPdfModalOpen(true);
+    };
+
     // Zahlungen bucht record_claim_payment derzeit nur für den Eigentümer der Forderung
     const paymentErrorMessage = (err) => {
         const raw = String(err?.message || '');
@@ -364,6 +385,36 @@ const ClaimDetail = () => {
         return String(100000 + (value % range));
     };
 
+    // Neuer Portal-Zugang. Die Datenbank speichert nur Hashes; Token und PIN gibt es nur in
+    // dieser Antwort. Ältere Datenbank ohne create_claim_portal_link: bisheriger Weg, Token und
+    // PIN werden dann im Browser erzeugt (generate_claim_access_link übernimmt gültige Werte).
+    const createPortalAccess = async () => {
+        const { data, error } = await supabase.rpc('create_claim_portal_link', {
+            p_claim_id: claim.id,
+            p_expires_days: PORTAL_LINK_DAYS
+        });
+        if (!error) {
+            if (!data?.link_id || !data?.token || !data?.pin) {
+                throw new Error('Der Portal-Link konnte nicht erzeugt werden.');
+            }
+            return { linkId: data.link_id, token: data.token, pin: String(data.pin) };
+        }
+        if (!isMissingRpcError(error)) throw error;
+
+        const token = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+        const pin = generatePin();
+        const { data: linkId, error: legacyError } = await supabase.rpc('generate_claim_access_link', {
+            p_claim_id: claim.id,
+            p_token: token,
+            p_pin: pin,
+            p_expires_days: PORTAL_LINK_DAYS
+        });
+        if (legacyError) throw legacyError;
+        if (!linkId) throw new Error('Der Portal-Link konnte nicht erzeugt werden.');
+        return { linkId, token, pin };
+    };
+
     const handleCreatePortalLink = async () => {
         if (isSubmitting) return;
         if (claimAccessLink && !window.confirm(
@@ -372,23 +423,11 @@ const ClaimDetail = () => {
         )) return;
         setIsSubmitting(true);
         try {
-            // Random token (32 hex chars) and a 6-digit PIN
-            const token = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-                .map(b => b.toString(16).padStart(2, '0')).join('');
-            const pin = generatePin();
-
-            const { error } = await supabase.rpc('generate_claim_access_link', {
-                p_claim_id: claim.id,
-                p_token: token,
-                p_pin: pin,
-                p_expires_days: 14 // valid for 14 days
-            });
-
-            if (error) throw error;
-
-            // Link is created, just reload data to get the new claimAccessLink
+            const secret = await createPortalAccess();
+            setPortalSecret(secret);
             await loadClaimData();
-            alert('Neuer Portal-Link wurde erfolgreich erstellt!');
+            // Link und PIN sind nur jetzt sichtbar – direkt anzeigen
+            setIsPortalModalOpen(true);
         } catch (err) {
             console.error(err);
             alert('Fehler beim Erstellen des Links: ' + translateClaimError(err));
@@ -414,6 +453,7 @@ const ClaimDetail = () => {
                 throw new Error('Der Link konnte nicht widerrufen werden (keine Berechtigung).');
             }
             setClaimAccessLink(null);
+            setPortalSecret(null);
             alert('Link wurde widerrufen.');
         } catch (err) {
             console.error(err);
@@ -529,6 +569,35 @@ const ClaimDetail = () => {
     const latestReversiblePaymentEvent = events.find(e => e.event_type === 'payment_received'
         && e.event_metadata?.payment_id && !reversedPaymentIds.has(e.event_metadata.payment_id));
 
+    // Rückabgewickelte Vorgänge bleiben in der Historie und werden gekennzeichnet
+    const reversedPlanIds = new Set(
+        events.filter(e => e.event_type === 'note_added' && e.event_metadata?.source === 'payment_plan_reversed')
+            .map(e => e.event_metadata?.payment_plan_id)
+            .filter(Boolean)
+    );
+    const reversedAppendEventIds = new Set(
+        events.filter(e => e.event_type === 'note_added' && e.event_metadata?.source === 'append_reversed')
+            .map(e => e.event_metadata?.reversed_event_id)
+            .filter(Boolean)
+    );
+
+    // Erlass/Ausbuchung je Position: aus claim_item_totals_view.waived_principal; bei älterem
+    // Datenbankstand ohne diese Spalte aus den (nicht stornierten) Erlass-Einträgen der Historie
+    const waivedFromEvents = new Map();
+    events.forEach(e => {
+        const meta = e.event_metadata || {};
+        if (e.event_type !== 'payment_received' || !isWaiverMeta(meta) || !meta.target_item_id) return;
+        if (meta.payment_id && reversedPaymentIds.has(meta.payment_id)) return;
+        waivedFromEvents.set(meta.target_item_id,
+            round2(num(waivedFromEvents.get(meta.target_item_id)) + num(meta.allocated_to_principal ?? meta.amount)));
+    });
+    const getItemWaived = (item) => (item && item.waived_principal !== undefined && item.waived_principal !== null
+        ? num(item.waived_principal)
+        : num(waivedFromEvents.get(item?.claim_item_id)));
+    const principalWaived = totals && totals.principal_waived !== undefined && totals.principal_waived !== null
+        ? num(totals.principal_waived)
+        : round2(items.reduce((sum, i) => sum + getItemWaived(i), 0));
+
     // Welche Historien-Einträge dürfen gelöscht/storniert werden? Mahn- und Systemereignisse bleiben unveränderlich.
     const getEventDeletePolicy = (event) => {
         if (!claim || isFinal) return { allowed: false };
@@ -547,7 +616,7 @@ const ClaimDetail = () => {
         }
         if (event.event_type === 'note_added') {
             if (meta.source === 'append_advanced') {
-                if (isLocked) return { allowed: false };
+                if (isLocked || reversedAppendEventIds.has(event.id)) return { allowed: false };
                 // Vor der Plananlage angehängte Positionen gehören zum aktiven Ratenplan
                 if (paymentPlan && new Date(event.event_date) <= new Date(paymentPlan.created_at)) return { allowed: false };
                 return { allowed: true, kind: 'append', title: 'Angehängte Positionen entfernen' };
@@ -619,7 +688,7 @@ const ClaimDetail = () => {
                             notices.push(`Der Ratenplan wurde aufgehoben, der Aufschlag (${formatCurrency(amount)}) konnte aber nicht automatisch ausgebucht werden. Bitte die Mahnkosten über „Bearbeiten“ in der Forderungsliste korrigieren.`);
                         }
                     }
-                    await supabase.from('claim_events').delete().eq('id', marker.id);
+                    // Der Aufschlag-Eintrag bleibt als Nachweis in der Historie
                 }
             }
 
@@ -656,11 +725,18 @@ const ClaimDetail = () => {
                 }
             }
 
-            // Historien-Eintrag entfernen (bei Stornos best effort – die Rückabwicklung ist bereits erfolgt)
-            const { error: deleteError } = await supabase.from('claim_events').delete().eq('id', event.id);
-            if (deleteError) {
-                if (policy.kind === 'note') throw deleteError;
-                notices.push('Die Rückabwicklung wurde durchgeführt; der ursprüngliche Historien-Eintrag bleibt zur Nachvollziehbarkeit bestehen.');
+            // Nur eigene Notizen werden gelöscht. Stornierte Zahlungen, aufgehobene Ratenpläne und
+            // rückgängig gemachte Nachträge bleiben als Nachweis in der Historie und werden gekennzeichnet.
+            if (policy.kind === 'note') {
+                const { data: deleted, error: deleteError } = await supabase
+                    .from('claim_events')
+                    .delete()
+                    .eq('id', event.id)
+                    .select('id');
+                if (deleteError) throw deleteError;
+                if (!deleted || deleted.length === 0) {
+                    throw new Error('Die Notiz konnte nicht gelöscht werden (keine Berechtigung).');
+                }
             }
 
             await loadClaimData();
@@ -681,6 +757,10 @@ const ClaimDetail = () => {
         }
         if (isPlanItem(item)) {
             alert('Diese Position gehört zur aktiven Ratenzahlungsvereinbarung. Bitte zuerst den Ratenplan aufheben.');
+            return;
+        }
+        if (items.length <= 1) {
+            alert('Die letzte Position einer Forderung kann nicht gelöscht werden. Bitte stornieren Sie stattdessen die Forderung.');
             return;
         }
         if (!window.confirm(`Forderungsposition „${item.claim_items?.description || item.claim_items?.item_type || 'Position'}“ (${formatCurrency(item.original_amount)}) wirklich löschen?`)) return;
@@ -992,8 +1072,21 @@ const ClaimDetail = () => {
 
         setIsSubmitting(true);
         let pdfCreated = false;
+        let portalAccessCreated = false;
         try {
-            const result = await generateClaimPdf(claim, totals, items, pdfForm.type, days, '', pdfForm.targetItemId, claimAccessLink, { targetWindow: pdfWindow });
+            // QR-Code und PIN nur, wenn sie bekannt sind (gerade erzeugt) bzw. jetzt neu erzeugt werden
+            let portalAccess = portalSecretActive ? portalSecret : null;
+            if (!portalAccess && pdfNewPortalAccess) {
+                portalAccess = await createPortalAccess();
+                portalAccessCreated = true;
+                setPortalSecret(portalAccess);
+            }
+            const pdfItems = items.map(i => ({ ...i, waived_amount: getItemWaived(i) }));
+            const result = await generateClaimPdf(
+                claim, totals, pdfItems, pdfForm.type, days, '', pdfForm.targetItemId,
+                portalAccess ? { token: portalAccess.token, pin: portalAccess.pin } : null,
+                { targetWindow: pdfWindow }
+            );
             pdfCreated = true;
             setIsPdfModalOpen(false);
 
@@ -1062,6 +1155,9 @@ const ClaimDetail = () => {
                 try { pdfWindow.close(); } catch { /* ignore */ }
             }
             alert((pdfCreated ? 'Fehler: ' : 'Fehler beim Erstellen des PDFs: ') + translateClaimError(err));
+            // Der neue Portal-Zugang ist bereits aktiv (der bisherige gesperrt): Akte neu laden, damit
+            // die Anzeige stimmt und ein erneuter Versuch diesen Zugang verwendet statt einen weiteren
+            if (portalAccessCreated) await loadClaimData();
         } finally {
             setIsSubmitting(false);
         }
@@ -1089,6 +1185,22 @@ const ClaimDetail = () => {
         return mapping[type] || type;
     };
 
+    // Überschrift eines Historien-Eintrags inkl. Kennzeichnung rückabgewickelter Vorgänge
+    const getEventTitle = (event) => {
+        const meta = event.event_metadata || {};
+        if (event.event_type === 'payment_received') {
+            const title = isWaiverMeta(meta) ? 'Erlass/Ausbuchung' : translateEventType(event.event_type);
+            return meta.payment_id && reversedPaymentIds.has(meta.payment_id) ? `${title} (storniert)` : title;
+        }
+        if (event.event_type === 'payment_plan_accepted' && meta.payment_plan_id && reversedPlanIds.has(meta.payment_plan_id)) {
+            return `${translateEventType(event.event_type)} (aufgehoben)`;
+        }
+        if (event.event_type === 'note_added' && meta.source === 'append_advanced') {
+            return reversedAppendEventIds.has(event.id) ? 'Positionen hinzugefügt (rückgängig gemacht)' : 'Positionen hinzugefügt';
+        }
+        return translateEventType(event.event_type);
+    };
+
     // Nur https-Adressen der eigenen App bzw. des eigenen Supabase-Speichers öffnen
     const getSafeDocumentUrl = (meta) => {
         const raw = meta?.document_url || meta?.document_path;
@@ -1109,17 +1221,59 @@ const ClaimDetail = () => {
         }
     };
 
+    // Archiviertes Mahnschreiben (privater Bucket) über eine kurzlebige signierte Adresse öffnen.
+    // Lesbar nur für Eigentümer bzw. Mitnutzer mit Schreibrecht – das Schreiben enthält die Portal-PIN.
+    const openArchivedDocument = async (storagePath) => {
+        const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+        const win = isNative ? null : window.open('', '_blank');
+        if (win) win.opener = null;
+        try {
+            const { data, error } = await supabase.storage.from(CLAIM_DOCUMENT_BUCKET).createSignedUrl(storagePath, 120);
+            if (error || !data?.signedUrl) throw error || new Error('no url');
+            if (win && !win.closed) {
+                win.location.href = data.signedUrl;
+            } else {
+                window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+            }
+        } catch {
+            if (win && !win.closed) {
+                try { win.close(); } catch { /* ignore */ }
+            }
+            alert('Das archivierte PDF konnte nicht geöffnet werden. Möglicherweise fehlt die Berechtigung (nur mit Schreibrecht für Finanzen) oder die Datei ist nicht mehr vorhanden.');
+        }
+    };
+
     const renderEventDetails = (event) => {
         const meta = event.event_metadata;
         if (!meta || Object.keys(meta).length === 0) return null;
 
         if (event.event_type === 'payment_received') {
             const isPaymentPlan = !!meta.payment_plan_id;
+            const isWaiver = isWaiverMeta(meta);
+            const isReversed = !!meta.payment_id && reversedPaymentIds.has(meta.payment_id);
+            // Geldeingang grün, Erlass neutral, stornierte Buchung grau
+            const palette = isReversed
+                ? { bg: '#F9FAFB', border: '#E5E7EB', text: '#6B7280' }
+                : isWaiver
+                    ? { bg: '#F8FAFC', border: '#CBD5E1', text: '#334155' }
+                    : { bg: '#F0FDF4', border: '#BBF7D0', text: '#166534' };
 
             return (
-                <div style={{ backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
-                    <div style={{ color: '#166534', fontWeight: 'bold', marginBottom: '8px' }}>Zahlung erfasst</div>
-                    <div style={{ fontSize: '1rem', color: '#166534', fontWeight: 'bold', marginBottom: '12px' }}>+ {formatCurrency(meta.amount)} {meta.payment_date ? `am ${formatDate(meta.payment_date)}` : ''}</div>
+                <div style={{ backgroundColor: palette.bg, border: `1px solid ${palette.border}`, padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    <div style={{ color: palette.text, fontWeight: 'bold', marginBottom: '8px' }}>
+                        {isWaiver ? 'Erlass/Ausbuchung (kein Geldeingang)' : 'Zahlung erfasst'}
+                        {isReversed && (
+                            <span style={{ marginLeft: '8px', fontSize: '0.7rem', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#FEE2E2', color: '#991B1B' }}>Storniert</span>
+                        )}
+                    </div>
+                    <div style={{ fontSize: '1rem', color: palette.text, fontWeight: 'bold', marginBottom: '12px', textDecoration: isReversed ? 'line-through' : 'none' }}>
+                        {isWaiver ? '' : '+ '}{formatCurrency(meta.amount)} {isWaiver ? 'ausgebucht' : ''} {meta.payment_date ? `am ${formatDate(meta.payment_date)}` : ''}
+                    </div>
+                    {isReversed && (
+                        <div style={{ marginBottom: '8px', color: palette.text }}>
+                            Diese Buchung wurde storniert (siehe Eintrag „Zahlung storniert“) und ist in den Summen nicht mehr enthalten.
+                        </div>
+                    )}
 
                     {isPaymentPlan ? (
                         <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #BBF7D0' }}>
@@ -1192,7 +1346,8 @@ const ClaimDetail = () => {
         }
 
         if (event.event_type === 'dunning_sent') {
-            const safeUrl = getSafeDocumentUrl(meta);
+            const archived = meta.document_bucket === CLAIM_DOCUMENT_BUCKET && typeof meta.document_storage_path === 'string';
+            const safeUrl = archived ? null : getSafeDocumentUrl(meta);
             return (
                 <div style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
                     {meta.document_type && <div style={{ marginBottom: '4px' }}><strong>Dokumenttyp:</strong> {meta.document_type}</div>}
@@ -1206,7 +1361,17 @@ const ClaimDetail = () => {
                         <div style={{ marginBottom: '4px', color: 'var(--text-secondary)' }}>
                             <strong>Datei:</strong> {meta.document_file_name || meta.document_path}
                             {meta.document_stored === false && ' (nicht in der App archiviert – bitte das PDF selbst ablegen)'}
+                            {archived && ' (in der App archiviert)'}
                         </div>
+                    )}
+                    {archived && (
+                        <Button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); openArchivedDocument(meta.document_storage_path); }}
+                            style={{ padding: '6px 12px', fontSize: '0.8rem', marginTop: '4px', backgroundColor: '#fff', color: '#374151', border: '1px solid #D1D5DB' }}
+                        >
+                            Archiviertes PDF öffnen
+                        </Button>
                     )}
                     {safeUrl && (
                         <Button
@@ -1250,6 +1415,11 @@ const ClaimDetail = () => {
                     <div style={{ marginBottom: '4px' }}><strong>Laufzeit:</strong> {formatDate(meta.first_due_date)} bis {formatDate(meta.last_due_date)}</div>
                     {meta.adjustment > 0 && <div style={{ marginBottom: '4px' }}><strong>Aufschlag / Kosten:</strong> {formatCurrency(meta.adjustment)}</div>}
                     {meta.note && <div style={{ marginTop: '4px' }}><strong>Notiz:</strong> {meta.note}</div>}
+                    {meta.payment_plan_id && reversedPlanIds.has(meta.payment_plan_id) && (
+                        <div style={{ marginTop: '8px', color: '#991B1B', fontWeight: 600 }}>
+                            Diese Vereinbarung wurde aufgehoben (siehe Eintrag „Ratenzahlungsvereinbarung rückgängig gemacht“).
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -1286,8 +1456,9 @@ const ClaimDetail = () => {
 
     // Kopfzahlen ausschließlich aus claim_totals_view (gleiche Quelle wie Zahlungsprüfung, Ratenplan und Portal)
     const principalOriginal = num(totals?.current_principal_original);
+    // principal_paid enthält Zahlungen UND Erlasse; „Getilgt" zeigt nur Geldeingänge, der Erlass steht getrennt
     const principalPaid = num(totals?.principal_paid);
-    const kpiGetilgt = round2(principalPaid + feesPaid + interestPaid);
+    const kpiGetilgt = round2(principalPaid - principalWaived + feesPaid + interestPaid);
     const kpiOffen = round2(totalDue);
     const kpiUrsprung = round2(principalOriginal + feesOpen + feesPaid + interestOpen + interestPaid);
 
@@ -1296,7 +1467,7 @@ const ClaimDetail = () => {
         .filter(n => Number.isInteger(n) && n > 0 && n <= MAX_INSTALLMENTS)
         .sort((a, b) => a - b);
 
-    const portalUrl = claimAccessLink ? buildClaimPortalUrl(claimAccessLink.token) : '';
+    const portalUrl = portalSecretActive ? buildClaimPortalUrl(portalSecret.token) : '';
     const actionsBlockedByLoad = !totals;
 
     return (
@@ -1341,6 +1512,11 @@ const ClaimDetail = () => {
                 <Card style={{ padding: '16px', borderLeft: '4px solid #10B981' }}>
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Getilgt</div>
                     <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#059669' }}>{totals ? formatCurrency(kpiGetilgt) : '—'}</div>
+                    {totals && principalWaived > 0 && (
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                            zzgl. Erlass/Ausbuchung {formatCurrency(principalWaived)} (kein Geldeingang)
+                        </div>
+                    )}
                 </Card>
                 <Card style={{ padding: '16px', borderLeft: '4px solid #EF4444', backgroundColor: '#FEF2F2' }}>
                     <div style={{ fontSize: '0.85rem', color: '#991B1B', marginBottom: '4px', fontWeight: 600 }}>Gesamt offen</div>
@@ -1383,7 +1559,9 @@ const ClaimDetail = () => {
                                             const intAmt = num(item.claim_items?.interest_amount);
                                             const inPlan = isPlanItem(item);
                                             const canSettle = !isLocked && !inPlan && num(item.open_amount) > 0;
-                                            const canDelete = !isLocked && !inPlan && num(item.paid_principal) === 0;
+                                            // Die letzte Position bleibt (sonst leere Forderung) – stattdessen die Forderung stornieren
+                                            const canDelete = !isLocked && !inPlan && num(item.paid_principal) === 0 && items.length > 1;
+                                            const itemWaived = getItemWaived(item);
                                             return (
                                                 <tr key={item.claim_item_id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem' }}>
@@ -1398,7 +1576,14 @@ const ClaimDetail = () => {
                                                         )}
                                                     </td>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right' }}>{formatCurrency(item.original_amount)}</td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>{formatCurrency(item.paid_principal)}</td>
+                                                    <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', color: '#059669' }}>
+                                                        {formatCurrency(round2(num(item.paid_principal) - itemWaived))}
+                                                        {itemWaived > 0 && (
+                                                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                                                erlassen: {formatCurrency(itemWaived)}
+                                                            </div>
+                                                        )}
+                                                    </td>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(item.open_amount)}</td>
                                                     <td style={{ padding: '12px 16px', textAlign: 'center' }}>
                                                         <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
@@ -1437,7 +1622,14 @@ const ClaimDetail = () => {
                                                 <tr style={{ backgroundColor: '#F9FAFB' }}>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem', fontWeight: 700 }}>Summe</td>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 700 }}>{formatCurrency(kpiUrsprung)}</td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 700, color: '#059669' }}>{formatCurrency(kpiGetilgt)}</td>
+                                                    <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 700, color: '#059669' }}>
+                                                        {formatCurrency(kpiGetilgt)}
+                                                        {principalWaived > 0 && (
+                                                            <div style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                                                zzgl. erlassen: {formatCurrency(principalWaived)}
+                                                            </div>
+                                                        )}
+                                                    </td>
                                                     <td style={{ padding: '12px 16px', fontSize: '0.9rem', textAlign: 'right', fontWeight: 700 }}>{formatCurrency(kpiOffen)}</td>
                                                     <td style={{ padding: '12px 16px' }}></td>
                                                 </tr>
@@ -1467,7 +1659,7 @@ const ClaimDetail = () => {
                                         <div key={event.id} style={{ position: 'relative', marginBottom: index === events.length - 1 ? 0 : '24px' }}>
                                             <div style={{ position: 'absolute', left: '-21px', top: '4px', width: '12px', height: '12px', borderRadius: '50%', backgroundColor: 'var(--primary-color)', border: '2px solid white' }}></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
-                                                <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{translateEventType(event.event_type)}</div>
+                                                <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{getEventTitle(event)}</div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{new Date(event.event_date).toLocaleString('de-DE')}</div>
                                                     {deletePolicy.allowed && (
@@ -1735,7 +1927,7 @@ const ClaimDetail = () => {
                             <Button
                                 variant="secondary"
                                 style={{ display: 'flex', justifyContent: 'flex-start', gap: '8px', backgroundColor: '#FEF2F2', color: '#991B1B', borderColor: '#FCA5A5', whiteSpace: 'normal', textAlign: 'left' }}
-                                onClick={() => setIsPdfModalOpen(true)}
+                                onClick={openPdfModal}
                                 disabled={isLocked || actionsBlockedByLoad}
                             >
                                 <Printer size={16} style={{ flexShrink: 0 }} /> PDF erzeugen
@@ -1854,15 +2046,33 @@ const ClaimDetail = () => {
                         <div style={{ fontSize: '0.8rem', color: '#B91C1C', marginTop: '-8px' }}>Bitte eine ganze Zahl von 1 bis 365 eingeben.</div>
                     )}
 
-                    {claimAccessLink && (
+                    {portalSecretActive && (
                         <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F0FDF4', borderRadius: '8px', border: '1px solid #BBF7D0', fontSize: '0.85rem', color: '#166534' }}>
-                            <strong>Portal-Link aktiv:</strong> QR-Code und Zugangscode (PIN: {claimAccessLink.pin}) werden automatisch auf der ersten Seite des PDFs abgedruckt.
+                            <strong>Portal-Link aktiv:</strong> QR-Code und Zugangscode (PIN: {portalSecret.pin}) werden auf der ersten Seite des PDFs abgedruckt.
                         </div>
                     )}
 
-                    {!claimAccessLink && (
-                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px', fontSize: '0.85rem', color: '#4B5563' }}>
-                            <strong>Hinweis:</strong> Erstellen Sie vorab einen "Portal-Link", um automatisch einen QR-Code für den Mieter in das PDF einzubauen.
+                    {!portalSecretActive && (
+                        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: claimAccessLink ? '#FFFBEB' : '#F3F4F6', borderRadius: '8px', border: claimAccessLink ? '1px solid #FDE68A' : '1px solid #E5E7EB', fontSize: '0.85rem', color: claimAccessLink ? '#92400E' : '#4B5563' }}>
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', cursor: isLocked ? 'default' : 'pointer', fontWeight: 600 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={pdfNewPortalAccess}
+                                    onChange={(e) => setPdfNewPortalAccess(e.target.checked)}
+                                    disabled={isSubmitting || isLocked}
+                                    style={{ marginTop: '2px' }}
+                                />
+                                <span>
+                                    {claimAccessLink
+                                        ? 'Neuen Portal-Zugang (QR-Code und PIN) für dieses Schreiben erzeugen'
+                                        : 'Portal-Zugang (QR-Code und PIN) erzeugen und auf dem Schreiben abdrucken'}
+                                </span>
+                            </label>
+                            <div style={{ marginTop: '6px', marginLeft: '24px' }}>
+                                {claimAccessLink
+                                    ? 'Link und PIN des bestehenden Zugangs sind aus Sicherheitsgründen nur direkt nach dem Erzeugen sichtbar. Ein neuer Zugang macht den bisherigen Link und die bisherige PIN ungültig – auch auf bereits verschickten Schreiben. Ohne Haken wird das Schreiben ohne QR-Code und PIN erstellt.'
+                                    : 'Der Mieter kann die Forderung damit online einsehen und eine Ratenzahlung anfragen.'}
+                            </div>
                         </div>
                     )}
 
@@ -2204,19 +2414,25 @@ const ClaimDetail = () => {
                         {claimAccessLink && (
                             <div style={{ marginBottom: '16px' }}>
                                 <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Portal Link</label>
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                    <Input
-                                        readOnly
-                                        value={portalUrl}
-                                        onFocus={(e) => e.target.select()}
-                                        style={{ flex: 1, backgroundColor: 'white' }}
-                                    />
-                                    <Button variant="secondary" onClick={() => copyToClipboard(portalUrl)}>
-                                        Kopieren
-                                    </Button>
-                                </div>
+                                {portalSecretActive ? (
+                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                        <Input
+                                            readOnly
+                                            value={portalUrl}
+                                            onFocus={(e) => e.target.select()}
+                                            style={{ flex: 1, backgroundColor: 'white' }}
+                                        />
+                                        <Button variant="secondary" onClick={() => copyToClipboard(portalUrl)}>
+                                            Kopieren
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                        Aus Sicherheitsgründen nicht mehr einsehbar (nur direkt nach dem Erzeugen).
+                                    </div>
+                                )}
                                 {claimAccessLink.expires_at && (
-                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '-8px' }}>
+                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: portalSecretActive ? '-8px' : 0 }}>
                                         Gültig bis {new Date(claimAccessLink.expires_at).toLocaleDateString('de-DE')}
                                     </div>
                                 )}
@@ -2227,7 +2443,7 @@ const ClaimDetail = () => {
                             <div style={{ flex: 1 }}>
                                 <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Zugangscode (PIN)</label>
                                 <div style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '4px', color: 'var(--primary-color)' }}>
-                                    {claimAccessLink ? (claimAccessLink.pin || '—') : '-----'}
+                                    {portalSecretActive ? portalSecret.pin : (claimAccessLink ? '••••••' : '-----')}
                                 </div>
                                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
                                     Wird zur Authentifizierung benötigt.
@@ -2255,6 +2471,24 @@ const ClaimDetail = () => {
                             <AlertCircle size={18} color="#1D4ED8" style={{ marginTop: '2px' }} />
                             <div style={{ fontSize: '0.85rem', color: '#1E3A8A' }}>
                                 Klicken Sie auf "Link generieren", um einen neuen Zugangscode zu erstellen. Dies widerruft automatisch alte Links dieser Forderung.
+                            </div>
+                        </div>
+                    )}
+
+                    {portalSecretActive && (
+                        <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE', marginBottom: 'var(--spacing-lg)' }}>
+                            <AlertCircle size={18} color="#1D4ED8" style={{ marginTop: '2px', flexShrink: 0 }} />
+                            <div style={{ fontSize: '0.85rem', color: '#1E3A8A' }}>
+                                Link und PIN werden aus Sicherheitsgründen nur jetzt angezeigt und nicht gespeichert. Erzeugen Sie das Schreiben (PDF erzeugen) am besten gleich – QR-Code und PIN werden dort abgedruckt. Nach dem Verlassen der Seite sind sie nicht mehr abrufbar.
+                            </div>
+                        </div>
+                    )}
+
+                    {claimAccessLink && !portalSecretActive && (
+                        <div style={{ display: 'flex', gap: '8px', padding: '12px', backgroundColor: '#EFF6FF', borderRadius: '8px', border: '1px solid #BFDBFE', marginBottom: 'var(--spacing-lg)' }}>
+                            <AlertCircle size={18} color="#1D4ED8" style={{ marginTop: '2px', flexShrink: 0 }} />
+                            <div style={{ fontSize: '0.85rem', color: '#1E3A8A' }}>
+                                Link und PIN des aktiven Zugangs sind nur direkt nach dem Erzeugen sichtbar. Für ein neues Schreiben mit QR-Code setzen Sie beim Erzeugen des PDFs den Haken „Neuen Portal-Zugang … erzeugen“ oder klicken Sie hier auf „Neu generieren“.
                             </div>
                         </div>
                     )}

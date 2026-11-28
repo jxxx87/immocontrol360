@@ -36,6 +36,9 @@ const ALLOWED_PLANS = new Set(["starter", "professional", "business"]);
 const TRIAL_DAYS = 10;
 // Rückfall-Grenze, solange die RPC register_trial_rate_check noch nicht eingespielt ist
 const FALLBACK_TRIALS_PER_HOUR = 30;
+// Wie MIN_PASSWORD_LENGTH in der App (Registrierung, Einstellungen, Passwort zurücksetzen)
+const MIN_PASSWORD_LENGTH = 10;
+const MAX_PASSWORD_LENGTH = 72;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 const serviceHeaders = {
@@ -202,8 +205,8 @@ serve(async (req: Request) => {
         if (!email || email.length > 254 || !EMAIL_RE.test(email)) {
             return fail("Bitte gib eine gültige E-Mail-Adresse ein.");
         }
-        if (password.length < 6 || password.length > 72) {
-            return fail("Das Passwort muss zwischen 6 und 72 Zeichen lang sein.");
+        if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+            return fail(`Das Passwort muss zwischen ${MIN_PASSWORD_LENGTH} und ${MAX_PASSWORD_LENGTH} Zeichen lang sein.`);
         }
         if (!ALLOWED_PLANS.has(plan)) {
             return fail("Ungültiger Tarif.");

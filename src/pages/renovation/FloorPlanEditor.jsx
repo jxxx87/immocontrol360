@@ -30,6 +30,13 @@ import {
     createViewport, render, screenToWorld, worldToScreen, zoomAtPoint, zoomToFit,
 } from '../../lib/floorplan/canvasRenderer';
 import { createCommandStack } from '../../lib/floorplan/commandStack';
+import { constrainPointToHostWall, projectPointOntoHostWall } from '../../lib/floorplan/hostWallConstraint';
+import {
+    MAX_BG_UPLOAD_BYTES, isStoredBackground, isInlineBackground, extForMime, parseDataUrl,
+    dataUrlByteLength, dataUrlToBlob, buildBackgroundPath, collectBackgroundPaths, toStoredBackground,
+    uploadBackgroundBlob, downloadBackgroundBlob, removeBackgroundObjects,
+} from '../../lib/floorplan/planBackgrounds';
+import { stripBackgrounds, createVersionEntry, addVersionEntry } from '../../lib/floorplan/planVersions';
 import { FURNITURE_CATEGORIES, FURNITURE_ITEMS, getItemsByCategory, getFurnitureItem, clampDimensions } from '../../lib/floorplan/furnitureCatalog';
 import { exportToPNG, exportToPDF, exportQuantityListCSV, exportQuantityListPDF, generateQuantityList, downloadBlob } from '../../lib/floorplan/floorplanExport';
 
@@ -235,6 +242,55 @@ const downscaleBgImage = (img) => {
     return { dataUrl: encodeBgCanvas(canvas), factor: canvas.width / w };
 };
 
+// ─── Hintergrundbild im Dateispeicher (Bucket floorplan-backgrounds) ───
+const canvasToBlob = (canvas, type, quality) => new Promise((resolve) => {
+    try {
+        canvas.toBlob(blob => resolve(blob), type, quality);
+    } catch {
+        resolve(null);
+    }
+});
+
+const loadImageFromUrl = (url) => new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Das Bild konnte nicht gelesen werden.'));
+    img.src = url;
+});
+
+const randomToken = () => {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    } catch { /* kein sicherer Kontext */ }
+    return genId();
+};
+
+// Bild für den Upload vorbereiten: PNG/JPEG, höchstens MAX_BG_EDGE_PX Kantenlänge und
+// MAX_BG_UPLOAD_BYTES. Passt die data-URL schon, wird sie unverändert übernommen.
+// factor = neue Breite / bisherige Breite (der Maßstab wird damit umgerechnet).
+const prepareBgUpload = async (dataUrl, img) => {
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    const parsed = parseDataUrl(dataUrl);
+    if (parsed && extForMime(parsed.mime) && Math.max(w, h) <= MAX_BG_EDGE_PX && dataUrlByteLength(dataUrl) <= MAX_BG_UPLOAD_BYTES) {
+        const blob = dataUrlToBlob(dataUrl);
+        if (blob && blob.size > 0) return { blob, factor: 1 };
+    }
+    const scale = Math.min(1, MAX_BG_EDGE_PX / Math.max(w, h, 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    let blob = await canvasToBlob(canvas, 'image/png');
+    if (!blob || blob.size > MAX_BG_DATAURL_CHARS) blob = await canvasToBlob(canvas, 'image/jpeg', 0.85);
+    if (blob && blob.size > MAX_BG_UPLOAD_BYTES) blob = await canvasToBlob(canvas, 'image/jpeg', 0.7);
+    if (!blob) throw new Error('Das Bild konnte nicht umgewandelt werden.');
+    return { blob, factor: canvas.width / Math.max(1, w) };
+};
+
 const DRAG_LABELS = {
     furniture: 'Möbel verschieben',
     opening: 'Öffnung verschieben',
@@ -386,6 +442,18 @@ const FloorPlanEditor = () => {
     const saveRef = useRef(null);             // immer aktuelle handleSave-Funktion (für Timer/Listener)
     const loadedOkRef = useRef(isNew);        // Speichern erst nach erfolgreichem Laden erlaubt
     const savedIdRef = useRef(null);
+    // Versionierung: beim ersten Speichern einer Sitzung den geladenen Stand ablegen
+    const versionHistoryRef = useRef([]);     // version_history wie geladen/zuletzt gespeichert
+    const pendingVersionRef = useRef(null);   // { json, stand, name } – noch abzulegender Ladestand
+    // Hintergrundbilder im Dateispeicher
+    const bgUrlCacheRef = useRef(new Map());  // Pfad → Objekt-URL (Blob)
+    const bgUploadTokensRef = useRef(new Map()); // Geschoss-ID → laufende Änderung (verwirft veraltete Uploads)
+    const pendingBgDeletesRef = useRef(new Set()); // ersetzte/entfernte Dateien, nach dem Speichern löschen
+    const bgMigrationRunningRef = useRef(false);
+    const bgMigrationFailedRef = useRef(false);
+    const afterSaveRef = useRef(null);         // Nacharbeiten nach erfolgreichem Speichern
+    const migrateBgRef = useRef(null);         // eingebettete Bilder in den Dateispeicher verschieben
+    const [bgUploading, setBgUploading] = useState(false);
 
     // Interaktions-Refs (auch vom Autosave genutzt, um nicht mitten im Ziehen zu speichern)
     const isPanningRef = useRef(false);
@@ -443,6 +511,12 @@ const FloorPlanEditor = () => {
                     return;
                 }
                 setPlanName(data.name || 'Grundriss');
+                versionHistoryRef.current = Array.isArray(data.version_history) ? data.version_history : [];
+                // Geladener Stand (ohne Hintergrundbilder) als JSON – wird beim ersten Speichern
+                // dieser Sitzung als Version abgelegt (der Editor ändert die Objekte danach in-place)
+                pendingVersionRef.current = Array.isArray(data.plan_data) && data.plan_data.length > 0
+                    ? { json: JSON.stringify(stripBackgrounds(data.plan_data)), stand: data.updated_at || null, name: data.name || null }
+                    : null;
                 if (Array.isArray(data.plan_data) && data.plan_data.length > 0) {
                     const loaded = data.plan_data.map((s, i) => normalizeStorey(s, i));
                     storeysRef.current = loaded;
@@ -455,6 +529,8 @@ const FloorPlanEditor = () => {
                 cmdStackRef.current.clear();
                 setSaveState('idle');
                 setLoading(false);
+                // Eingebettete Hintergrundbilder (Altbestand) einmalig in den Dateispeicher verschieben
+                setTimeout(() => { if (!cancelled) migrateBgRef.current?.(); }, 0);
             } catch (err) {
                 if (cancelled) return;
                 setLoadError(`Der Grundriss konnte nicht geladen werden (${err?.message || err}).`);
@@ -502,11 +578,27 @@ const FloorPlanEditor = () => {
                 };
 
                 if (savedIdRef.current) {
+                    // Erstes Speichern dieser Sitzung: den geladenen Stand als Version ablegen
+                    // (höchstens 5, ohne Hintergrundbilder) – Wiederherstellen in der Grundriss-Übersicht.
+                    // Unveränderte Stände (z. B. nur Bild-Umzug in den Dateispeicher) werden nicht abgelegt.
+                    let nextHistory = null;
+                    const pendingVersion = pendingVersionRef.current;
+                    if (pendingVersion && JSON.stringify(stripBackgrounds(updated)) !== pendingVersion.json) {
+                        nextHistory = addVersionEntry(
+                            versionHistoryRef.current,
+                            createVersionEntry(JSON.parse(pendingVersion.json), { stand: pendingVersion.stand, name: pendingVersion.name }),
+                        );
+                        payload.version_history = nextHistory;
+                    }
                     // user_id bleibt beim Update unverändert (kein Besitzerwechsel bei geteiltem Zugriff)
                     const { data, error } = await supabase.from('floor_plans').update(payload).eq('id', savedIdRef.current).select('id');
                     if (error) throw error;
                     if (!data || data.length === 0) {
                         throw new Error('Der Grundriss wurde nicht gefunden oder Sie haben keine Berechtigung, ihn zu ändern.');
+                    }
+                    if (nextHistory) {
+                        versionHistoryRef.current = nextHistory;
+                        pendingVersionRef.current = null;
                     }
                 } else {
                     const { data, error } = await supabase.from('floor_plans').insert({ ...payload, user_id: currentUser.id }).select('id').single();
@@ -518,6 +610,8 @@ const FloorPlanEditor = () => {
 
                 saveFailedRef.current = false;
                 setSaveError(null);
+                // Nacharbeiten: ersetzte Hintergrundbilder löschen, eingebettete Bilder verschieben
+                try { afterSaveRef.current?.(updated); } catch { /* Nacharbeiten dürfen das Speichern nicht scheitern lassen */ }
                 if (revisionRef.current === revisionAtStart) {
                     isDirtyRef.current = false;
                     setSaveState('saved');
@@ -659,17 +753,156 @@ const FloorPlanEditor = () => {
     // Nach jedem React-Render die Zeichenfläche nachziehen (In-Place-Änderungen + forceRender)
     useEffect(() => { requestRender(); });
 
+    // ─── Hintergrundbilder im Dateispeicher ─────────────────────
+    // Objekt-URL zu einem gespeicherten Bild (einmal laden, dann aus dem Zwischenspeicher)
+    const getBgObjectUrl = useCallback(async (path) => {
+        const cached = bgUrlCacheRef.current.get(path);
+        if (cached) return cached;
+        const blob = await downloadBackgroundBlob(supabase.storage, path);
+        const url = URL.createObjectURL(blob);
+        bgUrlCacheRef.current.set(path, url);
+        return url;
+    }, []);
+
+    const forgetBgObjectUrl = useCallback((path) => {
+        const url = bgUrlCacheRef.current.get(path);
+        if (url) {
+            URL.revokeObjectURL(url);
+            bgUrlCacheRef.current.delete(path);
+        }
+    }, []);
+
+    // Nie gespeicherte Datei sofort löschen (verworfener Upload)
+    const discardUploadedBg = useCallback((path) => {
+        forgetBgObjectUrl(path);
+        removeBackgroundObjects(supabase.storage, [path]).catch(() => { /* bleibt als verwaiste Datei im Plan-Ordner */ });
+    }, [forgetBgObjectUrl]);
+
+    // Neue Änderung am Hintergrund eines Geschosses → laufende Uploads dafür sind veraltet
+    const bumpBgToken = useCallback((storeyId) => {
+        const next = (bgUploadTokensRef.current.get(storeyId) || 0) + 1;
+        bgUploadTokensRef.current.set(storeyId, next);
+        return next;
+    }, []);
+
+    // Bild hochladen und Hintergrund-Daten mit Pfad liefern: { bgData, img }
+    const storeBackground = useCallback(async (planId, storeyId, bgData, dataUrl, img) => {
+        const prepared = await prepareBgUpload(dataUrl, img);
+        const ext = extForMime(prepared.blob.type);
+        if (!ext) throw new Error('Nur PNG- oder JPG-Bilder können gespeichert werden.');
+        const path = buildBackgroundPath(planId, storeyId, ext, randomToken());
+        await uploadBackgroundBlob(supabase.storage, path, prepared.blob);
+        const url = URL.createObjectURL(prepared.blob);
+        bgUrlCacheRef.current.set(path, url);
+        // Verkleinert → Bildobjekt aus der hochgeladenen Datei, Maßstab umrechnen (gleiche Weltgröße)
+        const finalImg = prepared.factor === 1 ? img : await loadImageFromUrl(url);
+        const stored = toStoredBackground(bgData, path, {
+            scale: (Number(bgData?.scale) || 1) * prepared.factor,
+            imgWidth: finalImg.width,
+            imgHeight: finalImg.height,
+        });
+        return { bgData: stored, img: finalImg };
+    }, []);
+
+    // Eingebettete Hintergrundbilder (Altbestand, data-URL in plan_data) in den Dateispeicher
+    // verschieben. Nur für gespeicherte Pläne; scheitert es (z. B. keine Schreibrechte oder
+    // Speicher nicht verfügbar), bleibt das Bild eingebettet und es gibt keinen neuen Versuch
+    // in dieser Sitzung.
+    const migrateInlineBackgrounds = async () => {
+        const planId = savedIdRef.current;
+        if (!planId || !loadedOkRef.current || bgMigrationRunningRef.current || bgMigrationFailedRef.current) return;
+        const pending = storeysRef.current.filter(s => isInlineBackground(s?.bgImage));
+        if (pending.length === 0) return;
+        bgMigrationRunningRef.current = true;
+        let changed = false;
+        try {
+            for (const storey of pending) {
+                const original = storey.bgImage;
+                if (!isInlineBackground(original)) continue;
+                const token = bgUploadTokensRef.current.get(storey.id) || 0;
+                const img = await loadImageFromUrl(original.dataUrl);
+                const { bgData: stored, img: storedImg } = await storeBackground(planId, storey.id, original, original.dataUrl, img);
+                const current = storeysRef.current.find(s => s.id === storey.id);
+                // Inzwischen ersetzt, entfernt oder anderer Plan → hochgeladene Datei verwerfen
+                if (!current || current.bgImage !== original || (bgUploadTokensRef.current.get(storey.id) || 0) !== token || savedIdRef.current !== planId) {
+                    discardUploadedBg(stored.path);
+                    continue;
+                }
+                current.bgImage = stored;
+                if (activeStoreyRef.current?.id === storey.id) {
+                    bgLoadTokenRef.current++;
+                    setBgImage(stored);
+                    setBgImageObj(storedImg);
+                }
+                changed = true;
+            }
+        } catch {
+            bgMigrationFailedRef.current = true;
+        } finally {
+            bgMigrationRunningRef.current = false;
+        }
+        if (changed) {
+            markDirty();
+            requestRender();
+        }
+    };
+    migrateBgRef.current = migrateInlineBackgrounds;
+
+    // Nach erfolgreichem Speichern: ersetzte/entfernte Bilder löschen, sobald weder der
+    // gespeicherte noch der aktuelle Stand auf sie verweist; eingebettete Bilder verschieben.
+    afterSaveRef.current = (savedStoreys) => {
+        const pendingDeletes = [...pendingBgDeletesRef.current];
+        if (pendingDeletes.length > 0) {
+            const referencedSaved = new Set(collectBackgroundPaths(savedStoreys));
+            const referencedNow = new Set(collectBackgroundPaths(storeysRef.current));
+            const toDelete = [];
+            for (const path of pendingDeletes) {
+                if (referencedNow.has(path)) { pendingBgDeletesRef.current.delete(path); continue; }
+                if (referencedSaved.has(path)) continue; // erst nach dem nächsten Speichern
+                pendingBgDeletesRef.current.delete(path);
+                forgetBgObjectUrl(path);
+                toDelete.push(path);
+            }
+            if (toDelete.length > 0) {
+                removeBackgroundObjects(supabase.storage, toDelete).catch(() => { /* verwaiste Datei, wird mit dem Plan gelöscht */ });
+            }
+        }
+        if (storeysRef.current.some(s => isInlineBackground(s?.bgImage))) {
+            setTimeout(() => migrateBgRef.current?.(), 0);
+        }
+    };
+
+    // Objekt-URLs beim Verlassen freigeben (die Map selbst wird nie ersetzt)
+    useEffect(() => {
+        const cache = bgUrlCacheRef.current;
+        return () => {
+            for (const url of cache.values()) URL.revokeObjectURL(url);
+            cache.clear();
+        };
+    }, []);
+
     // Hintergrundbild immer aus dem aktiven Geschoss ableiten (beim Geschosswechsel neu laden)
     useEffect(() => {
         const saved = activeStorey?.bgImage || null;
         const token = ++bgLoadTokenRef.current;
         setBgImage(saved);
         setBgImageObj(null);
-        if (saved?.dataUrl) {
+        const showImage = (src) => {
             const img = new window.Image();
             img.onload = () => { if (bgLoadTokenRef.current === token) { setBgImageObj(img); requestRender(); } };
             img.onerror = () => { if (bgLoadTokenRef.current === token) setBgImageObj(null); };
-            img.src = saved.dataUrl;
+            img.src = src;
+        };
+        if (saved?.dataUrl) {
+            showImage(saved.dataUrl);
+        } else if (isStoredBackground(saved)) {
+            getBgObjectUrl(saved.path)
+                .then((url) => { if (bgLoadTokenRef.current === token) showImage(url); })
+                .catch((err) => {
+                    if (bgLoadTokenRef.current !== token) return;
+                    setBgImageObj(null);
+                    setViewNotice(`Das Hintergrundbild dieses Geschosses konnte nicht geladen werden${err?.message ? ` (${err.message})` : ''}.`);
+                });
         }
     }, [activeStorey?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -915,8 +1148,7 @@ const FloorPlanEditor = () => {
         const targetStoreyId = activeStoreyRef.current?.id;
 
         const applyLoadedBg = (dataUrl, pxPerMm, img) => {
-            const target = storeysRef.current.find(s => s.id === targetStoreyId);
-            if (!target) return;
+            if (!storeysRef.current.some(s => s.id === targetStoreyId)) return;
             // pxPerMm = how many image pixels per 1 mm of real-world space
             const finalScale = pxPerMm || 5;
             const bgData = {
@@ -929,15 +1161,44 @@ const FloorPlanEditor = () => {
                 imgWidth: img.width,
                 imgHeight: img.height,
             };
-            // Persist to storey so it saves to DB
-            target.bgImage = bgData;
-            if (activeStoreyRef.current?.id === targetStoreyId) {
-                bgLoadTokenRef.current++;
-                setBgImage(bgData);
-                setBgImageObj(img);
-            }
-            markDirty();
-            requestRender();
+            const token = bumpBgToken(targetStoreyId);
+
+            // Am Geschoss übernehmen (wird mit dem Plan gespeichert); ein ersetztes Bild aus dem
+            // Dateispeicher wird nach dem nächsten erfolgreichen Speichern gelöscht.
+            const commit = (data, image) => {
+                if ((bgUploadTokensRef.current.get(targetStoreyId) || 0) !== token) return false;
+                const target = storeysRef.current.find(s => s.id === targetStoreyId);
+                if (!target) return false;
+                const previous = target.bgImage;
+                target.bgImage = data;
+                if (isStoredBackground(previous) && previous.path !== data.path) pendingBgDeletesRef.current.add(previous.path);
+                if (activeStoreyRef.current?.id === targetStoreyId) {
+                    bgLoadTokenRef.current++;
+                    setBgImage(data);
+                    setBgImageObj(image);
+                }
+                markDirty();
+                requestRender();
+                return true;
+            };
+
+            // Neuer, noch nie gespeicherter Plan: Bild vorerst einbetten; nach dem ersten
+            // Speichern wird es in den Dateispeicher verschoben.
+            const planId = savedIdRef.current;
+            if (!planId) { commit(bgData, img); return; }
+
+            setBgUploading(true);
+            storeBackground(planId, targetStoreyId, bgData, dataUrl, img)
+                .then(({ bgData: stored, img: storedImg }) => {
+                    if (!commit(stored, storedImg)) discardUploadedBg(stored.path);
+                })
+                .catch((err) => {
+                    // Rückfall: wie bisher im Grundriss einbetten (z. B. Dateispeicher nicht verfügbar)
+                    if (commit(bgData, img)) {
+                        setViewNotice(`Das Hintergrundbild konnte nicht im Dateispeicher abgelegt werden${err?.message ? ` (${err.message})` : ''}. Es wird vorerst direkt im Grundriss gespeichert.`);
+                    }
+                })
+                .finally(() => setBgUploading(false));
         };
 
         const loadImage = (dataUrl, pxPerMm) => {
@@ -1067,7 +1328,14 @@ const FloorPlanEditor = () => {
         setCalibPoints([]);
         if (bgFileRef.current) bgFileRef.current.value = '';
         const storey = activeStoreyRef.current;
-        if (storey?.bgImage) { delete storey.bgImage; markDirty(); }
+        if (storey) bumpBgToken(storey.id); // laufenden Upload für dieses Geschoss verwerfen
+        if (storey?.bgImage) {
+            const previous = storey.bgImage;
+            delete storey.bgImage;
+            // Datei erst löschen, wenn der Plan ohne sie gespeichert ist
+            if (isStoredBackground(previous)) pendingBgDeletesRef.current.add(previous.path);
+            markDirty();
+        }
         requestRender();
     };
 
@@ -1361,30 +1629,13 @@ const FloorPlanEditor = () => {
                     let newX = snapToGrid(world.x);
                     let newY = snapToGrid(world.y);
 
-                    // For inner wall endpoints, constrain to host wall
+                    // For inner wall endpoints, constrain to host wall (Mausposition auf die Host-Wand projiziert)
                     if (wall && wall.type !== 'outer') {
                         const origPt = { x: dragStartRef.current.origX, y: dragStartRef.current.origY };
-                        for (const hw of activeStorey.walls) {
-                            if (hw.id === id) continue;
-                            const hp1 = getPoint(activeStorey, hw.p1);
-                            const hp2 = getPoint(activeStorey, hw.p2);
-                            if (!hp1 || !hp2) continue;
-                            const hwDx = hp2.x - hp1.x, hwDy = hp2.y - hp1.y;
-                            const hwLen = Math.sqrt(hwDx * hwDx + hwDy * hwDy);
-                            if (hwLen < 1) continue;
-                            const hux = hwDx / hwLen, huy = hwDy / hwLen;
-                            const t0 = (origPt.x - hp1.x) * hux + (origPt.y - hp1.y) * huy;
-                            const projX = hp1.x + hux * t0;
-                            const projY = hp1.y + huy * t0;
-                            const perpDist = Math.sqrt((origPt.x - projX) ** 2 + (origPt.y - projY) ** 2);
-                            if (perpDist < 50 && t0 > -10 && t0 < hwLen + 10) {
-                                // Project mouse position onto host wall
-                                const tMouse = (snapToGrid(world.x) - hp1.x) * hux + (snapToGrid(world.y) - hp1.y) * huy;
-                                const clampedT = Math.max(0, Math.min(hwLen, snapToGrid(tMouse)));
-                                newX = hp1.x + hux * clampedT;
-                                newY = hp1.y + huy * clampedT;
-                                break;
-                            }
+                        const onHost = projectPointOntoHostWall(activeStorey, id, origPt, newX, newY, { snap: snapToGrid });
+                        if (onHost) {
+                            newX = onHost.x;
+                            newY = onHost.y;
                         }
                     }
 
@@ -1419,44 +1670,11 @@ const FloorPlanEditor = () => {
 
                     // Constrain endpoints to their host walls (if attached)
                     if (draggedWall && draggedWall.type !== 'outer') {
-                        // For each endpoint, find a host wall it lies on and project movement onto it
-                        const constrainToHost = (origPt, newX, newY) => {
-                            // Find host wall: another wall whose edge contains this point
-                            for (const hw of activeStorey.walls) {
-                                if (hw.id === id) continue;
-                                const hp1 = getPoint(activeStorey, hw.p1);
-                                const hp2 = getPoint(activeStorey, hw.p2);
-                                if (!hp1 || !hp2) continue;
-
-                                // Check if this endpoint was originally on this wall's edge
-                                const hwDx = hp2.x - hp1.x, hwDy = hp2.y - hp1.y;
-                                const hwLen = Math.sqrt(hwDx * hwDx + hwDy * hwDy);
-                                if (hwLen < 1) continue;
-                                const hux = hwDx / hwLen, huy = hwDy / hwLen;
-
-                                // Project original point onto host wall
-                                const t0 = (origPt.x - hp1.x) * hux + (origPt.y - hp1.y) * huy;
-                                const projX = hp1.x + hux * t0;
-                                const projY = hp1.y + huy * t0;
-                                const perpDist = Math.sqrt((origPt.x - projX) ** 2 + (origPt.y - projY) ** 2);
-
-                                if (perpDist < 50 && t0 > -10 && t0 < hwLen + 10) {
-                                    // This endpoint is on this host wall => constrain to slide along it
-                                    const moveX = newX - origPt.x;
-                                    const moveY = newY - origPt.y;
-                                    // Project movement onto host wall direction
-                                    const proj = moveX * hux + moveY * huy;
-                                    const snappedProj = snapToGrid(proj);
-                                    const newT = Math.max(0, Math.min(hwLen, t0 + snappedProj));
-                                    return {
-                                        x: hp1.x + hux * newT,
-                                        y: hp1.y + huy * newT,
-                                        constrained: true,
-                                    };
-                                }
-                            }
-                            return { x: newX, y: newY, constrained: false };
-                        };
+                        // Endpunkt auf einer Host-Wand: Bewegung auf die Wand projizieren und rasten
+                        const constrainToHost = (origPt, newX, newY) => (
+                            constrainPointToHostWall(activeStorey, id, origPt, newX - origPt.x, newY - origPt.y, { snapProj: snapToGrid })
+                            || { x: newX, y: newY, constrained: false }
+                        );
 
                         const c1 = constrainToHost(origP1, newP1x, newP1y);
                         const c2 = constrainToHost(origP2, newP2x, newP2y);
@@ -1481,28 +1699,11 @@ const FloorPlanEditor = () => {
 
                     if (draggedWall && draggedWall.type !== 'outer') {
                         // For inner walls, constrain each endpoint to slide along its host wall
-                        const constrainToHost = (origPt, moveX, moveY) => {
-                            for (const hw of activeStorey.walls) {
-                                if (hw.id === id) continue;
-                                const hp1 = getPoint(activeStorey, hw.p1);
-                                const hp2 = getPoint(activeStorey, hw.p2);
-                                if (!hp1 || !hp2) continue;
-                                const hwDx = hp2.x - hp1.x, hwDy = hp2.y - hp1.y;
-                                const hwLen = Math.sqrt(hwDx * hwDx + hwDy * hwDy);
-                                if (hwLen < 1) continue;
-                                const hux = hwDx / hwLen, huy = hwDy / hwLen;
-                                const t0 = (origPt.x - hp1.x) * hux + (origPt.y - hp1.y) * huy;
-                                const projX = hp1.x + hux * t0;
-                                const projY = hp1.y + huy * t0;
-                                const perpDist = Math.sqrt((origPt.x - projX) ** 2 + (origPt.y - projY) ** 2);
-                                if (perpDist < 50 && t0 > -10 && t0 < hwLen + 10) {
-                                    const proj = moveX * hux + moveY * huy;
-                                    const newT = Math.max(0, Math.min(hwLen, t0 + proj));
-                                    return { x: hp1.x + hux * newT, y: hp1.y + huy * newT };
-                                }
-                            }
-                            return { x: origPt.x + moveX, y: origPt.y + moveY };
-                        };
+                        // (Bewegung ist bereits gerastet, daher ohne zusätzliches Rasten der Projektion)
+                        const constrainToHost = (origPt, moveX, moveY) => (
+                            constrainPointToHostWall(activeStorey, id, origPt, moveX, moveY)
+                            || { x: origPt.x + moveX, y: origPt.y + moveY }
+                        );
 
                         const c1 = constrainToHost(origP1, dx, dy);
                         const c2 = constrainToHost(origP2, dx, dy);
@@ -1650,6 +1851,8 @@ const FloorPlanEditor = () => {
                         type: 'close_indicator',
                         x: chainStartPt.x, y: chainStartPt.y,
                         x1: lastPt.x, y1: lastPt.y,
+                        // gleiche Stärke wie die Wand, die beim Klick entsteht
+                        thickness: outerWallThickness,
                     };
                     snapPointRef.current = { ...chainStartPt, id: chainStartId };
                     requestRender();
@@ -1674,6 +1877,7 @@ const FloorPlanEditor = () => {
                     x1: lastPt.x, y1: lastPt.y,
                     x2: alignX, y2: alignY,
                     wallType: 'outer',
+                    thickness: outerWallThickness,
                 };
                 // Add previous point for angle display
                 if (drawPoints.length >= 2) {
@@ -1840,6 +2044,9 @@ const FloorPlanEditor = () => {
                     x1: lastPt.x, y1: lastPt.y,
                     x2: endX, y2: endY,
                     wallType: 'inner',
+                    // Stärke und Seite wie beim Anlegen (Seite = Cursorposition zur Wandachse)
+                    thickness: innerWallThickness,
+                    refEdge: getPointSide(world.x, world.y, lastPt.x, lastPt.y, endX, endY),
                 };
                 snapPointRef.current = snapFound;
             }
@@ -3510,10 +3717,11 @@ const FloorPlanEditor = () => {
                 />
                 <button
                     onClick={() => bgFileRef.current?.click()}
+                    disabled={bgUploading}
                     style={topBtnStyle}
-                    title="Hintergrundbild hochladen (PNG/JPG)"
+                    title={bgUploading ? 'Hintergrundbild wird hochgeladen …' : 'Hintergrundbild hochladen (PNG/JPG)'}
                 >
-                    <Upload size={16} />
+                    {bgUploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
                     {!isMobile && <span style={{ marginLeft: '4px', fontSize: '0.82rem' }}>Hintergrund</span>}
                 </button>
 
@@ -4822,7 +5030,11 @@ const getCursor = (tool) => {
 
 // ─── Export Menu Item ───────────────────────────────────────────
 
-const ExportMenuItem = ({ icon: Icon, label, sublabel, onClick }) => (
+const ExportMenuItem = (props) => {
+    // Icon über Destrukturierung im Rumpf (als Komponente genutzt, ESLint erkennt JSX-Nutzung
+    // von Parametern sonst nicht)
+    const { icon: Icon, label, sublabel, onClick } = props;
+    return (
     <button
         onClick={onClick}
         style={{
@@ -4840,7 +5052,8 @@ const ExportMenuItem = ({ icon: Icon, label, sublabel, onClick }) => (
             {sublabel && <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{sublabel}</div>}
         </div>
     </button>
-);
+    );
+};
 
 // ─── Quantities Panel ───────────────────────────────────────────
 

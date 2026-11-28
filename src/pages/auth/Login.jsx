@@ -4,6 +4,7 @@ import AuthLayout from '../../components/layout/AuthLayout';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { useAuth } from '../../context/AuthContext';
+import { translateError } from '../../lib/errorTranslator';
 import { AlertCircle } from 'lucide-react';
 
 const Login = () => {
@@ -23,7 +24,8 @@ const Login = () => {
             if (error) throw error;
             navigate('/');
         } catch (error) {
-            setError('Fehler beim Anmelden: ' + error.message);
+            // Verständliche deutsche Meldung statt des englischen Supabase-Texts
+            setError(translateError(error));
         } finally {
             setLoading(false);
         }
@@ -36,7 +38,7 @@ const Login = () => {
             const { error } = await signInWithGoogle();
             if (error) throw error;
         } catch (error) {
-            setError('Google Login fehlgeschlagen: ' + error.message);
+            setError(`Die Anmeldung mit Google ist fehlgeschlagen. ${translateError(error)}`);
             setLoading(false);
         }
     };

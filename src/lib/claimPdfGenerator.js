@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
 import QRCode from 'qrcode';
 import { openSansFontFaceCss } from './fontFaces';
+import { loadHtml2Pdf } from './htmlToPdf';
+import { DEFAULT_TEMPLATES, fixLegacyTemplateTypos } from './defaultTemplates';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemeinsame Hilfsfunktionen für das Forderungsmanagement (Forderungsliste,
@@ -132,6 +134,9 @@ export const getPublicAppOrigin = () => {
 
 export const buildClaimPortalUrl = (token) => `${getPublicAppOrigin()}/forderung/portal/${encodeURIComponent(token || '')}`;
 
+// Privater Speicher für das Archiv der Mahnschreiben (Pfad: <claim_id>/<datei>.pdf)
+export const CLAIM_DOCUMENT_BUCKET = 'claim-documents';
+
 // ── Fehlermeldungen der Forderungs-RPCs verständlich machen ─────────────────
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
@@ -176,7 +181,7 @@ const isSafeUrl = (value, attrName) => {
 };
 
 // Entfernt aktive Inhalte (Skripte, Event-Handler, javascript:-URLs, eingebettete Objekte) aus Vorlagen-HTML.
-// Wichtig, weil html2pdf den Inhalt in das Hauptdokument der App klont.
+// Wichtig, weil die PDF-Erzeugung den Inhalt in das Hauptdokument der App klont.
 export const sanitizeTemplateHtml = (html) => {
     if (!html) return '';
     if (typeof DOMParser === 'undefined') return String(html).replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -203,71 +208,12 @@ export const sanitizeTemplateHtml = (html) => {
     return doc.body.innerHTML;
 };
 
-// ── html2pdf (wird bis zur Aufnahme als npm-Paket von cdnjs geladen) ────────
-const HTML2PDF_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js';
-const HTML2PDF_TIMEOUT_MS = 20000;
-let html2pdfLoading = null;
-
-const loadHtml2Pdf = () => {
-    if (window.html2pdf) return Promise.resolve(window.html2pdf);
-    if (html2pdfLoading) return html2pdfLoading;
-    html2pdfLoading = new Promise((resolve, reject) => {
-        const existing = document.querySelector(`script[src="${HTML2PDF_SRC}"]`);
-        const script = existing || document.createElement('script');
-        let timer = null;
-        const cleanup = () => {
-            clearTimeout(timer);
-            script.removeEventListener('load', onLoad);
-            script.removeEventListener('error', onError);
-        };
-        const fail = () => {
-            cleanup();
-            html2pdfLoading = null;
-            if (!existing && script.parentNode) script.parentNode.removeChild(script);
-            reject(new Error('Die PDF-Komponente konnte nicht geladen werden. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.'));
-        };
-        function onLoad() {
-            cleanup();
-            if (window.html2pdf) resolve(window.html2pdf);
-            else fail();
-        }
-        function onError() { fail(); }
-        script.addEventListener('load', onLoad);
-        script.addEventListener('error', onError);
-        timer = setTimeout(() => { if (window.html2pdf) onLoad(); else fail(); }, HTML2PDF_TIMEOUT_MS);
-        if (!existing) {
-            script.src = HTML2PDF_SRC;
-            script.async = true;
-            script.referrerPolicy = 'no-referrer';
-            document.head.appendChild(script);
-        }
-    });
-    return html2pdfLoading;
-};
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const formatCurrency = formatCurrencyDE;
 const formatDate = formatDateDE;
 
-const DEFAULT_DUNNING_TEMPLATES = {
-    payment_reminder: {
-        subject: 'Zahlungserinnerung zu offenen Mietforderungen',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Zahlungserinnerung zu offenen Mietforderungen</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Bezüglich der offenen Posten besteht aktuell ein Zahlungsrückstand.</p><p>Trotz Fälligkeit wurde die nachfolgend aufgeführte Forderung nicht vollständig ausgeglichen. Bitte prüfen Sie den Vorgang und gleichen Sie den offenen Betrag aus.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_1: {
-        subject: 'Mahnung wegen Mietrückstand',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Mahnung wegen Mietrückstand</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_2: {
-        subject: 'Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Abmahnung und Zahlungsaufforderung wegen Zahlungsverzug</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag" data-label="Offener Betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Aufgrund der Höhe des Rückstands kann zudem die Prüfung einer außerordentlichen fristlosen Kündigung gemäß § 543 Abs. 2 Nr. 3 BGB, hilfsweise einer ordentlichen Kündigung, in Betracht kommen. Für Wohnraummietverhältnisse sind zusätzlich die Regelungen des § 569 BGB zu beachten.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    },
-    dunning_final: {
-        subject: 'Letzte Zahlungsaufforderung vor weiteren Schritten',
-        content_html: `<div class="letter-page"><div class="letter-sender"><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span> · <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span></div><div class="letter-header-row"><div class="letter-recipient">Herrn/Frau<br><strong><span data-type="mention" data-id="mieter_name" data-label="Mieter Name">Mieter Name</span></strong><br><span data-type="mention" data-id="mieter_adresse" data-label="Mieter Adresse">Mieter Adresse</span></div><div class="letter-date">Ort, den <span data-type="mention" data-id="rechnungsdatum" data-label="Rechnungsdatum">Rechnungsdatum</span></div></div><div class="letter-subject">Letzte Zahlungsaufforderung vor weiteren Schritten</div><div class="letter-object">Mietobjekt: <span data-type="mention" data-id="objekt_adresse" data-label="Objekt-Adresse">Objekt-Adresse</span> (Einheit: <span data-type="mention" data-id="einheit_name" data-label="Wohneinheit">Wohneinheit</span>)</div><div class="letter-body"><p><span data-type="mention" data-id="mieter_anrede" data-label="Sehr geehrte/r ...">Sehr geehrte/r ...</span>,</p><p>zwischen uns besteht seit dem <span data-type="mention" data-id="nutzungszeitraum" data-label="Nutzungszeitraum">Mietbeginn</span> ein Mietverhältnis über die oben bezeichnete Mietwohnung. Nach der Zahlungsübersicht sind Mietforderungen bislang offen.</p><p>Die Miete ist nach § 556b Abs. 1 BGB zu Beginn, spätestens bis zum dritten Werktag des jeweiligen Monats, zu entrichten. Trotz Fälligkeit wurden die nachfolgend aufgeführten Mietforderungen nicht vollständig ausgeglichen.</p><p>Ich mahne Sie hiermit ausdrücklich wegen Zahlungsverzuges ab und fordere Sie auf, den unten genannten Gesamtbetrag vollständig auszugleichen.</p><p><span data-type="mention" data-id="forderungs_tabelle" data-label="Forderungstabelle">Forderungstabelle</span></p><p>Zahlungsfrist: Bitte zahlen Sie den Gesamtbetrag in Höhe von <span data-type="mention" data-id="offener_betrag">Offener Betrag</span> spätestens bis zum <span data-type="mention" data-id="zahlungsfrist_datum" data-label="Fälligkeitsdatum">Fälligkeitsdatum</span> auf folgende Bankverbindung:</p><p><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></p><p>Sollte der vorgenannte Betrag nicht vollständig und fristgerecht eingehen, behalte ich mir vor, weitere rechtliche Schritte einzuleiten, insbesondere die Beantragung eines gerichtlichen Mahnbescheids beziehungsweise die gerichtliche Geltendmachung der Forderung. Außerdem behalte ich mir vor, einen Rechtsanwalt mit der weiteren Beitreibung zu beauftragen und die hierdurch erforderlichen Rechtsverfolgungskosten geltend zu machen.</p><p>Sollten Sie die Forderung ganz oder teilweise bestreiten, teilen Sie mir dies bitte innerhalb der oben genannten Frist schriftlich unter Vorlage geeigneter Zahlungsnachweise mit.</p><p>Mit freundlichen Grüßen,</p><p><strong><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></strong></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div><div class="letter-page"><div class="letter-subject" style="font-size: 12pt; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10mm;">Anlage zur Mahnung: Forderungsaufstellung &amp; Informationen</div><div class="letter-body"><p>Nachfolgend finden Sie die detaillierte Aufstellung der offenen Forderungen sowie Zinsen und Mahngebühren:</p><p><span data-type="mention" data-id="forderungs_detail_tabelle" data-label="Detaillierte Forderungstabelle">Detaillierte Forderungstabelle</span></p></div><div class="letter-footer"><div class="footer-col"><strong>Anschrift</strong><br><span data-type="mention" data-id="vermieter_name" data-label="Vermieter Name">Vermieter Name</span></div><div class="footer-col"><strong>Kontakt</strong><br>{vermieter_kontakt}</div><div class="footer-col"><strong>Bankverbindung</strong><br><span data-type="mention" data-id="vermieter_bankverbindung" data-label="Vermieter Bankverbindung">Vermieter Bankverbindung</span></div></div></div>`
-    }
-};
+// Standardvorlagen der Mahnstufen: gemeinsame Quelle mit dem Vorlagen-Editor (lib/defaultTemplates.js)
 
 // Mahnstufe je Dokumenttyp (für die Forderungsakte)
 export const getDunningLevel = (documentType) => {
@@ -292,6 +238,9 @@ const joinNonEmpty = (parts, sep) => parts.map(p => (p || '').trim()).filter(Boo
  * Beträge stammen ausschließlich aus claim_totals_view (gleiche Quelle wie Forderungsakte,
  * Mieterportal und Zahlungsbuchung). Die Signatur bleibt kompatibel; optional:
  * options.targetWindow – vorab (im Klick-Handler) geöffnetes Fenster, damit Popup-Blocker nicht greifen.
+ * portalLinkData: { token, pin } nur direkt nach dem Erzeugen des Portal-Links (die Datenbank
+ * speichert nur Hashes); ohne beides wird kein QR-Code/keine PIN abgedruckt.
+ * Das erzeugte PDF wird im Bucket claim-documents archiviert (scheitert das, nur ein Hinweis).
  *
  * Rückgabe: { fileName, eventMetadata, deadlineDate, warnings, historySaved, historyError, opened, downloaded }
  */
@@ -370,7 +319,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         else templateType = 'dunning_1';
     }
 
-    let template = DEFAULT_DUNNING_TEMPLATES[templateType];
+    let template = DEFAULT_TEMPLATES[templateType];
     try {
         let query = supabase
             .from('document_templates')
@@ -577,14 +526,19 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
                 </tr>
             </thead>
             <tbody>
-                ${activeItems.map(item => `
+                ${activeItems.map(item => {
+                    // paid_principal enthält auch Erlasse/Ausbuchungen (kein Geldeingang) – getrennt ausweisen
+                    const waived = round2(item.waived_amount ?? item.waived_principal);
+                    const paidOnly = round2(num(item.paid_principal) - waived);
+                    return `
                     <tr style="border-bottom: 1px solid #e2e8f0;">
                         <td style="padding: 5px; text-align: left;">${escapeHtml(item.claim_items?.description || item.claim_items?.item_type || 'Forderung')}</td>
                         <td style="padding: 5px; text-align: right;">${formatCurrency(item.original_amount)}</td>
-                        <td style="padding: 5px; text-align: right;">${formatCurrency(item.paid_principal)}</td>
+                        <td style="padding: 5px; text-align: right;">${formatCurrency(paidOnly)}${waived > 0 ? `<div style="font-size: 8pt; color: #475569;">Erlass: ${formatCurrency(waived)}</div>` : ''}</td>
                         <td style="padding: 5px; text-align: right; font-weight: bold;">${formatCurrency(item.open_amount)}</td>
                     </tr>
-                `).join('')}
+                `;
+                }).join('')}
                 <tr style="border-top: 2px solid #000; font-weight: bold; background-color: #f8fafc;">
                     <td style="padding: 6px;">Summe offener Hauptforderungen:</td>
                     <td></td>
@@ -749,7 +703,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     };
 
     // Vorlage bereinigen; doppelte Anrede vermeiden ('Sehr geehrte/r ' + Variable, die bereits die Anrede enthält)
-    const rawTemplateHtml = template?.content_html || DEFAULT_DUNNING_TEMPLATES[templateType].content_html;
+    const rawTemplateHtml = fixLegacyTemplateTypos(template?.content_html || DEFAULT_TEMPLATES[templateType].content_html);
     const fullTemplateHtml = sanitizeTemplateHtml(rawTemplateHtml)
         .replace(/Sehr geehrte(?:\/r|\(r\))?(?:\s|&nbsp;)*(?=<span[^>]*data-id="mieter_anrede")/gi, '')
         .replace(/Sehr geehrte(?:\/r|\(r\))?(?:\s|&nbsp;)*(?=\{mieter_anrede\})/gi, '');
@@ -877,11 +831,11 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     </body></html>`;
 
     // 9. Dateiname (lokales Datum)
-    const cleanTenantName = (tenantName || 'Mieter').replace(/[^a-z0-9]/gi, '_').replace(/_+/g, '_');
+    const cleanTenantName = (tenantName || 'Mieter').replace(/[^a-z0-9äöüß]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'Mieter';
     const cleanDocType = docType.replace(/[^a-z0-9äöüß]/gi, '_').replace(/_+/g, '_');
     const fileName = `${cleanDocType}_Zahlungsverzug_${cleanTenantName}_${todayStr}.pdf`;
 
-    // 10. PDF rendern (verstecktes iframe + html2pdf); iframe wird in jedem Fall entfernt
+    // 10. PDF rendern (verstecktes iframe + lib/htmlToPdf); iframe wird in jedem Fall entfernt
     const iframe = document.createElement('iframe');
     iframe.setAttribute('aria-hidden', 'true');
     iframe.tabIndex = -1;
@@ -931,6 +885,22 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         console.warn('SHA-256 nicht berechenbar:', hashErr);
     }
 
+    // 10b. Archiv: genau diese Datei unveränderlich ablegen (kein Überschreiben, eindeutiger Name)
+    const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+    let documentStoragePath = null;
+    try {
+        const safeFileName = fileName.replace(/[^A-Za-z0-9._-]/g, '_');
+        const archivePath = `${claim.id}/${todayStr}_${Date.now()}_${safeFileName}`;
+        const { error: uploadError } = await supabase.storage
+            .from(CLAIM_DOCUMENT_BUCKET)
+            .upload(archivePath, pdfBlob, { contentType: 'application/pdf', upsert: false });
+        if (uploadError) throw uploadError;
+        documentStoragePath = archivePath;
+    } catch (archiveErr) {
+        console.warn('PDF konnte nicht archiviert werden:', archiveErr);
+        warnings.push('Das PDF konnte nicht in der App archiviert werden. Bitte legen Sie es selbst ab.');
+    }
+
     // 11. Historien-Eintrag (append-only: jede Erzeugung bleibt nachvollziehbar)
     const eventMetadata = {
         document_type: docType,
@@ -947,7 +917,7 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         deadline_date: deadlineDateStr,
         deadline_days: deadlineDaysNum,
         document_file_name: fileName,
-        document_stored: false,
+        document_stored: !!documentStoragePath,
         document_sha256,
         template_type: templateType,
         template_id: template?.id || null,
@@ -955,6 +925,11 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         recipient_address_source: recipientSource,
         target_item_id: targetItemId || null
     };
+    if (documentStoragePath) {
+        eventMetadata.document_bucket = CLAIM_DOCUMENT_BUCKET;
+        eventMetadata.document_storage_path = documentStoragePath;
+    }
+    if (portalLinkData?.token && portalLinkData?.pin) eventMetadata.portal_access_printed = true;
     if (internalNote) eventMetadata.note = String(internalNote);
 
     const { error: eventError } = await supabase.from('claim_events').insert([{
@@ -967,7 +942,6 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     if (eventError) console.error('Error saving claim_event:', eventError);
 
     // 12. PDF anzeigen: vorab geöffnetes Fenster > neues Fenster > Download
-    const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
     const pdfUrl = URL.createObjectURL(pdfBlob);
     let opened = false;
     let downloaded = false;

@@ -6,6 +6,10 @@ import Messenger from '../../components/Messenger';
 import { MessageSquare } from 'lucide-react';
 import { useViewMode } from '../../context/ViewModeContext';
 
+// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
 const TenantMessages = () => {
     const { user, roleData } = useAuth();
     const { clearByType } = useNotifications();
@@ -27,21 +31,30 @@ const TenantMessages = () => {
         if (!userId) return;
         let cancelled = false;
 
-        // Vermieter deterministisch aus dem eigenen Objekt ableiten (properties.user_id –
+        // Vermieter deterministisch aus dem eigenen Objekt ableiten (Eigentümer des Objekts –
         // derselbe Nutzer, dem der Mieter in "Nachrichten" des Vermieters angezeigt wird).
         // Früher: irgendein Konto mit Rolle 'investor' (limit 1) – falscher Empfänger.
         const findLandlord = async () => {
             try {
                 let landlordId = null;
 
-                if (propertyId) {
-                    const { data: property, error: propError } = await supabase
-                        .from('properties')
-                        .select('user_id')
-                        .eq('id', propertyId)
-                        .maybeSingle();
-                    if (propError) console.error('Error loading property owner:', propError);
-                    if (property?.user_id) landlordId = property.user_id;
+                // Nur die Vermieter-ID über die Datenbank-Funktion (keine ganze Objektzeile)
+                const { data: info, error: infoError, status: infoStatus } = await supabase.rpc('get_my_landlord_info');
+                if (!infoError) {
+                    landlordId = info?.landlord_user_id || null;
+                } else if (isMissingRpc(infoError, infoStatus)) {
+                    // Bisheriger Weg (Funktion noch nicht eingespielt)
+                    if (propertyId) {
+                        const { data: property, error: propError } = await supabase
+                            .from('properties')
+                            .select('user_id')
+                            .eq('id', propertyId)
+                            .maybeSingle();
+                        if (propError) console.error('Error loading property owner:', propError);
+                        if (property?.user_id) landlordId = property.user_id;
+                    }
+                } else {
+                    console.error('Error loading landlord:', infoError);
                 }
 
                 if (!landlordId) {

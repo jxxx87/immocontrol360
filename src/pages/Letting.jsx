@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { hasSmtpSettings } from '../lib/smtpSettings';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
 import Card from '../components/ui/Card';
@@ -205,12 +206,7 @@ const Letting = () => {
   const checkSmtpSettings = async () => {
     if (!user) return;
     try {
-      const { data } = await supabase
-        .from('user_smtp_settings')
-        .select('id')
-        .eq('user_id', user.id)
-        .maybeSingle();
-      setSmtpConfigured(!!data);
+      setSmtpConfigured(await hasSmtpSettings(user.id));
     } catch (err) {
       console.error('Error checking SMTP settings:', err);
     }

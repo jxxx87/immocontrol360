@@ -62,6 +62,12 @@ const RenovationWizard = () => {
 
     // Eigentümer eines Objekts (Portfolio-Eigentümer; Fallback: Ersteller des Objekts / eigenes Konto)
     const ownerOf = (prop) => prop?.portfolio?.user_id || prop?.user_id || user.id;
+    // Konto, dem die angelegten Projektdaten gehören (user_id): der Portfolio-Eigentümer, damit
+    // Projekt, Gewerke, Meilensteine und Rechnungen nicht am Konto eines Teammitglieds hängen
+    // (ON DELETE CASCADE). Die Datenbank lässt als user_id das eigene Konto oder den
+    // Portfolio-Eigentümer zu (rls_user_ok); ohne lesbares Portfolio bleibt es das eigene Konto.
+    // Den Ersteller eines Projekts hält die Datenbank in renovation_projects.created_by fest.
+    const dataOwnerOf = (prop) => prop?.portfolio?.user_id || user.id;
 
     /* ─── Gewerke-Vorlagen laden ────── */
     const loadTemplates = async (ownerId) => {
@@ -262,9 +268,10 @@ const RenovationWizard = () => {
             const { data: msData, error: msErr } = await supabase.from('renovation_milestone_templates').select('*').eq('user_id', ownerForTemplates).order('sort_order');
             if (msErr) throw msErr;
             const milestoneTemplates = msData || [];
+            const dataOwner = dataOwnerOf(properties.find(p => p.id === selectedProperty));
 
             const { data: project, error: projErr } = await supabase.from('renovation_projects').insert({
-                user_id: user.id,
+                user_id: dataOwner,
                 property_id: selectedProperty,
                 unit_id: selectedUnit || null,
                 name: projectName.trim(),
@@ -281,7 +288,7 @@ const RenovationWizard = () => {
 
             if (tradePlan.length > 0) {
                 const { data: insertedTrades, error: ptErr } = await supabase.from('renovation_project_trades').insert(
-                    tradePlan.map(x => ({ project_id: projectId, user_id: user.id, name: x.tmpl.name, sort_order: x.sort_order, status: 'open' }))
+                    tradePlan.map(x => ({ project_id: projectId, user_id: dataOwner, name: x.tmpl.name, sort_order: x.sort_order, status: 'open' }))
                 ).select('id, sort_order');
                 if (ptErr) throw ptErr;
                 if ((insertedTrades || []).length !== tradePlan.length) throw new Error('Nicht alle Gewerke konnten angelegt werden.');
@@ -297,7 +304,7 @@ const RenovationWizard = () => {
                     selectedSubs.forEach((st, j) => {
                         const cfg = subtradeConfig[st.id] || {};
                         subtradeRows.push({
-                            project_trade_id: ptId, project_id: projectId, user_id: user.id,
+                            project_trade_id: ptId, project_id: projectId, user_id: dataOwner,
                             name: st.name, sort_order: j,
                             budget_soll: round2(cfg.budget_soll),
                             responsible_contact_id: cfg.contact_id || null,
@@ -305,7 +312,7 @@ const RenovationWizard = () => {
                     });
                     milestoneTemplates.forEach((m, k) => {
                         milestoneRows.push({
-                            project_trade_id: ptId, user_id: user.id,
+                            project_trade_id: ptId, user_id: dataOwner,
                             name: m.name, sort_order: k,
                             is_completion_trigger: !!m.is_completion_trigger,
                         });

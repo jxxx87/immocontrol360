@@ -142,6 +142,11 @@ const RenovationProjectDetail = () => {
     // Kontakte (Verantwortliche): eigene + die des Objekt-Eigentümers (bei geteilten Portfolios);
     // was davon sichtbar ist, entscheidet die RLS.
     const ownerId = project?.property?.portfolio?.user_id || project?.property?.user_id || null;
+    // user_id neuer Zeilen (Untergewerke, Rechnungen): der Portfolio-Eigentümer bzw. der Eigentümer
+    // des Projekts – nicht das Konto eines Teammitglieds (ON DELETE CASCADE). Beide lässt die
+    // Datenbank zu (rls_user_ok 'renovation_project'); den Ersteller einer Rechnung hält sie in
+    // renovation_invoices.created_by fest.
+    const dataOwnerId = project?.property?.portfolio?.user_id || project?.user_id || user?.id;
     useEffect(() => {
         if (!user) return;
         const ids = [...new Set([user.id, ownerId].filter(Boolean))];
@@ -373,7 +378,7 @@ const RenovationProjectDetail = () => {
         const nextSort = (trade.subtrades || []).reduce((max, s) => Math.max(max, Number(s.sort_order) || 0), -1) + 1;
         runAction(async () => {
             assertWrite(await supabase.from('renovation_project_subtrades').insert({
-                project_trade_id: trade.id, project_id: id, user_id: user.id,
+                project_trade_id: trade.id, project_id: id, user_id: dataOwnerId,
                 name, sort_order: nextSort, budget_soll: 0,
             }).select('id'), 'Untergewerk anlegen');
             setNewSubtradeNames(prev => ({ ...prev, [trade.id]: '' }));
@@ -400,7 +405,7 @@ const RenovationProjectDetail = () => {
             assertWrite(await supabase.from('renovation_invoices').insert({
                 project_subtrade_id: invoiceModal.subtradeId,
                 project_id: id,
-                user_id: user.id,
+                user_id: dataOwnerId,
                 amount,
                 date,
                 note: invoiceForm.note?.trim() || null,

@@ -12,6 +12,14 @@
 //   wenn sie leer sind (Papierkorb); Ordner mit Inhalt bleiben stehen. Strukturordner werden nie
 //   angefasst. Vorhandene Elemente werden beim Anlegen nie ersetzt (conflictBehavior 'fail').
 // - foldersToCreate wird auf die berechneten Soll-Pfade beschränkt; Logs nur mit Anzahlen.
+//
+// Wave 3 (2026-11-27), Paket 08 CLOUD:
+// - M2-06: Tokens nur noch über cloud_get_tokens/cloud_store_tokens (Vault), Rückfall auf die alten
+//   Spalten, solange die Migration fehlt.
+// - G18-12: '/' und '\' in Straße, Hausnummer, Einheit oder Mietername werden zu '-' (sonst entstünden
+//   Unterordner; gleiche Regel in TenantDetail.jsx/Properties.jsx/sync-applicant-files). Der Ordner
+//   eines Mietverhältnisses wird in lease_cloud_folders gemerkt: Existiert der gemerkte Ordner noch
+//   (z. B. nach Umbenennung des Mieters), wird unter dem neuen Namen kein zweiter Ordner angelegt.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
 // ---------------------------------------------------------------------------
@@ -123,6 +131,76 @@ const requireUser = async (req: Request, admin: any) => {
   return { user, jwt }
 }
 
+// OAuth-Tokens liegen verschlüsselt im Supabase Vault (Wave 3, Befund M2-06). Gelesen und geschrieben
+// wird nur über die RPCs cloud_get_tokens / cloud_store_tokens (ausführbar nur für service_role).
+// Solange die Migration noch nicht eingespielt ist (PostgREST kennt die Funktion nicht), gelten wie
+// bisher die Spalten access_token/refresh_token. Fehlermeldungen werden nur mit Code geloggt.
+// deno-lint-ignore no-explicit-any
+const isMissingRpc = (error: any): boolean => error?.code === 'PGRST202' || error?.code === '42883'
+
+type CloudTokens = { accessToken: string | null; refreshToken: string | null }
+
+// deno-lint-ignore no-explicit-any
+const readTokens = async (admin: any, connectionId: string, userId: string): Promise<CloudTokens> => {
+  const { data, error } = await admin.rpc('cloud_get_tokens', { p_connection_id: connectionId, p_user_id: userId })
+  if (!error) {
+    const row = Array.isArray(data) ? data[0] : data
+    return { accessToken: row?.access_token || null, refreshToken: row?.refresh_token || null }
+  }
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  const { data: legacy, error: legacyError } = await admin
+    .from('cloud_connections')
+    .select('access_token, refresh_token')
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (legacyError) {
+    console.error(`Cloud-Tokens lesen fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    throw new HttpError(500, 'db_error', 'Die Cloud-Verbindung konnte nicht geladen werden.')
+  }
+  return { accessToken: legacy?.access_token || null, refreshToken: legacy?.refresh_token || null }
+}
+
+// Speichert ein neues Access-Token (refreshToken null = bisheriges behalten) samt Ablaufzeit.
+// Liefert false, wenn nicht gespeichert werden konnte (Ursache steht im Server-Log).
+const storeTokens = async (
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  connectionId: string,
+  userId: string,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: string,
+): Promise<boolean> => {
+  const { error } = await admin.rpc('cloud_store_tokens', {
+    p_connection_id: connectionId,
+    p_user_id: userId,
+    p_access_token: accessToken,
+    p_refresh_token: refreshToken,
+    p_expires_at: expiresAt,
+  })
+  if (!error) return true
+  if (!isMissingRpc(error)) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${error.code || '-'})`)
+    return false
+  }
+  const update: Record<string, string> = { access_token: accessToken, expires_at: expiresAt }
+  if (refreshToken) update.refresh_token = refreshToken
+  const { error: legacyError } = await admin
+    .from('cloud_connections')
+    .update(update)
+    .eq('id', connectionId)
+    .eq('user_id', userId)
+  if (legacyError) {
+    console.error(`Cloud-Tokens speichern fehlgeschlagen (Verbindung ${connectionId}, Code ${legacyError.code || '-'})`)
+    return false
+  }
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Gemeinsamer Block B – identisch in cloud-drive und cloud-sync
 // (Verbindung laden, Token erneuern, Anbieter-Aufrufe mit Drosselungs-Behandlung)
@@ -132,7 +210,8 @@ const APP_FOLDER = 'ImmoControlpro360'
 const INVALID_ONEDRIVE_CHARS = /["*:<>?\/\\|]/g
 // deno-lint-ignore no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
-const CONNECTION_COLUMNS = 'id, user_id, provider, account_email, access_token, refresh_token, expires_at, created_at'
+// Ohne Token-Spalten: Tokens kommen ausschließlich über readTokens (Block A)
+const CONNECTION_COLUMNS = 'id, user_id, provider, account_email, expires_at, created_at'
 const RECONNECT_MESSAGE =
   'Die Cloud-Verbindung ist abgelaufen oder wurde widerrufen. Bitte verbinden Sie das Konto unter Einstellungen > Cloud neu.'
 
@@ -143,6 +222,20 @@ const TOKEN_ENDPOINTS: Record<string, string> = {
 
 // Escaping für Google-Drive-Suchausdrücke (q): erst Backslash, dann Hochkomma
 const gq = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+// Tabelle/Spalte (noch) nicht vorhanden, z. B. lease_cloud_folders vor dem Einspielen der Migration
+// deno-lint-ignore no-explicit-any
+const isMissingTable = (error: any): boolean =>
+  ['42P01', '42703', 'PGRST204', 'PGRST205'].includes(String(error?.code || ''))
+
+// Pfad wie in der App gebildet (Segmente mit '/'), ohne leere Segmente; null = ungültig
+const normalizeRawPath = (p: unknown): string | null => {
+  if (typeof p !== 'string' || p.length > 2000) return null
+  const segments = p.split('/').filter((s) => s.length > 0)
+  if (segments.length === 0) return null
+  if (segments.some((s) => s === '.' || s === '..' || CONTROL_CHARS.test(s))) return null
+  return segments.join('/')
+}
 
 // Lädt eine Verbindung NUR aus den eigenen Verbindungen des Nutzers.
 // Mit connectionId: genau diese; sonst die älteste Verbindung des Anbieters (deterministisch).
@@ -183,14 +276,15 @@ const loadConnection = async (admin: any, userId: string, connectionId: unknown,
   return data[0]
 }
 
-// Liefert ein gültiges Access-Token; erneuert es bei Bedarf und speichert es per service_role.
+// Liefert ein gültiges Access-Token; erneuert es bei Bedarf und speichert es (Vault) per service_role.
 // deno-lint-ignore no-explicit-any
 const getValidAccessToken = async (admin: any, connection: any): Promise<string> => {
+  const tokens = await readTokens(admin, connection.id, connection.user_id)
   const expiresAtMs = connection.expires_at ? Date.parse(connection.expires_at) : NaN
-  if (connection.access_token && Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() > 5 * 60 * 1000) {
-    return connection.access_token
+  if (tokens.accessToken && Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() > 5 * 60 * 1000) {
+    return tokens.accessToken
   }
-  if (!connection.refresh_token) throw new HttpError(409, 'reconnect_required', RECONNECT_MESSAGE)
+  if (!tokens.refreshToken) throw new HttpError(409, 'reconnect_required', RECONNECT_MESSAGE)
 
   const isGoogle = connection.provider === 'googledrive'
   const clientId = Deno.env.get(isGoogle ? 'GOOGLE_CLIENT_ID' : 'ONEDRIVE_CLIENT_ID')
@@ -207,7 +301,7 @@ const getValidAccessToken = async (admin: any, connection: any): Promise<string>
       body: new URLSearchParams({
         client_id: clientId,
         client_secret: clientSecret,
-        refresh_token: connection.refresh_token,
+        refresh_token: tokens.refreshToken,
         grant_type: 'refresh_token',
       }),
     })
@@ -235,24 +329,20 @@ const getValidAccessToken = async (admin: any, connection: any): Promise<string>
   }
 
   const expiresIn = Number(tokenResponse.expires_in)
-  const newExpiresAt = new Date(Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000)
-  const update: Record<string, string> = {
-    access_token: tokenResponse.access_token,
-    expires_at: newExpiresAt.toISOString(),
-  }
-  if (tokenResponse.refresh_token) update.refresh_token = tokenResponse.refresh_token
-
-  const { error: updateError } = await admin
-    .from('cloud_connections')
-    .update(update)
-    .eq('id', connection.id)
-    .eq('user_id', connection.user_id)
-  if (updateError) console.error(`Token-Update fehlgeschlagen (Verbindung ${connection.id}):`, updateError.message)
-
-  connection.access_token = update.access_token
-  connection.expires_at = update.expires_at
-  if (update.refresh_token) connection.refresh_token = update.refresh_token
-  return update.access_token
+  const newExpiresAt = new Date(
+    Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000,
+  ).toISOString()
+  // Fehler beim Speichern sind hier nicht fatal: das neue Token gilt für diesen Aufruf trotzdem
+  await storeTokens(
+    admin,
+    connection.id,
+    connection.user_id,
+    tokenResponse.access_token,
+    typeof tokenResponse.refresh_token === 'string' && tokenResponse.refresh_token ? tokenResponse.refresh_token : null,
+    newExpiresAt,
+  )
+  connection.expires_at = newExpiresAt
+  return tokenResponse.access_token
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -439,6 +529,36 @@ const googleHasFullDriveScope = async (accessToken: string): Promise<boolean> =>
   }
 }
 
+// Ein Name ergibt genau EIN Ordnersegment: '/' und '\' würden sonst Unterordner erzeugen (G18-12).
+// Dieselbe Regel steht in TenantDetail.jsx, Properties.jsx und sync-applicant-files (cloudFolderSegment).
+const folderSegment = (value: unknown): string => String(value ?? '').replace(/[/\\]/g, '-')
+
+// Gemerkte Mieterordner (lease_cloud_folders) dieser Verbindung laden.
+// null = Tabelle noch nicht vorhanden bzw. nicht lesbar -> Ordner werden nur aus den Namen gebildet.
+// deno-lint-ignore no-explicit-any
+const loadLeaseFolders = async (admin: any, userId: string, connectionId: string, leaseIds: string[]) => {
+  const map = new Map<string, string>()
+  for (let i = 0; i < leaseIds.length; i += 100) {
+    const { data, error } = await admin
+      .from('lease_cloud_folders')
+      .select('lease_id, folder_path')
+      .eq('user_id', userId)
+      .eq('cloud_connection_id', connectionId)
+      .in('lease_id', leaseIds.slice(i, i + 100))
+    if (error) {
+      if (!isMissingTable(error)) console.error(`[cloud-sync] Ordnerzuordnungen laden fehlgeschlagen (Code ${error.code || '-'})`)
+      return null
+    }
+    // deno-lint-ignore no-explicit-any
+    ;(data || []).forEach((r: any) => {
+      if (typeof r.folder_path === 'string') map.set(String(r.lease_id), r.folder_path)
+    })
+  }
+  return map
+}
+
+type PathEntry = { path: string; leaseId: string | null; mapped: string | null }
+
 Deno.serve(async (req: Request) => {
   const corsHeaders = buildCorsHeaders(req)
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -603,7 +723,11 @@ Deno.serve(async (req: Request) => {
       `[cloud-sync] ${action} (${provider}): ${props.length} Objekte, ${units.length} Einheiten, ${leases.length} Mietverhältnisse`,
     )
 
-    // 4. Objekte gruppieren und Ordnernamen bilden (unverändert, damit bestehende Ordner passen)
+    // Gemerkte Ordner der Mietverhältnisse für diese Verbindung (null = Tabelle noch nicht vorhanden)
+    const leaseFolders = await loadLeaseFolders(admin, user.id, connection.id, leases.map((l) => String(l.id)))
+
+    // 4. Objekte gruppieren und Ordnernamen bilden (unverändert, damit bestehende Ordner passen;
+    //    '/' bzw. '\' in einem Namen werden zu '-', damit daraus kein Unterordner entsteht)
     // deno-lint-ignore no-explicit-any
     const groups: Record<string, any> = {}
     // deno-lint-ignore no-explicit-any
@@ -641,15 +765,15 @@ Deno.serve(async (req: Request) => {
         const parts = Object.keys(groupedByStreet).map((street) => {
           const nums = groupedByStreet[street]
           if (nums.length > 0) {
-            return `${street} ${nums.join(' & ')}`
+            return `${folderSegment(street)} ${nums.map(folderSegment).join(' & ')}`
           }
-          return street
+          return folderSegment(street)
         })
         const displayNames = parts.slice(0, 2).join(' | ')
         const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames
         item.displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`
       } else {
-        item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim()
+        item.displayFolderName = `${folderSegment(item.street)} ${folderSegment(item.house_number || '')}`.trim()
       }
     })
 
@@ -660,14 +784,17 @@ Deno.serve(async (req: Request) => {
       return units.filter((u) => propertyIds.includes(u.property_id))
     }
 
-    // 5. Soll-Pfade berechnen
-    const expectedPaths: string[] = []
+    // 5. Soll-Pfade berechnen (Mieterordner mit Bezug zum Mietverhältnis, für lease_cloud_folders)
+    const pathEntries: PathEntry[] = []
+    const addPath = (path: string, leaseId: string | null = null) => {
+      pathEntries.push({ path, leaseId, mapped: leaseId && leaseFolders ? leaseFolders.get(leaseId) || null : null })
+    }
 
     finalGrouped.forEach((item) => {
       const folderName = item.displayFolderName
 
       DEFAULT_SUBFOLDERS.forEach((sub) => {
-        expectedPaths.push(`${folderName}/${sub}`)
+        addPath(`${folderName}/${sub}`)
       })
 
       relatedUnitsOf(item).forEach((unit) => {
@@ -676,21 +803,21 @@ Deno.serve(async (req: Request) => {
           if (item.isGroup) {
             // deno-lint-ignore no-explicit-any
             const prop = item.members.find((m: any) => m.id === unit.property_id)
-            const houseNumber = prop?.house_number || 'Ohne Hausnummer'
-            unitFolderPath = `${folderName}/Einheiten/${houseNumber}/${unit.unit_name}`
+            const houseNumber = folderSegment(prop?.house_number || 'Ohne Hausnummer')
+            unitFolderPath = `${folderName}/Einheiten/${houseNumber}/${folderSegment(unit.unit_name)}`
           } else {
-            unitFolderPath = `${folderName}/Einheiten/${unit.unit_name}`
+            unitFolderPath = `${folderName}/Einheiten/${folderSegment(unit.unit_name)}`
           }
 
-          expectedPaths.push(`${unitFolderPath}/Bilder`)
-          expectedPaths.push(`${unitFolderPath}/Mietverhältnisse`)
+          addPath(`${unitFolderPath}/Bilder`)
+          addPath(`${unitFolderPath}/Mietverhältnisse`)
 
           leases
             .filter((l) => l.unit_id === unit.id)
             .forEach((lease) => {
               const tenantName = `${lease.tenant?.first_name || ''} ${lease.tenant?.last_name || ''}`.trim()
               if (tenantName) {
-                expectedPaths.push(`${unitFolderPath}/Mietverhältnisse/${tenantName}`)
+                addPath(`${unitFolderPath}/Mietverhältnisse/${folderSegment(tenantName)}`, String(lease.id))
               }
             })
         }
@@ -708,14 +835,55 @@ Deno.serve(async (req: Request) => {
     }
 
     // foldersToCreate (vom Client) nur als Auswahl aus den Soll-Pfaden zulassen
-    let pathsToCreate = expectedPaths
+    let requestedFolders: Set<unknown> | null = null
     if (action === 'create' && body?.foldersToCreate !== undefined && body?.foldersToCreate !== null) {
       if (!Array.isArray(body.foldersToCreate)) {
         throw new HttpError(400, 'invalid_folders', 'Ungültige Ordnerliste.')
       }
-      const requested = new Set(body.foldersToCreate.filter((p: unknown) => typeof p === 'string'))
-      pathsToCreate = expectedPaths.filter((p) => requested.has(p))
+      requestedFolders = new Set(body.foldersToCreate.filter((p: unknown) => typeof p === 'string'))
     }
+    const selectPathsToCreate = (expected: string[]) =>
+      requestedFolders ? expected.filter((p) => (requestedFolders as Set<unknown>).has(p)) : expected
+
+    // Pfad in der Form, in der er in lease_cloud_folders steht (Rohnamen, ohne leere Segmente)
+    const storablePath = (path: string): string | null => (toSegments(path, false) ? normalizeRawPath(path) : null)
+
+    // Mietverhältnisse, deren gemerkter Ordner noch existiert (z. B. nach Umbenennung des Mieters),
+    // behalten diesen Ordner – unter dem neuen Namen wird dann kein zweiter Ordner angelegt.
+    const resolveMappedLeases = async (folderExists: (segments: string[]) => Promise<boolean>, strip: boolean) => {
+      const resolved = new Set<string>()
+      for (const e of pathEntries) {
+        if (!e.leaseId || !e.mapped || e.mapped === storablePath(e.path)) continue
+        const segments = toSegments(e.mapped, strip)
+        if (segments && (await folderExists(segments))) resolved.add(e.leaseId)
+      }
+      return resolved
+    }
+
+    // Gefundene bzw. angelegte Mieterordner merken, damit eine spätere Umbenennung sie nicht verwaisen lässt
+    const rememberLeaseFolders = async (resolved: Set<string>, isPresent: (path: string) => boolean) => {
+      if (!leaseFolders) return
+      const now = new Date().toISOString()
+      const rows: Record<string, string>[] = []
+      for (const e of pathEntries) {
+        if (!e.leaseId || resolved.has(e.leaseId) || !isPresent(e.path)) continue
+        const folderPath = storablePath(e.path)
+        if (!folderPath || e.mapped === folderPath) continue
+        rows.push({
+          lease_id: e.leaseId,
+          cloud_connection_id: connection.id,
+          user_id: user.id,
+          folder_path: folderPath,
+          updated_at: now,
+        })
+      }
+      if (rows.length === 0) return
+      const { error } = await admin.from('lease_cloud_folders').upsert(rows, { onConflict: 'lease_id,cloud_connection_id' })
+      if (error) console.error(`[cloud-sync] Ordnerzuordnungen speichern fehlgeschlagen (Code ${error.code || '-'})`)
+    }
+
+    const expectedPathsWithout = (resolved: Set<string>) =>
+      pathEntries.filter((e) => !(e.leaseId && resolved.has(e.leaseId))).map((e) => e.path)
 
     const accessToken = await getValidAccessToken(admin, connection)
     const getToken = () => accessToken
@@ -781,6 +949,11 @@ Deno.serve(async (req: Request) => {
         return parentId
       }
 
+      const folderExists = async (segments: string[]): Promise<boolean> =>
+        !!(await graph(`${odPath(segments)}?$select=id,folder`))?.folder
+      const resolved = await resolveMappedLeases(folderExists, true)
+      const expectedPaths = expectedPathsWithout(resolved)
+
       if (action === 'check') {
         const missing = new Set<string>()
         await mapLimit(expectedPaths, 4, async (path) => {
@@ -789,6 +962,7 @@ Deno.serve(async (req: Request) => {
           const folder = await graph(`${odPath(segments)}?$select=id`)
           if (!folder) missing.add(path)
         })
+        await rememberLeaseFolders(resolved, (p) => !missing.has(p) && toSegments(p, true) !== null)
         return respond({ missingFolders: expectedPaths.filter((p) => missing.has(p)) })
       }
 
@@ -813,6 +987,8 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      const pathsToCreate = selectPathsToCreate(expectedPaths)
+      const ensured = new Set<string>()
       let skipped = 0
       for (const path of pathsToCreate) {
         const segments = toSegments(path, true)
@@ -821,7 +997,9 @@ Deno.serve(async (req: Request) => {
           continue
         }
         await ensurePath(segments)
+        ensured.add(path)
       }
+      await rememberLeaseFolders(resolved, (p) => ensured.has(p))
       console.log(
         `[cloud-sync] OneDrive: ${pathsToCreate.length - skipped} Pfade sichergestellt, ${skipped} ungültig übersprungen, ${removedLegacy} leere Altordner entfernt`,
       )
@@ -886,6 +1064,23 @@ Deno.serve(async (req: Request) => {
         return parentId
       }
 
+      // Nur lesend: existiert der Ordnerpfad unterhalb des App-Ordners?
+      // deno-lint-ignore no-explicit-any
+      let existingRoot: any | undefined
+      const folderExists = async (segments: string[]): Promise<boolean> => {
+        if (existingRoot === undefined) existingRoot = await findChildFolder('root', APP_FOLDER)
+        if (!existingRoot) return false
+        let parentId = String(existingRoot.id)
+        for (const segment of segments) {
+          const folder = await findChildFolder(parentId, segment)
+          if (!folder) return false
+          parentId = String(folder.id)
+        }
+        return true
+      }
+      const resolved = await resolveMappedLeases(folderExists, false)
+      const expectedPaths = expectedPathsWithout(resolved)
+
       if (action === 'check') {
         const rootFolder = await findChildFolder('root', APP_FOLDER)
         if (!rootFolder) {
@@ -917,6 +1112,8 @@ Deno.serve(async (req: Request) => {
           if (!segments) continue
           if (!(await pathExists(segments))) missingPaths.push(path)
         }
+        const missingSet = new Set(missingPaths)
+        await rememberLeaseFolders(resolved, (p) => !missingSet.has(p) && toSegments(p, false) !== null)
         return respond({ missingFolders: missingPaths })
       }
 
@@ -959,6 +1156,8 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      const pathsToCreate = selectPathsToCreate(expectedPaths)
+      const ensured = new Set<string>()
       let skipped = 0
       for (const path of pathsToCreate) {
         const segments = toSegments(path, false)
@@ -967,7 +1166,9 @@ Deno.serve(async (req: Request) => {
           continue
         }
         await ensurePath(segments)
+        ensured.add(path)
       }
+      await rememberLeaseFolders(resolved, (p) => ensured.has(p))
       console.log(
         `[cloud-sync] Google Drive: ${pathsToCreate.length - skipped} Pfade sichergestellt, ${skipped} ungültig übersprungen, ${removedLegacy} leere Altordner entfernt`,
       )

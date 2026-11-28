@@ -1,24 +1,7 @@
 import React from 'react';
 import { useNotifications } from '../../context/NotificationContext';
-import { X, MessageSquare, Ticket, Megaphone, FileText, UserCheck, MessageCircle } from 'lucide-react';
-
-const iconMap = {
-    message: MessageSquare,
-    ticket: Ticket,
-    ticket_comment: MessageCircle,
-    announcement: Megaphone,
-    document: FileText,
-    registration: UserCheck,
-};
-
-const colorMap = {
-    message: '#3B82F6',
-    ticket: '#F59E0B',
-    ticket_comment: '#8B5CF6',
-    announcement: '#10B981',
-    document: '#6366F1',
-    registration: '#22C55E',
-};
+import { X } from 'lucide-react';
+import { getNotificationIcon, getNotificationColor } from './notificationTypes';
 
 const ToastContainer = () => {
     const { toasts, removeToast } = useNotifications();
@@ -40,8 +23,8 @@ const ToastContainer = () => {
             pointerEvents: 'none',
         }}>
             {toasts.map((toast) => {
-                const Icon = iconMap[toast.type] || MessageSquare;
-                const color = colorMap[toast.type] || '#3B82F6';
+                const Icon = getNotificationIcon(toast.type);
+                const color = getNotificationColor(toast.type);
 
                 return (
                     <div

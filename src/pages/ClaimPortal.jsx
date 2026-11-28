@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Scale, Lock, Clock, Calendar, CheckCircle2, FileText, Send, Loader2, CreditCard, LogOut } from 'lucide-react';
@@ -68,9 +68,28 @@ const getPortalErrorMessage = (err, fallback) => {
 
 const storageKey = (token) => `claim_pin_${token}`;
 
+// Automatische Anmeldung nach dem Neuladen nur innerhalb dieser Zeit seit der letzten Aktivität;
+// ebenso Abmeldung bei Inaktivität in einem offenen Tab.
+const SESSION_IDLE_MS = 15 * 60 * 1000;
+
+// Gespeichert wird { pin, ts } (ts = letzte Aktivität). Abgelaufene oder alte Einträge
+// (nur PIN, ohne Zeitstempel) werden verworfen.
 const readStoredPin = (token) => {
     try {
-        return sessionStorage.getItem(storageKey(token));
+        const raw = sessionStorage.getItem(storageKey(token));
+        if (!raw) return null;
+        let entry = null;
+        try {
+            entry = JSON.parse(raw);
+        } catch {
+            entry = null;
+        }
+        const ts = Number(entry?.ts);
+        if (!entry || typeof entry.pin !== 'string' || !Number.isFinite(ts) || Date.now() - ts > SESSION_IDLE_MS || ts > Date.now() + 60000) {
+            sessionStorage.removeItem(storageKey(token));
+            return null;
+        }
+        return entry.pin;
     } catch {
         return null;
     }
@@ -78,7 +97,7 @@ const readStoredPin = (token) => {
 
 const storePin = (token, value) => {
     try {
-        sessionStorage.setItem(storageKey(token), value);
+        sessionStorage.setItem(storageKey(token), JSON.stringify({ pin: value, ts: Date.now() }));
     } catch {
         // Speicher nicht verfügbar (z. B. privater Modus): dann eben ohne automatische Anmeldung
     }
@@ -112,6 +131,9 @@ export default function ClaimPortal() {
 
     // EPC-QR-Code State
     const [qrCodeUrl, setQrCodeUrl] = useState('');
+
+    // Zeitpunkt der letzten Aktivität (automatische Abmeldung nach SESSION_IDLE_MS)
+    const lastActivityRef = useRef(0);
 
     const failLogin = (message, code) => {
         clearStoredPin(token);
@@ -223,6 +245,36 @@ export default function ClaimPortal() {
         setRequestOption(null);
         setQrCodeUrl('');
     };
+
+    // Angemeldet: Aktivität merken (Zeitstempel im Speicher höchstens alle 30 s erneuern) und
+    // nach 15 Minuten ohne Aktivität abmelden – auch wenn der Tab offen bleibt.
+    useEffect(() => {
+        if (!isAuthenticated || !token) return undefined;
+        lastActivityRef.current = Date.now();
+
+        const markActivity = () => {
+            const now = Date.now();
+            if (now - lastActivityRef.current < 30000) return;
+            lastActivityRef.current = now;
+            if (pin) storePin(token, pin);
+        };
+        const checkIdle = () => {
+            if (Date.now() - lastActivityRef.current > SESSION_IDLE_MS) {
+                handleLogout();
+                setError('Sie wurden nach 15 Minuten ohne Aktivität abgemeldet. Bitte geben Sie den Zugangscode erneut ein.');
+            }
+        };
+        const activityEvents = ['pointerdown', 'keydown', 'touchstart'];
+        activityEvents.forEach(ev => window.addEventListener(ev, markActivity, { passive: true }));
+        document.addEventListener('visibilitychange', checkIdle);
+        const timer = window.setInterval(checkIdle, 30000);
+        return () => {
+            activityEvents.forEach(ev => window.removeEventListener(ev, markActivity));
+            document.removeEventListener('visibilitychange', checkIdle);
+            window.clearInterval(timer);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAuthenticated, token, pin]);
 
     const formatCurrency = (amount) => {
         return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount || 0);

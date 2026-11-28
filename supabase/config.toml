@@ -58,17 +58,30 @@ import_map = "./functions/send-letting-email/deno.json"
 verify_jwt = false
 
 # --- Abo / Stripe (Live-Stand) -------------------------------------------------------------------
+#
+# Gemeinsamer Code (Wave 3, E3-13): stripe-webhook und create-checkout-session importieren
+# ../_shared/stripePlans.ts (einzige Quelle der Stripe-Preis-IDs). Ordner mit "_" am Anfang sind
+# keine eigenen Functions. `supabase functions deploy <name>` nimmt die Datei automatisch mit;
+# beim Ausrollen über die Management-API/MCP (deploy_edge_function) muss sie zusätzlich zu
+# index.ts hochgeladen werden, z. B. files = [<name>/index.ts, _shared/stripePlans.ts] mit
+# entrypoint_path = "<name>/index.ts". Nach jeder Preisänderung BEIDE Functions neu ausrollen.
+#
+# Wave 3 (E3-21): stripe-webhook, create-checkout-session und create-portal-session nutzen das
+# eingebaute Deno.serve (keine Importe von deno.land/std mehr).
 
 # Stripe sendet kein JWT – Prüfung über die Webhook-Signatur.
+# Ereignisprotokoll: Tabelle public.stripe_webhook_events (Migration _fixwork/sql/wave3/10_STRIPE.sql).
 [functions.stripe-webhook]
 verify_jwt = false
 
 [functions.stripe-connect-onboard]
 verify_jwt = true
 
+# Prüft den Nutzer selbst (Nutzer-JWT über /auth/v1/user, role=anon wird abgewiesen).
 [functions.create-checkout-session]
 verify_jwt = false
 
+# Prüft den Nutzer selbst (Nutzer-JWT über /auth/v1/user, role=anon wird abgewiesen).
 [functions.create-portal-session]
 verify_jwt = false
 

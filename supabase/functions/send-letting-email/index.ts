@@ -7,14 +7,17 @@ import nodemailer from "npm:nodemailer@6.9.13"
 //
 // Sicherheitsmodell (Komplett-Check 2026-11-27):
 //  • Angemeldete Aktionen (test_connection, send_tenant_invite, get_invite_link,
-//    send_custom_email) – Vertrag C2: Der Nutzer wird ausschließlich aus dem
-//    Authorization-Header ermittelt. Der öffentliche anon-Key zählt NICHT als
-//    Anmeldung, `userId` im Body wird ignoriert (darf aus Kompatibilität weiter
-//    mitgeschickt werden).
+//    revoke_tenant_invite, send_custom_email) – Vertrag C2: Der Nutzer wird
+//    ausschließlich aus dem Authorization-Header ermittelt. Der öffentliche anon-Key
+//    zählt NICHT als Anmeldung, `userId` im Body wird ignoriert (darf aus
+//    Kompatibilität weiter mitgeschickt werden).
 //  • Öffentliche Aktionen (application_received, booking_confirmed,
 //    booking_canceled) – Vertrag C1: nur mit `process_token` des laufenden
 //    Vermietungsprozesses plus `applicant_id` bzw. `booking_id`. Empfänger kommen
-//    ausschließlich aus der Datenbank, nie aus dem Body.
+//    ausschließlich aus der Datenbank, nie aus dem Body. Jede Prozess-Mail wird
+//    über eine Spalte *_mail_sent_at atomar belegt (höchstens einmal je Ereignis).
+//  • Das SMTP-Passwort liegt verschlüsselt im Supabase Vault und wird nur über die
+//    Datenbank-Funktion get_smtp_password (nur service_role) gelesen.
 //  • Fachliche Fehler werden mit HTTP 200 und { success: false, error } beantwortet,
 //    damit die App die deutsche Meldung anzeigen kann (supabase.functions.invoke
 //    liefert bei Nicht-2xx nur eine generische Fehlermeldung).
@@ -28,6 +31,9 @@ const corsHeaders = {
 const APP_ORIGIN = 'https://app.immocontrol360.de'
 // Weiterleitungsziele für Login-/Einladungslinks (feste Allowlist, nie frei aus dem Body)
 const ALLOWED_REDIRECT_ORIGINS = new Set([APP_ORIGIN])
+// Zielseiten im Mieterportal nach dem Klick auf einen Einladungslink (Mail und QR/Link gleich)
+const DEFAULT_TENANT_REDIRECT_PATH = '/tenant/stammdaten'
+const ALLOWED_TENANT_REDIRECT_PATHS = new Set(['/tenant', DEFAULT_TENANT_REDIRECT_PATH])
 
 // Öffentliche Prozess-Mails dürfen nur kurz nach dem auslösenden Ereignis verschickt werden
 const PUBLIC_EVENT_WINDOW_MS = 30 * 60 * 1000
@@ -96,8 +102,13 @@ const isRecent = (timestamp: unknown, windowMs: number): boolean => {
   return diff <= windowMs && diff > -5 * 60 * 1000;
 };
 
-// Best-Effort-Schutz gegen mehrfaches Auslösen derselben Prozess-Mail innerhalb
-// einer laufenden Function-Instanz (eine dauerhafte Markierung bräuchte eine DB-Spalte).
+// Datenbank-Objekt (Funktion/Spalte) fehlt – Migration noch nicht eingespielt bzw. zurückgebaut
+const isMissingDbObject = (error: any): boolean => {
+  const code = String(error?.code || '');
+  return ['PGRST202', 'PGRST204', '42883', '42703'].includes(code);
+};
+
+// Übergangsschutz, solange die Spalten *_mail_sent_at fehlen: nur innerhalb einer Instanz
 const recentEvents = new Map<string, number>();
 const claimEvent = (key: string): boolean => {
   const now = Date.now();
@@ -110,6 +121,52 @@ const claimEvent = (key: string): boolean => {
 };
 const releaseEvent = (key: string) => { recentEvents.delete(key); };
 
+interface MailClaim {
+  table: 'rental_applicants' | 'rental_viewing_bookings';
+  column: 'received_mail_sent_at' | 'confirmed_mail_sent_at' | 'canceled_mail_sent_at';
+  id: string;
+  alreadySentMessage: string;
+  mode?: 'db' | 'memory';
+}
+
+// Prozess-Mail atomar belegen: Nur wer die Spalte von NULL auf einen Zeitpunkt setzt,
+// darf versenden. Parallele oder spätere Aufrufe (auch auf anderen Instanzen) erhalten 409.
+async function claimProcessMail(supabaseAdmin: any, claim: MailClaim): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from(claim.table)
+    .update({ [claim.column]: new Date().toISOString() })
+    .eq('id', claim.id)
+    .is(claim.column, null)
+    .select('id');
+  if (!error) {
+    if (!data || data.length === 0) throw new HttpError(409, claim.alreadySentMessage);
+    claim.mode = 'db';
+    return;
+  }
+  if (!isMissingDbObject(error)) {
+    console.error('Mail claim failed:', error.message);
+    throw new Error('Mail claim failed');
+  }
+  if (!claimEvent(`${claim.table}.${claim.column}:${claim.id}`)) {
+    throw new HttpError(409, claim.alreadySentMessage);
+  }
+  claim.mode = 'memory';
+}
+
+// Nach einem Versandfehler wieder freigeben, damit ein erneuter Versuch möglich ist
+async function releaseProcessMail(supabaseAdmin: any, claim: MailClaim): Promise<void> {
+  if (claim.mode === 'memory') {
+    releaseEvent(`${claim.table}.${claim.column}:${claim.id}`);
+  } else if (claim.mode === 'db') {
+    const { error } = await supabaseAdmin
+      .from(claim.table)
+      .update({ [claim.column]: null })
+      .eq('id', claim.id);
+    if (error) console.error('Mail claim release failed:', error.message);
+  }
+  claim.mode = undefined;
+}
+
 const resolveRedirectOrigin = (origin: unknown): string => {
   if (typeof origin === 'string') {
     const cleaned = origin.trim().replace(/\/+$/, '');
@@ -118,13 +175,39 @@ const resolveRedirectOrigin = (origin: unknown): string => {
   return APP_ORIGIN;
 };
 
+const resolveTenantRedirectPath = (path: unknown): string =>
+  typeof path === 'string' && ALLOWED_TENANT_REDIRECT_PATHS.has(path.trim())
+    ? path.trim()
+    : DEFAULT_TENANT_REDIRECT_PATH;
+
 // ── SMTP ────────────────────────────────────────────────────────────────────
+// SMTP-Passwort aus dem Vault (get_smtp_password, nur service_role). Übergang: Ist die
+// Migration noch nicht eingespielt, steht das Passwort noch in der alten Spalte smtp_pass.
+async function loadSmtpPassword(supabaseAdmin: any, userId: string): Promise<string> {
+  const { data, error } = await supabaseAdmin.rpc('get_smtp_password', { p_user_id: userId });
+  if (!error) return typeof data === 'string' ? data : '';
+  if (!isMissingDbObject(error)) {
+    console.error('SMTP password lookup failed:', error.message);
+    throw new HttpError(503, 'Die E-Mail-Einstellungen konnten gerade nicht geladen werden. Bitte versuchen Sie es später erneut.');
+  }
+  const { data: legacy, error: legacyErr } = await supabaseAdmin
+    .from('user_smtp_settings')
+    .select('smtp_pass')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (legacyErr) {
+    console.error('SMTP password lookup failed:', legacyErr.message);
+    throw new HttpError(503, 'Die E-Mail-Einstellungen konnten gerade nicht geladen werden. Bitte versuchen Sie es später erneut.');
+  }
+  return typeof legacy?.smtp_pass === 'string' ? legacy.smtp_pass : '';
+}
+
 // Nur das eigene Postfach des Nutzers (kein Plattform-Fallback)
 async function getUserSmtpConfig(supabaseAdmin: any, userId: string): Promise<SmtpConfig | null> {
   if (!userId) return null;
   const { data: userSettings, error } = await supabaseAdmin
     .from('user_smtp_settings')
-    .select('smtp_host, smtp_port, smtp_user, smtp_pass, smtp_sender')
+    .select('smtp_host, smtp_port, smtp_user, smtp_sender')
     .eq('user_id', userId)
     .maybeSingle();
 
@@ -138,7 +221,7 @@ async function getUserSmtpConfig(supabaseAdmin: any, userId: string): Promise<Sm
     host: userSettings.smtp_host,
     port: Number(userSettings.smtp_port) || 587,
     user: userSettings.smtp_user,
-    pass: userSettings.smtp_pass,
+    pass: await loadSmtpPassword(supabaseAdmin, userId),
     from: userSettings.smtp_sender || userSettings.smtp_user,
   };
 }
@@ -481,6 +564,75 @@ async function generateTenantLink(supabaseAdmin: any, ctx: any, redirectTo: stri
   return inviteResult.data.properties.action_link;
 }
 
+// Auth-Konto zu einer E-Mail-Adresse (Datenbank-Funktion, nur service_role).
+// Übergang ohne Migration: Kontenliste seitenweise durchsuchen.
+async function findAuthUserByEmail(supabaseAdmin: any, email: string) {
+  const { data: userId, error } = await supabaseAdmin.rpc('get_auth_user_id_by_email', { p_email: email });
+  if (!error) {
+    if (!isUuid(userId)) return null;
+    const { data, error: userErr } = await supabaseAdmin.auth.admin.getUserById(userId);
+    if (userErr) {
+      console.error('User lookup failed:', userErr.message);
+      throw new Error('User lookup failed');
+    }
+    return data?.user || null;
+  }
+  if (!isMissingDbObject(error)) {
+    console.error('User lookup failed:', error.message);
+    throw new Error('User lookup failed');
+  }
+  const perPage = 1000;
+  for (let page = 1; page <= 50; page++) {
+    const { data, error: listErr } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (listErr) {
+      console.error('User list failed:', listErr.message);
+      throw new Error('User list failed');
+    }
+    const users = data?.users || [];
+    const match = users.find((u: any) => normEmail(u.email) === email);
+    if (match) return match;
+    if (users.length < perPage) break;
+  }
+  return null;
+}
+
+// Zurückgezogene Einladung: Das per Einladungslink angelegte, noch nie bestätigte Konto
+// löschen – damit wird der versendete Link ungültig. Bestätigte, fremd genutzte oder
+// für weitere Einladungen benötigte Konten bleiben unverändert.
+async function revokeInviteAccount(supabaseAdmin: any, email: string, tenantId: string) {
+  const user = await findAuthUserByEmail(supabaseAdmin, email);
+  if (!user) return { linkRevoked: true, accountDeleted: false, reason: 'no_account' };
+  if (user.email_confirmed_at || user.confirmed_at || user.last_sign_in_at) {
+    return { linkRevoked: false, accountDeleted: false, reason: 'confirmed' };
+  }
+  if (!user.invited_at || !(await isExclusiveTenantAccount(supabaseAdmin, user, tenantId))) {
+    return { linkRevoked: false, accountDeleted: false, reason: 'foreign' };
+  }
+
+  // Weitere offene Einladungen an dieselbe Adresse (anderer Mieter) bräuchten das Konto noch
+  const { data: others, error: othersErr } = await supabaseAdmin
+    .from('tenant_invitations')
+    .select('id, tenant_id')
+    .ilike('email', email.replace(/[\\%_]/g, (m) => '\\' + m))
+    .eq('status', 'pending')
+    .neq('tenant_id', tenantId)
+    .limit(1);
+  if (othersErr) {
+    console.error('Invitation lookup failed:', othersErr.message);
+    throw new Error('Invitation lookup failed');
+  }
+  if (others && others.length > 0) {
+    return { linkRevoked: false, accountDeleted: false, reason: 'shared' };
+  }
+
+  const { error: deleteErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
+  if (deleteErr) {
+    console.error('Invite account deletion failed:', deleteErr.message);
+    throw new HttpError(502, 'Der Einladungslink konnte nicht widerrufen werden. Bitte versuchen Sie es später erneut.');
+  }
+  return { linkRevoked: true, accountDeleted: true, reason: 'deleted' };
+}
+
 // ── Öffentliche Prozess-Aktionen (Vertrag C1) ───────────────────────────────
 async function loadPublicProcess(supabaseAdmin: any, payload: any) {
   const token = payload.process_token ?? payload.processToken;
@@ -585,20 +737,20 @@ const formatViewingDate = (date: string, long: boolean) => {
 const formatSlot = (booking: any) =>
   `${String(booking.start_time ?? '').substring(0, 5)} - ${String(booking.end_time ?? '').substring(0, 5)} Uhr`;
 
+const noProcessMailConfig = () => {
+  console.warn('No email config found. Skipping email sending.');
+  return json({ success: false, warning: 'No email config configured' });
+};
+
 // Versendet Bewerber- und Vermieter-Mail; Empfänger ausschließlich aus der DB
 async function dispatchProcessMails(
   supabaseAdmin: any,
+  config: SmtpConfig,
   process: any,
   applicant: any,
   tenantMail: { subject: string; html: string },
   landlordMail: { subject: string; html: string },
 ) {
-  const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
-  if (!config) {
-    console.warn('No email config found. Skipping email sending.');
-    return json({ success: false, warning: 'No email config configured' });
-  }
-
   const applicantEmail = normEmail(applicant.email);
   const landlordEmail = await getLandlordEmail(supabaseAdmin, process.user_id);
 
@@ -748,7 +900,7 @@ serve(async (req) => {
         throw new HttpError(422, 'Es ist kein E-Mail-Versand eingerichtet. Bitte hinterlegen Sie unter Einstellungen > E-Mail Ihr Postfach.');
       }
 
-      const redirectTo = `${resolveRedirectOrigin(payload.origin)}/tenant/stammdaten`;
+      const redirectTo = `${resolveRedirectOrigin(payload.origin)}${DEFAULT_TENANT_REDIRECT_PATH}`;
       const magicLink = await generateTenantLink(supabaseAdmin, ctx, redirectTo);
 
       const firstName = oneLine(ctx.tenant.first_name, 80);
@@ -770,9 +922,44 @@ serve(async (req) => {
     if (action === 'get_invite_link') {
       const caller = await requireCaller(req, supabaseAdmin);
       const ctx = await prepareTenantLink(supabaseAdmin, caller, payload);
-      const redirectTo = `${resolveRedirectOrigin(payload.origin)}/tenant`;
+      // Gleiches Ziel wie der Link in der Einladungs-Mail (nur Pfade aus der Allowlist)
+      const redirectTo = `${resolveRedirectOrigin(payload.origin)}${resolveTenantRedirectPath(payload.redirectPath ?? payload.redirect_path)}`;
       const actionLink = await generateTenantLink(supabaseAdmin, ctx, redirectTo);
       return json({ success: true, actionLink });
+    }
+
+    // ACTION: REVOKE TENANT INVITE (zurückgezogene Einladung: versendeten Link ungültig machen)
+    if (action === 'revoke_tenant_invite') {
+      const caller = await requireCaller(req, supabaseAdmin);
+      const tenantId = payload.tenantId ?? payload.tenant_id;
+      const invitationId = payload.invitationId ?? payload.invitation_id;
+      if (!isUuid(tenantId) || !isUuid(invitationId)) {
+        throw new HttpError(422, 'Es wurde keine gültige Einladung angegeben.');
+      }
+      const tenant = await getWritableTenant(supabaseAdmin, caller, tenantId);
+      if (!tenant) throw new HttpError(403, 'Sie haben keine Berechtigung, Einladungen dieses Mieters zu verwalten.');
+
+      const { data: invitation, error: invErr } = await supabaseAdmin
+        .from('tenant_invitations')
+        .select('id, email, tenant_id, status')
+        .eq('id', invitationId)
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+      if (invErr) {
+        console.error('Invitation lookup failed:', invErr.message);
+        throw new Error('Invitation lookup failed');
+      }
+      if (!invitation) throw new HttpError(404, 'Die Einladung wurde nicht gefunden.');
+      // Nur angenommene Einladungen ausnehmen (offene und abgelaufene werden widerrufen,
+      // die App zeigt beide als „eingeladen“ an)
+      if (invitation.status === 'accepted') {
+        throw new HttpError(409, 'Die Einladung wurde bereits angenommen. Bitte entziehen Sie stattdessen den Portalzugang.');
+      }
+
+      const email = normEmail(invitation.email);
+      if (!isValidEmail(email)) return json({ success: true, linkRevoked: true, accountDeleted: false, reason: 'no_account' });
+      const result = await revokeInviteAccount(supabaseAdmin, email, tenantId);
+      return json({ success: true, ...result });
     }
 
     // ACTION: SEND CUSTOM EMAIL (nur angemeldet, nur über das eigene Postfach des Aufrufers)
@@ -835,10 +1022,18 @@ serve(async (req) => {
       if (!isRecent(applicant.created_at, PUBLIC_EVENT_WINDOW_MS)) {
         throw new HttpError(409, 'Die Eingangsbestätigung kann nur direkt nach dem Absenden der Bewerbung verschickt werden.');
       }
-      const eventKey = `application_received:${applicant.id}`;
-      if (!claimEvent(eventKey)) {
+      if (applicant.received_mail_sent_at) {
         throw new HttpError(409, 'Die Eingangsbestätigung wurde bereits verschickt.');
       }
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      if (!config) return noProcessMailConfig();
+      const claim: MailClaim = {
+        table: 'rental_applicants',
+        column: 'received_mail_sent_at',
+        id: applicant.id,
+        alreadySentMessage: 'Die Eingangsbestätigung wurde bereits verschickt.',
+      };
+      await claimProcessMail(supabaseAdmin, claim);
 
       try {
         const { listingTitle, addressStr } = await loadListing(supabaseAdmin, process);
@@ -909,12 +1104,12 @@ serve(async (req) => {
       `;
 
         return await dispatchProcessMails(
-          supabaseAdmin, process, applicant,
+          supabaseAdmin, config, process, applicant,
           { subject: `Bewerbung eingegangen: ${listingTitle}`, html: tenantHtml },
           { subject: `Neue Bewerbung: ${plainName} - ${listingTitle}`, html: landlordHtml },
         );
       } catch (err) {
-        releaseEvent(eventKey);
+        await releaseProcessMail(supabaseAdmin, claim);
         throw err;
       }
     }
@@ -927,8 +1122,16 @@ serve(async (req) => {
       if (!isRecent(booking.created_at, PUBLIC_EVENT_WINDOW_MS)) {
         throw new HttpError(409, 'Die Terminbestätigung kann nur direkt nach der Buchung verschickt werden.');
       }
-      const eventKey = `booking_confirmed:${booking.id}`;
-      if (!claimEvent(eventKey)) throw new HttpError(409, 'Die Terminbestätigung wurde bereits verschickt.');
+      if (booking.confirmed_mail_sent_at) throw new HttpError(409, 'Die Terminbestätigung wurde bereits verschickt.');
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      if (!config) return noProcessMailConfig();
+      const claim: MailClaim = {
+        table: 'rental_viewing_bookings',
+        column: 'confirmed_mail_sent_at',
+        id: booking.id,
+        alreadySentMessage: 'Die Terminbestätigung wurde bereits verschickt.',
+      };
+      await claimProcessMail(supabaseAdmin, claim);
 
       try {
         const { listingTitle, addressStr } = await loadListing(supabaseAdmin, process);
@@ -994,12 +1197,12 @@ serve(async (req) => {
       `;
 
         return await dispatchProcessMails(
-          supabaseAdmin, process, applicant,
+          supabaseAdmin, config, process, applicant,
           { subject: `Besichtigungstermin bestätigt: ${listingTitle}`, html: tenantHtml },
           { subject: `Termin gebucht: ${plainName} - ${listingTitle}`, html: landlordHtml },
         );
       } catch (err) {
-        releaseEvent(eventKey);
+        await releaseProcessMail(supabaseAdmin, claim);
         throw err;
       }
     }
@@ -1013,8 +1216,16 @@ serve(async (req) => {
       if (!isRecent(booking.canceled_at, PUBLIC_EVENT_WINDOW_MS)) {
         throw new HttpError(409, 'Die Absagebestätigung kann nur direkt nach der Stornierung verschickt werden.');
       }
-      const eventKey = `booking_canceled:${booking.id}`;
-      if (!claimEvent(eventKey)) throw new HttpError(409, 'Die Absagebestätigung wurde bereits verschickt.');
+      if (booking.canceled_mail_sent_at) throw new HttpError(409, 'Die Absagebestätigung wurde bereits verschickt.');
+      const config = await getNotificationSmtpConfig(supabaseAdmin, process.user_id);
+      if (!config) return noProcessMailConfig();
+      const claim: MailClaim = {
+        table: 'rental_viewing_bookings',
+        column: 'canceled_mail_sent_at',
+        id: booking.id,
+        alreadySentMessage: 'Die Absagebestätigung wurde bereits verschickt.',
+      };
+      await claimProcessMail(supabaseAdmin, claim);
 
       try {
         const listingTitle = oneLine(process.listing_title, 150) || 'Besichtigungstermin';
@@ -1060,12 +1271,12 @@ serve(async (req) => {
       `;
 
         return await dispatchProcessMails(
-          supabaseAdmin, process, applicant,
+          supabaseAdmin, config, process, applicant,
           { subject: `Besichtigungstermin abgesagt: ${listingTitle}`, html: tenantHtml },
           { subject: `Termin abgesagt: ${plainName} - ${listingTitle}`, html: landlordHtml },
         );
       } catch (err) {
-        releaseEvent(eventKey);
+        await releaseProcessMail(supabaseAdmin, claim);
         throw err;
       }
     }

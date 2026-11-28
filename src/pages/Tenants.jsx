@@ -8,6 +8,7 @@ import Input from '../components/ui/Input';
 import CurrencyInput from '../components/ui/CurrencyInput';
 import { Plus, Loader2, Trash2, Eye, Filter, Home, Key, AlertCircle, Edit, MoreVertical, ChevronDown, ChevronRight, FileText, Clock, TrendingUp, UserPlus, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { fetchAllRows } from '../lib/rentArrears';
 import { usePortfolio } from '../context/PortfolioContext';
 import { useAuth } from '../context/AuthContext';
 import { usePermission } from '../context/PermissionContext';
@@ -17,12 +18,15 @@ import ExportDropdown from '../components/ExportDropdown';
 import {
     localISODate, formatDateDE, isValidISODate, getLeaseTimeState, sumRent,
     checkLeaseDeletion, describeDeletionBlock, deletionConfirmText, translateLeaseDeleteError,
-    findOverlappingLeases, describeLease, buildTemplateTenantData
+    findOverlappingLeases, describeLease, buildTemplateTenantData, TENANT_SALUTATION_OPTIONS
 } from '../lib/leaseRentPeriods';
 
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 
-const EMPTY_TENANT_FORM = { first_name: '', last_name: '', email: '', phone: '', occupants: 1 };
+const EMPTY_TENANT_FORM = { salutation: '', first_name: '', last_name: '', email: '', phone: '', occupants: 1 };
+
+// Spalte fehlt (Migration für tenants.salutation noch nicht eingespielt): PostgREST-Schema-Cache bzw. Postgres
+const isMissingSalutationColumn = (error) => !!error && (error.code === 'PGRST204' || error.code === '42703') && /salutation/i.test(error.message || '');
 const EMPTY_LEASE_FORM = {
     property_id: '',
     unit_id: '',
@@ -37,14 +41,23 @@ const EMPTY_LEASE_FORM = {
     lease_type: 'normal'
 };
 
-// Abfragen mit vielen IDs in Blöcken (URL-Länge, Zeilengrenze von PostgREST)
+// Abfragen mit vielen IDs in Blöcken (URL-Länge); innerhalb eines Blocks seitenweise, weil PostgREST
+// je Abfrage höchstens 1000 Zeilen liefert. buildQuery(ids) liefert die Abfrage ohne Sortierung/Bereich.
 const CHUNK_SIZE = 100;
-const fetchInChunks = async (ids, fetchChunk) => {
+const PAGE_SIZE = 1000;
+const fetchInChunks = async (ids, buildQuery) => {
     const rows = [];
     for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-        const { data, error } = await fetchChunk(ids.slice(i, i + CHUNK_SIZE));
-        if (error) throw error;
-        rows.push(...(data || []));
+        const chunk = ids.slice(i, i + CHUNK_SIZE);
+        for (let from = 0; ; from += PAGE_SIZE) {
+            const { data, error } = await buildQuery(chunk)
+                .order('id', { ascending: true })
+                .range(from, from + PAGE_SIZE - 1);
+            if (error) throw error;
+            const page = data || [];
+            rows.push(...page);
+            if (page.length < PAGE_SIZE) break;
+        }
     }
     return rows;
 };
@@ -103,7 +116,7 @@ const EXPORT_STATUS_LABELS = {
 
 const Tenants = () => {
     const { user, userRole } = useAuth();
-    const { selectedPortfolioID } = usePortfolio();
+    const { selectedPortfolioID, portfolios } = usePortfolio();
     const location = useLocation();
     const navigate = useNavigate();
     const { checkGlobalAccess } = useSubscription();
@@ -114,6 +127,16 @@ const Tenants = () => {
     const canWriteLeases = (portfolioId) => {
         if (!perm || perm.loadingPermissions) return true;
         return portfolioId ? perm.canWrite('mietverhaeltnisse', portfolioId) : perm.canWrite('mietverhaeltnisse');
+    };
+
+    // Verträge gehören dem Eigentümer des Portfolios – auch wenn ein Freigabe-Nutzer sie anlegt
+    // (sonst behielte er nach Entzug der Freigabe den Zugriff). Die Datenbank setzt den Eigentümer
+    // des Vertrags zusätzlich selbst und überträgt dabei auch den neu angelegten Mieter.
+    const getOwnerForPortfolio = (portfolioId) => {
+        if (!portfolioId || !user) return user?.id;
+        const owner = (portfolios || []).find(p => p.id === portfolioId)?.user_id;
+        if (!owner || owner === user.id || !canWriteLeases(portfolioId)) return user.id;
+        return owner;
     };
 
     // Process URL Params & State
@@ -185,11 +208,12 @@ const Tenants = () => {
             setLoading(true);
             setLoadError(null);
 
-            // 1. Properties (Filter & Dropdown)
-            const { data: propsData, error: propsError } = await supabase
-                .from('properties')
-                .select('id, street, house_number, zip, city, portfolio_id, economic_unit_id, object_key')
-                .order('street');
+            // 1. Properties (Filter & Dropdown), seitenweise (keine stille 1000-Zeilen-Grenze)
+            const { data: propsData, error: propsError } = await fetchAllRows(
+                'properties',
+                'id, street, house_number, zip, city, portfolio_id, economic_unit_id, object_key',
+                q => q.order('street')
+            );
             if (propsError) throw propsError;
 
             const allProps = propsData || [];
@@ -414,16 +438,26 @@ const Tenants = () => {
         if (!tenantForm.last_name.trim()) return alert('Bitte geben Sie den Nachnamen ein.');
         try {
             setIsSaving(true);
-            const { data, error } = await supabase.from('tenants').insert([
-                {
-                    user_id: user.id,
-                    first_name: tenantForm.first_name.trim(),
-                    last_name: tenantForm.last_name.trim(),
-                    email: tenantForm.email,
-                    phone: tenantForm.phone,
-                    occupants: parseInt(tenantForm.occupants) || 1
-                }
-            ]).select();
+            const tenantRow = {
+                // Vorerst das eigene Konto: Erst die Einheit in Schritt 2 legt den Eigentümer fest.
+                // Beim ersten Vertrag überträgt die Datenbank den Mieter (und seinen Kontakt) auf den
+                // Eigentümer der Einheit (Trigger trg_leases_owner_sync). So bleibt ein abgebrochener
+                // Assistent vollständig löschbar.
+                user_id: user.id,
+                first_name: tenantForm.first_name.trim(),
+                last_name: tenantForm.last_name.trim(),
+                email: tenantForm.email,
+                phone: tenantForm.phone,
+                occupants: parseInt(tenantForm.occupants) || 1
+            };
+            // Anrede (für die Briefanrede in Schreibvorlagen) nur mitsenden, wenn gewählt
+            if (tenantForm.salutation) tenantRow.salutation = tenantForm.salutation;
+            let { data, error } = await supabase.from('tenants').insert([tenantRow]).select();
+            if (error && tenantRow.salutation && isMissingSalutationColumn(error)) {
+                // Datenbank kennt die Spalte noch nicht: ohne Anrede speichern (neutrale Briefanrede)
+                const { salutation: _salutation, ...withoutSalutation } = tenantRow;
+                ({ data, error } = await supabase.from('tenants').insert([withoutSalutation]).select());
+            }
 
             if (error) throw error;
 
@@ -449,6 +483,9 @@ const Tenants = () => {
         if (leaseForm.end_date && leaseForm.end_date < leaseForm.start_date) return alert('Das Mietende darf nicht vor dem Mietbeginn liegen.');
         if (!leaseForm.cold_rent) return alert('Bitte geben Sie die Kaltmiete ein.');
         if (!createdTenantId) return alert('Kein Mieter erstellt.');
+
+        // Vertrag im Bestand des Eigentümers der gewählten Einheit (die Datenbank setzt ihn ebenfalls)
+        const leaseOwnerId = getOwnerForPortfolio(propertiesDropdown.find(p => p.id === leaseForm.property_id)?.portfolio_id || null);
 
         const coldRent = parseFloat(leaseForm.cold_rent) || 0;
         const serviceCharge = parseFloat(leaseForm.service_charge) || 0;
@@ -487,7 +524,7 @@ const Tenants = () => {
 
             // 1. Create Lease
             const newLease = {
-                user_id: user.id,
+                user_id: leaseOwnerId,
                 tenant_id: createdTenantId,
                 unit_id: leaseForm.unit_id,
                 start_date: leaseForm.start_date,
@@ -1036,6 +1073,22 @@ const Tenants = () => {
                             <CurrencyInput label="Monatliche Einnahmen (Kaltmiete Ist) €" allowDecimals value={leaseForm.cold_rent} onChange={e => setLeaseForm({ ...leaseForm, cold_rent: e.target.value })} />
                         ) : (
                             <>
+                                <div>
+                                    <label htmlFor="tenant-salutation" style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Anrede</label>
+                                    <select
+                                        id="tenant-salutation"
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}
+                                        value={tenantForm.salutation}
+                                        onChange={e => setTenantForm({ ...tenantForm, salutation: e.target.value })}
+                                    >
+                                        {TENANT_SALUTATION_OPTIONS.map(opt => (
+                                            <option key={opt.value || 'none'} value={opt.value}>{opt.label}</option>
+                                        ))}
+                                    </select>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                        Für die Briefanrede in Schreibvorlagen („Sehr geehrte Frau …“ / „Sehr geehrter Herr …“).
+                                    </div>
+                                </div>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                                     <Input label="Vorname" value={tenantForm.first_name} onChange={e => setTenantForm({ ...tenantForm, first_name: e.target.value })} />
                                     <Input label="Nachname" value={tenantForm.last_name} onChange={e => setTenantForm({ ...tenantForm, last_name: e.target.value })} />

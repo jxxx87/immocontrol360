@@ -228,6 +228,42 @@ const drawFurnitureHighlight = (ctx, vp, furn, fill, stroke) => {
     ctx.stroke();
 };
 
+/**
+ * Wandpolygone je Frame nur einmal berechnen: innerhalb eines Frames ändert sich die
+ * Geometrie nicht, getWallPolygon wurde aber für dieselbe Wand mehrfach aufgerufen
+ * (Flächen, Kanten, Hervorhebung, Maße, Fangpunkte). Die gelieferten Polygone werden
+ * von den Zeichenfunktionen nur gelesen, nie verändert.
+ */
+const createWallPolygonCache = (storey) => {
+    const cache = new Map();
+    return (wall) => {
+        if (!wall) return null;
+        if (cache.has(wall)) return cache.get(wall);
+        const poly = getWallPolygon(wall, storey);
+        cache.set(wall, poly);
+        return poly;
+    };
+};
+
+/** Wandpolygon aus dem Frame-Cache (ohne Frame: direkt berechnen). */
+const wallPolygonOf = (frame, wall, storey) => (frame?.polyOf ? frame.polyOf(wall) : getWallPolygon(wall, storey));
+
+/**
+ * Achsparallele Hülle eines Polygons (für schnelle Vorab-Ausschlüsse).
+ * null bei nicht endlichen Koordinaten – dann muss der vollständige Test laufen.
+ */
+const polygonBounds = (pts) => {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of pts) {
+        if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, maxX, minY, maxY };
+};
+
 /** Polygon (Weltkoordinaten) als Pfad anlegen. */
 const tracePolygon = (ctx, vp, pts) => {
     const sp = pts.map(p => worldToScreen(vp, p.x, p.y));
@@ -265,7 +301,8 @@ export const render = (ctx, canvas, vp, storey, state) => {
 const renderFrame = (ctx, vp, storey, state, view) => {
     const { w, h } = view;
     const recordHitBoxes = !state.isExport;
-    const frame = { outerContours: [] };
+    const frame = { outerContours: [], polyOf: createWallPolygonCache(storey) };
+    const polyOf = frame.polyOf;
 
     // Build set of selected IDs for fast lookup
     const selectedSet = new Set();
@@ -320,7 +357,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
         // Check if hovered element is a wall
         const hoveredWall = storey.walls.find(w => w.id === state.hoverId);
         if (hoveredWall) {
-            const poly = getWallPolygon(hoveredWall, storey);
+            const poly = polyOf(hoveredWall);
             if (poly && poly.length >= 4) {
                 const screenPoly = poly.map(p => worldToScreen(vp, p.x, p.y));
                 ctx.fillStyle = 'rgba(14, 165, 233, 0.15)';
@@ -345,7 +382,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
     if (selectedSet.size > 0) {
         for (const wall of storey.walls) {
             if (!selectedSet.has(wall.id)) continue;
-            const poly = getWallPolygon(wall, storey);
+            const poly = polyOf(wall);
             if (poly && poly.length >= 4) {
                 const sp = poly.map(p => worldToScreen(vp, p.x, p.y));
                 ctx.fillStyle = 'rgba(14, 165, 233, 0.18)';
@@ -423,7 +460,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
                 if (w2Len < 1) continue;
                 const dot = Math.abs(ux * (w2p2.x - w2p1.x) + uy * (w2p2.y - w2p1.y)) / w2Len;
                 if (dot >= 0.3) continue; // nur (annähernd) senkrechte Anschlüsse
-                const poly = getWallPolygon(w2, storey);
+                const poly = polyOf(w2);
                 if (!poly) continue;
                 // Eckpunkte des Nachbarn an diesem Knoten: [p1_left, p1_right] bzw. [p2_left, p2_right]
                 const corners = atW2P1 ? [poly[0], poly[3]] : [poly[1], poly[2]];
@@ -593,7 +630,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
 
     // Tool overlays
     if (state.preview) {
-        drawPreview(ctx, vp, state, storey, view);
+        drawPreview(ctx, vp, state, storey, view, frame);
     }
 
     // Snap indicator — enhanced with wall segment and measurements
@@ -662,7 +699,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
                 if (!attached) continue;
 
                 // Use actual wall polygon to find min/max t along snap segment
-                const poly = getWallPolygon(iw, storey);
+                const poly = polyOf(iw);
                 if (!poly || poly.length < 4) continue;
 
                 let tMin = Infinity, tMax = -Infinity;
@@ -828,7 +865,7 @@ const renderFrame = (ctx, vp, storey, state, view) => {
             // Highlight preselected walls
             for (const wall of storey.walls) {
                 if (!pre.has(wall.id)) continue;
-                const poly = getWallPolygon(wall, storey);
+                const poly = polyOf(wall);
                 if (poly && poly.length >= 4) {
                     const sp = poly.map(p => worldToScreen(vp, p.x, p.y));
                     ctx.fillStyle = 'rgba(14, 165, 233, 0.25)';
@@ -926,16 +963,16 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
         for (const chain of chains) {
             const drawn = storey.outerClosed && chain.closed && chain.walls.length >= 3
                 ? drawClosedOuterChain(ctx, vp, storey, chain, frame)
-                : drawOpenOuterChain(ctx, vp, storey, chain);
+                : drawOpenOuterChain(ctx, vp, storey, chain, frame);
             if (!drawn) {
                 // Rückfall: Wände einzeln zeichnen, damit nichts unsichtbar bleibt
-                for (const w of chain.walls) drawWallSolid(ctx, vp, w, storey, false);
+                for (const w of chain.walls) drawWallSolid(ctx, vp, w, storey, false, frame);
             }
 
             // Selection highlight for ALL selected outer walls
             for (const ow of chain.walls) {
                 if (selectedSet.has(ow.id)) {
-                    drawWallSelectionHighlight(ctx, vp, ow, storey);
+                    drawWallSelectionHighlight(ctx, vp, ow, storey, frame);
                 }
             }
         }
@@ -959,7 +996,7 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
         // Only extend edges when connecting to outer walls (reliable)
         const wallPolys = [];
         for (const wall of innerWalls) {
-            const poly = getWallPolygon(wall, storey);
+            const poly = wallPolygonOf(frame, wall, storey);
             if (!poly || poly.length < 4) continue;
 
             // poly = [p1_left, p2_left, p2_right, p1_right]
@@ -995,7 +1032,7 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
                         if (withinLimit(nearRightIdx, extRight)) corners[nearRightIdx] = extRight;
                     } else {
                         // Inner→inner: extend to the neighbor's polygon edges
-                        const nPoly = getWallPolygon(neighbor, storey);
+                        const nPoly = wallPolygonOf(frame, neighbor, storey);
                         if (!nPoly || nPoly.length < 4) continue;
                         // nPoly: [p1_left(0), p2_left(1), p2_right(2), p1_right(3)]
                         // Left edge = 0→1, Right edge = 3→2
@@ -1041,10 +1078,11 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
             ctx.fill();
         }
 
-        // Build all inner wall polygons for overlap detection
+        // Build all inner wall polygons for overlap detection (Hülle einmal vorberechnet)
         const allInnerPolys = wallPolys.map(wp => ({
             wall: wp.wall,
             corners: wp.corners,
+            bounds: polygonBounds(wp.corners),
         }));
 
         // Helper: check if a screen-space line segment is inside another wall's polygon
@@ -1054,6 +1092,10 @@ const drawWallsMerged = (ctx, vp, storey, state, selectedSet, frame) => {
             const midY = (edgeA.y + edgeB.y) / 2;
             for (const other of allInnerPolys) {
                 if (other.wall.id === ownWallId) continue;
+                // Außerhalb der Hülle kann der Punkt nicht im Polygon liegen (gleiches Ergebnis
+                // wie der vollständige Test, nur ohne die Kantenschleife)
+                const b = other.bounds;
+                if (b && (midX < b.minX || midX > b.maxX || midY < b.minY || midY > b.maxY)) continue;
                 // Point-in-polygon test using world coordinates
                 const c = other.corners;
                 let inside = false;
@@ -1147,7 +1189,7 @@ const drawClosedOuterChain = (ctx, vp, storey, chain, frame) => {
     const n = chain.walls.length;
     const innerPts = chain.nodes.map(id => getPoint(storey, id));
     if (innerPts.some(p => !p)) return false;
-    const polys = chain.walls.map(w => getWallPolygon(w, storey));
+    const polys = chain.walls.map(w => wallPolygonOf(frame, w, storey));
     if (polys.some(p => !p)) return false;
 
     // Außenkante: Gehrung an jedem Knoten zwischen Wand i und Wand i+1
@@ -1198,7 +1240,7 @@ const drawClosedOuterChain = (ctx, vp, storey, chain, frame) => {
 };
 
 /** Offene Außenwand-Kette (während des Zeichnens) als Band mit Endkappen. */
-const drawOpenOuterChain = (ctx, vp, storey, chain) => {
+const drawOpenOuterChain = (ctx, vp, storey, chain, frame) => {
     const walls = chain.walls;
     if (walls.length === 0) return true;
     // Kettenknoten in Laufrichtung (bei einem nicht geschlossenen Umriss, der dennoch
@@ -1206,7 +1248,7 @@ const drawOpenOuterChain = (ctx, vp, storey, chain) => {
     const nodes = chain.closed ? [...chain.nodes, chain.nodes[0]] : chain.nodes;
     const innerPts = nodes.map(id => getPoint(storey, id));
     if (innerPts.some(p => !p)) return false;
-    const polys = walls.map(w => getWallPolygon(w, storey));
+    const polys = walls.map(w => wallPolygonOf(frame, w, storey));
     if (polys.some(p => !p)) return false;
 
     // Build outer boundary with mitered corners
@@ -1263,8 +1305,8 @@ const drawOpenOuterChain = (ctx, vp, storey, chain) => {
 };
 
 /** Draw a single wall segment as a solid filled shape */
-const drawWallSolid = (ctx, vp, wall, storey, selected) => {
-    const poly = getWallPolygon(wall, storey);
+const drawWallSolid = (ctx, vp, wall, storey, selected, frame) => {
+    const poly = wallPolygonOf(frame, wall, storey);
     if (!poly || poly.length < 3) return;
 
     const screenPoly = poly.map(p => worldToScreen(vp, p.x, p.y));
@@ -1282,8 +1324,8 @@ const drawWallSolid = (ctx, vp, wall, storey, selected) => {
 };
 
 /** Highlight outline of a selected wall on the merged surface */
-const drawWallSelectionHighlight = (ctx, vp, wall, storey) => {
-    const poly = getWallPolygon(wall, storey);
+const drawWallSelectionHighlight = (ctx, vp, wall, storey, frame) => {
+    const poly = wallPolygonOf(frame, wall, storey);
     if (!poly || poly.length < 3) return;
     const screenPoly = poly.map(p => worldToScreen(vp, p.x, p.y));
 
@@ -2826,7 +2868,7 @@ const findWallByEndpoints = (storey, a, b) => {
     }) || null;
 };
 
-const drawPreview = (ctx, vp, state, storey, view) => {
+const drawPreview = (ctx, vp, state, storey, view, frame) => {
     const { preview } = state;
     const viewW = view ? view.w : ctx.canvas.width;
     const viewH = view ? view.h : ctx.canvas.height;
@@ -2924,7 +2966,7 @@ const drawPreview = (ctx, vp, state, storey, view) => {
                     if (atStart(getPoint(storey, w.p2)) || atStart(getPoint(storey, w.p1))) lastWall = w;
                 }
                 if (lastWall) {
-                    const lastPoly = getWallPolygon(lastWall, storey);
+                    const lastPoly = wallPolygonOf(frame, lastWall, storey);
                     if (lastPoly) {
                         // Determine which end connects to preview start
                         const isP2 = atStart(getPoint(storey, lastWall.p2));

@@ -1,5 +1,4 @@
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
+import { ALLOWED_PLANS, planForPriceId } from "../_shared/stripePlans.ts";
 
 /**
  * stripe-webhook
@@ -14,6 +13,21 @@ import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
  * - Abo-Status wird auf die bekannte Stripe-Statusmenge abgebildet; DB-Fehler führen zu 500
  *   (Stripe wiederholt), fehlende Zeilen werden über metadata.user_id / stripe_customer_id gefunden.
  * - Tarif nur aus Preis-Mapping bzw. erlaubten Metadaten (starter/professional/business).
+ * - Wave 3 (E3-07): Vollständige Erstattung (charge.refunded) und Rückbuchung (charge.dispute.created
+ *   ohne Vorwarnstatus, charge.dispute.closed = lost) stornieren die Forderungszahlung über
+ *   reverse_claim_payment (Server-Rolle). Teilerstattungen, Vorwarnungen und gewonnene Anfechtungen
+ *   werden nur als Hinweis in der Forderungsakte vermerkt.
+ * - Wave 3 (D1b-16): Forderungszahlungen werden zum Stichtag des Betrags (metadata.quote_date,
+ *   Berliner Kalendertag) gebucht, wenn der gezahlte Betrag genau diesem Betrag entspricht.
+ * - Wave 3 (E3-09): Ereignisprotokoll public.stripe_webhook_events (Migration wave3/10_STRIPE.sql):
+ *   jedes Ereignis wird mit event.id vermerkt; bereits verarbeitete Ereignisse werden übersprungen,
+ *   gleichzeitige Zustellungen desselben Ereignisses abgewiesen (409, Stripe wiederholt später).
+ *   Fehlt das Protokoll (Migration noch nicht eingespielt), läuft die Verarbeitung wie bisher.
+ *   Fachlich nicht verbuchbare Forderungszahlungen (Forderung erledigt, Betrag zu hoch …) werden
+ *   als Hinweis in der Forderungsakte vermerkt und mit 200 quittiert statt tagelang wiederholt.
+ * - Wave 3 (E3-13): Preis-IDs nur noch in ../_shared/stripePlans.ts (gemeinsam mit create-checkout-session).
+ * - Wave 3 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0.
+ *   Ausrollen: index.ts UND ../_shared/stripePlans.ts hochladen (siehe supabase/config.toml).
  */
 
 // ─── Config ───
@@ -26,24 +40,12 @@ const WEBHOOK_SECRETS = [
     Deno.env.get("STRIPE_CONNECT_WEBHOOK_SECRET") ?? "",
 ].filter(Boolean);
 
-const ALLOWED_PLANS = new Set(["starter", "professional", "business"]);
 const KNOWN_STATUSES = new Set([
     "trialing", "active", "past_due", "canceled", "unpaid", "incomplete", "incomplete_expired", "paused",
 ]);
 // Abos, die noch laufen (Zugang/Verwaltung nötig)
 const RUNNING_STATUSES = new Set(["active", "trialing", "past_due", "unpaid", "paused"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// ─── Price ID → Plan mapping ───
-// Hinweis: identisch in create-checkout-session (PRICE_IDS) gepflegt.
-const PRICE_TO_PLAN: Record<string, string> = {
-    "price_1T1GauFpRUY7TQZUpmxwYOJb": "starter",
-    "price_1T1l3oFpRUY7TQZUtwi16wzf": "starter",
-    "price_1T1GbJFpRUY7TQZUPASgpSTz": "professional",
-    "price_1T1l37FpRUY7TQZUwCuCfubf": "professional",
-    "price_1T1GbhFpRUY7TQZUtvTFLgI7": "business",
-    "price_1T1l1xFpRUY7TQZUIEG7ATgZ": "business",
-};
 
 // ─── Stripe Webhook Signature Verification (Web Crypto) ───
 function timingSafeEqual(a: string, b: string): boolean {
@@ -139,7 +141,11 @@ async function stripeGet(path: string): Promise<any> {
     });
     if (!res.ok) {
         const txt = await res.text();
-        throw new Error(`Stripe API error (${res.status}): ${txt}`);
+        console.error(`Stripe API error (${res.status}) for ${path.split("?")[0]}:`, txt);
+        // Kurze Fehlermeldung ohne Antwortinhalt (wird im Ereignisprotokoll gespeichert)
+        let code = "";
+        try { code = String(JSON.parse(txt)?.error?.code ?? ""); } catch { code = ""; }
+        throw new Error(`Stripe API error (${res.status}${/^[a-z_]{1,60}$/.test(code) ? ` ${code}` : ""})`);
     }
     return res.json();
 }
@@ -204,7 +210,7 @@ async function findSubscriptionRow(column: string, value: string): Promise<any |
 /** Tarif nur aus Preis-Mapping oder erlaubten Metadaten; sonst `fallback` (mit Alarm im Log). */
 async function resolvePlan(sub: any, fallback: string | null): Promise<string | null> {
     const price = sub.items?.data?.[0]?.price;
-    const mapped = PRICE_TO_PLAN[price?.id];
+    const mapped = planForPriceId(price?.id);
     if (mapped) return mapped;
 
     const metaPlan = String(sub.metadata?.plan ?? "").toLowerCase();
@@ -222,20 +228,76 @@ async function resolvePlan(sub: any, fallback: string | null): Promise<string | 
         } catch (_e) { /* ignore */ }
     }
 
-    console.error(`ALARM: unknown price ${price?.id} (product ${productId}) – plan fallback "${fallback}". Bitte PRICE_TO_PLAN ergänzen.`);
+    console.error(`ALARM: unknown price ${price?.id} (product ${productId}) – plan fallback "${fallback}". Bitte _shared/stripePlans.ts ergänzen.`);
     return fallback;
 }
 
 // ─── Forderungszahlung (Forderungsportal) ───
-async function bookClaimPayment(session: any, eventCreated: number): Promise<void> {
+const QUOTE_MAX_AGE_DAYS = 45;
+
+/**
+ * Stichtag des Zahlungsbetrags aus den Session-Metadaten (create-portal-checkout-session),
+ * nur wenn der gezahlte Betrag genau dem berechneten Betrag entspricht und der Stichtag
+ * plausibel ist (nicht nach dem Buchungstag, höchstens QUOTE_MAX_AGE_DAYS davor).
+ */
+function quoteDateFor(session: any, metaAmount: number, bookingDate: string): string | null {
+    const quoteDate = session.metadata?.quote_date;
+    if (typeof quoteDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(quoteDate)) return null;
+    const quoteMs = Date.parse(`${quoteDate}T00:00:00Z`);
+    const bookingMs = Date.parse(`${bookingDate}T00:00:00Z`);
+    if (!Number.isFinite(quoteMs) || !Number.isFinite(bookingMs)) return null;
+    if (quoteMs > bookingMs || bookingMs - quoteMs > QUOTE_MAX_AGE_DAYS * 86400000) return null;
+    if (!Number.isFinite(metaAmount) || !(metaAmount > 0)) return null;
+    const paidCents = Math.round(Number(session.amount_total ?? NaN));
+    if (!Number.isFinite(paidCents) || paidCents !== Math.round(metaAmount * 100)) return null;
+    return quoteDate;
+}
+
+/**
+ * Fachliche Ablehnung durch eine Datenbankfunktion (RAISE EXCEPTION → PostgREST 400 / P0001),
+ * z. B. „Forderung bereits erledigt“ oder „Betrag übersteigt die offene Gesamtforderung“.
+ * Eine Wiederholung durch Stripe ändert daran nichts. „Not authenticated“ (falscher Schlüssel bzw.
+ * Datenbankfassung ohne Server-Rolle) bleibt ein technischer Fehler, damit nach der Korrektur
+ * automatisch nachgebucht wird. Rückgabe: Meldung der Datenbank oder null.
+ */
+function businessRejection(r: SbResult): string | null {
+    if (r.ok || r.status !== 400 || r.data?.code !== "P0001") return null;
+    const message = typeof r.data?.message === "string" ? r.data.message.trim() : "";
+    if (!message || /not authenticated/i.test(message)) return null;
+    return message.slice(0, 500);
+}
+
+/**
+ * Nicht verbuchbare Online-Zahlung: Hinweis für den Vermieter in der Forderungsakte
+ * (je Checkout-Session nur einmal). Rückgabe: Ergebnis-Code für das Ereignisprotokoll.
+ */
+async function noteUnbookedClaimPayment(event: any, session: any, claimId: string, reason: string): Promise<string> {
+    const sessionId = String(session.id);
+    const paid = Number.isFinite(Number(session.amount_total ?? NaN))
+        ? formatEur(session.amount_total)
+        : formatEur(Math.round(Number(session.metadata?.claim_amount ?? 0) * 100));
+    const reasonText = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+    const noted = await addClaimNote(claimId, event,
+        `Online-Zahlung über Stripe (Session ${sessionId}, Betrag ${paid}) konnte nicht automatisch verbucht werden: ${reasonText} Bitte die Zahlung manuell prüfen und in der Forderungsakte erfassen bzw. über Stripe erstatten.`,
+        { portal_event: "stripe_unbooked", session_id: sessionId, amount_cents: session.amount_total ?? null, reason },
+        { portal_event: "stripe_unbooked", session_id: sessionId });
+    if (!noted) {
+        console.error(`ALARM: Online-Zahlung ${sessionId} (${paid}) gehört zu keiner vorhandenen Forderung (${claimId}) – nicht verbucht, bitte in Stripe prüfen/erstatten.`);
+        return "claim_payment_unbooked_no_claim";
+    }
+    console.error(`ALARM: Online-Zahlung ${sessionId} für Forderung ${claimId} nicht verbucht (${reason}) – Hinweis in der Forderungsakte vermerkt.`);
+    return "claim_payment_unbooked";
+}
+
+async function bookClaimPayment(session: any, event: any): Promise<string> {
     const claimId = session.metadata?.claim_id;
     if (typeof claimId !== "string" || !UUID_RE.test(claimId)) {
-        console.error(`Claim checkout ${session.id} without valid claim_id – nothing booked`);
-        return;
+        console.error(`ALARM: Claim checkout ${session.id} without valid claim_id – nothing booked`);
+        return "claim_payment_invalid";
     }
     if (session.payment_status !== "paid") {
         console.log(`Claim checkout ${session.id}: payment_status=${session.payment_status} → wait for async_payment_succeeded`);
-        return;
+        return "claim_payment_pending";
     }
 
     // Idempotenz: dieselbe Checkout-Session nie zweimal buchen
@@ -245,7 +307,7 @@ async function bookClaimPayment(session: any, eventCreated: number): Promise<voi
     if (!existing.ok) throw new Error(`claim_payments lookup failed (${existing.status})`);
     if (Array.isArray(existing.data) && existing.data.length > 0) {
         console.log(`Claim checkout ${sessionId} already booked – skipping duplicate delivery`);
-        return;
+        return "claim_payment_duplicate";
     }
 
     const metaAmount = parseFloat(session.metadata?.claim_amount ?? "");
@@ -253,17 +315,25 @@ async function bookClaimPayment(session: any, eventCreated: number): Promise<voi
         ? Math.round(metaAmount * 100) / 100
         : Math.round(Number(session.amount_total ?? 0)) / 100;
     if (!(amount > 0)) {
-        console.error(`Claim checkout ${sessionId}: no positive amount – nothing booked`);
-        return;
+        console.error(`ALARM: Claim checkout ${sessionId}: no positive amount – nothing booked`);
+        return "claim_payment_invalid";
     }
+    const eventCreated = Number(event?.created);
 
-    console.log(`Processing claim checkout payment: claimId=${claimId}, amount=${amount}`);
+    // D1b-16: Der Betrag wurde zum Stichtag quote_date (Berliner Kalendertag, wie claim_totals_view)
+    // berechnet. Entspricht der gezahlte Betrag genau diesem Angebot, wird zu diesem Tag gebucht –
+    // sonst fehlt bei Zahlung über Mitternacht bzw. bei SEPA-Laufzeit ein Tageszins und die
+    // Forderung wird nicht erledigt. Sonst (älteres Angebot, abweichender Betrag) Ereignisdatum.
+    const bookingDate = berlinDate(eventCreated || session.created);
+    const paymentDate = quoteDateFor(session, metaAmount, bookingDate) ?? bookingDate;
+
+    console.log(`Processing claim checkout payment: claimId=${claimId}, amount=${amount}, payment_date=${paymentDate}`);
 
     const rpc = await sb("rpc/record_claim_payment", {
         method: "POST",
         body: JSON.stringify({
             p_claim_id: claimId,
-            p_payment_date: berlinDate(eventCreated || session.created),
+            p_payment_date: paymentDate,
             p_amount: amount,
             p_note: `Online-Zahlung via Stripe Checkout (${sessionId})`,
             p_installment_id: null,
@@ -271,17 +341,208 @@ async function bookClaimPayment(session: any, eventCreated: number): Promise<voi
     });
 
     if (!rpc.ok) {
-        // 500 → Stripe wiederholt und zeigt den Fehler im Dashboard; Doppelbuchung verhindert die Idempotenz-Prüfung.
+        // Fachlich abgelehnt (E3-09): Wiederholen hilft nicht → Hinweis an den Vermieter, 200 an Stripe.
+        const reason = businessRejection(rpc);
+        if (reason) return await noteUnbookedClaimPayment(event, session, claimId, reason);
+        // Technisch: 500 → Stripe wiederholt und zeigt den Fehler im Dashboard; Doppelbuchung verhindert die Idempotenz-Prüfung.
         console.error(`ALARM: record_claim_payment failed for claim ${claimId} / session ${sessionId}:`, rpc.text);
-        throw new Error("record_claim_payment failed");
+        throw new Error(`record_claim_payment failed (${rpc.status})`);
     }
     console.log(`✅ Recorded payment of ${amount} EUR for claim ${claimId}`);
+    return "claim_payment_booked";
+}
+
+// ─── Erstattung / Rückbuchung einer Forderungszahlung (E3-07) ───
+const STRIPE_EVENT_ID_RE = /^evt_[A-Za-z0-9]+$/;
+
+function formatEur(cents: unknown): string {
+    const n = Number(cents);
+    const value = Number.isFinite(n) ? n / 100 : 0;
+    return value.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " EUR";
+}
+
+/** Checkout-Session des Forderungsportals zu einem PaymentIntent (sonst null). */
+async function findClaimCheckoutSession(paymentIntentId: unknown): Promise<any | null> {
+    if (typeof paymentIntentId !== "string" || !/^pi_[A-Za-z0-9]+$/.test(paymentIntentId)) return null;
+    const list = await stripeGet(`/checkout/sessions?payment_intent=${encodeURIComponent(paymentIntentId)}&limit=1`);
+    const session = Array.isArray(list?.data) ? list.data[0] : null;
+    if (!session || session.metadata?.payment_type !== "claim_checkout") return null;
+    const claimId = session.metadata?.claim_id;
+    if (typeof claimId !== "string" || !UUID_RE.test(claimId)) return null;
+    if (!/^[A-Za-z0-9_]+$/.test(String(session.id ?? ""))) return null;
+    return session;
+}
+
+/** PaymentIntent einer Anfechtung (Fallback über die Charge). */
+async function disputePaymentIntent(dispute: any): Promise<string | null> {
+    if (typeof dispute?.payment_intent === "string") return dispute.payment_intent;
+    if (typeof dispute?.charge === "string" && /^(ch|py)_[A-Za-z0-9]+$/.test(dispute.charge)) {
+        const charge = await stripeGet(`/charges/${encodeURIComponent(dispute.charge)}`);
+        return typeof charge?.payment_intent === "string" ? charge.payment_intent : null;
+    }
+    return null;
+}
+
+/** Gebuchte Forderungszahlung zur Checkout-Session (Session-ID steht in der Zahlungsnotiz). */
+async function findClaimPayment(claimId: string, sessionId: string): Promise<{ id: string; status: string } | null> {
+    const r = await sb(`claim_payments?claim_id=eq.${claimId}&note=like.*${sessionId}*&select=id,status&order=created_at.asc&limit=1`);
+    if (!r.ok) throw new Error(`claim_payments lookup failed (${r.status})`);
+    return Array.isArray(r.data) && r.data.length > 0 ? r.data[0] : null;
+}
+
+/**
+ * Hinweis in der Forderungsakte (unter dem Eigentümer der Forderung); je Stripe-Ereignis nur einmal,
+ * bzw. – mit `dedupe` – nur einmal je Kombination dieser Metadaten (z. B. je Checkout-Session).
+ * Rückgabe false, wenn die Forderung nicht (mehr) existiert.
+ */
+async function addClaimNote(
+    claimId: string,
+    event: any,
+    description: string,
+    metadata: Record<string, unknown>,
+    dedupe?: Record<string, string>,
+): Promise<boolean> {
+    const eventId = String(event?.id ?? "");
+    if (!STRIPE_EVENT_ID_RE.test(eventId)) throw new Error("Invalid event id");
+    const dedupeFilter = dedupe && Object.keys(dedupe).length > 0
+        ? Object.entries(dedupe).map(([k, v]) => {
+            if (!/^[a-z_]{1,40}$/.test(k)) throw new Error("Invalid dedupe key");
+            return `event_metadata->>${k}=eq.${encodeURIComponent(v)}`;
+        }).join("&")
+        : `event_metadata->>stripe_event_id=eq.${eventId}`;
+    const dup = await sb(`claim_events?claim_id=eq.${claimId}&event_type=eq.note_added&${dedupeFilter}&select=id&limit=1`);
+    if (!dup.ok) throw new Error(`claim_events lookup failed (${dup.status})`);
+    if (Array.isArray(dup.data) && dup.data.length > 0) return true;
+
+    const owner = await sb(`claims?id=eq.${claimId}&select=user_id`);
+    if (!owner.ok) throw new Error(`claim owner lookup failed (${owner.status})`);
+    if (!Array.isArray(owner.data) || owner.data.length === 0) return false;
+
+    const ins = await sb("claim_events", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+            user_id: owner.data[0].user_id,
+            claim_id: claimId,
+            event_type: "note_added",
+            description,
+            event_metadata: { source: "stripe", stripe_event_id: eventId, stripe_event_type: event.type, ...metadata },
+        }),
+    });
+    if (!ins.ok) {
+        console.error(`claim note insert failed for claim ${claimId}:`, ins.text);
+        throw new Error(`claim note insert failed (${ins.status})`);
+    }
+    return true;
+}
+
+/**
+ * Storniert die Forderungszahlung zu einem PaymentIntent. Fachliche Ablehnungen der Datenbank
+ * (z. B. alte Datenbankfassung ohne Server-Storno, Forderung nicht wieder zu öffnen) werden als
+ * Hinweis vermerkt und nicht wiederholt; technische Fehler -> 500 (Stripe wiederholt).
+ */
+async function reverseClaimPaymentForStripe(event: any, paymentIntentId: unknown, reasonText: string): Promise<void> {
+    const session = await findClaimCheckoutSession(paymentIntentId);
+    if (!session) {
+        console.log(`${event.type}: payment_intent ${paymentIntentId} gehört zu keiner Forderungszahlung – ignoriert`);
+        return;
+    }
+    const claimId = session.metadata.claim_id as string;
+    const payment = await findClaimPayment(claimId, String(session.id));
+    if (!payment) {
+        console.warn(`${event.type}: keine Forderungszahlung zu ${session.id} gebucht – nichts zu stornieren`);
+        return;
+    }
+    if (payment.status === "cancelled") {
+        console.log(`${event.type}: Forderungszahlung ${payment.id} ist bereits storniert`);
+        return;
+    }
+
+    const rpc = await sb("rpc/reverse_claim_payment", {
+        method: "POST",
+        body: JSON.stringify({ p_payment_id: payment.id }),
+    });
+    const meta = { payment_intent: paymentIntentId, claim_payment_id: payment.id };
+    if (!rpc.ok) {
+        if (rpc.status >= 400 && rpc.status < 500 && rpc.data?.code === "P0001") {
+            const reason = typeof rpc.data?.message === "string" ? rpc.data.message : "";
+            console.error(`ALARM: ${event.type}: Forderungszahlung ${payment.id} nicht automatisch storniert: ${reason}`);
+            await addClaimNote(claimId, event,
+                `${reasonText}. Die Forderungszahlung konnte nicht automatisch storniert werden${reason && !/Not authenticated/i.test(reason) ? ` (${reason})` : ""} – bitte stornieren Sie die Zahlung in der Forderungsakte.`,
+                { ...meta, auto_reversed: false });
+            return;
+        }
+        console.error(`ALARM: reverse_claim_payment failed for payment ${payment.id}:`, rpc.text);
+        throw new Error("reverse_claim_payment failed");
+    }
+    await addClaimNote(claimId, event, `${reasonText}. Die Forderungszahlung wurde automatisch storniert.`, { ...meta, auto_reversed: true });
+    console.log(`✅ Reversed claim payment ${payment.id} (${event.type})`);
+}
+
+/** Nur Hinweis (keine Buchung), z. B. Teilerstattung oder Vorwarnung. */
+async function noteClaimPaymentForStripe(event: any, paymentIntentId: unknown, description: string, metadata: Record<string, unknown>): Promise<void> {
+    const session = await findClaimCheckoutSession(paymentIntentId);
+    if (!session) return;
+    await addClaimNote(session.metadata.claim_id as string, event, description, { payment_intent: paymentIntentId, ...metadata });
+}
+
+// ─── Ereignisprotokoll (E3-09) ───
+// "process": verarbeiten · "duplicate": schon verarbeitet · "in_progress": läuft gerade in einer
+// anderen Zustellung · "untracked": Protokoll nicht verfügbar (Migration fehlt) → wie bisher verarbeiten.
+type EventGate = "process" | "duplicate" | "in_progress" | "untracked";
+
+async function beginEventLog(event: any): Promise<EventGate> {
+    const eventId = String(event?.id ?? "");
+    if (!STRIPE_EVENT_ID_RE.test(eventId)) return "untracked";
+    try {
+        const r = await sb("rpc/stripe_webhook_event_begin", {
+            method: "POST",
+            body: JSON.stringify({
+                p_event_id: eventId,
+                p_event_type: String(event.type ?? "").slice(0, 100),
+                p_livemode: typeof event.livemode === "boolean" ? event.livemode : null,
+                p_account: typeof event.account === "string" && /^acct_[A-Za-z0-9]+$/.test(event.account) ? event.account : null,
+                p_created: Number.isInteger(event.created) && event.created > 0 ? event.created : null,
+            }),
+        });
+        if (r.ok && (r.data === "process" || r.data === "duplicate" || r.data === "in_progress")) return r.data;
+        console.warn(`Ereignisprotokoll nicht verfügbar (${r.status}) – Verarbeitung ohne Protokoll`);
+    } catch (err) {
+        console.warn("Ereignisprotokoll nicht erreichbar:", (err as Error).message);
+    }
+    return "untracked";
+}
+
+/** Ergebnis im Ereignisprotokoll vermerken; Fehler hier ändern die Antwort an Stripe nicht. */
+async function finishEventLog(event: any, gate: EventGate, ok: boolean, outcome: string | null, error: string | null): Promise<void> {
+    if (gate !== "process") return;
+    try {
+        const r = await sb("rpc/stripe_webhook_event_finish", {
+            method: "POST",
+            body: JSON.stringify({
+                p_event_id: String(event.id),
+                p_success: ok,
+                p_outcome: outcome,
+                p_error: error ? error.slice(0, 500) : null,
+            }),
+        });
+        if (!r.ok) console.warn(`Ereignisprotokoll: Abschluss für ${event.id} nicht gespeichert (${r.status})`);
+    } catch (err) {
+        console.warn("Ereignisprotokoll: Abschluss nicht gespeichert:", (err as Error).message);
+    }
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+    });
 }
 
 // ═════════════════════════════════════════════════
 // MAIN HANDLER
 // ═════════════════════════════════════════════════
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     const signature = req.headers.get("Stripe-Signature");
     const body = await req.text();
 
@@ -318,11 +579,22 @@ serve(async (req: Request) => {
     // damit ein über das Connect-Secret signiertes Ereignis keine Zahlung/kein Abo verbuchen kann.
     if (event.account && event.type !== "account.updated") {
         console.warn(`Ignoring ${event.type} from connected account ${event.account}`);
-        return new Response(JSON.stringify({ received: true, ignored: true }), {
-            headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse({ received: true, ignored: true });
     }
 
+    // 3. Ereignisprotokoll: doppelte bzw. gleichzeitige Zustellung desselben Ereignisses erkennen
+    const gate = await beginEventLog(event);
+    if (gate === "duplicate") {
+        console.log(`Event ${event.id} bereits verarbeitet – übersprungen`);
+        return jsonResponse({ received: true, duplicate: true });
+    }
+    if (gate === "in_progress") {
+        // Nicht-2xx: Stripe stellt später erneut zu (dann als "duplicate" bzw. nach Abbruch erneut verarbeitet)
+        console.warn(`Event ${event.id} wird gerade verarbeitet – erneute Zustellung später`);
+        return jsonResponse({ error: "in_progress" }, 409);
+    }
+
+    let outcome: string | null = null;
     try {
         switch (event.type) {
             // ═══════════════════════════════════════
@@ -334,7 +606,7 @@ serve(async (req: Request) => {
                 console.log("mode:", session.mode, "payment_status:", session.payment_status, "sub:", session.subscription);
 
                 if (session.metadata?.payment_type === "claim_checkout") {
-                    await bookClaimPayment(session, event.created);
+                    outcome = await bookClaimPayment(session, event);
                     break;
                 }
 
@@ -397,11 +669,46 @@ serve(async (req: Request) => {
                 break;
             }
 
-            // Rückbuchungen/Erstattungen werden (noch) nicht automatisch storniert → deutlicher Hinweis im Log
-            case "charge.dispute.created":
+            // ═══════════════════════════════════════
+            // ERSTATTUNG / RÜCKBUCHUNG (Forderungsportal)
+            // ═══════════════════════════════════════
             case "charge.refunded": {
-                const obj = event.data.object;
-                console.warn(`ALARM: ${event.type} für ${obj?.id} (payment_intent ${obj?.payment_intent}) – ggf. Forderungszahlung manuell stornieren.`);
+                const charge = event.data.object;
+                const fullyRefunded = charge?.refunded === true
+                    || (Number(charge?.amount_refunded ?? 0) > 0 && Number(charge?.amount_refunded) >= Number(charge?.amount ?? 0));
+                if (fullyRefunded) {
+                    await reverseClaimPaymentForStripe(event, charge?.payment_intent,
+                        `Die Online-Zahlung über ${formatEur(charge?.amount)} wurde über Stripe vollständig erstattet`);
+                } else {
+                    await noteClaimPaymentForStripe(event, charge?.payment_intent,
+                        `Teilerstattung über Stripe: insgesamt ${formatEur(charge?.amount_refunded)} von ${formatEur(charge?.amount)} erstattet. Die Forderungszahlung bleibt gebucht – bitte prüfen und ggf. in der Forderungsakte korrigieren.`,
+                        { amount_refunded_cents: charge?.amount_refunded ?? null, amount_cents: charge?.amount ?? null });
+                }
+                break;
+            }
+
+            case "charge.dispute.created":
+            case "charge.dispute.closed": {
+                const dispute = event.data.object;
+                const status = String(dispute?.status ?? "");
+                const paymentIntentId = await disputePaymentIntent(dispute);
+                const isWarning = status.startsWith("warning_");
+                if (event.type === "charge.dispute.created" && isWarning) {
+                    // Vorwarnung/Anfrage: noch kein Geld zurückgebucht
+                    await noteClaimPaymentForStripe(event, paymentIntentId,
+                        `Stripe meldet eine Vorwarnung zur Online-Zahlung (${formatEur(dispute?.amount)}). Noch keine Rückbuchung – die Forderungszahlung bleibt gebucht.`,
+                        { dispute_status: status });
+                } else if (event.type === "charge.dispute.created" || status === "lost") {
+                    // Rückbuchung: der Betrag wurde dem Konto belastet (bzw. die Anfechtung ist verloren)
+                    await reverseClaimPaymentForStripe(event, paymentIntentId,
+                        `Rückbuchung/Zahlungsanfechtung über Stripe (${formatEur(dispute?.amount)})`);
+                } else if (status === "won") {
+                    await noteClaimPaymentForStripe(event, paymentIntentId,
+                        `Die Zahlungsanfechtung (${formatEur(dispute?.amount)}) wurde zugunsten des Vermieters entschieden. Die zuvor stornierte Zahlung bitte bei Bedarf erneut in der Forderungsakte erfassen.`,
+                        { dispute_status: status });
+                } else {
+                    console.log(`${event.type}: Anfechtung mit Status ${status} – keine Buchung`);
+                }
                 break;
             }
 
@@ -518,18 +825,16 @@ serve(async (req: Request) => {
 
             default:
                 console.log("Unhandled:", event.type);
+                outcome = "unhandled";
         }
 
+        await finishEventLog(event, gate, true, outcome, null);
         console.log("=== END (200) ===");
-        return new Response(JSON.stringify({ received: true }), {
-            headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse({ received: true });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("=== ERROR:", msg, "===");
-        return new Response(JSON.stringify({ error: "processing_failed" }), {
-            status: 500,
-            headers: { "Content-Type": "application/json" },
-        });
+        await finishEventLog(event, gate, false, outcome, msg);
+        return jsonResponse({ error: "processing_failed" }, 500);
     }
 });

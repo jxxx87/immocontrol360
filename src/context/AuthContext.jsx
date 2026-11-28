@@ -1,7 +1,27 @@
 import React, { createContext, useState, useEffect, useContext, useRef, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
+import { unregisterPushNotifications } from '../lib/pushNotifications';
 
 const AuthContext = createContext();
+
+// Abmelden: zuerst das Push-Token dieses Geräts entfernen, solange die Sitzung noch gilt
+// (danach scheitert das Löschen in push_subscriptions an RLS). Fehler oder ein hängendes
+// Netz verhindern das Abmelden nicht (höchstens PUSH_CLEANUP_TIMEOUT_MS Wartezeit).
+const PUSH_CLEANUP_TIMEOUT_MS = 4000;
+const signOutWithPushCleanup = async (userId) => {
+    let timer = null;
+    try {
+        await Promise.race([
+            unregisterPushNotifications(userId),
+            new Promise(resolve => { timer = setTimeout(resolve, PUSH_CLEANUP_TIMEOUT_MS); }),
+        ]);
+    } catch {
+        // Push-Abmeldung ist nachrangig
+    } finally {
+        clearTimeout(timer);
+    }
+    return supabase.auth.signOut();
+};
 
 // PostgREST meldet eine (noch) nicht eingespielte Datenbank-Funktion mit PGRST202 bzw. HTTP 404.
 const isMissingFunction = (error, status) =>
@@ -81,8 +101,23 @@ const acceptInvitationLegacy = async (userId, email) => {
     return newRole;
 };
 
+// Konto ist über eine Mieter-Einladung entstanden (user_metadata.role = 'tenant'), hat aber weder
+// eine Rolle noch eine offene Einladung (Einladung storniert bzw. Portalzugang entzogen) und keine
+// eigenen Vermieterdaten → kein stilles Vermieter-Konto daraus machen.
+const isEndedTenantAccount = async (userId, meta) => {
+    if (meta?.role !== 'tenant') return false;
+    const { count, error } = await supabase
+        .from('portfolios')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId);
+    if (error) throw error;
+    return (count || 0) === 0;
+};
+
+const ENDED_TENANT_RESULT = { role: null, data: null, tenantAccessEnded: true };
+
 // Ermittelt die Rolle eines Kontos. Wirft bei Fehlern, statt eine Rolle zu raten.
-const resolveRole = async (userId, email) => {
+const resolveRole = async (userId, email, meta) => {
     const { data: rows, error } = await supabase
         .from('user_roles')
         .select('*')
@@ -98,16 +133,41 @@ const resolveRole = async (userId, email) => {
     const { data: accepted, error: rpcError, status } = await supabase.rpc('accept_tenant_invitation');
     if (!rpcError) {
         if (accepted?.role) return { role: accepted.role, data: toRoleData(accepted) };
+        if (await isEndedTenantAccount(userId, meta)) return ENDED_TENANT_RESULT;
         return { role: 'investor', data: null };
     }
     if (!isMissingFunction(rpcError, status)) throw rpcError;
 
     const legacyRole = await acceptInvitationLegacy(userId, email);
     if (legacyRole) return { role: legacyRole.role || 'tenant', data: toRoleData(legacyRole) };
+    if (await isEndedTenantAccount(userId, meta)) return ENDED_TENANT_RESULT;
 
     // Keine Einladung → bestehendes Konto → Vermieter
     return { role: 'investor', data: null };
 };
+
+const TenantAccessEnded = ({ onContinue }) => (
+    <div style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '24px', boxSizing: 'border-box', fontFamily: 'Inter, sans-serif', background: '#f8fafc'
+    }}>
+        <div style={{
+            maxWidth: '440px', width: '100%', textAlign: 'center', backgroundColor: '#fff',
+            border: '1px solid #e2e8f0', borderRadius: '16px', padding: '32px'
+        }}>
+            <h1 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e293b', marginBottom: '12px' }}>
+                Kein Zugang zum Mieterportal
+            </h1>
+            <p style={{ color: '#64748b', fontSize: '0.92rem', lineHeight: 1.5, marginBottom: '20px' }}>
+                Die Einladung zum Mieterportal wurde zurückgezogen oder Ihr Zugang wurde vom Vermieter beendet.
+                Sie wurden abgemeldet. Bitte wenden Sie sich bei Fragen an Ihren Vermieter.
+            </p>
+            <button type="button" className="btn btn-primary btn-md" onClick={onContinue}>
+                Zur Anmeldung
+            </button>
+        </div>
+    </div>
+);
 
 const RoleLoadError = ({ message, onRetry, onSignOut }) => (
     <div style={{
@@ -150,8 +210,10 @@ export const AuthProvider = ({ children }) => {
     const [roleData, setRoleData] = useState(null); // { unit_id, property_id, tenant_id }
     const [roleLoading, setRoleLoading] = useState(true);
     const [roleError, setRoleError] = useState(null);
+    const [tenantAccessEnded, setTenantAccessEnded] = useState(false);
 
     const currentUserIdRef = useRef(null);       // aktuell angemeldetes Konto
+    const currentUserMetaRef = useRef(null);     // user_metadata des angemeldeten Kontos
     const loadedRoleUserRef = useRef(null);      // Konto, für das die Rolle geladen ist
     const roleRequestRef = useRef({ userId: null, promise: null });
 
@@ -160,6 +222,7 @@ export const AuthProvider = ({ children }) => {
     const applySession = useCallback((nextSession) => {
         const nextUser = nextSession?.user ?? null;
         currentUserIdRef.current = nextUser?.id ?? null;
+        currentUserMetaRef.current = nextUser?.user_metadata ?? null;
         setSession(nextSession);
         setUser(prev => {
             if (prev && nextUser && prev.id === nextUser.id && JSON.stringify(prev) === JSON.stringify(nextUser)) {
@@ -190,14 +253,31 @@ export const AuthProvider = ({ children }) => {
         }
 
         // Neues Konto: bis zur Rolle nichts rendern (sonst sieht ein Mieter kurz die Vermieter-Ansicht)
-        if (loadedRoleUserRef.current !== userId) setRoleLoading(true);
+        if (loadedRoleUserRef.current !== userId) {
+            setRoleLoading(true);
+            setTenantAccessEnded(false);
+        }
 
         const promise = (async () => {
             let lastError = null;
             for (let attempt = 0; attempt < 2; attempt++) {
                 try {
-                    const result = await resolveRole(userId, email);
+                    const result = await resolveRole(userId, email, currentUserMetaRef.current);
                     if (currentUserIdRef.current !== userId) return; // inzwischen abgemeldet/gewechselt
+                    if (result.tenantAccessEnded) {
+                        // Hinweis zeigen und abmelden (kein Vermieter-Zugang für ein beendetes Mieterkonto)
+                        setTenantAccessEnded(true);
+                        setUserRole(null);
+                        setRoleData(null);
+                        setRoleError(null);
+                        loadedRoleUserRef.current = userId;
+                        try {
+                            await signOutWithPushCleanup(userId);
+                        } catch {
+                            // Lokale Sitzung wird auch bei Netzwerkfehlern entfernt
+                        }
+                        return;
+                    }
                     setUserRole(result.role);
                     setRoleData(result.data);
                     setRoleError(null);
@@ -300,11 +380,10 @@ export const AuthProvider = ({ children }) => {
         signUp: (data) => supabase.auth.signUp(data),
         signIn: (data) => supabase.auth.signInWithPassword(data),
         signInWithGoogle: () => supabase.auth.signInWithOAuth({ provider: 'google' }),
-        signOut: () => supabase.auth.signOut(),
+        signOut: () => signOutWithPushCleanup(currentUserIdRef.current),
         resetPassword: (email) => supabase.auth.resetPasswordForEmail(email, {
             redirectTo: `${window.location.origin}/reset-password`,
         }),
-        updatePassword: (password) => supabase.auth.updateUser({ password }),
         user,
         session,
         loading,
@@ -321,11 +400,13 @@ export const AuthProvider = ({ children }) => {
 
     return (
         <AuthContext.Provider value={value}>
-            {!loading && !roleLoading && (showRoleError ? (
+            {tenantAccessEnded ? (
+                <TenantAccessEnded onContinue={() => setTenantAccessEnded(false)} />
+            ) : !loading && !roleLoading && (showRoleError ? (
                 <RoleLoadError
                     message={roleError}
                     onRetry={() => fetchUserRole(user.id, user.email, { force: true })}
-                    onSignOut={() => supabase.auth.signOut()}
+                    onSignOut={() => signOutWithPushCleanup(user.id)}
                 />
             ) : children)}
         </AuthContext.Provider>

@@ -59,7 +59,6 @@ const Billing = () => {
     useEffect(() => {
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible' && refreshSubscription) {
-                console.log('[Billing] Tab sichtbar → Subscription wird aktualisiert...');
                 refreshSubscription();
             }
         };

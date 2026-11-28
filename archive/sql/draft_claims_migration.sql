@@ -1,5 +1,7 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/draft_claims_migration.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
+-- Maßgeblich für claims, claim_items, claim_payments, claim_payment_allocations, claim_events, claim_access_links und die Forderungs-Sichten: supabase/baseline/baseline_public.sql (Live-Stand vom 27.11.2026). Diese Datei ist überholt.
 -- ============================================================================
 -- SQL MIGRATION PROPOSAL: FORDERUNGSMANAGEMENT (CLAIMS)
 -- WICHTIG: Dies ist ein Entwurf. Noch nicht live ausführen!

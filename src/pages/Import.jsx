@@ -16,6 +16,13 @@ const DATA_ROW_INDEX = 5;   // ab Excel-Zeile 6
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 const MAX_ROWS = 5000;
 const INSERT_CHUNK = 200;
+const FAR_FUTURE = '9999-12-31';
+// Der Import läuft in EINER Datenbanktransaktion (import_rows, höchstens 60 s). Grobe Laufzeit je
+// Datensatz inkl. Trigger (gemessen 11/2026, mit Reserve): Vertrag erzeugt zusätzlich je Monat ab
+// Mietbeginn eine Sollstellung. Größere Dateien werden vorab abgelehnt (aufteilen statt Abbruch).
+const IMPORT_COST_MS = { portfolio: 2, property: 2, unit: 2, tenant: 3, lease: 8, ledgerMonth: 0.4 };
+const IMPORT_BUDGET_MS = 30000;
+const MAX_ROWS_IN_MESSAGE = 10;
 
 // Erwartete Spaltenüberschriften (Präfix, ohne Groß-/Kleinschreibung) laut offizieller Vorlage
 const EXPECTED_HEADERS = {
@@ -33,6 +40,16 @@ const isBlank = (v) => v === null || v === undefined || (typeof v === 'string' &
 const normText = (v) => (isBlank(v) ? '' : String(v).replace(/\s+/g, ' ').trim());
 const keyText = (v) => normText(v).toLowerCase();
 const round2 = (v) => Math.round((v + Number.EPSILON) * 100) / 100;
+// 'YYYY-MM-DD' -> 'MM.YYYY'
+const formatMonthDE = (value) => (value ? `${value.slice(5, 7)}.${value.slice(0, 4)}` : '');
+// 'YYYY-MM-DD' -> 'TT.MM.JJJJ'
+const formatDateDE = (value) => (value ? `${value.slice(8, 10)}.${value.slice(5, 7)}.${value.slice(0, 4)}` : '');
+// Anzahl Monate Mietkonto von Mietbeginn bis einschließlich des laufenden Monats
+const monthsUntilNow = (startDate, now) => {
+    if (!startDate) return 0;
+    const months = (now.getFullYear() * 12 + now.getMonth()) - (Number(startDate.slice(0, 4)) * 12 + Number(startDate.slice(5, 7)) - 1) + 1;
+    return Math.max(0, months);
+};
 
 // Zahl aus Excel-Zelle: Zahl bleibt Zahl; Text im deutschen (1.234,56 / 850,50) oder internationalen Format
 const parseNumberCell = (val) => {
@@ -259,6 +276,81 @@ const readWorkbook = (file) => new Promise((resolve, reject) => {
     reader.readAsArrayBuffer(file);
 });
 
+// Excel-Zeilen für Fehlermeldungen der Datenbank (gekürzt)
+const rowsForMessage = (rowNos) => (rowNos.length > MAX_ROWS_IN_MESSAGE
+    ? [...rowNos.slice(0, MAX_ROWS_IN_MESSAGE), '…']
+    : rowNos);
+
+// Geprüften Plan in die Form der Datenbankfunktion import_rows bringen:
+// vorhandene Datensätze per ID, neu anzulegende per Index (0-basiert) in der jeweiligen Liste.
+const buildImportPayload = (plan, bookingStartDate) => {
+    const portfolios = [...plan.newPortfolios.entries()];
+    const properties = [...plan.newProperties.entries()];
+    const units = [...plan.newUnits.entries()];
+    const tenants = [...plan.newTenants.entries()];
+    const indexByKey = (entries) => new Map(entries.map(([key], i) => [key, i]));
+    const portfolioIdx = indexByKey(portfolios);
+    const propertyIdx = indexByKey(properties);
+    const unitIdx = indexByKey(units);
+    const tenantIdx = indexByKey(tenants);
+    const ref = (r, idx, idField, idxField) => (r.id ? { [idField]: r.id } : { [idxField]: idx.get(r.key) });
+
+    return {
+        portfolios: portfolios.map(([, p]) => ({ name: p.name, rows: rowsForMessage(p.rowNos) })),
+        properties: properties.map(([, p]) => ({
+            ...ref(p.portfolioRef, portfolioIdx, 'portfolio_id', 'portfolio_idx'),
+            ...p.data,
+            rows: rowsForMessage(p.rowNos)
+        })),
+        units: units.map(([, u]) => ({
+            ...ref(u.propertyRef, propertyIdx, 'property_id', 'property_idx'),
+            ...u.data,
+            rows: rowsForMessage(u.rowNos)
+        })),
+        tenants: tenants.map(([, t]) => ({
+            first_name: t.data.first_name,
+            last_name: t.data.last_name,
+            email: t.data.email,
+            phone: t.data.phone,
+            occupants: t.data.occupants,
+            rows: rowsForMessage(t.rowNos)
+        })),
+        // Bestandsverträge: Mietkonto ab dem Importmonat (siehe handleExecute)
+        leases: plan.newLeases.map(l => ({
+            ...ref(l.unitRef, unitIdx, 'unit_id', 'unit_idx'),
+            ...ref(l.tenantRef, tenantIdx, 'tenant_id', 'tenant_idx'),
+            ...l.data,
+            booking_start_date: l.data.start_date && l.data.start_date < bookingStartDate ? bookingStartDate : null,
+            rows: [l.rowNo]
+        }))
+    };
+};
+
+// Funktion import_rows noch nicht eingespielt -> bisheriger schrittweiser Import
+const isMissingImportRpc = (error) => ['PGRST202', '42883'].includes(String(error?.code || ''));
+
+// Fehler der Datenbankfunktion import_rows: bei einem Datenbankfehler wurde die Transaktion
+// vollständig zurückgerollt; ohne Fehlercode (Verbindung/Gateway) ist das Ergebnis unklar.
+const describeImportError = (error, status) => {
+    const code = String(error?.code || '');
+    const message = error?.message || 'Unbekannter Fehler';
+    if (code === '57014') {
+        return { outcome: 'aborted', text: 'Der Import hat zu lange gedauert und wurde abgebrochen. Bitte die Datei aufteilen (z. B. nach Objekten) und die Teile nacheinander importieren.' };
+    }
+    if (code === 'PGRST301' || code === 'PGRST303' || status === 401) {
+        return { outcome: 'aborted', text: 'Die Anmeldung ist abgelaufen. Bitte neu anmelden und den Import erneut starten.' };
+    }
+    if (code) return { outcome: 'aborted', text: message };
+    if (status === 413) {
+        return { outcome: 'aborted', text: 'Die Datenmenge ist für einen Import zu groß. Bitte die Datei aufteilen und die Teile nacheinander importieren.' };
+    }
+    if (status >= 400 && status < 500) return { outcome: 'aborted', text: message };
+    return {
+        outcome: 'unknown',
+        text: 'Die Verbindung wurde während des Imports unterbrochen. Ob die Daten gespeichert wurden, ist unklar – bitte unter Immobilien und Mieter prüfen, bevor Sie den Import erneut starten.'
+    };
+};
+
 const Import = () => {
     const { user } = useAuth();
     const { portfolios, selectedPortfolioID, refreshPortfolios } = usePortfolio();
@@ -347,7 +439,7 @@ const Import = () => {
             const [propRes, unitRes, leaseRes, tenantRes, countRes] = await Promise.all([
                 fetchAllRows('properties', 'id, street, house_number, zip, city, portfolio_id'),
                 fetchAllRows('units', 'id, property_id, unit_name'),
-                fetchAllRows('leases', 'id, unit_id, tenant_id, status'),
+                fetchAllRows('leases', 'id, unit_id, tenant_id, status, start_date, end_date'),
                 fetchAllRows('tenants', 'id, user_id, first_name, last_name, email'),
                 supabase.from('units').select('id', { count: 'exact', head: true }).eq('user_id', user.id)
             ]);
@@ -396,6 +488,7 @@ const Import = () => {
 
             const propPortfolio = new Map(); // propertyKey -> portfolio key/id aus der Datei
             const leasePairs = new Set();
+            const leaseRowByUnit = new Map(); // Einheit (id bzw. key) -> Excel-Zeile des neuen Vertrags
 
             rows.forEach(row => {
                 row.errors.forEach(m => rowError(row.rowNo, m));
@@ -520,10 +613,25 @@ const Import = () => {
                         result.skippedLeases++;
                         return;
                     }
-                    if (activeOnUnit.length > 0) {
-                        rowWarning(row.rowNo, 'Die Einheit hat bereits einen aktiven Mietvertrag mit einem anderen Mieter – ein zusätzlicher Vertrag wird angelegt.');
+                    // Keine zweite Belegung im selben Zeitraum – gleiche Regel wie findOverlappingLeases
+                    // (leaseRentPeriods.js) und Trigger trg_leases_check_overlap; importierte Verträge sind unbefristet.
+                    const overlap = ownLeases.find(l =>
+                        l.unit_id === unitRef.id &&
+                        !(l.status && l.status !== 'active' && !l.end_date) &&
+                        row.lease.start_date <= (l.end_date || FAR_FUTURE)
+                    );
+                    if (overlap) {
+                        rowError(row.rowNo, `Für die Einheit „${row.unit.unit_name}“ besteht ab ${formatDateDE(row.lease.start_date)} bereits ein Mietvertrag (${formatDateDE(overlap.start_date)} – ${overlap.end_date ? formatDateDE(overlap.end_date) : 'unbefristet'}). Bitte zuerst den bestehenden Vertrag beenden oder einen Mietbeginn nach dessen Ende angeben.`);
+                        return;
                     }
                 }
+                const unitTag = unitRef.id || `new:${unitRef.key}`;
+                const prevLeaseRow = leaseRowByUnit.get(unitTag);
+                if (prevLeaseRow) {
+                    rowError(row.rowNo, `Für die Einheit „${row.unit.unit_name}“ steht bereits in Zeile ${prevLeaseRow} ein Mietvertrag – je Einheit kann nur ein laufender Vertrag importiert werden.`);
+                    return;
+                }
+                leaseRowByUnit.set(unitTag, row.rowNo);
                 result.newLeases.push({ unitRef, tenantRef, data: row.lease, rowNo: row.rowNo });
             });
 
@@ -532,6 +640,23 @@ const Import = () => {
             const newUnitCount = result.newUnits.size;
             if (newUnitCount > 0 && checkUsageLimit && !checkUsageLimit(existingUnitCount + newUnitCount - 1)) {
                 result.errors.push({ rowNo: null, message: `Das Einheiten-Limit Ihres Tarifs würde überschritten (vorhanden: ${existingUnitCount}, neu: ${newUnitCount}).` });
+            }
+
+            // Umfang für einen Import in einer Transaktion
+            const now = new Date();
+            const ledgerMonths = result.newLeases.reduce((sum, l) => sum + monthsUntilNow(l.data.start_date, now), 0);
+            const estimatedMs =
+                result.newPortfolios.size * IMPORT_COST_MS.portfolio +
+                result.newProperties.size * IMPORT_COST_MS.property +
+                newUnitCount * IMPORT_COST_MS.unit +
+                result.newTenants.size * IMPORT_COST_MS.tenant +
+                result.newLeases.length * IMPORT_COST_MS.lease +
+                ledgerMonths * IMPORT_COST_MS.ledgerMonth;
+            if (estimatedMs > IMPORT_BUDGET_MS) {
+                result.errors.push({
+                    rowNo: null,
+                    message: `Die Datei ist zu umfangreich, um sie in einem Schritt zu importieren (${newUnitCount} neue Einheiten, ${result.newTenants.size} neue Mieter, ${result.newLeases.length} Mietverträge mit zusammen ${ledgerMonths} Monaten Mietkonto). Bitte die Datei aufteilen (z. B. nach Objekten) und die Teile nacheinander importieren – bereits importierte Objekte, Einheiten und Mieter werden dabei wiedererkannt.`
+                });
             }
 
             result.errors.forEach(e => addLog(`${e.rowNo ? `Zeile ${e.rowNo}: ` : ''}${e.message}`, 'error'));
@@ -572,7 +697,85 @@ const Import = () => {
         return inserted;
     };
 
+    // Bisheriger Weg – nur solange die Datenbankfunktion import_rows noch nicht eingespielt ist:
+    // Tabelle für Tabelle ohne gemeinsame Transaktion; scheitern einzelne Datensätze, werden sie
+    // gemeldet, der Rest bleibt gespeichert.
+    const executeStepwise = async (stats, failed, bookingStartDate) => {
+        // 1. Portfolios
+        setProgress('Schritt 1/5: Portfolios anlegen...');
+        const portfolioIds = new Map();
+        const portItems = [...plan.newPortfolios.entries()].map(([key, p]) => ({ key, rowNos: p.rowNos, payload: { user_id: user.id, name: p.name } }));
+        const newPorts = await insertRows('portfolios', portItems, 'id, name', (item, err) => failed(item.rowNos, `Portfolio „${item.payload.name}“ konnte nicht angelegt werden: ${err.message}`));
+        newPorts.forEach(p => portfolioIds.set(keyText(p.name), p.id));
+        stats.portfolios = newPorts.length;
+        const resolvePortfolio = (ref) => ref.id || portfolioIds.get(ref.key) || null;
+
+        // 2. Immobilien
+        setProgress('Schritt 2/5: Immobilien anlegen...');
+        const propertyIds = new Map();
+        const propItems = [];
+        plan.newProperties.forEach((p, key) => {
+            const portfolioId = resolvePortfolio(p.portfolioRef);
+            if (!portfolioId) { failed(p.rowNos, 'Immobilie übersprungen, weil das Portfolio nicht angelegt werden konnte.'); return; }
+            propItems.push({ key, rowNos: p.rowNos, payload: { user_id: user.id, portfolio_id: portfolioId, ...p.data } });
+        });
+        const newProps = await insertRows('properties', propItems, 'id, street, house_number, zip, city', (item, err) => failed(item.rowNos, `Immobilie ${item.payload.street} ${item.payload.house_number} konnte nicht angelegt werden: ${err.message}`));
+        newProps.forEach(p => propertyIds.set(propertyKeyOf(p.street, p.house_number, p.zip, p.city), p.id));
+        stats.properties = newProps.length;
+        const resolveProperty = (ref) => ref.id || propertyIds.get(ref.key) || null;
+
+        // 3. Einheiten
+        setProgress('Schritt 3/5: Einheiten anlegen...');
+        const unitIds = new Map();
+        const unitItems = [];
+        const unitKeyByPropAndName = new Map();
+        plan.newUnits.forEach((u, key) => {
+            const propertyId = resolveProperty(u.propertyRef);
+            if (!propertyId) { failed(u.rowNos, `Einheit „${u.data.unit_name}“ übersprungen, weil die Immobilie nicht angelegt werden konnte.`); return; }
+            unitKeyByPropAndName.set(`${propertyId}|${keyText(u.data.unit_name)}`, key);
+            unitItems.push({ key, rowNos: u.rowNos, payload: { user_id: user.id, property_id: propertyId, ...u.data } });
+        });
+        const newUnits = await insertRows('units', unitItems, 'id, property_id, unit_name', (item, err) => failed(item.rowNos, `Einheit „${item.payload.unit_name}“ konnte nicht angelegt werden: ${err.message}`));
+        newUnits.forEach(u => {
+            const key = unitKeyByPropAndName.get(`${u.property_id}|${keyText(u.unit_name)}`);
+            if (key) unitIds.set(key, u.id);
+        });
+        stats.units = newUnits.length;
+
+        // 4. Mieter
+        setProgress('Schritt 4/5: Mieter anlegen...');
+        const tenantIds = new Map();
+        const tenantItems = [...plan.newTenants.entries()].map(([key, t]) => {
+            const payload = { user_id: user.id, first_name: t.data.first_name, last_name: t.data.last_name, email: t.data.email, phone: t.data.phone, occupants: t.data.occupants };
+            return { key, rowNos: t.rowNos, payload };
+        });
+        const newTenants = await insertRows('tenants', tenantItems, 'id, first_name, last_name, email', (item, err) => failed(item.rowNos, `Mieter ${item.payload.last_name} konnte nicht angelegt werden: ${err.message}`));
+        newTenants.forEach(t => tenantIds.set(tenantKeyOf(t.first_name, t.last_name, t.email), t.id));
+        stats.tenants = newTenants.length;
+
+        // 5. Mietverträge
+        setProgress('Schritt 5/5: Mietverträge anlegen...');
+        const leaseItems = [];
+        plan.newLeases.forEach(l => {
+            const unitId = l.unitRef.id || unitIds.get(l.unitRef.key);
+            const tenantId = l.tenantRef.id || tenantIds.get(l.tenantRef.key);
+            if (!unitId || !tenantId) {
+                failed([l.rowNo], 'Mietvertrag übersprungen, weil Einheit oder Mieter nicht angelegt werden konnte.');
+                return;
+            }
+            const bookingStart = l.data.start_date && l.data.start_date < bookingStartDate ? { booking_start_date: bookingStartDate } : {};
+            leaseItems.push({ rowNos: [l.rowNo], payload: { user_id: user.id, tenant_id: tenantId, unit_id: unitId, status: 'active', ...l.data, ...bookingStart } });
+        });
+        const newLeases = await insertRows('leases', leaseItems, 'id, booking_start_date', (item, err) => failed(item.rowNos, `Mietvertrag konnte nicht angelegt werden: ${err.message}`));
+        stats.leases = newLeases.length;
+        stats.bookingStart = {
+            date: bookingStartDate,
+            leases: newLeases.filter(l => l.booking_start_date).length
+        };
+    };
+
     // --- Schritt 2: ausführen ---
+    // Alles in EINER Datenbanktransaktion (import_rows): scheitert ein Datensatz, wird nichts gespeichert.
     const handleExecute = async () => {
         if (!plan || plan.errors.length > 0 || busy) return;
         if (checkGlobalAccess && !checkGlobalAccess()) {
@@ -580,80 +783,37 @@ const Import = () => {
             return;
         }
         setBusy('import');
-        const stats = { portfolios: 0, properties: 0, units: 0, tenants: 0, leases: 0, errors: [] };
+        // outcome: 'done' (gespeichert) | 'stepwise' (bisheriger Weg) | 'aborted' (nichts gespeichert) | 'unknown'
+        const stats = { portfolios: 0, properties: 0, units: 0, tenants: 0, leases: 0, errors: [], outcome: 'done' };
         const failed = (rowNos, msg) => {
             stats.errors.push(`${rowNos && rowNos.length ? `Zeile ${rowNos.join(', ')}: ` : ''}${msg}`);
             addLog(`${rowNos && rowNos.length ? `Zeile ${rowNos.join(', ')}: ` : ''}${msg}`, 'error');
         };
+        // Bestandsverträge: Das Mietkonto wird ab dem Importmonat geführt. Frühere Monate wurden außerhalb
+        // der App abgerechnet und zählen nicht als Rückstand (in den Finanzen einblendbar).
+        const importDate = new Date();
+        const bookingStartDate = `${importDate.getFullYear()}-${pad2(importDate.getMonth() + 1)}-01`;
         try {
-            // 1. Portfolios
-            setProgress('Schritt 1/5: Portfolios anlegen...');
-            const portfolioIds = new Map();
-            const portItems = [...plan.newPortfolios.entries()].map(([key, p]) => ({ key, rowNos: p.rowNos, payload: { user_id: user.id, name: p.name } }));
-            const newPorts = await insertRows('portfolios', portItems, 'id, name', (item, err) => failed(item.rowNos, `Portfolio „${item.payload.name}“ konnte nicht angelegt werden: ${err.message}`));
-            newPorts.forEach(p => portfolioIds.set(keyText(p.name), p.id));
-            stats.portfolios = newPorts.length;
-            const resolvePortfolio = (ref) => ref.id || portfolioIds.get(ref.key) || null;
-
-            // 2. Immobilien
-            setProgress('Schritt 2/5: Immobilien anlegen...');
-            const propertyIds = new Map();
-            const propItems = [];
-            plan.newProperties.forEach((p, key) => {
-                const portfolioId = resolvePortfolio(p.portfolioRef);
-                if (!portfolioId) { failed(p.rowNos, 'Immobilie übersprungen, weil das Portfolio nicht angelegt werden konnte.'); return; }
-                propItems.push({ key, rowNos: p.rowNos, payload: { user_id: user.id, portfolio_id: portfolioId, ...p.data } });
-            });
-            const newProps = await insertRows('properties', propItems, 'id, street, house_number, zip, city', (item, err) => failed(item.rowNos, `Immobilie ${item.payload.street} ${item.payload.house_number} konnte nicht angelegt werden: ${err.message}`));
-            newProps.forEach(p => propertyIds.set(propertyKeyOf(p.street, p.house_number, p.zip, p.city), p.id));
-            stats.properties = newProps.length;
-            const resolveProperty = (ref) => ref.id || propertyIds.get(ref.key) || null;
-
-            // 3. Einheiten
-            setProgress('Schritt 3/5: Einheiten anlegen...');
-            const unitIds = new Map();
-            const unitItems = [];
-            const unitKeyByPropAndName = new Map();
-            plan.newUnits.forEach((u, key) => {
-                const propertyId = resolveProperty(u.propertyRef);
-                if (!propertyId) { failed(u.rowNos, `Einheit „${u.data.unit_name}“ übersprungen, weil die Immobilie nicht angelegt werden konnte.`); return; }
-                unitKeyByPropAndName.set(`${propertyId}|${keyText(u.data.unit_name)}`, key);
-                unitItems.push({ key, rowNos: u.rowNos, payload: { user_id: user.id, property_id: propertyId, ...u.data } });
-            });
-            const newUnits = await insertRows('units', unitItems, 'id, property_id, unit_name', (item, err) => failed(item.rowNos, `Einheit „${item.payload.unit_name}“ konnte nicht angelegt werden: ${err.message}`));
-            newUnits.forEach(u => {
-                const key = unitKeyByPropAndName.get(`${u.property_id}|${keyText(u.unit_name)}`);
-                if (key) unitIds.set(key, u.id);
-            });
-            stats.units = newUnits.length;
-
-            // 4. Mieter
-            setProgress('Schritt 4/5: Mieter anlegen...');
-            const tenantIds = new Map();
-            const tenantItems = [...plan.newTenants.entries()].map(([key, t]) => {
-                const payload = { user_id: user.id, first_name: t.data.first_name, last_name: t.data.last_name, email: t.data.email, phone: t.data.phone, occupants: t.data.occupants };
-                return { key, rowNos: t.rowNos, payload };
-            });
-            const newTenants = await insertRows('tenants', tenantItems, 'id, first_name, last_name, email', (item, err) => failed(item.rowNos, `Mieter ${item.payload.last_name} konnte nicht angelegt werden: ${err.message}`));
-            newTenants.forEach(t => tenantIds.set(tenantKeyOf(t.first_name, t.last_name, t.email), t.id));
-            stats.tenants = newTenants.length;
-
-            // 5. Mietverträge
-            setProgress('Schritt 5/5: Mietverträge anlegen...');
-            const leaseItems = [];
-            plan.newLeases.forEach(l => {
-                const unitId = l.unitRef.id || unitIds.get(l.unitRef.key);
-                const tenantId = l.tenantRef.id || tenantIds.get(l.tenantRef.key);
-                if (!unitId || !tenantId) {
-                    failed([l.rowNo], 'Mietvertrag übersprungen, weil Einheit oder Mieter nicht angelegt werden konnte.');
-                    return;
-                }
-                leaseItems.push({ rowNos: [l.rowNo], payload: { user_id: user.id, tenant_id: tenantId, unit_id: unitId, status: 'active', ...l.data } });
-            });
-            const newLeases = await insertRows('leases', leaseItems, 'id', (item, err) => failed(item.rowNos, `Mietvertrag konnte nicht angelegt werden: ${err.message}`));
-            stats.leases = newLeases.length;
+            setProgress('Alle Datensätze werden gemeinsam gespeichert...');
+            const { data, error, status } = await supabase.rpc('import_rows', { p_plan: buildImportPayload(plan, bookingStartDate) });
+            if (error && isMissingImportRpc(error)) {
+                stats.outcome = 'stepwise';
+                await executeStepwise(stats, failed, bookingStartDate);
+            } else if (error) {
+                const described = describeImportError(error, status);
+                stats.outcome = described.outcome;
+                failed(null, described.text);
+            } else {
+                stats.portfolios = data?.portfolios || 0;
+                stats.properties = data?.properties || 0;
+                stats.units = data?.units || 0;
+                stats.tenants = data?.tenants || 0;
+                stats.leases = data?.leases || 0;
+                stats.bookingStart = { date: bookingStartDate, leases: data?.booking_start_leases || 0 };
+            }
         } catch (error) {
             console.error('Import Error:', error);
+            if (stats.outcome !== 'stepwise') stats.outcome = 'unknown';
             failed(null, `Import abgebrochen: ${error.message || 'Unbekannter Fehler'}`);
         } finally {
             stats.skippedLeases = plan.skippedLeases;
@@ -663,11 +823,17 @@ const Import = () => {
                 tenants: plan.existing.tenants.size
             };
             setImportResult(stats);
-            addLog(
-                `Import ${stats.errors.length > 0 ? 'mit Fehlern ' : ''}abgeschlossen: ${stats.portfolios} Portfolios, ${stats.properties} Immobilien, ${stats.units} Einheiten, ${stats.tenants} Mieter, ${stats.leases} Mietverträge angelegt.`,
-                stats.errors.length > 0 ? 'error' : 'success'
-            );
-            if (stats.portfolios > 0 && refreshPortfolios) refreshPortfolios();
+            if (stats.outcome === 'aborted') {
+                addLog('Import abgebrochen – es wurde nichts gespeichert.', 'error');
+            } else if (stats.outcome === 'unknown') {
+                addLog('Import-Ergebnis unklar – bitte die Daten prüfen, bevor der Import wiederholt wird.', 'error');
+            } else {
+                addLog(
+                    `Import ${stats.errors.length > 0 ? 'mit Fehlern ' : ''}abgeschlossen: ${stats.portfolios} Portfolios, ${stats.properties} Immobilien, ${stats.units} Einheiten, ${stats.tenants} Mieter, ${stats.leases} Mietverträge angelegt.`,
+                    stats.errors.length > 0 ? 'error' : 'success'
+                );
+            }
+            if ((stats.portfolios > 0 || stats.outcome === 'unknown') && refreshPortfolios) refreshPortfolios();
             // Datei zurücksetzen, damit derselbe Import nicht versehentlich erneut gestartet wird
             setPlan(null);
             setFile(null);
@@ -695,7 +861,7 @@ const Import = () => {
                 }}>
                     <Loader2 size={64} className="animate-spin" style={{ marginBottom: '20px' }} />
                     <h2 style={{ fontSize: '1.5rem', fontWeight: 600, marginBottom: '10px' }}>{busy === 'analyze' ? 'Datei wird geprüft...' : 'Import läuft...'}</h2>
-                    <p style={{ fontSize: '1.1rem', marginBottom: '20px' }}>{busy === 'analyze' ? 'Es wird noch nichts gespeichert.' : 'Es kann einen Augenblick dauern, bis alle Objekte angelegt sind.'}</p>
+                    <p style={{ fontSize: '1.1rem', marginBottom: '20px' }}>{busy === 'analyze' ? 'Es wird noch nichts gespeichert.' : 'Es kann einen Augenblick dauern, bis alle Objekte angelegt sind. Bitte die Seite nicht schließen.'}</p>
                     <div style={{ fontSize: '1rem', opacity: 0.8 }}>{progress}</div>
                 </div>
             )}
@@ -853,23 +1019,40 @@ const Import = () => {
                     }}>
                         <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                             {importResult.errors.length > 0 ? <AlertTriangle size={18} /> : <CheckCircle size={18} />}
-                            {importResult.errors.length > 0 ? 'Import mit Fehlern abgeschlossen' : 'Import abgeschlossen'}
+                            {importResult.outcome === 'aborted'
+                                ? 'Import abgebrochen – es wurde nichts gespeichert'
+                                : importResult.outcome === 'unknown'
+                                    ? 'Import-Ergebnis unklar'
+                                    : importResult.errors.length > 0 ? 'Import mit Fehlern abgeschlossen' : 'Import abgeschlossen'}
                         </h3>
-                        <p>Neu angelegt:</p>
-                        <ul style={{ listStyle: 'disc', paddingLeft: '20px', marginTop: '5px' }}>
-                            <li>Portfolios: {importResult.portfolios}</li>
-                            <li>Immobilien: {importResult.properties}</li>
-                            <li>Einheiten: {importResult.units}</li>
-                            <li>Mieter: {importResult.tenants}</li>
-                            <li>Mietverträge: {importResult.leases}</li>
-                        </ul>
-                        <p style={{ marginTop: '6px', fontSize: '0.85rem' }}>
-                            Bereits vorhanden (unverändert): {importResult.existing.properties} Immobilien, {importResult.existing.units} Einheiten, {importResult.existing.tenants} Mieter
-                            {importResult.skippedLeases > 0 ? `; ${importResult.skippedLeases} Mietverträge übersprungen` : ''}.
-                        </p>
+                        {importResult.outcome === 'aborted' && (
+                            <p style={{ fontSize: '0.9rem' }}>Der Import läuft als Ganzes: Weil ein Datensatz nicht gespeichert werden konnte, wurde nichts übernommen. Bitte die Datei korrigieren und erneut importieren.</p>
+                        )}
+                        {(importResult.outcome === 'done' || importResult.outcome === 'stepwise') && (
+                            <>
+                                <p>Neu angelegt:</p>
+                                <ul style={{ listStyle: 'disc', paddingLeft: '20px', marginTop: '5px' }}>
+                                    <li>Portfolios: {importResult.portfolios}</li>
+                                    <li>Immobilien: {importResult.properties}</li>
+                                    <li>Einheiten: {importResult.units}</li>
+                                    <li>Mieter: {importResult.tenants}</li>
+                                    <li>Mietverträge: {importResult.leases}</li>
+                                </ul>
+                                <p style={{ marginTop: '6px', fontSize: '0.85rem' }}>
+                                    Bereits vorhanden (unverändert): {importResult.existing.properties} Immobilien, {importResult.existing.units} Einheiten, {importResult.existing.tenants} Mieter
+                                    {importResult.skippedLeases > 0 ? `; ${importResult.skippedLeases} Mietverträge übersprungen` : ''}.
+                                </p>
+                            </>
+                        )}
+                        {importResult.bookingStart?.leases > 0 && (
+                            <p style={{ marginTop: '6px', fontSize: '0.85rem' }}>
+                                Mietkonto geführt ab {formatMonthDE(importResult.bookingStart.date)}: Bei {importResult.bookingStart.leases} Mietvertr{importResult.bookingStart.leases !== 1 ? 'ägen' : 'ag'} mit früherem
+                                Mietbeginn gelten Monate vor dem Importmonat nicht als Mietrückstand (unter Finanzen einblendbar).
+                            </p>
+                        )}
                         {importResult.errors.length > 0 && (
                             <div style={{ marginTop: '10px', color: '#B91C1C' }}>
-                                <p style={{ fontWeight: 600 }}>Nicht importiert:</p>
+                                <p style={{ fontWeight: 600 }}>{importResult.outcome === 'stepwise' ? 'Nicht importiert:' : 'Fehler:'}</p>
                                 <ul style={{ listStyle: 'disc', paddingLeft: '20px' }}>
                                     {importResult.errors.map((e, i) => <li key={i}>{e}</li>)}
                                 </ul>

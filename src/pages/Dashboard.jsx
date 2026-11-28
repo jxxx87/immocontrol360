@@ -105,6 +105,8 @@ const Dashboard = () => {
 
     // Daten werden portfolio-unabhängig geladen und im Speicher gefiltert: ein Portfoliowechsel braucht
     // keinen neuen Request, und ältere Antworten können neuere nicht überschreiben (Request-Zähler).
+    // Das Mietkonto wird vollständig geladen (nur benötigte Spalten): Zahlungen kommen nur für 6 Monate,
+    // ältere bezahlte Monate erkennt die Rückstandslogik deshalb nur an ihrer Mietkonto-Zeile.
     const fetchDashboardData = useCallback(async () => {
         if (!userId) return;
         const requestId = ++requestIdRef.current;
@@ -114,11 +116,13 @@ const Dashboard = () => {
             const windowStart = monthStartStr(now.getFullYear(), now.getMonth() - 5);
             const paymentCols = 'id, lease_id, payment_date, period_month, amount, note';
             const expenseCols = 'id, booking_date, payee, note, amount, property_id, expense_categories(name)';
+            // Nur die Vertragsfelder für Leerstand, Buchungsliste und Rückstandslogik (computeArrears)
+            const leaseCols = 'id, unit_id, tenant_id, status, start_date, end_date, created_at, booking_start_date, cold_rent, service_charge, heating_cost, other_costs, payment_due_day';
 
             const [propRes, unitRes, leaseRes, ledgerRes, payRes, expRes, recentPayRes, recentExpRes, tenantRes] = await Promise.all([
                 fetchAllRows('properties', 'id, portfolio_id'),
                 fetchAllRows('units', 'id, property_id, is_vacation_rental'),
-                fetchAllRows('leases', '*'),
+                fetchAllRows('leases', leaseCols),
                 fetchAllRows('rent_ledger', 'id, lease_id, period_month, due_date, expected_rent, paid_amount, status'),
                 fetchAllRows('rent_payments', paymentCols, q => q.gte('payment_date', windowStart)),
                 fetchAllRows('expenses', expenseCols, q => q.gte('booking_date', windowStart)),

@@ -9,16 +9,18 @@ import * as THREE from 'three';
 import { getPoint, dist, polygonCentroid } from '../../lib/floorplan/geometryKernel';
 import { getFurnitureItem } from '../../lib/floorplan/furnitureCatalog';
 import { ROOF_TYPES, WALL_THICKNESS } from '../../lib/floorplan/constants';
+import {
+    DEFAULT_STOREY_HEIGHT_MM, DEFAULT_SLAB_THICKNESS_MM,
+    storeyHeightMm, storeyStackHeightMm, storeyBaseOffsetsMm, totalStackHeightMm,
+} from '../../lib/floorplan/storeyStack';
 
 const MM = 0.001;
-const DEFAULT_STOREY_HEIGHT_MM = 2600;
 // Standardhöhen fehlender Öffnungsmaße (wie beim Platzieren in geometryKernel.placeOpening)
 const DEFAULT_DOOR_HEIGHT_MM = 2010;
 const DEFAULT_WINDOW_HEIGHT_MM = 1200;
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v, fallback) => (Number.isFinite(v) ? v : fallback);
-const storeyHeightMm = (storey) => (Number.isFinite(storey?.height_mm) && storey.height_mm > 0 ? storey.height_mm : DEFAULT_STOREY_HEIGHT_MM);
 
 // Polygon als Werte-Schlüssel: Punkte werden im Editor teils in-place verschoben (gleiche
 // Array-Referenz). Die Geometrie wird aus dem Schlüssel selbst aufgebaut.
@@ -256,7 +258,7 @@ const FloorMesh = ({ storey, yOffset = 0 }) => {
 
 const SlabMesh = ({ slab, yOffset = 0 }) => {
     const polyKey = polygonKey(slab.polygon);
-    const thicknessMm = num(slab.thickness_mm, 0) > 0 ? slab.thickness_mm : 200;
+    const thicknessMm = num(slab.thickness_mm, 0) > 0 ? slab.thickness_mm : DEFAULT_SLAB_THICKNESS_MM;
     const geometry = useMemo(() => {
         // Use the slab's own drawn polygon
         const polygon = parsePolygonKey(polyKey);
@@ -394,7 +396,8 @@ const RoofMesh = ({ storey, yOffset = 0 }) => {
     const overhangMm = roof?.overhang_mm;
     const parapetMm = roof?.parapet_mm;
     const footprintKey = polygonKey(storey.outerBoundary || storey.outerPolygon);
-    const wallHeightMm = storeyHeightMm(storey);
+    // Dach sitzt auf der obersten Decke (Raumhöhe + Deckenstärke), nicht in der Deckenplatte
+    const wallHeightMm = storeyStackHeightMm(storey);
     const geometry = useMemo(() => {
         if (!roofType) return null;
         // Get outer boundary as footprint
@@ -566,7 +569,8 @@ const RoofMesh = ({ storey, yOffset = 0 }) => {
 // Kamera, Zielpunkt und Bodenplatte auf den Grundriss ausrichten (statt fest auf den Ursprung)
 const computeSceneFit = (storeys) => {
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    let totalHeight = 0;
+    // Gesamthöhe wie die Stapelung in der Szene (Raumhöhen + Deckenstärken)
+    const totalHeight = totalStackHeightMm(storeys) * MM;
     for (const storey of arr(storeys)) {
         for (const p of arr(storey?.points)) {
             if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) continue;
@@ -575,7 +579,6 @@ const computeSceneFit = (storeys) => {
             if (p.y < minZ) minZ = p.y;
             if (p.y > maxZ) maxZ = p.y;
         }
-        totalHeight += storeyHeightMm(storey) * MM;
     }
     if (!Number.isFinite(minX)) {
         return { cx: 0, cz: 0, size: 10, height: totalHeight || DEFAULT_STOREY_HEIGHT_MM * MM };
@@ -595,6 +598,10 @@ const Scene = ({ storeys, fit }) => {
     const targetY = Math.max(1, fit.height / 2);
     const groundSize = Math.max(100, fit.size * 6);
     const list = arr(storeys);
+    // Unterkante je Geschoss: Summe der darunterliegenden Raumhöhen + Deckenstärken
+    // (Deckenplatten liegen auf Geschosshöhe und wachsen nach oben – sonst überlappen
+    // sie mit dem Boden des nächsten Geschosses)
+    const baseOffsetsMm = storeyBaseOffsetsMm(list);
     return (
         <>
             <PerspectiveCamera makeDefault position={[fit.cx + camOffset, targetY + camOffset, fit.cz + camOffset]} fov={50} />
@@ -615,10 +622,7 @@ const Scene = ({ storeys, fit }) => {
             </mesh>
 
             {list.map((storey, idx) => {
-                let yOffset = 0;
-                for (let i = 0; i < idx; i++) {
-                    yOffset += storeyHeightMm(list[i]) * MM;
-                }
+                const yOffset = (baseOffsetsMm[idx] || 0) * MM;
                 // Dach nur auf dem obersten Geschoss – sonst würde es durch die Geschosse darüber gezeichnet
                 const isTopStorey = idx === list.length - 1;
                 return (

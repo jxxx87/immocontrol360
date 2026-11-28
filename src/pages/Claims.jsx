@@ -371,7 +371,8 @@ const Claims = () => {
         const totalsRows = claimIds.length > 0
             ? await fetchInChunks(claimIds, (chunk) => supabase
                 .from('claim_totals_view')
-                .select('claim_id, principal_paid, fees_paid, interest_paid, current_principal_open, total_fees_open, total_interest_open, total_due')
+                // '*' statt fester Spalten: principal_waived gibt es erst nach der Datenbank-Aktualisierung
+                .select('*')
                 .in('claim_id', chunk))
             : [];
         if (requestId !== loadRequestRef.current) return;
@@ -380,13 +381,16 @@ const Claims = () => {
         const merged = claimsData.map(claim => {
             const t = totalsById.get(claim.id) || null;
             const totalOffen = round2(t?.total_due);
-            const totalGetilgt = round2(num(t?.principal_paid) + num(t?.fees_paid) + num(t?.interest_paid));
+            // principal_paid enthält auch Erlasse/Ausbuchungen (kein Geldeingang); „Getilgt" zeigt nur Geldeingänge
+            const totalErlassen = round2(t?.principal_waived);
+            const totalGetilgt = round2(num(t?.principal_paid) - totalErlassen + num(t?.fees_paid) + num(t?.interest_paid));
             return {
                 ...claim,
                 hasTotals: !!t,
                 totalOffen,
                 totalGetilgt,
-                totalUrsprung: round2(totalOffen + totalGetilgt),
+                totalErlassen,
+                totalUrsprung: round2(totalOffen + totalGetilgt + totalErlassen),
                 feesOpen: round2(t?.total_fees_open),
                 interestOpen: round2(t?.total_interest_open)
             };

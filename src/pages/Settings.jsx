@@ -812,87 +812,10 @@ const Settings = () => {
         }
     };
 
-    // Überträgt alle Daten mit eigener portfolio_id in das Zielportfolio. Läuft in
-    // Einzelschritten; bricht ein Schritt ab, wird das Quellportfolio NICHT gelöscht
-    // (bereits übertragene Daten liegen dann schon im Ziel – es geht nichts verloren).
-    const transferPortfolioContents = async (fromId, toId) => {
-        const moved = [];
-        const fail = (label, error) => {
-            const err = new Error(`${label}: ${translateError(error)}`);
-            err.moved = [...moved];
-            return err;
-        };
-        const move = async (table, label) => {
-            const { error } = await supabase.from(table).update({ portfolio_id: toId }).eq('portfolio_id', fromId);
-            if (error) throw fail(label, error);
-            moved.push(label);
-        };
-
-        await move('properties', 'Objekte (mit Einheiten, Verträgen, Mietkonto, Zahlungen, Abrechnungen)');
-        await move('meters', 'Zähler');
-        await move('meter_readings', 'Zählerstände');
-        await move('invoices', 'Rechnungen');
-        await move('loans', 'Darlehen');
-        await move('deals', 'Deals');
-
-        // Rechnungsnummern-Zähler zusammenführen (höchster Stand gewinnt), damit im Ziel
-        // keine Nummern doppelt vergeben werden
-        const { data: srcCounters, error: srcCounterError } = await supabase
-            .from('invoice_counters').select('id, year, object_unit_id, last_number').eq('portfolio_id', fromId);
-        if (srcCounterError) throw fail('Rechnungsnummern-Zähler', srcCounterError);
-        if (srcCounters && srcCounters.length > 0) {
-            const { data: dstCounters, error: dstCounterError } = await supabase
-                .from('invoice_counters').select('id, year, object_unit_id, last_number').eq('portfolio_id', toId);
-            if (dstCounterError) throw fail('Rechnungsnummern-Zähler', dstCounterError);
-            for (const counter of srcCounters) {
-                const match = (dstCounters || []).find(d => d.year === counter.year && (d.object_unit_id || null) === (counter.object_unit_id || null));
-                if (match) {
-                    if ((counter.last_number || 0) > (match.last_number || 0)) {
-                        const { error } = await supabase.from('invoice_counters').update({ last_number: counter.last_number }).eq('id', match.id);
-                        if (error) throw fail('Rechnungsnummern-Zähler', error);
-                    }
-                } else {
-                    const { error } = await supabase.from('invoice_counters').update({ portfolio_id: toId }).eq('id', counter.id);
-                    if (error) throw fail('Rechnungsnummern-Zähler', error);
-                }
-            }
-            moved.push('Rechnungsnummern-Zähler');
-        }
-
-        // Portfolio-eigene Schreibvorlagen: übernehmen, sofern das Ziel keine gleiche Vorlage hat
-        const { data: srcTemplates, error: srcTplError } = await supabase
-            .from('document_templates').select('id, type').eq('portfolio_id', fromId);
-        if (srcTplError) throw fail('Schreibvorlagen', srcTplError);
-        if (srcTemplates && srcTemplates.length > 0) {
-            const { data: dstTemplates, error: dstTplError } = await supabase
-                .from('document_templates').select('type').eq('portfolio_id', toId);
-            if (dstTplError) throw fail('Schreibvorlagen', dstTplError);
-            const dstTypes = new Set((dstTemplates || []).map(t => t.type));
-            for (const tpl of srcTemplates) {
-                const { error } = dstTypes.has(tpl.type)
-                    ? await supabase.from('document_templates').delete().eq('id', tpl.id)
-                    : await supabase.from('document_templates').update({ portfolio_id: toId }).eq('id', tpl.id);
-                if (error) throw fail('Schreibvorlagen', error);
-            }
-            moved.push('Schreibvorlagen');
-        }
-
-        // PDF-Vorlage nur übernehmen, wenn das Ziel noch keine hat (eine je Portfolio)
-        const { data: srcPdf, error: srcPdfError } = await supabase.from('pdf_templates').select('id').eq('portfolio_id', fromId);
-        if (srcPdfError) throw fail('PDF-Vorlage', srcPdfError);
-        if (srcPdf && srcPdf.length > 0) {
-            const { data: dstPdf, error: dstPdfError } = await supabase.from('pdf_templates').select('id').eq('portfolio_id', toId);
-            if (dstPdfError) throw fail('PDF-Vorlage', dstPdfError);
-            if (!dstPdf || dstPdf.length === 0) {
-                const { error } = await supabase.from('pdf_templates').update({ portfolio_id: toId }).eq('id', srcPdf[0].id);
-                if (error) throw fail('PDF-Vorlage', error);
-                moved.push('PDF-Vorlage');
-            }
-        }
-
-        return moved;
-    };
-
+    // Übertrag und Löschen laufen serverseitig in EINER Transaktion (Datenbankfunktion delete_portfolio):
+    // bricht ein Schritt ab, bleibt alles unverändert – kein teilübertragener Stand. Die Funktion prüft
+    // Eigentümer (Quelle und Ziel), Hauptportfolio und doppelte Rechnungsnummern; ohne Ziel lehnt sie
+    // Rechnungen, Darlehen, Mietverträge, NK-Abrechnungen, Dokumente und Forderungen ab.
     const handleExecuteDelete = async () => {
         if (!portfolioToDelete) return;
         if (!isOwnPortfolio(portfolioToDelete)) {
@@ -905,102 +828,36 @@ const Settings = () => {
         }
 
         const fromId = portfolioToDelete.id;
+        if (targetPortfolioId && !ownPortfolios.some(p => p.id === targetPortfolioId && p.id !== fromId)) {
+            alert('Bitte wählen Sie eines Ihrer eigenen Portfolios als Ziel.');
+            return;
+        }
+
         setIsDeleting(true);
         try {
-            const impact = deleteImpact || await loadDeleteImpact(fromId);
-            const n = (key) => impact[key] || 0;
-
-            if (targetPortfolioId) {
-                if (!ownPortfolios.some(p => p.id === targetPortfolioId && p.id !== fromId)) {
-                    alert('Bitte wählen Sie eines Ihrer eigenen Portfolios als Ziel.');
-                    return;
-                }
-
-                // Doppelte Rechnungsnummern im Ziel würden den Übertrag mittendrin abbrechen
-                if (n('invoices') > 0) {
-                    const [{ data: srcInv, error: srcErr }, { data: dstInv, error: dstErr }] = await Promise.all([
-                        supabase.from('invoices').select('invoice_number').eq('portfolio_id', fromId),
-                        supabase.from('invoices').select('invoice_number').eq('portfolio_id', targetPortfolioId)
-                    ]);
-                    if (srcErr) throw srcErr;
-                    if (dstErr) throw dstErr;
-                    const dstNumbers = new Set((dstInv || []).map(i => i.invoice_number));
-                    const duplicates = (srcInv || []).map(i => i.invoice_number).filter(num => dstNumbers.has(num));
-                    if (duplicates.length > 0) {
-                        alert(`Im Zielportfolio gibt es bereits Rechnungen mit denselben Nummern (z. B. ${duplicates.slice(0, 3).join(', ')}). Die Rechnungen können deshalb nicht übertragen werden. Bitte wählen Sie ein anderes Zielportfolio. Es wurde nichts verändert.`);
-                        return;
-                    }
-                }
-
-                try {
-                    await transferPortfolioContents(fromId, targetPortfolioId);
-                } catch (transferError) {
-                    const done = transferError.moved && transferError.moved.length > 0
-                        ? `\n\nBereits übertragen: ${transferError.moved.join(', ')}.`
-                        : '';
-                    alert(`Die Übertragung wurde abgebrochen – das Portfolio wurde NICHT gelöscht.\n\n${transferError.message}${done}`);
-                    return;
-                }
-            } else {
-                // Ohne Ziel: Rechnungen (Aufbewahrungspflicht) und Darlehen nie mitlöschen
+            if (!targetPortfolioId) {
+                const impact = deleteImpact || await loadDeleteImpact(fromId);
                 if (impact.invoices === null || impact.loans === null || impact.properties === null) {
                     alert('Die abhängigen Daten konnten nicht vollständig ermittelt werden. Zur Sicherheit wird nicht gelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder versuchen Sie es später erneut.');
                     return;
                 }
-                if (n('invoices') > 0) {
-                    alert(`Dieses Portfolio enthält ${n('invoices')} Rechnung(en). Rechnungen unterliegen Aufbewahrungspflichten (§ 147 AO, § 14b UStG) und werden nicht mitgelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio.`);
+                if ((impact.properties || 0) > 0 && !deleteProperties) {
+                    alert('Dieses Portfolio enthält Immobilien. Bitte wählen Sie ein Ziel-Portfolio für die Übertragung aus ODER bestätigen Sie die endgültige Löschung.');
                     return;
-                }
-                if (n('loans') > 0) {
-                    alert(`Dieses Portfolio enthält ${n('loans')} Darlehen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder löschen Sie die Darlehen zuerst unter „Finanzierungen".`);
-                    return;
-                }
-                if (n('properties') > 0) {
-                    if (!deleteProperties) {
-                        alert('Dieses Portfolio enthält Immobilien. Bitte wählen Sie ein Ziel-Portfolio für die Übertragung aus ODER bestätigen Sie die endgültige Löschung.');
-                        return;
-                    }
-                    if (n('documents') > 0 || n('claims') > 0) {
-                        alert('Zu den Objekten gibt es noch Dokumente oder Forderungsakten. Diese verhindern das Löschen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder entfernen Sie Dokumente/Forderungen zuerst.');
-                        return;
-                    }
-                    // Explicitly delete properties if user chose to not transfer and confirmed deletion
-                    const { error: propDelError } = await supabase
-                        .from('properties')
-                        .delete()
-                        .eq('portfolio_id', fromId);
-                    if (propDelError) throw propDelError;
-                }
-
-                // Portfolio-eigene Vorlagen, die es schon als allgemeine Vorlage gibt, würden das
-                // Löschen blockieren (eine allgemeine Vorlage je Typ) – diese entfallen.
-                const { data: srcTemplates, error: tplError } = await supabase
-                    .from('document_templates').select('id, type, user_id').eq('portfolio_id', fromId);
-                if (tplError) throw tplError;
-                if (srcTemplates && srcTemplates.length > 0) {
-                    const { data: globalTemplates, error: globalError } = await supabase
-                        .from('document_templates').select('type').is('portfolio_id', null).eq('user_id', user.id);
-                    if (globalError) throw globalError;
-                    const globalTypes = new Set((globalTemplates || []).map(t => t.type));
-                    for (const tpl of srcTemplates) {
-                        if (tpl.user_id === user.id && globalTypes.has(tpl.type)) {
-                            const { error } = await supabase.from('document_templates').delete().eq('id', tpl.id);
-                            if (error) throw error;
-                        }
-                    }
                 }
             }
 
-            // Delete the portfolio
-            const { data: deleted, error: deleteError } = await supabase
-                .from('portfolios')
-                .delete()
-                .eq('id', fromId)
-                .select('id');
-
-            if (deleteError) throw deleteError;
-            if (!deleted || deleted.length === 0) {
-                throw new Error('Das Portfolio wurde nicht gelöscht (keine Berechtigung).');
+            const { error } = await supabase.rpc('delete_portfolio', {
+                p_portfolio_id: fromId,
+                p_target_id: targetPortfolioId || null,
+                p_delete_properties: !targetPortfolioId && deleteProperties
+            });
+            if (error) {
+                const message = translateError(error);
+                alert(message.includes('nichts verändert')
+                    ? message
+                    : `${message}\n\nDas Portfolio wurde nicht gelöscht, es wurde nichts verändert.`);
+                return;
             }
 
             // Success
@@ -1821,8 +1678,11 @@ const Settings = () => {
                     ? IMPACT_LABELS.filter(([key]) => deleteImpact[key] === null || deleteImpact[key] > 0)
                     : [];
                 const n = (key) => (deleteImpact && deleteImpact[key]) || 0;
+                // Mietverträge und NK-Abrechnungen sind per Fremdschlüssel vor dem Mitlöschen geschützt
+                const hasBookingData = (n('leases') > 0 || n('settlements') > 0) && n('properties') > 0;
                 const hasBlockingForDelete = !!deleteImpact && (n('invoices') > 0 || n('loans') > 0
                     || ((n('documents') > 0 || n('claims') > 0) && n('properties') > 0)
+                    || hasBookingData
                     || deleteImpact.invoices === null || deleteImpact.loans === null || deleteImpact.properties === null);
                 const deleteDisabled = isDeleting || loadingDeleteImpact
                     || (!targetPortfolioId && (hasBlockingForDelete || (n('properties') > 0 && !deleteProperties)));
@@ -1866,6 +1726,11 @@ const Settings = () => {
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '8px' }}>
                                     Freigaben an andere Nutzer und die Cloud-Ordner-Verknüpfung dieses Portfolios werden in jedem Fall entfernt (Dateien in der Cloud bleiben erhalten).
                                 </div>
+                                {!targetPortfolioId && n('documentTemplates') > 0 && (
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '4px' }}>
+                                        Ohne Übertrag werden die Portfolio-eigenen Schreibvorlagen ({n('documentTemplates')}) mitgelöscht. Ihre allgemeinen Vorlagen bleiben unverändert.
+                                    </div>
+                                )}
                             </div>
 
                             {transferTargets.length > 0 && (
@@ -1904,6 +1769,7 @@ const Settings = () => {
                                             {n('invoices') > 0 && <li>Rechnungen unterliegen Aufbewahrungspflichten (§ 147 AO, § 14b UStG) und werden nicht mitgelöscht.</li>}
                                             {n('loans') > 0 && <li>Darlehen müssen zuerst übertragen oder unter „Finanzierungen" gelöscht werden.</li>}
                                             {(n('documents') > 0 || n('claims') > 0) && n('properties') > 0 && <li>Dokumente bzw. Forderungsakten zu den Objekten verhindern das Löschen.</li>}
+                                            {hasBookingData && <li>Mietverträge (mit Mietkonto und Zahlungen) bzw. Nebenkostenabrechnungen zu den Objekten werden nicht mitgelöscht.</li>}
                                             {deleteImpact && (deleteImpact.invoices === null || deleteImpact.loans === null || deleteImpact.properties === null) && <li>Die abhängigen Daten konnten nicht vollständig ermittelt werden.</li>}
                                         </ul>
                                         {transferTargets.length > 0 ? 'Bitte übertragen Sie die Inhalte in ein anderes Portfolio.' : 'Legen Sie ggf. zuerst ein weiteres Portfolio an und übertragen Sie die Inhalte dorthin.'}
@@ -1925,9 +1791,10 @@ const Settings = () => {
                                         style={{ width: '18px', height: '18px', accentColor: 'var(--danger-color)', flexShrink: 0, marginTop: '2px' }}
                                     />
                                     <label htmlFor="deleteProperties" style={{ fontSize: '0.875rem', color: '#991B1B', fontWeight: 500, cursor: 'pointer' }}>
-                                        Ich möchte stattdessen alles endgültig löschen: alle Objekte mit Einheiten, Mietverträgen, Mietkonto,
-                                        Mietzahlungen, Nebenkostenabrechnungen, Zählern und Zählerständen (siehe Aufstellung oben).
-                                        Das kann nicht rückgängig gemacht werden.
+                                        Ich möchte stattdessen alles endgültig löschen: alle Objekte mit Einheiten, Zählern und
+                                        Zählerständen sowie die Portfolio-eigenen Schreibvorlagen (siehe Aufstellung oben).
+                                        Mit den Objekten entfallen auch deren Tickets, Ankündigungen, Sanierungsprojekte und
+                                        Objektkalender-Einträge. Das kann nicht rückgängig gemacht werden.
                                     </label>
                                 </div>
                             )}

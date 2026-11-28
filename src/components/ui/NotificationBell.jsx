@@ -2,10 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../../context/NotificationContext';
-import {
-    Bell, MessageSquare, Ticket, Megaphone, FileText, UserCheck,
-    MessageCircle, BellOff, X, CheckCheck
-} from 'lucide-react';
+import { Bell, BellOff, X, CheckCheck } from 'lucide-react';
+import { getNotificationIcon, getNotificationColor } from './notificationTypes';
 
 // Panel-Position nur bei echter Änderung neu setzen (vermeidet Re-Render bei jedem Scroll-Event)
 const sameStyle = (a, b) => {
@@ -15,24 +13,6 @@ const sameStyle = (a, b) => {
 };
 
 const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
-
-const iconMap = {
-    message: MessageSquare,
-    ticket: Ticket,
-    ticket_comment: MessageCircle,
-    announcement: Megaphone,
-    document: FileText,
-    registration: UserCheck,
-};
-
-const colorMap = {
-    message: '#3B82F6',
-    ticket: '#F59E0B',
-    ticket_comment: '#8B5CF6',
-    announcement: '#10B981',
-    document: '#6366F1',
-    registration: '#22C55E',
-};
 
 const NotificationBell = () => {
     const { notifications, unreadCount, markAllRead, markRead, permissionGranted, requestPermission } = useNotifications();
@@ -363,8 +343,8 @@ const NotificationBell = () => {
                                 </div>
                             ) : (
                                 notifications.map(notif => {
-                                    const Icon = iconMap[notif.type] || Bell;
-                                    const color = colorMap[notif.type] || '#6B7280';
+                                    const Icon = getNotificationIcon(notif.type);
+                                    const color = getNotificationColor(notif.type);
 
                                     return (
                                         <div

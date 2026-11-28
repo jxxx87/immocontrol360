@@ -8,7 +8,12 @@ import { Mail, CheckCircle2, AlertTriangle, Loader2, Trash2 } from 'lucide-react
 
 // Das SMTP-Passwort wird nie in den Browser zurückgeladen: Es kann nur gesetzt
 // bzw. geändert werden. Leeres Passwortfeld = gespeichertes Passwort bleibt.
+// Die Datenbank legt ein mitgeschicktes Passwort verschlüsselt im Supabase Vault ab
+// (Trigger auf user_smtp_settings); in der Tabelle selbst steht kein Passwort.
+// Wechselt Server oder Benutzername, muss das Passwort neu eingegeben werden.
 const EMAIL_PATTERN = /[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/;
+
+const normalizeHost = (host) => (host || '').trim().toLowerCase();
 
 const extractSenderAddress = (sender) => {
     const value = (sender || '').trim();
@@ -26,6 +31,8 @@ export const EmailSettings = () => {
     const [statusMessage, setStatusMessage] = useState(null);
     const [isConfiguredInDb, setIsConfiguredInDb] = useState(false);
     const [dbSender, setDbSender] = useState('');
+    // Gespeicherter Server/Benutzer: Das gespeicherte Passwort gilt nur für genau diese Kombination
+    const [storedLogin, setStoredLogin] = useState({ host: '', user: '' });
 
     const [form, setForm] = useState({
         smtp_host: '',
@@ -58,9 +65,11 @@ export const EmailSettings = () => {
                 });
                 setIsConfiguredInDb(!!data.smtp_host && !!data.smtp_user);
                 setDbSender(data.smtp_sender || data.smtp_user || '');
+                setStoredLogin({ host: normalizeHost(data.smtp_host), user: (data.smtp_user || '').trim() });
             } else {
                 setIsConfiguredInDb(false);
                 setDbSender('');
+                setStoredLogin({ host: '', user: '' });
             }
         } catch (err) {
             console.error('Failed to load SMTP settings:', err);
@@ -74,12 +83,20 @@ export const EmailSettings = () => {
         fetchSettings();
     }, [fetchSettings]);
 
-    const validateForm = ({ requirePassword }) => {
+    // Gespeichertes Passwort darf nicht für einen anderen Server/Benutzer verwendet werden
+    const loginChanged = isConfiguredInDb && (
+        normalizeHost(form.smtp_host) !== storedLogin.host || form.smtp_user.trim() !== storedLogin.user
+    );
+    const passwordRequired = !isConfiguredInDb || loginChanged;
+
+    const validateForm = () => {
         if (!form.smtp_host.trim() || !form.smtp_port || !form.smtp_user.trim() || !form.smtp_sender.trim()) {
             return 'Bitte füllen Sie alle Pflichtfelder aus.';
         }
-        if (requirePassword && !form.smtp_pass) {
-            return 'Bitte geben Sie das Passwort des Postfachs ein.';
+        if (passwordRequired && !form.smtp_pass) {
+            return loginChanged
+                ? 'Server oder Benutzername wurden geändert. Bitte geben Sie das Passwort des Postfachs erneut ein.'
+                : 'Bitte geben Sie das Passwort des Postfachs ein.';
         }
         const port = Number(form.smtp_port);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -96,7 +113,7 @@ export const EmailSettings = () => {
             alert(loadError);
             return;
         }
-        const validationError = validateForm({ requirePassword: !isConfiguredInDb });
+        const validationError = validateForm();
         if (validationError) {
             alert(validationError);
             return;
@@ -137,6 +154,7 @@ export const EmailSettings = () => {
             if (error) throw error;
             setIsConfiguredInDb(true);
             setDbSender(payload.smtp_sender || payload.smtp_user);
+            setStoredLogin({ host: normalizeHost(payload.smtp_host), user: payload.smtp_user });
             setForm(prev => ({ ...prev, smtp_pass: '' }));
             window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail Server-Einstellungen erfolgreich gespeichert.');
@@ -170,6 +188,7 @@ export const EmailSettings = () => {
             });
             setIsConfiguredInDb(false);
             setDbSender('');
+            setStoredLogin({ host: '', user: '' });
 
             window.dispatchEvent(new Event('smtp-changed'));
             alert('E-Mail-Verbindung erfolgreich aufgehoben.');
@@ -184,7 +203,7 @@ export const EmailSettings = () => {
     const testRecipient = user?.email || '';
 
     const handleTestConnection = async () => {
-        const validationError = validateForm({ requirePassword: !isConfiguredInDb });
+        const validationError = validateForm();
         if (validationError) {
             setStatusMessage({ type: 'error', text: validationError });
             return;
@@ -337,12 +356,14 @@ export const EmailSettings = () => {
                         />
                         <div>
                             <Input
-                                label={isConfiguredInDb ? 'Passwort (nur zum Ändern ausfüllen)' : 'Passwort *'}
+                                label={passwordRequired
+                                    ? (loginChanged ? 'Passwort * (Server/Benutzer geändert)' : 'Passwort *')
+                                    : 'Passwort (nur zum Ändern ausfüllen)'}
                                 value={form.smtp_pass}
                                 onChange={e => setForm({ ...form, smtp_pass: e.target.value })}
                                 type="password"
                                 autoComplete="new-password"
-                                placeholder={isConfiguredInDb ? 'Gespeichert – leer lassen, um es beizubehalten' : '••••••••'}
+                                placeholder={passwordRequired ? '••••••••' : 'Gespeichert – leer lassen, um es beizubehalten'}
                             />
                         </div>
                     </div>
@@ -415,7 +436,8 @@ export const EmailSettings = () => {
                         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
                             Mit den Angaben aus dem Formular wird eine Test-Nachricht an Ihre Konto-Adresse
                             <strong> {testRecipient || '–'}</strong> gesendet.
-                            {!form.smtp_pass && isConfiguredInDb && ' Ohne neu eingegebenes Passwort wird das gespeicherte Passwort verwendet.'}
+                            {!form.smtp_pass && !passwordRequired && ' Ohne neu eingegebenes Passwort wird das gespeicherte Passwort verwendet.'}
+                            {!form.smtp_pass && loginChanged && ' Server oder Benutzername wurden geändert – bitte geben Sie das Passwort erneut ein.'}
                         </p>
 
                         {statusMessage && (

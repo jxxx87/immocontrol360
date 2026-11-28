@@ -27,6 +27,12 @@ import { usePortfolio } from '../context/PortfolioContext';
 // einzelner alter Regeln – auf ausdrücklichen Wunsch des Nutzers.
 // Ein echter Import braucht später: stabile transaction_id + Upsert, Buchung per
 // RPC in einer Transaktion (Status 'pending' sperren, Buchungs-ID am Umsatz).
+// Vertrag für bank_transactions.matched_target_id (Welle 3, M2-16): bei
+// matched_type 'income' die ID der Mietzahlung (rent_payments.id), bei 'expense'
+// die ID der Ausgabe (expenses.id) – nie Vertrags- oder Kostenart-IDs. Wird die
+// Buchung gelöscht, setzt der DB-Trigger trigger_bank_tx_unmatch_on_delete den
+// Umsatz wieder auf 'pending'. (Altbestand der früheren Testversion trägt teils
+// Vertrags- bzw. Kostenart-IDs; die Seite zeigt ihn nur an.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;

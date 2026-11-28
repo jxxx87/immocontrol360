@@ -7,7 +7,9 @@ import {
 } from 'lucide-react';
 import Card from '../../components/ui/Card';
 import Button from '../../components/ui/Button';
+import Modal from '../../components/ui/Modal';
 import { supabase } from '../../lib/supabase';
+import { useUnsavedChangesGuard } from '../../lib/useUnsavedChangesGuard';
 import { useAuth } from '../../context/AuthContext';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { useViewMode } from '../../context/ViewModeContext';
@@ -100,6 +102,7 @@ const TEST_ROWS = [
 ];
 
 const NO_ROW_SAVED = 'Die Vorlage wurde nicht gespeichert – keine Berechtigung oder die Vorlage existiert nicht mehr. Bitte die Seite neu laden.';
+const UNSAVED_MESSAGE = 'Es gibt ungespeicherte Änderungen an der PDF-Vorlage. Trotzdem verlassen?';
 const describeSaveError = (err) => {
     const msg = err?.message || String(err || 'Unbekannter Fehler');
     if (err?.code === '42501' || /row-level security/i.test(msg)) {
@@ -112,18 +115,57 @@ const describeSaveError = (err) => {
 // Der Editor wird bei Nutzer- oder Portfoliowechsel neu eingehängt. So kann
 // kein Zustand (Vorlagen-ID, Logo, Subtitel, Verlauf) in ein anderes
 // Portfolio „mitwandern" und beim Speichern eine fremde Vorlage überschreiben.
+// Wechselt jemand bei ungespeicherten Änderungen das Portfolio (Topbar), bleibt
+// die bisherige Vorlage geöffnet, bis er verwirft oder zum Portfolio zurückkehrt.
 const PdfTemplateEditor = () => {
     const { user } = useAuth();
-    const { selectedPortfolioID } = usePortfolio();
+    const { selectedPortfolioID, setSelectedPortfolioID, portfolios } = usePortfolio();
+    const requestedPortfolioId = selectedPortfolioID || '';
+    const [editorPortfolioId, setEditorPortfolioId] = useState(requestedPortfolioId);
+    const [editorDirty, setEditorDirty] = useState(false);
+
+    // Ohne ungespeicherte Änderungen dem Wechsel sofort folgen
+    if (requestedPortfolioId !== editorPortfolioId && !editorDirty) {
+        setEditorPortfolioId(requestedPortfolioId);
+    }
+    const switchPending = requestedPortfolioId !== editorPortfolioId && editorDirty;
+
+    const discardAndSwitch = () => {
+        setEditorDirty(false);
+        setEditorPortfolioId(requestedPortfolioId);
+    };
+    const stayOnTemplate = () => setSelectedPortfolioID(editorPortfolioId);
+
+    const editorPortfolioName = portfolios.find(p => p.id === editorPortfolioId)?.name || '';
+
     return (
-        <PdfTemplateEditorInner
-            key={`${user?.id || '-'}:${selectedPortfolioID || '-'}`}
-            portfolioId={selectedPortfolioID || ''}
-        />
+        <>
+            <PdfTemplateEditorInner
+                key={`${user?.id || '-'}:${editorPortfolioId || '-'}`}
+                portfolioId={editorPortfolioId}
+                onDirtyChange={setEditorDirty}
+            />
+            <Modal
+                isOpen={switchPending}
+                onClose={stayOnTemplate}
+                title="Ungespeicherte Änderungen"
+                footer={(
+                    <>
+                        <Button variant="secondary" onClick={stayOnTemplate}>Zurück zur Vorlage</Button>
+                        <Button variant="danger" onClick={discardAndSwitch}>Änderungen verwerfen und wechseln</Button>
+                    </>
+                )}
+            >
+                <p style={{ lineHeight: 1.5 }}>
+                    Die PDF-Vorlage {editorPortfolioName ? <>des Portfolios „{editorPortfolioName}“</> : 'des bisherigen Portfolios'} hat ungespeicherte Änderungen.
+                    Beim Portfoliowechsel gehen sie verloren. Speichern Sie die Vorlage zuerst oder verwerfen Sie die Änderungen.
+                </p>
+            </Modal>
+        </>
     );
 };
 
-function PdfTemplateEditorInner({ portfolioId }) {
+function PdfTemplateEditorInner({ portfolioId, onDirtyChange }) {
     const navigate = useNavigate();
     const location = useLocation();
     const { user } = useAuth();
@@ -539,11 +581,8 @@ function PdfTemplateEditorInner({ portfolioId }) {
         });
     };
 
-    // ─── Back (mit Rückfrage bei ungespeicherten Änderungen) ──
-    const handleBack = () => {
-        if (dirty && !window.confirm('Es gibt ungespeicherte Änderungen an der PDF-Vorlage. Trotzdem verlassen?')) return;
-        navigate(backPath);
-    };
+    // ─── Back (Rückfrage bei ungespeicherten Änderungen über useUnsavedChangesGuard) ──
+    const handleBack = () => navigate(backPath);
 
     // ─── Drag Handling ─────────────────────────
     const handlePointerDown = useCallback((e, elId) => {
@@ -612,11 +651,13 @@ function PdfTemplateEditorInner({ portfolioId }) {
     }, [dragging, zoom, applyLayout, pushHistory, markDirty]);
 
     // ─── Unsaved changes warning ───────────────
+    // Jede App-Navigation (Sidebar, Topbar, Zurück) und Neuladen/Schließen fragt nach
+    useUnsavedChangesGuard(dirty ? UNSAVED_MESSAGE : null);
+
+    // Portfoliowechsel bei ungespeicherten Änderungen erkennt die äußere Komponente
     useEffect(() => {
-        const handler = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } };
-        window.addEventListener('beforeunload', handler);
-        return () => window.removeEventListener('beforeunload', handler);
-    }, [dirty]);
+        onDirtyChange?.(dirty);
+    }, [dirty, onDirtyChange]);
 
     // ─── Keyboard shortcuts ────────────────────
     useEffect(() => {

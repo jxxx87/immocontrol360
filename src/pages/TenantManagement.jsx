@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { supabase } from '../lib/supabase';
+import { fetchAllRows, isMissingRelationError } from '../lib/rentArrears';
 import { useAuth } from '../context/AuthContext';
 import { useNotifications } from '../context/NotificationContext';
 import {
@@ -25,6 +26,43 @@ const isLeaseActive = (lease, today) =>
     lease.start_date <= today &&
     (!lease.end_date || lease.end_date >= today);
 
+// Laufender oder künftiger Vertrag (gleiche Regel wie die Löschsperre in delete_tenant_completely)
+const isLeaseRunningOrFuture = (lease, today) =>
+    (!!lease.end_date && lease.end_date >= today) || (!lease.end_date && lease.status === 'active');
+
+// Kontaktfelder im Änderungsprotokoll (tenant_change_log), Reihenfolge = Anzeige
+const CHANGE_LOG_FIELDS = [
+    ['first_name', 'Vorname'],
+    ['last_name', 'Nachname'],
+    ['street', 'Straße'],
+    ['house_number', 'Hausnummer'],
+    ['postal_code', 'PLZ'],
+    ['city', 'Ort'],
+    ['phone', 'Telefon'],
+    ['email', 'E-Mail']
+];
+
+const normalizeLogValue = (key, value) => {
+    const text = value === null || value === undefined ? '' : String(value).trim();
+    return key === 'email' ? text.toLowerCase() : text;
+};
+
+// Geänderte Felder eines Protokolleintrags als Vorher/Nachher
+const getChangedFields = (entry) => CHANGE_LOG_FIELDS
+    .map(([key, label]) => ({
+        key,
+        label,
+        before: normalizeLogValue(key, entry?.old_values?.[key]),
+        after: normalizeLogValue(key, entry?.new_values?.[key])
+    }))
+    .filter(field => field.before !== field.after);
+
+const formatDateTimeDE = (value) => {
+    if (!value) return '—';
+    const d = new Date(value);
+    return `${d.toLocaleDateString('de-DE')} um ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr`;
+};
+
 // Öffentliche Adresse für Links an Mieter. In der Android-App (https://localhost) bzw. im
 // lokalen Entwicklungsbetrieb wäre window.location.origin für den Mieter nicht erreichbar.
 const PUBLIC_APP_ORIGIN = 'https://app.immocontrol360.de';
@@ -42,6 +80,33 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({
 }[ch]));
 
 const isValidEmail = (value) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value);
+
+// Fehlertext von supabase.functions.invoke (FunctionsHttpError trägt die Response)
+const readFunctionErrorMessage = async (err) => {
+    try {
+        if (err?.context && typeof err.context.json === 'function') {
+            const body = await err.context.json();
+            if (body?.error) return String(body.error);
+        }
+    } catch {
+        // Antwort ohne JSON-Inhalt
+    }
+    return err?.message || String(err);
+};
+
+// Ergebnis von revoke_tenant_invite als Hinweistext
+const describeInviteRevocation = (result) => {
+    if (!result) {
+        return 'Der bereits versendete Einladungslink konnte nicht widerrufen werden. Über ihn erhält der Mieter aber keinen Zugang zum Mieterportal mehr.';
+    }
+    if (result.accountDeleted || result.reason === 'no_account') {
+        return 'Der versendete Einladungslink ist ungültig.';
+    }
+    if (result.reason === 'confirmed') {
+        return 'Der Mieter hat die Einladung bereits geöffnet. Sein Benutzerkonto bleibt bestehen, erhält aber keinen Zugang zum Mieterportal.';
+    }
+    return 'Das Benutzerkonto zu dieser E-Mail-Adresse wird auch anderweitig genutzt und bleibt bestehen. Über die stornierte Einladung erhält es keinen Zugang zum Mieterportal.';
+};
 
 // Zufälliges Token für Mieterdaten-Links (192 Bit). Die Datenbank speichert künftig nur den Hash.
 const createLinkToken = () =>
@@ -93,6 +158,9 @@ const TenantManagement = () => {
     const [leases, setLeases] = useState([]);
     const [verificationLinks, setVerificationLinks] = useState([]);
     const [tenantAuthInfo, setTenantAuthInfo] = useState([]);
+    // Änderungsprotokoll der Mieterdaten-Links (Tabelle kommt mit Migration 09_tenant-mgmt)
+    const [changeLog, setChangeLog] = useState([]);
+    const [changeLogSupported, setChangeLogSupported] = useState(false);
     const [loading, setLoading] = useState(true);       // nur beim ersten Laden (Vollbild)
     const [refreshing, setRefreshing] = useState(false); // spätere Aktualisierungen
     const [loadErrors, setLoadErrors] = useState([]);
@@ -126,18 +194,24 @@ const TenantManagement = () => {
         if (initial) setLoading(true);
         else setRefreshing(true);
         try {
-            const results = await Promise.all([
-                supabase.from('tenant_invitations').select('id, email, tenant_id, unit_id, property_id, invited_by, status, created_at').order('created_at', { ascending: false }),
-                supabase.from('user_roles').select('id, user_id, role, tenant_id, unit_id, property_id, created_at').eq('role', 'tenant'),
-                supabase.from('tenants').select('id, user_id, first_name, last_name, email, phone, street, house_number, postal_code, city').order('last_name'),
-                supabase.from('units').select('id, unit_name, property_id, property:properties(street, house_number)').order('unit_name'),
-                supabase.from('properties').select('id, street, house_number, zip, city').order('street'),
-                supabase.from('leases').select('id, tenant_id, unit_id, status, start_date, end_date'),
+            // Seitenweise laden (fetchAllRows), damit die API-Grenze von 1000 Zeilen nichts abschneidet
+            const [changeLogRes, ...results] = await Promise.all([
+                fetchAllRows('tenant_change_log', 'id, tenant_id, link_id, source, old_values, new_values, created_at',
+                    q => q.order('created_at', { ascending: false })),
+                fetchAllRows('tenant_invitations', 'id, email, tenant_id, unit_id, property_id, invited_by, status, created_at',
+                    q => q.order('created_at', { ascending: false })),
+                fetchAllRows('user_roles', 'id, user_id, role, tenant_id, unit_id, property_id, created_at', q => q.eq('role', 'tenant')),
+                fetchAllRows('tenants', 'id, user_id, first_name, last_name, email, phone, street, house_number, postal_code, city',
+                    q => q.order('last_name')),
+                fetchAllRows('units', 'id, unit_name, property_id, property:properties(street, house_number)', q => q.order('unit_name')),
+                fetchAllRows('properties', 'id, street, house_number, zip, city', q => q.order('street')),
+                fetchAllRows('leases', 'id, tenant_id, unit_id, status, start_date, end_date'),
                 // Nur Links zu Mietern, die dieses Konto sehen darf (Inner Join auf tenants)
-                supabase.from('tenant_verification_links')
-                    .select('id, tenant_id, token, created_at, expires_at, is_updated, updated_at, created_by, tenant:tenants!inner(id)')
-                    .order('created_at', { ascending: false }),
-                supabase.from('tenant_auth_info').select('*')
+                fetchAllRows('tenant_verification_links',
+                    'id, tenant_id, token, created_at, expires_at, is_updated, updated_at, created_by, tenant:tenants!inner(id)',
+                    q => q.order('created_at', { ascending: false })),
+                // Sicht ohne id-Spalte: eindeutig über Konto + Mieter
+                fetchAllRows('tenant_auth_info', '*', q => q.order('tenant_user_id'), 1000, 'tenant_id')
             ]);
 
             const labels = ['Einladungen', 'Portal-Rollen', 'Mieter', 'Einheiten', 'Objekte', 'Mietverträge', 'Mieterdaten-Links', 'Portal-Konten'];
@@ -151,6 +225,19 @@ const TenantManagement = () => {
                     setters[i](res.data || []);
                 }
             });
+
+            // Fehlt die Tabelle noch (Migration nicht eingespielt), gilt der bisherige Verlauf ohne Vorher/Nachher
+            if (changeLogRes.error) {
+                setChangeLog([]);
+                setChangeLogSupported(false);
+                if (!isMissingRelationError(changeLogRes.error)) {
+                    console.error('Error fetching Änderungsprotokoll:', changeLogRes.error);
+                    failed.push(`Änderungsprotokoll: ${changeLogRes.error.message}`);
+                }
+            } else {
+                setChangeLog(changeLogRes.data || []);
+                setChangeLogSupported(true);
+            }
             setLoadErrors(failed);
         } catch (err) {
             console.error('Error fetching data:', err);
@@ -188,6 +275,33 @@ const TenantManagement = () => {
     }, [leases, unitById, today]);
 
     const registeredTenantIds = useMemo(() => new Set(tenantRoles.map(r => r.tenant_id).filter(Boolean)), [tenantRoles]);
+
+    // Verlauf: Protokolleinträge mit Vorher/Nachher; verwendete Links ohne Protokoll (vor Einführung) wie bisher
+    const updateHistory = useMemo(() => {
+        const loggedLinkIds = new Set(changeLog.map(e => e.link_id).filter(Boolean));
+        const entries = changeLog.map(e => ({
+            key: `log-${e.id}`,
+            tenantId: e.tenant_id,
+            date: e.created_at,
+            changes: getChangedFields(e)
+        }));
+        verificationLinks
+            .filter(l => l.is_updated && !loggedLinkIds.has(l.id))
+            .forEach(l => entries.push({ key: `link-${l.id}`, tenantId: l.tenant_id, date: l.updated_at, changes: null }));
+        return entries.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    }, [changeLog, verificationLinks]);
+
+    // Zuletzt über den Mieterdaten-Link eingetragene E-Mail-Adresse des im Einladungsdialog gewählten Mieters
+    const inviteEmailChangedByLink = useMemo(() => {
+        if (!inviteForm.tenant_id) return null;
+        // changeLog ist nach Datum absteigend sortiert -> erster Treffer = letzte Änderung
+        const entry = changeLog.find(e => e.tenant_id === inviteForm.tenant_id &&
+            normalizeLogValue('email', e.old_values?.email) !== normalizeLogValue('email', e.new_values?.email));
+        if (!entry) return null;
+        const linkEmail = normalizeLogValue('email', entry.new_values?.email);
+        if (!linkEmail || linkEmail !== normalizeLogValue('email', inviteForm.email)) return null;
+        return { date: entry.created_at, before: normalizeLogValue('email', entry.old_values?.email) };
+    }, [changeLog, inviteForm.tenant_id, inviteForm.email]);
 
     // ── SEND INVITATION ─────────────────────────────────────────────
     const handleInvite = async () => {
@@ -291,13 +405,33 @@ const TenantManagement = () => {
     };
 
     const handleCancelInvitation = async (entry) => {
-        if (!window.confirm(`Möchten Sie die Einladung für ${getTenantName(entry.tenantId)} wirklich stornieren?\n\nDer Mieter erhält dadurch keinen Zugang zum Mieterportal. Mieterdaten-Links (Tab „Mieterdaten") bleiben unberührt.`)) {
+        if (!window.confirm(`Möchten Sie die Einladung für ${getTenantName(entry.tenantId)} wirklich stornieren?\n\nDer Mieter erhält dadurch keinen Zugang zum Mieterportal; ein bereits versendeter, noch nicht genutzter Einladungslink wird ungültig. Mieterdaten-Links (Tab „Mieterdaten") bleiben unberührt.`)) {
             return;
         }
 
         setBusyEntryKey(entry.key);
         try {
-            // Nur diese Einladung löschen (Mieterdaten-Links gehören zum Tab „Mieterdaten")
+            // 1. Versendeten Einladungslink widerrufen (das per Einladung angelegte, noch nie
+            //    bestätigte Konto wird serverseitig gelöscht; bestätigte Konten bleiben bestehen)
+            let revocation = null;
+            const { data: revokeData, error: revokeErr } = await supabase.functions.invoke('send-letting-email', {
+                body: {
+                    action: 'revoke_tenant_invite',
+                    tenantId: entry.tenantId,
+                    invitationId: entry.id
+                }
+            });
+            if (revokeErr) {
+                const message = await readFunctionErrorMessage(revokeErr);
+                // Ältere Fassung der Function kennt die Aktion noch nicht -> Einladung trotzdem stornieren
+                if (message !== 'Unbekannte Aktion.') throw new Error(message);
+            } else if (revokeData?.error) {
+                throw new Error(revokeData.error);
+            } else {
+                revocation = revokeData;
+            }
+
+            // 2. Nur diese Einladung löschen (Mieterdaten-Links gehören zum Tab „Mieterdaten")
             const { data: removed, error: invErr } = await supabase
                 .from('tenant_invitations')
                 .delete()
@@ -308,10 +442,11 @@ const TenantManagement = () => {
                 throw new Error('Die Einladung konnte nicht gelöscht werden (fehlende Berechtigung oder bereits entfernt).');
             }
 
+            const fullyRevoked = !!revocation && (revocation.accountDeleted || revocation.reason === 'no_account');
             addNotification({
-                type: 'success',
+                type: fullyRevoked ? 'success' : 'warning',
                 title: 'Einladung storniert',
-                body: `Die Einladung für ${getTenantName(entry.tenantId)} wurde storniert.`
+                body: `Die Einladung für ${getTenantName(entry.tenantId)} wurde storniert. ${describeInviteRevocation(revocation)}`
             });
             fetchData();
         } catch (err) {
@@ -377,11 +512,41 @@ const TenantManagement = () => {
 
     const handleDeleteTenantCompletely = async (entry) => {
         const tenantName = getTenantName(entry.tenantId);
+
+        // Löschen nur ohne laufenden/künftigen Vertrag und ohne offene Forderung
+        // (die Datenbank prüft dasselbe; hier vorab mit verständlicher Meldung)
+        const blockedBody = (reason) => `${tenantName} kann nicht gelöscht werden: ${reason} ` +
+            'Wenn Sie nur den Zugang zum Mieterportal beenden möchten, wählen Sie „Zugang entziehen".';
+        if (leases.some(l => l.tenant_id === entry.tenantId && isLeaseRunningOrFuture(l, localDateString()))) {
+            addNotification({
+                type: 'error',
+                title: 'Löschen nicht möglich',
+                body: blockedBody('Es besteht ein laufender oder künftiger Mietvertrag. Bitte beenden Sie zuerst das Mietverhältnis.')
+            });
+            return;
+        }
+        setBusyEntryKey(entry.key);
+        const { count: openClaims, error: claimsError } = await supabase
+            .from('claims')
+            .select('id', { count: 'exact', head: true })
+            .eq('tenant_id', entry.tenantId)
+            .not('status', 'in', '("settled","cancelled","archived")');
+        setBusyEntryKey(null);
+        if (!claimsError && (openClaims || 0) > 0) {
+            addNotification({
+                type: 'error',
+                title: 'Löschen nicht möglich',
+                body: blockedBody('Es bestehen noch offene Forderungen. Bitte schließen Sie diese zuerst ab.')
+            });
+            return;
+        }
+
         if (!window.confirm(
             `Mieter ${tenantName} endgültig löschen?\n\n` +
-            'Gelöscht werden: die Mieterstammdaten sowie Portalzugang, Einladungen und Mieterdaten-Links dieses Mieters. ' +
+            'Gelöscht werden: die Mieterstammdaten sowie Portalzugang, Einladungen, Mieterdaten-Links und deren Änderungsprotokoll. ' +
             'Das Mieter-Benutzerkonto wird ebenfalls entfernt, sofern es nur für diesen Mieter besteht.\n\n' +
-            'Mietverträge, Mietkonto, Forderungen, Dokumente und Kontakte bleiben erhalten, verlieren aber unwiderruflich ' +
+            'Möglich nur, wenn kein laufender oder künftiger Mietvertrag und keine offene Forderung besteht. ' +
+            'Beendete Mietverträge, Mietkonto, abgeschlossene Forderungen, Dokumente und Kontakte bleiben erhalten, verlieren aber unwiderruflich ' +
             'den Bezug zu diesem Mieter (Name und Anschrift des Mieters fehlen dort danach).\n\n' +
             'Wenn Sie nur den Zugang zum Mieterportal beenden möchten, wählen Sie stattdessen „Zugang entziehen".\n\n' +
             'Dieser Schritt kann nicht rückgängig gemacht werden.'
@@ -1537,34 +1702,61 @@ const TenantManagement = () => {
                             <RefreshCw size={18} color="var(--primary-color)" />
                             Verlauf der Aktualisierungen
                         </h2>
+                        {changeLogSupported && (
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '-6px 0 14px 0' }}>
+                                Änderungen über den Mieterdaten-Link werden direkt übernommen. Hier sehen Sie je Aktualisierung die bisherigen
+                                und die neuen Angaben – bitte prüfen Sie insbesondere geänderte E-Mail-Adressen, bevor Sie diese verwenden.
+                            </p>
+                        )}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {verificationLinks.filter(l => l.is_updated).length === 0 ? (
+                            {updateHistory.length === 0 ? (
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', fontStyle: 'italic' }}>
                                     Es wurden noch keine Daten über die Verifikationslinks aktualisiert.
                                 </div>
                             ) : (
-                                verificationLinks
-                                    .filter(l => l.is_updated)
-                                    .map(l => {
-                                        const tenant = tenantById.get(l.tenant_id);
-                                        const name = tenant ? `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim() : 'Unbekannter Mieter';
-                                        return (
-                                            <div key={l.id} style={{
-                                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                padding: '10px 14px', borderRadius: 'var(--radius-md)',
-                                                backgroundColor: 'var(--background-color)', border: '1px solid var(--border-color)'
-                                            }}>
+                                updateHistory.map(h => {
+                                    const tenant = tenantById.get(h.tenantId);
+                                    const name = tenant ? `${tenant.first_name || ''} ${tenant.last_name || ''}`.trim() : 'Unbekannter Mieter';
+                                    return (
+                                        <div key={h.key} style={{
+                                            padding: '10px 14px', borderRadius: 'var(--radius-md)',
+                                            backgroundColor: 'var(--background-color)', border: '1px solid var(--border-color)'
+                                        }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                                                 <div style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>
-                                                    Mieter <strong>{name}</strong> hat seine Kontaktdaten aktualisiert.
+                                                    Mieter <strong>{name}</strong>{' '}
+                                                    {h.changes && h.changes.length === 0
+                                                        ? 'hat seine Kontaktdaten ohne Änderung bestätigt.'
+                                                        : 'hat seine Kontaktdaten aktualisiert.'}
                                                 </div>
                                                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                                    {l.updated_at
-                                                        ? `am ${new Date(l.updated_at).toLocaleDateString('de-DE')} um ${new Date(l.updated_at).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr`
-                                                        : '—'}
+                                                    {h.date ? `am ${formatDateTimeDE(h.date)}` : '—'}
                                                 </div>
                                             </div>
-                                        );
-                                    })
+                                            {h.changes && h.changes.length > 0 && (
+                                                <ul style={{ margin: '8px 0 0 0', padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                    {h.changes.map(c => (
+                                                        <li key={c.key} style={{ fontSize: '0.82rem', color: 'var(--text-primary)', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                                            <span style={{ fontWeight: 600, minWidth: '90px' }}>{c.label}:</span>
+                                                            <span style={{ color: 'var(--text-secondary)', textDecoration: c.before ? 'line-through' : 'none' }}>
+                                                                {c.before || '(leer)'}
+                                                            </span>
+                                                            <span style={{ color: 'var(--text-secondary)' }}>→</span>
+                                                            <span style={{ fontWeight: c.key === 'email' ? 600 : 400, color: c.key === 'email' ? '#92400E' : 'inherit' }}>
+                                                                {c.after || '(leer)'}
+                                                            </span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                            {!h.changes && changeLogSupported && (
+                                                <div style={{ marginTop: '4px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                                    Bisherige Werte nicht gespeichert (Aktualisierung vor Einführung des Änderungsprotokolls).
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })
                             )}
                         </div>
                     </div>
@@ -1653,6 +1845,21 @@ const TenantManagement = () => {
                                         outline: 'none', fontSize: '0.9rem'
                                     }}
                                 />
+                                {inviteEmailChangedByLink && (
+                                    <div role="alert" style={{
+                                        marginTop: '8px', padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                                        backgroundColor: '#FFFBEB', border: '1px solid #FDE68A',
+                                        fontSize: '0.8rem', color: '#92400E', lineHeight: 1.45,
+                                        display: 'flex', gap: '8px', alignItems: 'flex-start'
+                                    }}>
+                                        <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '1px' }} />
+                                        <span>
+                                            Diese E-Mail-Adresse wurde am {formatDateTimeDE(inviteEmailChangedByLink.date)} über den
+                                            Mieterdaten-Link eingetragen (vorher: {inviteEmailChangedByLink.before || 'keine'}). Wer den Link
+                                            hatte, konnte sie ändern – bitte prüfen Sie vor dem Einladen, ob sie wirklich zum Mieter gehört.
+                                        </span>
+                                    </div>
+                                )}
                             </div>
 
                             {inviteForm.unit_id ? (
