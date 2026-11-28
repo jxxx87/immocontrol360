@@ -39,6 +39,15 @@ ErrorDocument 404 /index.html
   Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), usb=()"
   # HSTS 180 Tage, bewusst ohne includeSubDomains und ohne preload
   Header always set Strict-Transport-Security "max-age=15552000"
+  # Content-Security-Policy ohne script-src/connect-src (nichts, was Skripte, Supabase oder Stripe bremst):
+  # - frame-ancestors 'self': keine Einbettung in fremde Seiten (gleiche Wirkung wie X-Frame-Options oben)
+  # - base-uri 'self': ein eingeschleustes <base> kann relative Adressen nicht umbiegen (die Seite setzt keins)
+  # - object-src 'none': die Seite nutzt keine <object>/<embed>-Elemente und zeigt keine PDFs an
+  # - upgrade-insecure-requests setzt Hostinger bereits selbst; hier wiederholt, damit es erhalten bleibt,
+  #   falls dieses "set" den Hostinger-Header ersetzt (bei zwei CSP-Headern gelten beide).
+  # Gilt bei Apache auch für den Unterordner /app; die App setzt dort in ihrer eigenen .htaccess eine eigene
+  # CSP (ohne object-src, wegen der PDF-Anzeige) und ersetzt damit diese.
+  Header always set Content-Security-Policy "upgrade-insecure-requests; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
 
   # HTML immer beim Server nachfragen, damit ein neuer Deploy sofort ankommt.
   # "always": gilt auch für die 404-Antwort (index.html als ErrorDocument), damit kein Cache sie festhält.

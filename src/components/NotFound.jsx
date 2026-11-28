@@ -4,7 +4,8 @@ import MainLayout from '../layouts/MainLayout';
 import { BRAND_NAME } from './siteConfig';
 
 // Eigene 404-Seite statt stiller Weiterleitung auf die Startseite (W1b-12).
-// Die SPA liefert technisch weiterhin HTTP 200 – "noindex" verhindert Soft-404-Einträge.
+// Unbekannte Pfade beantwortet der Server mit HTTP 404 (public/.htaccess: ErrorDocument 404 + Routenliste);
+// "noindex" bleibt als Absicherung, falls die Seite doch einmal mit Status 200 ausgeliefert wird.
 const NotFound = () => {
     return (
         <MainLayout>
