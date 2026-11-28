@@ -7,8 +7,9 @@
 --   report  Prüfbericht: das erzeugte DDL wurde in dieser Transaktion in Ersatz-Schemata
 --           (w3bl_public / w3bl_auth / w3bl_storage) eingespielt und Objekt für Objekt mit dem
 --           Live-Stand verglichen. Erwartet: "OK" in jeder Zeile. Bekannte, harmlose Abweichungen:
---           notify_push (absichtlich, siehe unten) und contact_requests_email_len (gleiche Bedingung,
---           nur andere Klammerung: das Original wurde mit BETWEEN angelegt).
+--           notify_push (absichtlich, siehe unten) sowie contact_requests_email_len und
+--           lease_cloud_folders_path_check (gleiche Bedingung, nur andere Klammerung: die Originale
+--           wurden mit BETWEEN angelegt).
 --
 -- Aufruf: per Supabase-MCP execute_sql oder SQL-Editor (der ganze Inhalt dieser Datei). Alles läuft
 -- in EINER Transaktion, die am Ende zurückgerollt wird – die Datenbank bleibt unverändert. Danach
@@ -83,6 +84,19 @@ fn as (
        and not exists (select 1 from pg_depend d
                         where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
 ),
+-- Funktionen, die schon beim Anlegen der Tabellen existieren müssen: von berechneten Spalten,
+-- Spalten-Vorgaben oder CHECK-Constraints benutzt (z. B. floor_plans.room_count ->
+-- floor_plan_room_count(jsonb)). Sie stehen deshalb vor Abschnitt 3, nicht in Abschnitt 5.
+early_fn as (
+    select distinct fn.oid
+      from fn
+      join pg_depend d on d.refclassid = 'pg_proc'::regclass and d.refobjid = fn.oid
+     where (d.classid = 'pg_attrdef'::regclass
+            and exists (select 1 from pg_attrdef ad join tbl on tbl.oid = ad.adrelid where ad.oid = d.objid))
+        or (d.classid = 'pg_constraint'::regclass
+            and exists (select 1 from pg_constraint k join tbl on tbl.oid = k.conrelid
+                         where k.oid = d.objid and k.contype = 'c'))
+),
 cols as (
     select a.attrelid, a.attnum,
            '    ' || quote_ident(a.attname::text) || ' ' || format_type(a.atttypid, a.atttypmod)
@@ -140,6 +154,14 @@ lines(sec, ord, txt) as (
         'set client_min_messages = warning;',
         'select pg_catalog.set_config(''search_path'', '''', false);')
 
+    -- 1 (Fortsetzung) Funktionen für berechnete Spalten/Vorgaben/CHECK – vor den Tabellen
+    union all
+    select 1, '1', E'\n-- Funktionen, die berechnete Spalten, Spalten-Vorgaben oder CHECK-Constraints benutzen\n-- (müssen vor den Tabellen in Abschnitt 3 existieren; Rechte und Kommentare folgen in 13/14)'
+     where exists (select 1 from early_fn)
+    union all
+    select 1, '1 ' || fn.proname || ' ' || fn.sig, replace(pg_get_functiondef(fn.oid), E'\r\n', E'\n') || ';'
+      from fn where fn.oid in (select oid from early_fn)
+
     -- 2 Erweiterungen
     union all
     select 2, e.extname::text, format('create extension if not exists %I with schema %I;', e.extname, n.nspname)
@@ -171,6 +193,7 @@ lines(sec, ord, txt) as (
            case when fn.proname = 'notify_push' then pg_temp.baseline_notify_push_def()
                 else replace(pg_get_functiondef(fn.oid), E'\r\n', E'\n') end || ';'
       from fn
+     where fn.oid not in (select oid from early_fn)
 
     -- 6 Sichten
     union all

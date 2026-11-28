@@ -1,8 +1,8 @@
 -- =============================================================================
 -- ImmoControl360 · Ausgangsschema (Baseline) der Live-Datenbank – Schema public (+ Storage-Policies)
 -- Erzeugt mit supabase/baseline/generate_baseline.sql aus dem Live-Katalog (nur lesend).
--- Stand: 2026-11-27 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261127192703
--- Inhalt: 72 Tabellen, 4 Sichten, 138 Funktionen, 293 Policies (public), 27 Storage-Policies
+-- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128033003
+-- Inhalt: 74 Tabellen, 3 Sichten, 153 Funktionen, 291 Policies (public), 32 Storage-Policies
 --
 -- NUR AUF EINER LEEREN DATENBANK (frisches Supabase-Projekt) ausführen, als eine Transaktion:
 --   psql "<db-url>" -v ON_ERROR_STOP=1 --single-transaction -f baseline_public.sql
@@ -16,6 +16,46 @@
 set check_function_bodies = off;
 set client_min_messages = warning;
 select pg_catalog.set_config('search_path', '', false);
+
+-- Funktionen, die berechnete Spalten, Spalten-Vorgaben oder CHECK-Constraints benutzen
+-- (müssen vor den Tabellen in Abschnitt 3 existieren; Rechte und Kommentare folgen in 13/14)
+CREATE OR REPLACE FUNCTION public.floor_plan_room_count(p_plan jsonb)
+ RETURNS integer
+ LANGUAGE sql
+ IMMUTABLE PARALLEL SAFE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce(sum(
+           case when jsonb_typeof(s -> 'rooms') = 'array' then jsonb_array_length(s -> 'rooms') else 0 end
+         ), 0)::integer
+  from jsonb_array_elements(case when jsonb_typeof(p_plan) = 'array' then p_plan else '[]'::jsonb end) as s
+$function$
+;
+CREATE OR REPLACE FUNCTION public.floor_plan_storey_labels(p_plan jsonb)
+ RETURNS text[]
+ LANGUAGE sql
+ IMMUTABLE PARALLEL SAFE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce(array_agg(coalesce(nullif(e.s ->> 'label', ''), '?') order by e.ord), '{}'::text[])
+  from jsonb_array_elements(case when jsonb_typeof(p_plan) = 'array' then p_plan else '[]'::jsonb end)
+       with ordinality as e(s, ord)
+$function$
+;
+CREATE OR REPLACE FUNCTION public.floor_plan_total_area_mm2(p_plan jsonb)
+ RETURNS numeric
+ LANGUAGE sql
+ IMMUTABLE PARALLEL SAFE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce(sum(
+           case when jsonb_typeof(r -> 'area_mm2') = 'number' then (r ->> 'area_mm2')::numeric else 0 end
+         ), 0)
+  from jsonb_array_elements(case when jsonb_typeof(p_plan) = 'array' then p_plan else '[]'::jsonb end) as s
+  cross join lateral jsonb_array_elements(
+           case when jsonb_typeof(s -> 'rooms') = 'array' then s -> 'rooms' else '[]'::jsonb end) as r
+$function$
+;
 
 -- -----------------------------------------------------------------------------
 -- 2 · Erweiterungen
@@ -99,7 +139,8 @@ create table public.claim_access_links (
     token text,
     pin text,
     is_active boolean default true,
-    constraint claim_access_links_pkey PRIMARY KEY (id)
+    constraint claim_access_links_pkey PRIMARY KEY (id),
+    constraint claim_access_links_no_plaintext CHECK (((token IS NULL) AND (pin IS NULL)))
 );
 create table public.claim_events (
     id uuid default gen_random_uuid() not null,
@@ -160,7 +201,7 @@ create table public.claim_payments (
     created_at timestamp with time zone default now(),
     constraint claim_payments_pkey PRIMARY KEY (id),
     constraint chk_reversal_amount CHECK ((((allocation_type = 'reversal'::text) AND (amount < (0)::numeric) AND (reversal_reference_id IS NOT NULL)) OR ((allocation_type <> 'reversal'::text) AND (amount >= (0)::numeric) AND (reversal_reference_id IS NULL)))),
-    constraint claim_payments_allocation_type_check CHECK ((allocation_type = ANY (ARRAY['automatic'::text, 'manual'::text, 'debtor_designated'::text, 'reversal'::text]))),
+    constraint claim_payments_allocation_type_check CHECK ((allocation_type = ANY (ARRAY['automatic'::text, 'manual'::text, 'debtor_designated'::text, 'reversal'::text, 'waiver'::text]))),
     constraint claim_payments_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'posted'::text, 'cancelled'::text])))
 );
 create table public.claims (
@@ -183,6 +224,7 @@ create table public.claims (
     cancellation_reason text,
     archived_at timestamp with time zone,
     constraint claims_pkey PRIMARY KEY (id),
+    constraint claims_accumulated_unpaid_fees_check CHECK ((accumulated_unpaid_fees >= (0)::numeric)),
     constraint claims_interest_rate_check CHECK ((interest_rate >= (0)::numeric)),
     constraint claims_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'open'::text, 'sent'::text, 'action_required'::text, 'payment_plan_requested'::text, 'payment_plan_active'::text, 'settled'::text, 'cancelled'::text, 'archived'::text])))
 );
@@ -195,6 +237,8 @@ create table public.cloud_connections (
     expires_at timestamp with time zone,
     account_email text,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    access_token_secret_id uuid,
+    refresh_token_secret_id uuid,
     constraint cloud_connections_pkey PRIMARY KEY (id)
 );
 create table public.contact_requests (
@@ -269,7 +313,8 @@ create table public.document_templates (
     name character varying(100),
     is_custom boolean default false not null,
     category character varying(50),
-    constraint document_templates_pkey PRIMARY KEY (id)
+    constraint document_templates_pkey PRIMARY KEY (id),
+    constraint document_templates_content_html_size_check CHECK (((content_html IS NULL) OR (octet_length(content_html) <= 5242880)))
 );
 create table public.documents (
     id uuid default gen_random_uuid() not null,
@@ -341,6 +386,9 @@ create table public.floor_plans (
     version_history jsonb default '[]'::jsonb,
     created_at timestamp with time zone default now(),
     updated_at timestamp with time zone default now(),
+    room_count integer generated always as (public.floor_plan_room_count(plan_data)) stored,
+    total_area_mm2 numeric generated always as (public.floor_plan_total_area_mm2(plan_data)) stored,
+    storey_labels text[] generated always as (public.floor_plan_storey_labels(plan_data)) stored,
     constraint floor_plans_pkey PRIMARY KEY (id),
     constraint floor_plans_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'completed'::text])))
 );
@@ -355,20 +403,6 @@ create table public.invoice_counters (
     constraint invoice_counters_pkey PRIMARY KEY (id),
     constraint invoice_counters_unique_portfolio_year_object UNIQUE NULLS NOT DISTINCT (portfolio_id, year, object_unit_id)
 );
-create table public.invoice_items (
-    id uuid default gen_random_uuid() not null,
-    user_id uuid not null,
-    invoice_id uuid not null,
-    "position" integer default 1 not null,
-    title text not null,
-    description text,
-    quantity numeric(12,2) default 1 not null,
-    unit_price numeric(12,2) default 0 not null,
-    vat_rate numeric(5,2) default 7 not null,
-    created_at timestamp with time zone default now(),
-    constraint invoice_items_pkey PRIMARY KEY (id),
-    constraint invoice_items_vat_rate_only_7 CHECK ((vat_rate = (7)::numeric))
-);
 create table public.invoices (
     id uuid default gen_random_uuid() not null,
     user_id uuid not null,
@@ -377,8 +411,6 @@ create table public.invoices (
     unit_id uuid,
     contact_id uuid,
     invoice_date date default CURRENT_DATE not null,
-    checkin_date date,
-    checkout_date date,
     nights integer,
     persons integer,
     invoice_number text not null,
@@ -402,6 +434,24 @@ create table public.invoices (
     constraint invoices_pkey PRIMARY KEY (id),
     constraint invoices_user_id_invoice_number_portfolio_id_key UNIQUE (user_id, invoice_number, portfolio_id),
     constraint invoices_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'issued'::text, 'credited'::text, 'credit_note'::text])))
+);
+create table public.lease_cloud_folders (
+    lease_id uuid not null,
+    cloud_connection_id uuid not null,
+    user_id uuid not null,
+    folder_path text not null,
+    created_at timestamp with time zone default now() not null,
+    updated_at timestamp with time zone default now() not null,
+    constraint lease_cloud_folders_pkey PRIMARY KEY (lease_id, cloud_connection_id),
+    constraint lease_cloud_folders_path_check CHECK ((((char_length(folder_path) >= 1) AND (char_length(folder_path) <= 2000)) AND (folder_path !~ '^/'::text) AND (folder_path !~ '/$'::text) AND (folder_path !~ '//'::text) AND (folder_path !~ '(^|/)\.{1,2}(/|$)'::text) AND (folder_path !~ '[[:cntrl:]]'::text)))
+);
+create table public.lease_notes (
+    lease_id uuid not null,
+    notes text default ''::text not null,
+    updated_at timestamp with time zone default now() not null,
+    updated_by uuid,
+    constraint lease_notes_pkey PRIMARY KEY (lease_id),
+    constraint lease_notes_length CHECK ((char_length(notes) <= 20000))
 );
 create table public.lease_rent_periods (
     id uuid default gen_random_uuid() not null,
@@ -435,7 +485,9 @@ create table public.leases (
     deposit numeric,
     last_rent_increase date,
     lease_type text default 'normal'::text,
-    constraint leases_pkey PRIMARY KEY (id)
+    booking_start_date date,
+    constraint leases_pkey PRIMARY KEY (id),
+    constraint leases_end_after_start CHECK (((end_date IS NULL) OR (end_date >= start_date)))
 );
 create table public.loans (
     id uuid default gen_random_uuid() not null,
@@ -625,7 +677,7 @@ create table public.pdf_templates (
     margin_mm integer default 15 not null,
     header_height_mm integer default 50 not null,
     footer_height_mm integer default 20 not null,
-    accent_color text default '#f59e0b'::text,
+    accent_color text default '#0ea5e9'::text,
     elements jsonb default '[]'::jsonb,
     subtitles_by_report_type jsonb default '{}'::jsonb,
     logo_url text,
@@ -809,6 +861,7 @@ create table public.renovation_invoices (
     note text,
     created_at timestamp with time zone default now(),
     updated_at timestamp with time zone default now(),
+    created_by uuid default auth.uid(),
     constraint renovation_invoices_pkey PRIMARY KEY (id)
 );
 create table public.renovation_milestone_templates (
@@ -831,17 +884,6 @@ create table public.renovation_milestones (
     completed_at timestamp with time zone,
     created_at timestamp with time zone default now(),
     constraint renovation_milestones_pkey PRIMARY KEY (id)
-);
-create table public.renovation_positions (
-    id uuid default gen_random_uuid() not null,
-    subtrade_id uuid not null,
-    user_id uuid not null,
-    name text not null,
-    unit text default 'Stk.'::text,
-    price numeric default 0,
-    sort_order integer default 0,
-    created_at timestamp with time zone default now(),
-    constraint renovation_positions_pkey PRIMARY KEY (id)
 );
 create table public.renovation_project_subtrades (
     id uuid default gen_random_uuid() not null,
@@ -885,6 +927,7 @@ create table public.renovation_projects (
     created_at timestamp with time zone default now(),
     updated_at timestamp with time zone default now(),
     gik_transferred_amount numeric default 0,
+    created_by uuid default auth.uid(),
     constraint renovation_projects_pkey PRIMARY KEY (id),
     constraint renovation_projects_gik_transferred_amount_check CHECK (((gik_transferred_amount IS NULL) OR (gik_transferred_amount >= (0)::numeric))),
     constraint renovation_projects_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'active'::text, 'completed'::text, 'archived'::text])))
@@ -915,6 +958,7 @@ create table public.renovation_tasks (
     completed_at timestamp with time zone,
     created_at timestamp with time zone default now(),
     updated_at timestamp with time zone default now(),
+    created_by uuid default auth.uid(),
     constraint renovation_tasks_pkey PRIMARY KEY (id)
 );
 create table public.renovation_trades (
@@ -962,6 +1006,7 @@ create table public.rent_payments (
     amount numeric(12,2) not null,
     note text,
     created_at timestamp with time zone default now(),
+    claim_payment_id uuid,
     constraint rent_payments_pkey PRIMARY KEY (id)
 );
 create table public.rental_applicants (
@@ -1001,6 +1046,7 @@ create table public.rental_applicants (
     receives_social_benefits boolean default false,
     has_pets boolean default false,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    received_mail_sent_at timestamp with time zone,
     constraint rental_applicants_pkey PRIMARY KEY (id),
     constraint rental_applicants_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'invited'::text, 'declined'::text, 'accepted'::text, 'contract_requested'::text, 'contract_declined'::text])))
 );
@@ -1032,6 +1078,8 @@ create table public.rental_viewing_bookings (
     status text default 'booked'::text not null,
     canceled_at timestamp with time zone,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    confirmed_mail_sent_at timestamp with time zone,
+    canceled_mail_sent_at timestamp with time zone,
     constraint rental_viewing_bookings_pkey PRIMARY KEY (id),
     constraint rental_viewing_bookings_status_check CHECK ((status = ANY (ARRAY['booked'::text, 'canceled'::text])))
 );
@@ -1046,6 +1094,28 @@ create table public.rental_viewings (
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     constraint rental_viewings_pkey PRIMARY KEY (id),
     constraint rental_viewings_slot_duration_check CHECK ((slot_duration_minutes > 0))
+);
+create table public.stripe_webhook_events (
+    event_id text not null,
+    event_type text not null,
+    livemode boolean,
+    connect_account text,
+    stripe_created_at timestamp with time zone,
+    status text default 'processing'::text not null,
+    attempts integer default 1 not null,
+    outcome text,
+    last_error text,
+    received_at timestamp with time zone default now() not null,
+    started_at timestamp with time zone default now() not null,
+    processed_at timestamp with time zone,
+    constraint stripe_webhook_events_pkey PRIMARY KEY (event_id),
+    constraint stripe_webhook_events_account_check CHECK (((connect_account IS NULL) OR (connect_account ~ '^acct_[A-Za-z0-9]{1,255}$'::text))),
+    constraint stripe_webhook_events_attempts_check CHECK ((attempts >= 1)),
+    constraint stripe_webhook_events_error_check CHECK (((last_error IS NULL) OR (char_length(last_error) <= 500))),
+    constraint stripe_webhook_events_event_id_check CHECK ((event_id ~ '^evt_[A-Za-z0-9]{1,255}$'::text)),
+    constraint stripe_webhook_events_event_type_check CHECK (((char_length(event_type) >= 1) AND (char_length(event_type) <= 100))),
+    constraint stripe_webhook_events_outcome_check CHECK (((outcome IS NULL) OR (outcome ~ '^[a-z_]{1,100}$'::text))),
+    constraint stripe_webhook_events_status_check CHECK ((status = ANY (ARRAY['processing'::text, 'processed'::text, 'failed'::text])))
 );
 create table public.subscriptions (
     id uuid default gen_random_uuid() not null,
@@ -1062,6 +1132,16 @@ create table public.subscriptions (
     constraint subscriptions_pkey PRIMARY KEY (id),
     constraint subscriptions_user_id_key UNIQUE (user_id)
 );
+create table public.tenant_change_log (
+    id uuid default gen_random_uuid() not null,
+    tenant_id uuid not null,
+    link_id uuid,
+    source text default 'token_link'::text not null,
+    old_values jsonb default '{}'::jsonb not null,
+    new_values jsonb default '{}'::jsonb not null,
+    created_at timestamp with time zone default now() not null,
+    constraint tenant_change_log_pkey PRIMARY KEY (id)
+);
 create table public.tenant_invitations (
     id uuid default gen_random_uuid() not null,
     email text not null,
@@ -1077,7 +1157,7 @@ create table public.tenant_invitations (
 );
 create table public.tenant_verification_links (
     id uuid default gen_random_uuid() not null,
-    tenant_id uuid,
+    tenant_id uuid not null,
     token text not null,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     expires_at timestamp with time zone not null,
@@ -1101,7 +1181,9 @@ create table public.tenants (
     house_number text,
     postal_code text,
     city text,
-    constraint tenants_pkey PRIMARY KEY (id)
+    salutation text,
+    constraint tenants_pkey PRIMARY KEY (id),
+    constraint tenants_salutation_check CHECK (((salutation IS NULL) OR (salutation = ANY (ARRAY['female'::text, 'male'::text, 'diverse'::text]))))
 );
 create table public.tickets (
     id uuid default gen_random_uuid() not null,
@@ -1161,12 +1243,14 @@ create table public.user_smtp_settings (
     smtp_host text not null,
     smtp_port integer default 587 not null,
     smtp_user text not null,
-    smtp_pass text not null,
+    smtp_pass text,
     smtp_sender text not null,
     created_at timestamp with time zone default CURRENT_TIMESTAMP,
     updated_at timestamp with time zone default CURRENT_TIMESTAMP,
+    smtp_pass_secret_id uuid,
     constraint user_smtp_settings_pkey PRIMARY KEY (id),
-    constraint user_smtp_settings_user_id_key UNIQUE (user_id)
+    constraint user_smtp_settings_user_id_key UNIQUE (user_id),
+    constraint user_smtp_settings_no_plaintext_pass CHECK ((smtp_pass IS NULL))
 );
 create table public.utility_settlements (
     id uuid default gen_random_uuid() not null,
@@ -1223,7 +1307,7 @@ alter table public.contacts add constraint contacts_user_id_fkey FOREIGN KEY (us
 alter table public.deals add constraint deals_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE SET NULL;
 alter table public.deals add constraint deals_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.distribution_keys add constraint distribution_keys_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-alter table public.document_templates add constraint document_templates_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE SET NULL;
+alter table public.document_templates add constraint document_templates_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE CASCADE;
 alter table public.document_templates add constraint document_templates_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.documents add constraint documents_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id);
 alter table public.documents add constraint documents_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
@@ -1241,13 +1325,16 @@ alter table public.floor_plans add constraint floor_plans_unit_id_fkey FOREIGN K
 alter table public.floor_plans add constraint floor_plans_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.invoice_counters add constraint invoice_counters_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE CASCADE;
 alter table public.invoice_counters add constraint invoice_counters_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-alter table public.invoice_items add constraint invoice_items_invoice_id_fkey FOREIGN KEY (invoice_id) REFERENCES public.invoices(id) ON DELETE CASCADE;
-alter table public.invoice_items add constraint invoice_items_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.invoices add constraint invoices_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES public.contacts(id) ON DELETE SET NULL;
 alter table public.invoices add constraint invoices_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE RESTRICT;
 alter table public.invoices add constraint invoices_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id) ON DELETE SET NULL;
 alter table public.invoices add constraint invoices_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.units(id) ON DELETE SET NULL;
 alter table public.invoices add constraint invoices_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.lease_cloud_folders add constraint lease_cloud_folders_cloud_connection_id_fkey FOREIGN KEY (cloud_connection_id) REFERENCES public.cloud_connections(id) ON DELETE CASCADE;
+alter table public.lease_cloud_folders add constraint lease_cloud_folders_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.leases(id) ON DELETE CASCADE;
+alter table public.lease_cloud_folders add constraint lease_cloud_folders_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.lease_notes add constraint lease_notes_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.leases(id) ON DELETE CASCADE;
+alter table public.lease_notes add constraint lease_notes_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.lease_rent_periods add constraint lease_rent_periods_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.lease_rent_periods add constraint lease_rent_periods_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.leases(id) ON DELETE CASCADE;
 alter table public.leases add constraint leases_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE RESTRICT;
@@ -1305,14 +1392,13 @@ alter table public.renovation_calc_trades add constraint renovation_calc_trades_
 alter table public.renovation_calculations add constraint renovation_calculations_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id) ON DELETE SET NULL;
 alter table public.renovation_calculations add constraint renovation_calculations_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.units(id) ON DELETE SET NULL;
 alter table public.renovation_calculations add constraint renovation_calculations_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.renovation_invoices add constraint renovation_invoices_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.renovation_invoices add constraint renovation_invoices_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.renovation_projects(id) ON DELETE CASCADE;
 alter table public.renovation_invoices add constraint renovation_invoices_project_subtrade_id_fkey FOREIGN KEY (project_subtrade_id) REFERENCES public.renovation_project_subtrades(id) ON DELETE CASCADE;
 alter table public.renovation_invoices add constraint renovation_invoices_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.renovation_milestone_templates add constraint renovation_milestone_templates_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.renovation_milestones add constraint renovation_milestones_project_trade_id_fkey FOREIGN KEY (project_trade_id) REFERENCES public.renovation_project_trades(id) ON DELETE CASCADE;
 alter table public.renovation_milestones add constraint renovation_milestones_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-alter table public.renovation_positions add constraint renovation_positions_subtrade_id_fkey FOREIGN KEY (subtrade_id) REFERENCES public.renovation_subtrades(id) ON DELETE CASCADE;
-alter table public.renovation_positions add constraint renovation_positions_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.renovation_project_subtrades add constraint renovation_project_subtrades_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.renovation_projects(id) ON DELETE CASCADE;
 alter table public.renovation_project_subtrades add constraint renovation_project_subtrades_project_trade_id_fkey FOREIGN KEY (project_trade_id) REFERENCES public.renovation_project_trades(id) ON DELETE CASCADE;
 alter table public.renovation_project_subtrades add constraint renovation_project_subtrades_responsible_contact_id_fkey FOREIGN KEY (responsible_contact_id) REFERENCES public.contacts(id) ON DELETE SET NULL;
@@ -1320,11 +1406,13 @@ alter table public.renovation_project_subtrades add constraint renovation_projec
 alter table public.renovation_project_trades add constraint renovation_project_trades_depends_on_fkey FOREIGN KEY (depends_on) REFERENCES public.renovation_project_trades(id) ON DELETE SET NULL;
 alter table public.renovation_project_trades add constraint renovation_project_trades_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.renovation_projects(id) ON DELETE CASCADE;
 alter table public.renovation_project_trades add constraint renovation_project_trades_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.renovation_projects add constraint renovation_projects_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.renovation_projects add constraint renovation_projects_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id) ON DELETE CASCADE;
 alter table public.renovation_projects add constraint renovation_projects_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.units(id) ON DELETE SET NULL;
 alter table public.renovation_projects add constraint renovation_projects_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.renovation_subtrades add constraint renovation_subtrades_trade_id_fkey FOREIGN KEY (trade_id) REFERENCES public.renovation_trades(id) ON DELETE CASCADE;
 alter table public.renovation_subtrades add constraint renovation_subtrades_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.renovation_tasks add constraint renovation_tasks_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.renovation_tasks add constraint renovation_tasks_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.renovation_projects(id) ON DELETE CASCADE;
 alter table public.renovation_tasks add constraint renovation_tasks_project_trade_id_fkey FOREIGN KEY (project_trade_id) REFERENCES public.renovation_project_trades(id) ON DELETE SET NULL;
 alter table public.renovation_tasks add constraint renovation_tasks_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id) ON DELETE CASCADE;
@@ -1334,6 +1422,7 @@ alter table public.rent_charges add constraint rent_charges_lease_id_fkey FOREIG
 alter table public.rent_charges add constraint rent_charges_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.rent_ledger add constraint rent_ledger_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.leases(id) ON DELETE RESTRICT;
 alter table public.rent_ledger add constraint rent_ledger_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.rent_payments add constraint rent_payments_claim_payment_id_fkey FOREIGN KEY (claim_payment_id) REFERENCES public.claim_payments(id) ON DELETE RESTRICT;
 alter table public.rent_payments add constraint rent_payments_lease_id_fkey FOREIGN KEY (lease_id) REFERENCES public.leases(id) ON DELETE RESTRICT;
 alter table public.rent_payments add constraint rent_payments_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.rental_applicants add constraint rental_applicants_process_id_fkey FOREIGN KEY (process_id) REFERENCES public.rental_processes(id) ON DELETE CASCADE;
@@ -1345,6 +1434,8 @@ alter table public.rental_viewing_bookings add constraint rental_viewing_booking
 alter table public.rental_viewings add constraint rental_viewings_process_id_fkey FOREIGN KEY (process_id) REFERENCES public.rental_processes(id) ON DELETE CASCADE;
 alter table public.rental_viewings add constraint rental_viewings_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.subscriptions add constraint subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+alter table public.tenant_change_log add constraint tenant_change_log_link_id_fkey FOREIGN KEY (link_id) REFERENCES public.tenant_verification_links(id) ON DELETE SET NULL;
+alter table public.tenant_change_log add constraint tenant_change_log_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
 alter table public.tenant_invitations add constraint tenant_invitations_invited_by_fkey FOREIGN KEY (invited_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 alter table public.tenant_invitations add constraint tenant_invitations_property_id_fkey FOREIGN KEY (property_id) REFERENCES public.properties(id) ON DELETE SET NULL;
 alter table public.tenant_invitations add constraint tenant_invitations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
@@ -1507,54 +1598,82 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.bank_transactions_unmatch_deleted_target()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_type text;
+begin
+    v_type := case tg_table_name
+                  when 'rent_payments' then 'income'
+                  when 'expenses' then 'expense'
+              end;
+    if v_type is not null then
+        update public.bank_transactions bt
+           set status = 'pending',
+               matched_type = null,
+               matched_target_id = null
+         where bt.matched_target_id = old.id
+           and bt.matched_type = v_type;
+    end if;
+    return old;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.block_claim_events_modification()
  RETURNS trigger
  LANGUAGE plpgsql
  SECURITY DEFINER
  SET search_path TO 'public', 'pg_temp'
 AS $function$
+declare
+  v_own_note boolean;
 begin
   if current_setting('app.claims_rpc_bypass', true) = '1' then
     if tg_op = 'DELETE' then return old; end if;
     return new;
   end if;
 
+  -- Eigene Notiz: note_added ohne Systemquelle und ohne Positionsbezug (z. B. "Position gelöscht")
+  v_own_note := old.event_type = 'note_added'
+                and coalesce(old.event_metadata->>'source', '') = ''
+                and not (coalesce(old.event_metadata, '{}'::jsonb) ? 'item_id');
+
   if tg_op = 'UPDATE' then
-    if old.event_type in ('created', 'payment_received', 'payment_reversed', 'payment_plan_accepted')
-       or new.event_type in ('created', 'payment_received', 'payment_reversed', 'payment_plan_accepted')
-       or (old.event_type = 'note_added' and coalesce(old.event_metadata->>'source', '') <> '')
-       or new.claim_id is distinct from old.claim_id then
-      raise exception 'Buchungsrelevante Ereignisse der Forderungsakte können nicht geändert werden.';
+    if to_jsonb(new) = to_jsonb(old) then
+      return new;
     end if;
-    return new;
+    -- Ein verknüpftes Dokument wurde gelöscht (claim_events.document_id ON DELETE SET NULL)
+    if new.document_id is null
+       and (to_jsonb(new) - 'document_id') = (to_jsonb(old) - 'document_id') then
+      return new;
+    end if;
+    -- Eigene Notizen dürfen korrigiert werden; Typ, Forderung, Verfasser und Datum bleiben
+    if v_own_note
+       and new.event_type = 'note_added'
+       and coalesce(new.event_metadata->>'source', '') = ''
+       and not (coalesce(new.event_metadata, '{}'::jsonb) ? 'item_id')
+       and (to_jsonb(new) - array['description', 'event_metadata', 'document_id'])
+         = (to_jsonb(old) - array['description', 'event_metadata', 'document_id']) then
+      return new;
+    end if;
+    raise exception 'Einträge der Forderungshistorie können nicht geändert werden. Bitte ergänzen Sie stattdessen eine Notiz.';
   end if;
 
   -- DELETE
-  if old.event_type = 'payment_reversed' then
-    raise exception 'Storno-Ereignisse sind Teil des Zahlungsnachweises und können nicht gelöscht werden.';
+  if v_own_note then
+    return old;
   end if;
-  if old.event_type = 'payment_received'
-     and exists (select 1 from public.claim_payments cp
-                  where cp.id::text = old.event_metadata->>'payment_id' and cp.status = 'posted') then
-    raise exception 'Diese Zahlung ist noch gebucht. Bitte die Zahlung zuerst stornieren.';
+  if old.event_type = 'payment_received' then
+    raise exception 'Zahlungsbuchungen bleiben in der Forderungshistorie erhalten. Eine Zahlung wird storniert, nicht gelöscht.';
+  elsif old.event_type = 'payment_plan_accepted' then
+    raise exception 'Ratenzahlungsvereinbarungen bleiben in der Forderungshistorie erhalten. Ein Ratenplan wird aufgehoben, nicht gelöscht.';
   end if;
-  if old.event_type = 'payment_plan_accepted'
-     and exists (select 1 from public.payment_plans pp
-                  where pp.id::text = old.event_metadata->>'payment_plan_id' and pp.status = 'active') then
-    raise exception 'Der Ratenplan ist noch aktiv. Bitte den Ratenplan zuerst rückgängig machen.';
-  end if;
-  return old;
+  raise exception 'Einträge der Forderungshistorie (z. B. Anlage, Mahnungen, Fristen, Statuswechsel, Zahlungen, Stornos) können nicht gelöscht werden. Löschbar sind nur eigene Notizen.';
 end;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.block_claim_events_update()
- RETURNS trigger
- LANGUAGE plpgsql
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-  RAISE EXCEPTION 'claim_events is an immutable audit log. Updates are strictly forbidden.';
-END;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.block_physical_delete()
@@ -1829,6 +1948,9 @@ declare
   v_claim_user_id uuid;
   v_item_user_id uuid;
   v_item_claim_id uuid;
+  v_item_amount numeric;
+  v_fees numeric;
+  v_sum numeric;
 begin
   -- 1. Zahlung existiert und gehört zu Nutzer und Forderung
   select user_id, claim_id, allocation_type, status
@@ -1870,6 +1992,41 @@ begin
     end if;
     if v_item_claim_id is distinct from new.claim_id then
       raise exception 'claim_item_id does not belong to this claim.';
+    end if;
+  end if;
+
+  -- 4. Keine Überzuordnung (R2-06). Die Zeilensperre serialisiert gleichzeitige Zuordnungen.
+  if new.amount > 0 and new.allocation_bucket = 'principal' and new.claim_item_id is not null then
+    select original_amount into v_item_amount
+      from public.claim_items where id = new.claim_item_id
+       for no key update;
+    select coalesce(sum(a.amount), 0) into v_sum
+      from public.claim_payment_allocations a
+      join public.claim_payments cp on cp.id = a.claim_payment_id
+     where a.claim_item_id = new.claim_item_id
+       and a.allocation_bucket = 'principal'
+       and cp.status <> 'cancelled'
+       and a.id <> new.id;
+    if v_sum + new.amount > coalesce(v_item_amount, 0) + 0.005 then
+      raise exception 'Die Zuordnung (% EUR) übersteigt den offenen Betrag der Position (% EUR).',
+        public.claim_format_eur(new.amount),
+        public.claim_format_eur(greatest(0, coalesce(v_item_amount, 0) - v_sum));
+    end if;
+  elsif new.amount > 0 and new.allocation_bucket = 'fees' then
+    select accumulated_unpaid_fees into v_fees
+      from public.claims where id = new.claim_id
+       for no key update;
+    select coalesce(sum(a.amount), 0) into v_sum
+      from public.claim_payment_allocations a
+      join public.claim_payments cp on cp.id = a.claim_payment_id
+     where a.claim_id = new.claim_id
+       and a.allocation_bucket = 'fees'
+       and cp.status <> 'cancelled'
+       and a.id <> new.id;
+    if v_sum + new.amount > coalesce(v_fees, 0) + 0.005 then
+      raise exception 'Die Zuordnung auf Mahnkosten (% EUR) übersteigt die offenen Mahnkosten der Forderung (% EUR).',
+        public.claim_format_eur(new.amount),
+        public.claim_format_eur(greatest(0, coalesce(v_fees, 0) - v_sum));
     end if;
   end if;
 
@@ -1966,6 +2123,57 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.check_claim_reactivation_duplicates()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_x uuid;
+  v_dup uuid;
+  v_dup_period date;
+begin
+  if old.status not in ('cancelled', 'archived', 'settled')
+     or new.status in ('cancelled', 'archived', 'settled') then
+    return new;
+  end if;
+
+  for v_x in
+    select distinct t.x
+      from public.claim_items ci
+      cross join lateral unnest(array_append(coalesce(ci.rent_ledger_ids, '{}'::uuid[]), ci.rent_ledger_id)) as t(x)
+     where ci.claim_id = new.id
+       and t.x is not null
+     order by t.x
+  loop
+    perform pg_advisory_xact_lock(hashtextextended('claim_rent_ledger:' || v_x::text, 0));
+  end loop;
+
+  select t.x into v_dup
+    from public.claim_items ci
+    cross join lateral unnest(array_append(coalesce(ci.rent_ledger_ids, '{}'::uuid[]), ci.rent_ledger_id)) as t(x)
+   where ci.claim_id = new.id
+     and t.x is not null
+     and exists (
+       select 1
+         from public.claim_items o
+         join public.claims c on c.id = o.claim_id
+        where o.claim_id <> new.id
+          and c.status not in ('cancelled', 'archived', 'settled')
+          and (o.rent_ledger_id = t.x or t.x = any(o.rent_ledger_ids)))
+   limit 1;
+
+  if v_dup is not null then
+    select period_month into v_dup_period from public.rent_ledger where id = v_dup;
+    raise exception 'Die Forderung kann nicht wieder geöffnet werden: Für die Miete % besteht inzwischen eine andere aktive Forderung.',
+      coalesce(to_char(v_dup_period, 'MM/YYYY'), v_dup::text);
+  end if;
+
+  return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.check_duplicate_active_claim_item()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -1974,6 +2182,7 @@ CREATE OR REPLACE FUNCTION public.check_duplicate_active_claim_item()
 AS $function$
 declare
   v_ids uuid[];
+  v_x uuid;
   v_dup uuid;
   v_dup_period date;
 begin
@@ -1988,11 +2197,17 @@ begin
   v_ids := array(
     select distinct x
       from unnest(array_append(coalesce(new.rent_ledger_ids, '{}'::uuid[]), new.rent_ledger_id)) as t(x)
-     where x is not null);
+     where x is not null
+     order by x);
 
   if cardinality(v_ids) = 0 then
     return new;
   end if;
+
+  foreach v_x in array v_ids
+  loop
+    perform pg_advisory_xact_lock(hashtextextended('claim_rent_ledger:' || v_x::text, 0));
+  end loop;
 
   select x into v_dup
     from unnest(v_ids) as t(x)
@@ -2101,6 +2316,8 @@ CREATE OR REPLACE FUNCTION public.claim_portal_check_access(p_token text, p_pin 
 AS $function$
 declare
   v_link public.claim_access_links%rowtype;
+  v_token_hash text;
+  v_pin_ok boolean := false;
   v_owner uuid;
   v_recent integer;
   v_since_success integer;
@@ -2108,14 +2325,16 @@ declare
   c_max_in_window constant integer := 5;
   c_max_total constant integer := 10;
 begin
-  if p_token is null or btrim(p_token) = '' then
+  if p_token is null or btrim(p_token) = '' or length(p_token) > 256 then
     return jsonb_build_object('ok', false, 'code', 'link_invalid',
       'error', 'Der Link ist ungültig. Bitte verwenden Sie den Link aus Ihrem Anschreiben.');
   end if;
 
+  v_token_hash := encode(extensions.digest(btrim(p_token), 'sha256'), 'hex');
+
   select l.* into v_link
     from public.claim_access_links l
-   where l.token = p_token
+   where l.token_hash = v_token_hash
    order by l.created_at desc
    limit 1
    for update;
@@ -2155,7 +2374,17 @@ begin
       'error', 'Zu viele falsche Eingaben. Bitte warten Sie 15 Minuten und versuchen Sie es dann erneut.');
   end if;
 
-  if p_pin is null or v_link.pin is null or v_link.pin <> btrim(p_pin) then
+  -- PIN nur gegen den bcrypt-Hash prüfen (kein Klartext-Vergleich)
+  begin
+    v_pin_ok := p_pin is not null
+                and length(p_pin) <= 64
+                and v_link.pin_hash is not null
+                and extensions.crypt(btrim(p_pin), v_link.pin_hash) = v_link.pin_hash;
+  exception when others then
+    v_pin_ok := false;  -- kein gültiger bcrypt-Hash (Altbestand)
+  end;
+
+  if not v_pin_ok then
     insert into public.claim_events (user_id, claim_id, event_type, event_date, description, event_metadata)
     values (v_owner, v_link.claim_id, 'note_added', clock_timestamp(),
             'Mieterportal: falscher Zugangscode (PIN) eingegeben',
@@ -2298,6 +2527,122 @@ begin
   end if;
 
   return null;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.claim_today()
+ RETURNS date
+ LANGUAGE sql
+ STABLE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select (now() at time zone 'Europe/Berlin')::date
+$function$
+;
+CREATE OR REPLACE FUNCTION public.cloud_connections_delete_secrets()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  if old.access_token_secret_id is not null or old.refresh_token_secret_id is not null then
+    delete from vault.secrets s
+     where s.id in (old.access_token_secret_id, old.refresh_token_secret_id);
+  end if;
+  return old;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.cloud_get_tokens(p_connection_id uuid, p_user_id uuid)
+ RETURNS TABLE(access_token text, refresh_token text)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce(c.access_token, sa.decrypted_secret) as access_token,
+         coalesce(c.refresh_token, sr.decrypted_secret) as refresh_token
+    from public.cloud_connections c
+    left join vault.decrypted_secrets sa on sa.id = c.access_token_secret_id
+    left join vault.decrypted_secrets sr on sr.id = c.refresh_token_secret_id
+   where c.id = p_connection_id
+     and c.user_id = p_user_id;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.cloud_store_tokens(p_connection_id uuid, p_user_id uuid, p_access_token text, p_refresh_token text DEFAULT NULL::text, p_expires_at timestamp with time zone DEFAULT NULL::timestamp with time zone)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  r public.cloud_connections%rowtype;
+  v_access text;
+  v_refresh text;
+  v_access_id uuid;
+  v_refresh_id uuid;
+  v_keep boolean := public.cloud_tokens_keep_plaintext();
+begin
+  if p_connection_id is null or p_user_id is null then
+    raise exception 'Verbindung und Nutzer sind erforderlich' using errcode = '22004';
+  end if;
+
+  select * into r
+    from public.cloud_connections c
+   where c.id = p_connection_id and c.user_id = p_user_id
+   for update;
+  if not found then
+    raise exception 'Cloud-Verbindung nicht gefunden' using errcode = 'P0002';
+  end if;
+
+  v_access := coalesce(nullif(p_access_token, ''), r.access_token);
+  v_refresh := coalesce(nullif(p_refresh_token, ''), r.refresh_token);
+
+  v_access_id := public.cloud_vault_put(r.access_token_secret_id, v_access, format('cloud_connection:%s:access_token', r.id));
+  v_refresh_id := public.cloud_vault_put(r.refresh_token_secret_id, v_refresh, format('cloud_connection:%s:refresh_token', r.id));
+
+  update public.cloud_connections c
+     set access_token_secret_id = v_access_id,
+         refresh_token_secret_id = v_refresh_id,
+         access_token = case when v_keep then v_access else null end,
+         refresh_token = case when v_keep then v_refresh else null end,
+         expires_at = coalesce(p_expires_at, c.expires_at)
+   where c.id = r.id;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.cloud_tokens_keep_plaintext()
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$ select false $function$
+;
+CREATE OR REPLACE FUNCTION public.cloud_vault_put(p_secret_id uuid, p_value text, p_name text)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_id uuid;
+begin
+  if p_value is null or p_value = '' then
+    return p_secret_id;
+  end if;
+
+  if p_secret_id is not null and exists (select 1 from vault.secrets s where s.id = p_secret_id) then
+    perform vault.update_secret(p_secret_id, p_value);
+    return p_secret_id;
+  end if;
+
+  -- Eintrag gleichen Namens (z. B. aus einem abgebrochenen Lauf) wiederverwenden
+  select s.id into v_id from vault.secrets s where s.name = p_name;
+  if v_id is not null then
+    perform vault.update_secret(v_id, p_value);
+    return v_id;
+  end if;
+
+  return vault.create_secret(p_value, p_name, 'ImmoControl360: OAuth-Token einer Cloud-Verbindung');
 end;
 $function$
 ;
@@ -2545,7 +2890,7 @@ begin
   if length(v_desc_text) > 0 then
     v_desc_text := substring(v_desc_text from 1 for length(v_desc_text) - 2);
   end if;
-  v_deadline := case when p_deadline_days is null then null else current_date + p_deadline_days end;
+  v_deadline := case when p_deadline_days is null then null else public.claim_today() + p_deadline_days end;
 
   -- Aktive Forderung zum Mietvertrag?
   select * into v_active
@@ -2572,13 +2917,13 @@ begin
 
     -- Zinsen der bisherigen Posten bis heute festschreiben, Zinsbeginn = heute.
     -- Die Zinsen der neuen Posten bis heute übergibt die Oberfläche (p_accumulated_interest).
-    v_cap := coalesce(public.claim_live_interest(v_claim_id, current_date), 0);
+    v_cap := coalesce(public.claim_live_interest(v_claim_id, public.claim_today()), 0);
 
     update public.claims set
       accumulated_unpaid_interest = round(coalesce(accumulated_unpaid_interest, 0) + v_cap + v_interest, 2),
       accumulated_unpaid_fees = coalesce(accumulated_unpaid_fees, 0) + v_fee,
       interest_start_date = case when interest_start_date is null then null
-                                 else greatest(interest_start_date, current_date) end,
+                                 else greatest(interest_start_date, public.claim_today()) end,
       deadline = greatest(deadline, v_deadline),
       next_action_at = greatest(next_action_at, v_deadline),
       updated_at = now()
@@ -2641,350 +2986,203 @@ begin
 end;
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.create_claim_from_rent_ledger(p_rent_ledger_id uuid, p_fee_amount numeric, p_interest_rate numeric, p_interest_start_date date, p_deadline_days integer, p_note text)
- RETURNS uuid
+CREATE OR REPLACE FUNCTION public.create_claim_portal_link(p_claim_id uuid, p_expires_days integer DEFAULT 14)
+ RETURNS jsonb
  LANGUAGE plpgsql
  SECURITY DEFINER
  SET search_path TO 'public', 'pg_temp'
 AS $function$
-DECLARE
-    v_user_id uuid;
-    v_lease_id uuid;
-    v_tenant_id uuid;
-    v_expected_rent numeric;
-    v_paid_amount numeric;
-    v_open_amount numeric;
-    v_period_month date;
-    v_active_claim_id uuid;
-    v_new_claim_id uuid;
-    v_deadline date;
-BEGIN
-    -- 1. Auth-Check
-    v_user_id := auth.uid();
-    IF v_user_id IS NULL THEN
-        RAISE EXCEPTION 'Not authenticated';
-    END IF;
+declare
+  v_uid uuid := auth.uid();
+  v_owner uuid;
+  v_days integer := coalesce(p_expires_days, 14);
+  v_token text;
+  v_token_hash text;
+  v_pin text;
+  v_bytes bytea;
+  v_value bigint;
+  v_tries integer := 0;
+  v_link_id uuid;
+  v_expires timestamptz;
+begin
+  if v_uid is null then
+    raise exception 'Nicht angemeldet.' using errcode = '42501';
+  end if;
 
-    -- 2. Lade rent_ledger Daten
-    SELECT lease_id, expected_rent, COALESCE(paid_amount, 0), period_month
-    INTO v_lease_id, v_expected_rent, v_paid_amount, v_period_month
-    FROM rent_ledger
-    WHERE id = p_rent_ledger_id AND user_id = v_user_id;
+  select c.user_id into v_owner from public.claims c where c.id = p_claim_id for update;
+  if not found
+     or (v_owner is distinct from v_uid
+         and not coalesce(public.has_claim_access(p_claim_id, 'finanzen', 'write'), false)) then
+    raise exception 'Forderung nicht gefunden oder keine Berechtigung, einen Portal-Link zu erstellen.'
+      using errcode = '42501';
+  end if;
 
-    IF v_lease_id IS NULL THEN
-        RAISE EXCEPTION 'rent_ledger Eintrag nicht gefunden oder keine Berechtigung.';
-    END IF;
+  if v_days < 1 or v_days > 90 then
+    raise exception 'Die Gültigkeit des Portal-Links muss zwischen 1 und 90 Tagen liegen.';
+  end if;
 
-    -- 3. Offene Summe prüfen
-    v_open_amount := v_expected_rent - v_paid_amount;
-    IF v_open_amount <= 0 THEN
-        RAISE EXCEPTION 'Diese Miete ist bereits vollständig bezahlt.';
-    END IF;
+  loop
+    v_tries := v_tries + 1;
+    v_token := encode(extensions.gen_random_bytes(24), 'hex');
+    v_token_hash := encode(extensions.digest(v_token, 'sha256'), 'hex');
+    exit when not exists (select 1 from public.claim_access_links l where l.token_hash = v_token_hash);
+    if v_tries >= 5 then
+      raise exception 'Der Portal-Link konnte nicht erzeugt werden. Bitte erneut versuchen.';
+    end if;
+  end loop;
 
-    -- 4. Tenant aus Lease holen
-    SELECT tenant_id INTO v_tenant_id FROM leases WHERE id = v_lease_id;
+  -- 6-stellige PIN gleichverteilt (Zufallswerte >= 4772 * 900000 werden verworfen)
+  loop
+    v_bytes := extensions.gen_random_bytes(4);
+    v_value := get_byte(v_bytes, 0)::bigint * 16777216
+             + get_byte(v_bytes, 1)::bigint * 65536
+             + get_byte(v_bytes, 2)::bigint * 256
+             + get_byte(v_bytes, 3)::bigint;
+    exit when v_value < 4294800000;
+  end loop;
+  v_pin := (100000 + v_value % 900000)::text;
 
-    -- 5. Prüfen, ob bereits aktiver Claim existiert
-    SELECT ci.claim_id INTO v_active_claim_id
-    FROM claim_items ci
-    JOIN claims c ON c.id = ci.claim_id
-    WHERE ci.rent_ledger_id = p_rent_ledger_id
-      AND c.status NOT IN ('settled', 'cancelled', 'archived')
-    LIMIT 1;
+  update public.claim_access_links
+     set is_active = false,
+         revoked_at = coalesce(revoked_at, now())
+   where claim_id = p_claim_id
+     and (is_active is distinct from false or revoked_at is null);
 
-    IF v_active_claim_id IS NOT NULL THEN
-        RAISE EXCEPTION 'Für diese Miete existiert bereits eine aktive Forderung (Claim-ID: %).', v_active_claim_id;
-    END IF;
+  v_expires := now() + make_interval(days => v_days);
 
-    -- 6. Frist berechnen
-    v_deadline := CURRENT_DATE + p_deadline_days;
+  insert into public.claim_access_links (claim_id, token, pin, token_hash, pin_hash, expires_at, created_by, is_active)
+  values (p_claim_id, null, null, v_token_hash, extensions.crypt(v_pin, extensions.gen_salt('bf', 8)),
+          v_expires, v_uid, true)
+  returning id into v_link_id;
 
-    -- 7. CLAIM erstellen
-    INSERT INTO claims (
-        user_id, lease_id, tenant_id, status, escalation_level,
-        interest_start_date, interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
-        deadline, next_action_at
-    )
-    VALUES (
-        v_user_id, v_lease_id, v_tenant_id, 'open', 0,
-        p_interest_start_date, p_interest_rate, 0, p_fee_amount,
-        v_deadline, v_deadline
-    )
-    RETURNING id INTO v_new_claim_id;
-
-    -- 8. CLAIM_ITEM erstellen
-    INSERT INTO claim_items (
-        user_id, claim_id, rent_ledger_id, item_type, original_amount, period_month, description
-    )
-    VALUES (
-        v_user_id, v_new_claim_id, p_rent_ledger_id, 'rent', v_open_amount, v_period_month, 
-        'Mietrückstand ' || to_char(v_period_month, 'MM/YYYY')
-    );
-
-    -- 9. CLAIM_EVENT erstellen
-    INSERT INTO claim_events (
-        user_id, claim_id, event_type, description, event_metadata
-    )
-    VALUES (
-        v_user_id, v_new_claim_id, 'created', 'Forderung aus offener Miete erstellt',
-        jsonb_build_object(
-            'source', 'rent_ledger',
-            'rent_ledger_id', p_rent_ledger_id,
-            'period_month', v_period_month,
-            'principal_amount', v_open_amount,
-            'fee_amount', p_fee_amount,
-            'interest_start_date', p_interest_start_date,
-            'deadline', v_deadline,
-            'note', p_note
-        )
-    );
-
-    RETURN v_new_claim_id;
-END;
+  return jsonb_build_object('link_id', v_link_id, 'token', v_token, 'pin', v_pin, 'expires_at', v_expires);
+end;
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.create_claim_from_rent_ledgers(p_rent_ledger_ids uuid[], p_fee_amount numeric, p_interest_rate numeric, p_interest_start_date date, p_deadline_days integer, p_note text)
- RETURNS uuid
+CREATE OR REPLACE FUNCTION public.create_credit_note(p_invoice_id uuid)
+ RETURNS public.invoices
  LANGUAGE plpgsql
- SECURITY DEFINER
  SET search_path TO 'public', 'pg_temp'
 AS $function$
-DECLARE
-    v_user_id uuid;
-    v_lease_id uuid;
-    v_tenant_id uuid;
-    v_ledger RECORD;
-    v_open_amount numeric;
-    v_total_open_amount numeric := 0;
-    v_active_claim_id uuid;
-    v_new_claim_id uuid;
-    v_deadline date;
-    v_metadata_items jsonb := '[]'::jsonb;
-BEGIN
-    v_user_id := auth.uid();
-    IF v_user_id IS NULL THEN
-        RAISE EXCEPTION 'Not authenticated';
-    END IF;
+declare
+    v_orig public.invoices%rowtype;
+    v_new public.invoices%rowtype;
+    v_today date := (now() at time zone 'Europe/Berlin')::date;
+    v_small boolean;
+    v_positions jsonb := '[]'::jsonb;
+    v_pos jsonb;
+    v_out jsonb;
+    v_raw jsonb;
+    v_rate numeric;
+    v_key text;
+    v_amount numeric;
+    v_number text;
+    v_attempt integer := 0;
+    v_rows integer;
+begin
+    if auth.uid() is null then
+        raise exception 'Bitte melden Sie sich an.';
+    end if;
+    if p_invoice_id is null then
+        raise exception 'Keine Rechnung angegeben.';
+    end if;
 
-    IF array_length(p_rent_ledger_ids, 1) IS NULL OR array_length(p_rent_ledger_ids, 1) = 0 THEN
-        RAISE EXCEPTION 'Keine Mieten ausgewählt.';
-    END IF;
+    -- Sperren (verhindert doppelte Gutschriften); FOR UPDATE liefert nur Zeilen mit Schreibrecht
+    select * into v_orig from public.invoices i where i.id = p_invoice_id for update;
+    if not found or not public.has_portfolio_access(v_orig.portfolio_id, 'finanzen', 'write') then
+        raise exception 'Die Rechnung wurde nicht gefunden oder Sie haben keine Schreibberechtigung.';
+    end if;
+    if v_orig.status is distinct from 'issued' then
+        raise exception 'Eine Gutschrift kann nur zu einer ausgestellten Rechnung erstellt werden. Die Rechnung wurde inzwischen geändert oder bereits storniert.';
+    end if;
 
-    -- Lease-Referenz des ersten Eintrags holen
-    SELECT lease_id INTO v_lease_id 
-    FROM rent_ledger 
-    WHERE id = p_rent_ledger_ids[1] AND user_id = v_user_id;
+    -- Positionen spiegeln (entspricht isInvoiceSmallBusiness / getPositionVatRate / r2 in lib/invoiceDocument.js)
+    v_small := jsonb_typeof(v_orig.positions) = 'array'
+               and exists (select 1 from jsonb_array_elements(v_orig.positions) e(x)
+                            where e.x -> 'smallBusiness' = 'true'::jsonb);
 
-    IF v_lease_id IS NULL THEN
-        RAISE EXCEPTION 'Mietereintrag nicht gefunden oder keine Berechtigung.';
-    END IF;
+    for v_pos in
+        select case when jsonb_typeof(e.x) = 'object' then e.x else '{}'::jsonb end
+          from jsonb_array_elements(case when jsonb_typeof(v_orig.positions) = 'array'
+                                         then v_orig.positions else '[]'::jsonb end)
+               with ordinality as e(x, ord)
+         order by e.ord
+    loop
+        v_raw := v_pos -> 'vatRate';
+        v_rate := case
+            when v_small or v_pos -> 'smallBusiness' = 'true'::jsonb then 0
+            when v_raw is null or v_raw = 'null'::jsonb or v_raw = '""'::jsonb then 7
+            when jsonb_typeof(v_raw) = 'number' then (v_raw #>> '{}')::numeric
+            when jsonb_typeof(v_raw) = 'string'
+                 and btrim(v_raw #>> '{}') ~ '^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$'
+                then btrim(v_raw #>> '{}')::numeric
+            else 7
+        end;
 
-    SELECT tenant_id INTO v_tenant_id FROM leases WHERE id = v_lease_id;
+        v_out := v_pos || jsonb_build_object(
+            'vatRate', v_rate,
+            'refInvoiceId', v_orig.id,
+            'refInvoiceNumber', coalesce(v_orig.invoice_number, ''),
+            'refInvoiceDate', v_orig.invoice_date);
 
-    -- Alle ausgewählten Mieten prüfen und Summe berechnen
-    FOR v_ledger IN 
-        SELECT id, lease_id, expected_rent, COALESCE(paid_amount, 0) as paid_amount, period_month 
-        FROM rent_ledger 
-        WHERE id = ANY(p_rent_ledger_ids) AND user_id = v_user_id
-    LOOP
-        IF v_ledger.lease_id != v_lease_id THEN
-            RAISE EXCEPTION 'Alle ausgewählten Mieten müssen zum selben Mietvertrag gehören.';
-        END IF;
-        
-        v_open_amount := v_ledger.expected_rent - v_ledger.paid_amount;
-        IF v_open_amount <= 0 THEN
-            RAISE EXCEPTION 'Eine der Mieten (Monat %) ist bereits bezahlt.', v_ledger.period_month;
-        END IF;
+        -- Beträge wie parseFloat(): Zahl, sonst führender Zahlenwert eines Textes, sonst 0; dann negiert
+        foreach v_key in array array['pricePerNight', 'netTotal', 'vat', 'grossTotal'] loop
+            v_raw := v_pos -> v_key;
+            v_amount := case jsonb_typeof(v_raw)
+                when 'number' then (v_raw #>> '{}')::numeric
+                when 'string' then substring(v_raw #>> '{}' from '^\s*([+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)')::numeric
+            end;
+            v_out := v_out || jsonb_build_object(v_key, round(-coalesce(v_amount, 0), 2));
+        end loop;
 
-        -- Prüfen, ob bereits aktiver Claim existiert
-        SELECT ci.claim_id INTO v_active_claim_id
-        FROM claim_items ci
-        JOIN claims c ON c.id = ci.claim_id
-        WHERE ci.rent_ledger_id = v_ledger.id
-          AND c.status NOT IN ('settled', 'cancelled', 'archived')
-        LIMIT 1;
+        if v_small then
+            v_out := v_out || jsonb_build_object('smallBusiness', true);
+        end if;
+        v_positions := v_positions || jsonb_build_array(v_out);
+    end loop;
 
-        IF v_active_claim_id IS NOT NULL THEN
-            RAISE EXCEPTION 'Für die Miete % existiert bereits eine aktive Forderung.', v_ledger.period_month;
-        END IF;
+    -- Nummer aus dem Nummernkreis des Portfolios; bei Kollision (gleichzeitige Vergabe) neu vergeben
+    loop
+        v_attempt := v_attempt + 1;
+        v_number := public.get_next_invoice_number(v_orig.portfolio_id, null, extract(year from v_today)::integer);
+        begin
+            insert into public.invoices (
+                user_id, portfolio_id, property_id, unit_id, contact_id, invoice_date, invoice_number,
+                sender_name, sender_street, sender_zip, sender_city,
+                recipient_name, recipient_street, recipient_zip, recipient_city,
+                move_in, move_out, persons, nights, vat_rate, positions,
+                net_amount, vat_amount, gross_amount, status)
+            values (
+                v_orig.user_id, v_orig.portfolio_id, v_orig.property_id, v_orig.unit_id, v_orig.contact_id,
+                v_today, v_number,
+                v_orig.sender_name, v_orig.sender_street, v_orig.sender_zip, v_orig.sender_city,
+                v_orig.recipient_name, v_orig.recipient_street, v_orig.recipient_zip, v_orig.recipient_city,
+                v_orig.move_in, v_orig.move_out, nullif(v_orig.persons, 0), v_orig.nights, v_orig.vat_rate,
+                v_positions,
+                round(-coalesce(v_orig.net_amount, 0), 2),
+                round(-coalesce(v_orig.vat_amount, 0), 2),
+                round(-coalesce(v_orig.gross_amount, 0), 2),
+                'credit_note')
+            returning * into v_new;
+            exit;
+        exception when unique_violation then
+            if v_attempt >= 5 then
+                raise exception 'Es konnte keine eindeutige Gutschriftsnummer vergeben werden. Bitte versuchen Sie es erneut.';
+            end if;
+        end;
+    end loop;
 
-        v_total_open_amount := v_total_open_amount + v_open_amount;
-        v_metadata_items := v_metadata_items || jsonb_build_object('rent_ledger_id', v_ledger.id, 'period_month', v_ledger.period_month, 'amount', v_open_amount);
-    END LOOP;
+    update public.invoices
+       set status = 'credited'
+     where id = v_orig.id
+       and status = 'issued';
+    get diagnostics v_rows = row_count;
+    if v_rows <> 1 then
+        raise exception 'Die Rechnung wurde inzwischen geändert oder bereits storniert. Es wurde keine Gutschrift erstellt.';
+    end if;
 
-    -- CLAIM erstellen
-    v_deadline := CURRENT_DATE + p_deadline_days;
-    INSERT INTO claims (
-        user_id, lease_id, tenant_id, status, escalation_level,
-        interest_start_date, interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
-        deadline, next_action_at
-    )
-    VALUES (
-        v_user_id, v_lease_id, v_tenant_id, 'open', 0,
-        p_interest_start_date, p_interest_rate, 0, p_fee_amount,
-        v_deadline, v_deadline
-    )
-    RETURNING id INTO v_new_claim_id;
-
-    -- Einzelne Monate als CLAIM_ITEMS erstellen
-    FOR v_ledger IN 
-        SELECT id, expected_rent, COALESCE(paid_amount, 0) as paid_amount, period_month 
-        FROM rent_ledger 
-        WHERE id = ANY(p_rent_ledger_ids) AND user_id = v_user_id
-    LOOP
-        v_open_amount := v_ledger.expected_rent - v_ledger.paid_amount;
-        INSERT INTO claim_items (
-            user_id, claim_id, rent_ledger_id, item_type, original_amount, period_month, description
-        )
-        VALUES (
-            v_user_id, v_new_claim_id, v_ledger.id, 'rent', v_open_amount, v_ledger.period_month, 
-            'Mietrückstand ' || to_char(v_ledger.period_month, 'MM/YYYY')
-        );
-    END LOOP;
-
-    -- CLAIM_EVENT speichern
-    INSERT INTO claim_events (user_id, claim_id, event_type, description, event_metadata)
-    VALUES (
-        v_user_id, v_new_claim_id, 'created', 'Forderung aus offener Miete (' || array_length(p_rent_ledger_ids, 1) || ' Monate) erstellt',
-        jsonb_build_object('source', 'rent_ledger_multi', 'items', v_metadata_items, 'total_principal_amount', v_total_open_amount, 'fee_amount', p_fee_amount, 'interest_start_date', p_interest_start_date, 'deadline', v_deadline, 'note', p_note)
-    );
-
-    RETURN v_new_claim_id;
-END;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.create_claim_from_rent_ledgers(p_rent_ledger_ids uuid[], p_fee_amount numeric, p_interest_rate numeric, p_accumulated_interest numeric, p_interest_start_date date, p_deadline_days integer, p_note text)
- RETURNS uuid
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-DECLARE
-    v_user_id uuid;
-    v_lease_id uuid;
-    v_tenant_id uuid;
-    
-    v_ledger RECORD;
-    v_open_amount numeric;
-    v_total_open_amount numeric := 0;
-    
-    v_active_claim_id uuid;
-    v_new_claim_id uuid;
-    v_deadline date;
-    
-    v_metadata_items jsonb := '[]'::jsonb;
-BEGIN
-    -- 1. Auth-Check
-    v_user_id := auth.uid();
-    IF v_user_id IS NULL THEN
-        RAISE EXCEPTION 'Not authenticated';
-    END IF;
-
-    IF array_length(p_rent_ledger_ids, 1) IS NULL OR array_length(p_rent_ledger_ids, 1) = 0 THEN
-        RAISE EXCEPTION 'Keine Mieten ausgewählt.';
-    END IF;
-
-    -- 2. Prüfen, ob alle ausgewählten Mieten zum selben Lease/Tenant gehören und sammeln
-    -- Wir nehmen den Lease des ersten Eintrags als Referenz
-    SELECT lease_id INTO v_lease_id 
-    FROM rent_ledger 
-    WHERE id = p_rent_ledger_ids[1] AND user_id = v_user_id;
-
-    IF v_lease_id IS NULL THEN
-        RAISE EXCEPTION 'Mietereintrag nicht gefunden oder keine Berechtigung.';
-    END IF;
-
-    SELECT tenant_id INTO v_tenant_id FROM leases WHERE id = v_lease_id;
-
-    -- 3. Überprüfe alle Ledger-IDs und berechne Gesamtsumme
-    FOR v_ledger IN 
-        SELECT id, lease_id, expected_rent, COALESCE(paid_amount, 0) as paid_amount, period_month 
-        FROM rent_ledger 
-        WHERE id = ANY(p_rent_ledger_ids) AND user_id = v_user_id
-    LOOP
-        IF v_ledger.lease_id != v_lease_id THEN
-            RAISE EXCEPTION 'Alle ausgewählten Mieten müssen zum selben Mietvertrag gehören.';
-        END IF;
-        
-        v_open_amount := v_ledger.expected_rent - v_ledger.paid_amount;
-        IF v_open_amount <= 0 THEN
-            RAISE EXCEPTION 'Eine der Mieten (Monat %) ist bereits bezahlt.', v_ledger.period_month;
-        END IF;
-
-        -- Prüfen, ob bereits aktiver Claim existiert
-        SELECT ci.claim_id INTO v_active_claim_id
-        FROM claim_items ci
-        JOIN claims c ON c.id = ci.claim_id
-        WHERE ci.rent_ledger_id = v_ledger.id
-          AND c.status NOT IN ('settled', 'cancelled', 'archived')
-        LIMIT 1;
-
-        IF v_active_claim_id IS NOT NULL THEN
-            RAISE EXCEPTION 'Für die Miete % existiert bereits eine aktive Forderung.', v_ledger.period_month;
-        END IF;
-
-        v_total_open_amount := v_total_open_amount + v_open_amount;
-        
-        -- Metadaten sammeln
-        v_metadata_items := v_metadata_items || jsonb_build_object(
-            'rent_ledger_id', v_ledger.id,
-            'period_month', v_ledger.period_month,
-            'amount', v_open_amount
-        );
-    END LOOP;
-
-    -- 4. Frist berechnen
-    v_deadline := CURRENT_DATE + p_deadline_days;
-
-    -- 5. CLAIM erstellen
-    INSERT INTO claims (
-        user_id, lease_id, tenant_id, status, escalation_level,
-        interest_start_date, interest_rate, accumulated_unpaid_interest, accumulated_unpaid_fees,
-        deadline, next_action_at
-    )
-    VALUES (
-        v_user_id, v_lease_id, v_tenant_id, 'open', 0,
-        p_interest_start_date, p_interest_rate, p_accumulated_interest, p_fee_amount,
-        v_deadline, v_deadline
-    )
-    RETURNING id INTO v_new_claim_id;
-
-    -- 6. CLAIM_ITEMS erstellen (für jeden ausgewählten Monat)
-    FOR v_ledger IN 
-        SELECT id, expected_rent, COALESCE(paid_amount, 0) as paid_amount, period_month 
-        FROM rent_ledger 
-        WHERE id = ANY(p_rent_ledger_ids) AND user_id = v_user_id
-    LOOP
-        v_open_amount := v_ledger.expected_rent - v_ledger.paid_amount;
-        INSERT INTO claim_items (
-            user_id, claim_id, rent_ledger_id, item_type, original_amount, period_month, description
-        )
-        VALUES (
-            v_user_id, v_new_claim_id, v_ledger.id, 'rent', v_open_amount, v_ledger.period_month, 
-            'Mietrückstand ' || to_char(v_ledger.period_month, 'MM/YYYY')
-        );
-    END LOOP;
-
-    -- 7. CLAIM_EVENT erstellen
-    INSERT INTO claim_events (
-        user_id, claim_id, event_type, description, event_metadata
-    )
-    VALUES (
-        v_user_id, v_new_claim_id, 'created', 'Forderung aus offener Miete (' || array_length(p_rent_ledger_ids, 1) || ' Monate) erstellt',
-        jsonb_build_object(
-            'source', 'rent_ledger_multi',
-            'items', v_metadata_items,
-            'total_principal_amount', v_total_open_amount,
-            'fee_amount', p_fee_amount,
-            'accumulated_interest', p_accumulated_interest,
-            'interest_start_date', p_interest_start_date,
-            'deadline', v_deadline,
-            'note', p_note
-        )
-    );
-
-    RETURN v_new_claim_id;
-END;
+    return v_new;
+end;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.create_payment_plan(p_claim_id uuid, p_first_due_date date, p_installment_count integer, p_adjustment_amount numeric, p_note text)
@@ -3041,7 +3239,7 @@ begin
 
   -- 1. Zinsen bis heute festschreiben; während des Plans laufen für die Planpositionen
   --    keine weiteren Zinsen (claim_live_interest lässt sie aus).
-  v_cap := coalesce(public.claim_live_interest(p_claim_id, current_date), 0);
+  v_cap := coalesce(public.claim_live_interest(p_claim_id, public.claim_today()), 0);
   v_fees_before := coalesce(v_claim.accumulated_unpaid_fees, 0);
   v_interest_after := round(coalesce(v_claim.accumulated_unpaid_interest, 0) + v_cap, 2);
 
@@ -3049,7 +3247,7 @@ begin
   update public.claims set
     accumulated_unpaid_interest = v_interest_after,
     interest_start_date = case when interest_start_date is null then null
-                               else greatest(interest_start_date, current_date) end,
+                               else greatest(interest_start_date, public.claim_today()) end,
     accumulated_unpaid_fees = v_fees_before + v_adj,
     updated_at = now()
   where id = p_claim_id;
@@ -3146,7 +3344,6 @@ declare
   v_claim public.claims%rowtype;
   v_other uuid;
   v_plan_created timestamptz;
-  v_fees_paid numeric := 0;
   v_moved_to uuid;
 begin
   if v_caller is null then
@@ -3163,6 +3360,11 @@ begin
     raise exception 'Keine Berechtigung.';
   end if;
 
+  if v_claim.status in ('settled', 'cancelled', 'archived') then
+    raise exception 'Bei abgeschlossenen Forderungen können keine Positionen gelöscht werden (Status: %).',
+      case v_claim.status when 'settled' then 'erledigt' when 'cancelled' then 'storniert' else 'archiviert' end;
+  end if;
+
   if exists (select 1 from public.claim_payment_allocations where claim_item_id = p_item_id) then
     raise exception 'Diese Position hat bereits zugeordnete Zahlungen. Bitte zuerst die Zahlungen rückabwickeln.';
   end if;
@@ -3173,32 +3375,22 @@ begin
     raise exception 'Diese Position ist Teil einer aktiven Ratenzahlungsvereinbarung. Bitte den Ratenplan zuerst rückgängig machen.';
   end if;
 
-  -- Gebühr/Zinsen der Position: auf eine verbleibende Position übertragen; ist es die
-  -- letzte Position, aus der Forderung ausbuchen (bezahlte Gebühren bleiben stehen).
+  select id into v_other
+    from public.claim_items
+   where claim_id = v_item.claim_id and id <> p_item_id
+   order by created_at asc nulls first, id
+   limit 1;
+  if v_other is null then
+    raise exception 'Die letzte Position einer Forderung kann nicht gelöscht werden. Bitte stornieren Sie stattdessen die Forderung.';
+  end if;
+
+  -- Gebühr/Zinsen der Position auf die älteste verbleibende Position übertragen
   if coalesce(v_item.fee_amount, 0) > 0 or coalesce(v_item.interest_amount, 0) > 0 then
-    select id into v_other
-      from public.claim_items
-     where claim_id = v_item.claim_id and id <> p_item_id
-     order by created_at asc nulls first, id
-     limit 1;
-    if v_other is not null then
-      update public.claim_items set
-        fee_amount = fee_amount + coalesce(v_item.fee_amount, 0),
-        interest_amount = interest_amount + coalesce(v_item.interest_amount, 0)
-      where id = v_other;
-      v_moved_to := v_other;
-    else
-      select coalesce(sum(a.amount), 0) into v_fees_paid
-        from public.claim_payment_allocations a
-        join public.claim_payments cp on cp.id = a.claim_payment_id
-       where cp.claim_id = v_item.claim_id and cp.status = 'posted' and a.allocation_bucket = 'fees';
-      update public.claims set
-        accumulated_unpaid_fees = greatest(accumulated_unpaid_fees - coalesce(v_item.fee_amount, 0),
-                                           least(accumulated_unpaid_fees, v_fees_paid)),
-        accumulated_unpaid_interest = round(greatest(0, accumulated_unpaid_interest - coalesce(v_item.interest_amount, 0)), 2),
-        updated_at = now()
-      where id = v_item.claim_id;
-    end if;
+    update public.claim_items set
+      fee_amount = fee_amount + coalesce(v_item.fee_amount, 0),
+      interest_amount = interest_amount + coalesce(v_item.interest_amount, 0)
+    where id = v_other;
+    v_moved_to := v_other;
   end if;
 
   delete from public.claim_items where id = p_item_id;
@@ -3210,6 +3402,186 @@ begin
                              'amount', v_item.original_amount, 'fee_amount', v_item.fee_amount,
                              'interest_amount', v_item.interest_amount, 'fees_moved_to_item', v_moved_to,
                              'deleted_by', v_caller));
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.delete_portfolio(p_portfolio_id uuid, p_target_id uuid DEFAULT NULL::uuid, p_delete_properties boolean DEFAULT false)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_uid uuid := auth.uid();
+    v_src public.portfolios%rowtype;
+    v_n int;
+    v_dupes text;
+    v_we_ids uuid[];
+    v_result jsonb := '{}'::jsonb;
+begin
+    if v_uid is null then
+        raise exception 'Bitte melden Sie sich an.';
+    end if;
+    if p_portfolio_id is null then
+        raise exception 'Kein Portfolio angegeben.';
+    end if;
+
+    -- Quelle sperren (gleichzeitige Löschungen/Überträge serialisieren); nur der Eigentümer
+    select * into v_src from public.portfolios po where po.id = p_portfolio_id for update;
+    if not found or v_src.user_id is distinct from v_uid then
+        raise exception 'Nur der Eigentümer kann dieses Portfolio löschen.';
+    end if;
+    if coalesce(v_src.is_primary, false) then
+        raise exception 'Das Hauptportfolio kann nicht gelöscht werden.';
+    end if;
+
+    if p_target_id is not null then
+        if p_target_id = p_portfolio_id then
+            raise exception 'Bitte wählen Sie ein anderes Portfolio als Ziel.';
+        end if;
+        perform 1 from public.portfolios po where po.id = p_target_id and po.user_id = v_uid for update;
+        if not found then
+            raise exception 'Bitte wählen Sie eines Ihrer eigenen Portfolios als Ziel.';
+        end if;
+
+        -- Doppelte Rechnungsnummern würden den Übertrag am Unique-Index scheitern lassen
+        select string_agg(num, ', ') into v_dupes
+          from (select distinct s.invoice_number as num
+                  from public.invoices s
+                  join public.invoices d on d.portfolio_id = p_target_id and d.invoice_number = s.invoice_number
+                 where s.portfolio_id = p_portfolio_id
+                 order by 1
+                 limit 3) x;
+        if v_dupes is not null then
+            raise exception 'Im Zielportfolio gibt es bereits Rechnungen mit denselben Nummern (z. B. %). Die Rechnungen können deshalb nicht übertragen werden. Bitte wählen Sie ein anderes Zielportfolio. Es wurde nichts verändert.', v_dupes;
+        end if;
+
+        update public.properties set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('properties', v_n);
+
+        update public.meters set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('meters', v_n);
+
+        update public.meter_readings set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('meter_readings', v_n);
+
+        update public.invoices set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('invoices', v_n);
+
+        update public.loans set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('loans', v_n);
+
+        update public.deals set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('deals', v_n);
+
+        -- Rechnungsnummern-Zähler: gleicher Zähler im Ziel -> höchster Stand; sonst umhängen.
+        -- Zusammengeführte Quell-Zähler entfallen mit dem Portfolio (CASCADE).
+        update public.invoice_counters d
+           set last_number = greatest(d.last_number, s.last_number)
+          from public.invoice_counters s
+         where s.portfolio_id = p_portfolio_id
+           and d.portfolio_id = p_target_id
+           and d.year = s.year
+           and d.object_unit_id is not distinct from s.object_unit_id;
+        update public.invoice_counters s
+           set portfolio_id = p_target_id
+         where s.portfolio_id = p_portfolio_id
+           and not exists (select 1 from public.invoice_counters d
+                            where d.portfolio_id = p_target_id
+                              and d.year = s.year
+                              and d.object_unit_id is not distinct from s.object_unit_id);
+
+        -- Portfolio-Vorlagen: übernehmen, sofern das Ziel keine Vorlage gleichen Typs hat (sonst entfallen sie)
+        delete from public.document_templates s
+         where s.portfolio_id = p_portfolio_id
+           and exists (select 1 from public.document_templates d
+                        where d.portfolio_id = p_target_id and d.type = s.type);
+        update public.document_templates set portfolio_id = p_target_id where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('document_templates', v_n);
+
+        -- PDF-Vorlage (eine je Portfolio): nur übernehmen, wenn das Ziel noch keine hat
+        if not exists (select 1 from public.pdf_templates where portfolio_id = p_target_id) then
+            update public.pdf_templates
+               set portfolio_id = p_target_id
+             where id = (select t.id from public.pdf_templates t where t.portfolio_id = p_portfolio_id limit 1);
+        end if;
+    else
+        if exists (select 1 from public.invoices where portfolio_id = p_portfolio_id) then
+            raise exception 'Dieses Portfolio enthält Rechnungen. Rechnungen unterliegen Aufbewahrungspflichten (§ 147 AO, § 14b UStG) und werden nicht mitgelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio.';
+        end if;
+        if exists (select 1 from public.loans l
+                    where l.portfolio_id = p_portfolio_id
+                       or l.property_id in (select pr.id from public.properties pr where pr.portfolio_id = p_portfolio_id)) then
+            raise exception 'Dieses Portfolio enthält Darlehen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder löschen Sie die Darlehen zuerst unter „Finanzierungen“.';
+        end if;
+
+        if exists (select 1 from public.properties where portfolio_id = p_portfolio_id) then
+            if not coalesce(p_delete_properties, false) then
+                raise exception 'Dieses Portfolio enthält Immobilien. Bitte wählen Sie ein Ziel-Portfolio für die Übertragung aus ODER bestätigen Sie die endgültige Löschung.';
+            end if;
+            if exists (select 1 from public.documents doc
+                        where doc.property_id in (select pr.id from public.properties pr where pr.portfolio_id = p_portfolio_id)
+                           or doc.unit_id in (select u.id from public.units u
+                                                join public.properties pr on pr.id = u.property_id
+                                               where pr.portfolio_id = p_portfolio_id))
+               or exists (select 1 from public.claims c
+                            join public.leases l on l.id = c.lease_id
+                            join public.units u on u.id = l.unit_id
+                            join public.properties pr on pr.id = u.property_id
+                           where pr.portfolio_id = p_portfolio_id) then
+                raise exception 'Zu den Objekten gibt es noch Dokumente oder Forderungsakten. Diese verhindern das Löschen. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder entfernen Sie Dokumente/Forderungen zuerst.';
+            end if;
+            if exists (select 1 from public.leases l
+                         join public.units u on u.id = l.unit_id
+                         join public.properties pr on pr.id = u.property_id
+                        where pr.portfolio_id = p_portfolio_id) then
+                raise exception 'Zu den Objekten gibt es noch Mietverträge. Mietverträge mit Mietkonto und Zahlungen werden nicht mitgelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio oder entfernen Sie die Mietverträge zuerst.';
+            end if;
+            if exists (select 1 from public.utility_settlements us
+                        where us.property_id in (select pr.id from public.properties pr where pr.portfolio_id = p_portfolio_id)) then
+                raise exception 'Zu den Objekten gibt es noch Nebenkostenabrechnungen. Diese werden nicht mitgelöscht. Bitte übertragen Sie die Inhalte in ein anderes Portfolio.';
+            end if;
+
+            select coalesce(array_agg(distinct pr.economic_unit_id), '{}'::uuid[]) into v_we_ids
+              from public.properties pr
+             where pr.portfolio_id = p_portfolio_id and pr.economic_unit_id is not null;
+
+            -- Objekte mit Einheiten, Zählern usw. (Fremdschlüssel); weitere Sperren der DB brechen alles ab
+            delete from public.properties where portfolio_id = p_portfolio_id;
+            get diagnostics v_n = row_count;
+            v_result := v_result || jsonb_build_object('properties_deleted', v_n);
+
+            -- Verwaiste Wirtschaftseinheiten ohne Darlehen und NK-Abrechnungen entfernen
+            delete from public.economic_units e
+             where e.id = any(v_we_ids)
+               and not exists (select 1 from public.properties pr where pr.economic_unit_id = e.id)
+               and not exists (select 1 from public.loans l where l.economic_unit_id = e.id)
+               and not exists (select 1 from public.utility_settlements us where us.economic_unit_id = e.id);
+        end if;
+
+        -- Portfolio-eigene Schreibvorlagen entfallen mit dem Portfolio (unabhängig vom Fremdschlüssel)
+        delete from public.document_templates where portfolio_id = p_portfolio_id;
+        get diagnostics v_n = row_count;
+        v_result := v_result || jsonb_build_object('document_templates_deleted', v_n);
+    end if;
+
+    delete from public.portfolios po
+     where po.id = p_portfolio_id
+       and po.user_id = v_uid
+       and coalesce(po.is_primary, false) = false;
+    get diagnostics v_n = row_count;
+    if v_n <> 1 then
+        raise exception 'Das Portfolio wurde nicht gelöscht (keine Berechtigung).';
+    end if;
+
+    return v_result || jsonb_build_object('deleted', true);
 end;
 $function$
 ;
@@ -3229,6 +3601,22 @@ begin
 
   if v_caller is null or v_landlord_id is null or v_landlord_id <> v_caller then
     raise exception 'Not authorized to delete this tenant';
+  end if;
+
+  if exists (select 1 from public.leases l
+              where l.tenant_id = p_tenant_id
+                and (l.end_date >= current_date
+                     or (l.end_date is null and l.status = 'active'))) then
+    raise exception 'Der Mieter hat einen laufenden oder künftigen Mietvertrag und kann deshalb nicht gelöscht werden. Bitte beenden Sie zuerst das Mietverhältnis oder entziehen Sie nur den Portalzugang.'
+      using hint = 'tenant_has_active_lease';
+  end if;
+
+  if exists (select 1 from public.claims c
+              where (c.tenant_id = p_tenant_id
+                     or c.lease_id in (select l.id from public.leases l where l.tenant_id = p_tenant_id))
+                and c.status not in ('settled', 'cancelled', 'archived')) then
+    raise exception 'Für den Mieter bestehen noch offene Forderungen. Bitte schließen Sie diese zuerst ab (erledigt oder storniert) oder entziehen Sie nur den Portalzugang.'
+      using hint = 'tenant_has_open_claims';
   end if;
 
   select coalesce(array_agg(distinct ur.user_id), '{}')
@@ -3280,11 +3668,32 @@ AS $function$
                  where pr.economic_unit_id = check_economic_unit_id)
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.floor_plan_can_write(p_plan_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce((
+    select case
+             when fp.property_id is not null then
+               public.has_property_access(fp.property_id, 'immobilien', 'write')
+               or public.has_property_access(fp.property_id, 'investorportal', 'write')
+             when fp.unit_id is not null then
+               public.has_unit_access(fp.unit_id, 'immobilien', 'write')
+               or public.has_unit_access(fp.unit_id, 'investorportal', 'write')
+             else fp.user_id = (select auth.uid())
+           end
+    from public.floor_plans fp
+    where fp.id = p_plan_id
+  ), false)
+$function$
+;
 CREATE OR REPLACE FUNCTION public.generate_claim_access_link(p_claim_id uuid, p_token text, p_pin text, p_expires_days integer DEFAULT 14)
  RETURNS uuid
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO 'public', 'extensions', 'pg_temp'
+ SET search_path TO 'public', 'pg_temp'
 AS $function$
 declare
   v_uid uuid := auth.uid();
@@ -3312,7 +3721,8 @@ begin
   end if;
 
   if length(v_token) < 32 or length(v_token) > 128 or v_token !~ '^[A-Za-z0-9_-]+$'
-     or exists (select 1 from public.claim_access_links l where l.token = v_token or l.token_hash = v_token) then
+     or exists (select 1 from public.claim_access_links l
+                 where l.token_hash = encode(extensions.digest(v_token, 'sha256'), 'hex')) then
     v_token := encode(extensions.gen_random_bytes(16), 'hex');
   end if;
 
@@ -3332,10 +3742,10 @@ begin
 
   insert into public.claim_access_links (claim_id, token, pin, token_hash, pin_hash, expires_at, created_by, is_active)
   values (p_claim_id,
-          v_token,
-          v_pin,
+          null,
+          null,
           encode(extensions.digest(v_token, 'sha256'), 'hex'),
-          extensions.crypt(v_pin, extensions.gen_salt('bf')),
+          extensions.crypt(v_pin, extensions.gen_salt('bf', 8)),
           now() + make_interval(days => v_days),
           v_uid,
           true)
@@ -3343,6 +3753,21 @@ begin
 
   return v_link_id;
 end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.get_auth_user_id_by_email(p_email text)
+ RETURNS uuid
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select u.id
+    from auth.users u
+   where p_email is not null
+     and btrim(p_email) <> ''
+     and lower(btrim(u.email)) = lower(btrim(p_email))
+   order by u.created_at
+   limit 1
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.get_investor_properties(uid uuid)
@@ -3356,6 +3781,85 @@ AS $function$
    where pr.user_id = uid
      and auth.uid() is not null
      and (uid = auth.uid() or public.has_property_access(pr.id, '*', 'read'));
+$function$
+;
+CREATE OR REPLACE FUNCTION public.get_my_landlord_info(p_property_id uuid DEFAULT NULL::uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_uid uuid := auth.uid();
+    v_role record;
+    v_property_id uuid;
+    v_property_owner uuid;
+    v_portfolio_owner uuid;
+    v_visible boolean;
+    v_text text;
+begin
+    if v_uid is null then
+        return null;
+    end if;
+
+    select ur.tenant_id, ur.unit_id, ur.property_id into v_role
+    from public.user_roles ur
+    where ur.user_id = v_uid
+      and ur.role = 'tenant'
+    order by ur.created_at desc nulls last
+    limit 1;
+
+    if not found then
+        return null;
+    end if;
+
+    if p_property_id is not null then
+        if p_property_id is distinct from v_role.property_id
+           and not exists (select 1 from public.units u
+                           where u.id = v_role.unit_id
+                             and u.property_id = p_property_id)
+           and not exists (select 1 from public.leases l
+                           join public.units u on u.id = l.unit_id
+                           where v_role.tenant_id is not null
+                             and l.tenant_id = v_role.tenant_id
+                             and u.property_id = p_property_id) then
+            return null;
+        end if;
+        v_property_id := p_property_id;
+    else
+        v_property_id := coalesce(
+            v_role.property_id,
+            (select u.property_id from public.units u where u.id = v_role.unit_id)
+        );
+    end if;
+
+    if v_property_id is null then
+        return null;
+    end if;
+
+    select pr.user_id, po.user_id
+      into v_property_owner, v_portfolio_owner
+    from public.properties pr
+    left join public.portfolios po on po.id = pr.portfolio_id
+    where pr.id = v_property_id;
+
+    if not found then
+        return null;
+    end if;
+
+    -- Öffnungszeiten aus dem Profil des Portfolio-Eigentümers (wie bisher in der Topbar)
+    select p.settings_opening_hours_visible, p.settings_opening_hours_text
+      into v_visible, v_text
+    from public.profiles p
+    where p.id = coalesce(v_portfolio_owner, v_property_owner);
+
+    return json_build_object(
+        'property_id', v_property_id,
+        'landlord_user_id', coalesce(v_property_owner, v_portfolio_owner),
+        'opening_hours_visible', v_visible,
+        'opening_hours_text', v_text
+    );
+end;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.get_my_role()
@@ -3479,11 +3983,17 @@ CREATE OR REPLACE FUNCTION public.get_next_invoice_number(p_portfolio_id uuid, p
  SECURITY DEFINER
  SET search_path TO 'public', 'pg_temp'
 AS $function$
+-- p_object_unit_id wird bewusst ignoriert (Parameter bleibt für ältere Aufrufer): Rechnungsnummern sind
+-- je Portfolio eindeutig (invoices (portfolio_id, invoice_number)), deshalb zählt EIN Zähler je Portfolio
+-- und Jahr (object_unit_id NULL). Ältere Zähler je Einheit und bereits vergebene Nummern „JJJJ-NNN“
+-- fließen als Untergrenze ein.
 declare
   v_caller uuid := auth.uid();
   v_owner uuid;
   v_id uuid;
-  v_next integer;
+  v_counter bigint;
+  v_used numeric;
+  v_next numeric;
 begin
   if v_caller is null then
     raise exception 'Not authenticated';
@@ -3498,32 +4008,39 @@ begin
     raise exception 'Portfolio nicht gefunden oder keine Berechtigung.';
   end if;
 
-  -- Vergabe je Zähler serialisieren (der Unique-Index greift bei object_unit_id NULL nicht)
+  -- Vergabe je Portfolio und Jahr serialisieren
   perform pg_advisory_xact_lock(hashtextextended(
-    'invoice_counter:' || p_portfolio_id::text || ':' || p_year::text || ':' || coalesce(p_object_unit_id::text, '-'), 0));
+    'invoice_counter:' || p_portfolio_id::text || ':' || p_year::text, 0));
 
-  select id into v_id
-    from public.invoice_counters
-   where portfolio_id = p_portfolio_id
-     and year = p_year
-     and object_unit_id is not distinct from p_object_unit_id
-   order by last_number desc, created_at nulls first, id
-   limit 1
+  select max(c.last_number) into v_counter
+    from public.invoice_counters c
+   where c.portfolio_id = p_portfolio_id
+     and c.year = p_year;
+
+  select max(substring(btrim(i.invoice_number) from ('^' || p_year::text || '-([0-9]+)$'))::numeric)
+    into v_used
+    from public.invoices i
+   where i.portfolio_id = p_portfolio_id;
+
+  v_next := greatest(coalesce(v_counter, 0), coalesce(v_used, 0)) + 1;
+  if v_next > 2147483647 then
+    raise exception 'Rechnungsnummer konnte nicht vergeben werden.';
+  end if;
+
+  select c.id into v_id
+    from public.invoice_counters c
+   where c.portfolio_id = p_portfolio_id
+     and c.year = p_year
+     and c.object_unit_id is null
      for update;
 
   if v_id is null then
     insert into public.invoice_counters (user_id, portfolio_id, year, object_unit_id, last_number)
-    values (v_owner, p_portfolio_id, p_year, p_object_unit_id, 0)
-    returning id into v_id;
-  end if;
-
-  update public.invoice_counters
-     set last_number = last_number + 1
-   where id = v_id
-  returning last_number into v_next;
-
-  if v_next is null then
-    raise exception 'Rechnungsnummer konnte nicht vergeben werden.';
+    values (v_owner, p_portfolio_id, p_year, null, v_next::integer);
+  else
+    update public.invoice_counters
+       set last_number = v_next::integer
+     where id = v_id;
   end if;
 
   return p_year::text || '-' || case when v_next < 1000 then lpad(v_next::text, 3, '0') else v_next::text end;
@@ -3833,6 +4350,21 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.get_smtp_password(p_user_id uuid)
+ RETURNS text
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select d.decrypted_secret
+    from public.user_smtp_settings s
+    join vault.decrypted_secrets d
+      on d.id = s.smtp_pass_secret_id
+     and d.name = 'smtp_pass:' || s.user_id::text
+   where s.user_id = p_user_id
+   limit 1
+$function$
+;
 CREATE OR REPLACE FUNCTION public.get_tenant_auth_info()
  RETURNS TABLE(tenant_user_id uuid, tenant_id uuid, registered_email character varying, last_sign_in_at timestamp with time zone)
  LANGUAGE sql
@@ -3931,21 +4463,6 @@ BEGIN
 END;
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.has_claim_access(check_claim_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-DECLARE
-    c_lease_id UUID;
-    c_tenant_id UUID;
-BEGIN
-    SELECT lease_id, tenant_id INTO c_lease_id, c_tenant_id FROM claims WHERE id = check_claim_id;
-    RETURN has_claim_columns_access(c_lease_id, c_tenant_id);
-END;
-$function$
-;
 CREATE OR REPLACE FUNCTION public.has_claim_access(check_claim_id uuid, category text, access_type text)
  RETURNS boolean
  LANGUAGE sql
@@ -3959,137 +4476,6 @@ AS $function$
     join public.properties pr on pr.id = u.property_id
     where c.id = check_claim_id
       and public.has_portfolio_access(pr.portfolio_id, category, access_type))
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_claim_columns_access(check_lease_id uuid, check_tenant_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- STABLE SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-begin
-    if check_lease_id is not null then
-        return exists (
-            select 1 from public.leases l
-            join public.units u on l.unit_id = u.id
-            join public.properties p on u.property_id = p.id
-            where l.id = check_lease_id
-              and public.has_portfolio_access(p.portfolio_id)
-        );
-    end if;
-
-    if check_tenant_id is not null then
-        return public.has_tenant_access(check_tenant_id);
-    end if;
-
-    return false;
-end;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_contact_access(check_contact_id uuid, contact_owner uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-DECLARE
-    is_linked_to_subtrade boolean;
-    is_linked_to_invoice boolean;
-    has_subtrade_access boolean;
-    has_invoice_access boolean;
-BEGIN
-    -- Wenn der aktuelle Benutzer der Owner ist, hat er immer Zugriff
-    IF contact_owner = auth.uid() THEN
-        RETURN TRUE;
-    END IF;
-
-    -- 2. Prüfe Verknüpfung mit Renovation Subtrades
-    SELECT EXISTS (
-        SELECT 1 FROM renovation_project_subtrades WHERE responsible_contact_id = check_contact_id
-    ) INTO is_linked_to_subtrade;
-
-    IF is_linked_to_subtrade THEN
-        SELECT EXISTS (
-            SELECT 1 FROM renovation_project_subtrades rps
-            JOIN renovation_projects rp ON rps.project_id = rp.id
-            WHERE rps.responsible_contact_id = check_contact_id
-            AND (rp.user_id = auth.uid() OR has_property_access(rp.property_id))
-        ) INTO has_subtrade_access;
-        
-        IF has_subtrade_access THEN
-            RETURN TRUE;
-        ELSE
-            RETURN FALSE;
-        END IF;
-    END IF;
-
-    -- 3. Prüfe Verknüpfung mit Invoices
-    SELECT EXISTS (
-        SELECT 1 FROM invoices WHERE contact_id = check_contact_id
-    ) INTO is_linked_to_invoice;
-
-    IF is_linked_to_invoice THEN
-        SELECT EXISTS (
-            SELECT 1 FROM invoices i
-            WHERE i.contact_id = check_contact_id
-            AND (i.user_id = auth.uid() OR has_portfolio_access(i.portfolio_id))
-        ) INTO has_invoice_access;
-
-        IF has_invoice_access THEN
-            RETURN TRUE;
-        ELSE
-            RETURN FALSE;
-        END IF;
-    END IF;
-
-    -- 4. Wenn der Kontakt weder mit Subtrades noch mit Invoices verknüpft ist,
-    -- ist es ein freier Kontakt. Der Zugriff wird gewährt, wenn der Owner des Kontakts
-    -- seine Daten mit dem aktuellen Benutzer geteilt hat.
-    RETURN is_user_shared_with_me(contact_owner);
-END;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_document_template_access(tpl_portfolio_id uuid, tpl_user_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    -- If it's the template owner, allow
-    IF tpl_user_id = auth.uid() THEN
-        RETURN TRUE;
-    END IF;
-
-    -- If it's a portfolio template, check portfolio access
-    IF tpl_portfolio_id IS NOT NULL THEN
-        -- Check if current user is owner of the portfolio
-        IF EXISTS (SELECT 1 FROM portfolios WHERE id = tpl_portfolio_id AND user_id = auth.uid()) THEN
-            RETURN TRUE;
-        END IF;
-        -- Check if current user has shared access
-        IF EXISTS (SELECT 1 FROM portfolio_shares WHERE portfolio_id = tpl_portfolio_id AND shared_with_email = (auth.jwt()->>'email') AND status = 'accepted') THEN
-            RETURN TRUE;
-        END IF;
-    END IF;
-
-    RETURN FALSE;
-END;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_economic_unit_access(check_economic_unit_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM properties p
-        WHERE p.economic_unit_id = check_economic_unit_id
-        AND has_portfolio_access(p.portfolio_id)
-    );
-END;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.has_economic_unit_access(check_economic_unit_id uuid, category text, access_type text)
@@ -4115,21 +4501,6 @@ AS $function$
      )
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.has_invoice_access(check_invoice_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM invoices i
-        WHERE i.id = check_invoice_id
-        AND has_portfolio_access(i.portfolio_id)
-    );
-END;
-$function$
-;
 CREATE OR REPLACE FUNCTION public.has_invoice_access(check_invoice_id uuid, category text, access_type text)
  RETURNS boolean
  LANGUAGE sql
@@ -4140,23 +4511,6 @@ AS $function$
     select 1 from public.invoices i
     where i.id = check_invoice_id
       and public.has_portfolio_access(i.portfolio_id, category, access_type))
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_lease_access(check_lease_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM leases l
-        JOIN units u ON l.unit_id = u.id
-        JOIN properties p ON u.property_id = p.id
-        WHERE l.id = check_lease_id
-        AND has_portfolio_access(p.portfolio_id)
-    );
-END;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.has_lease_access(check_lease_id uuid, category text, access_type text)
@@ -4171,17 +4525,6 @@ AS $function$
     join public.properties pr on pr.id = u.property_id
     where l.id = check_lease_id
       and public.has_portfolio_access(pr.portfolio_id, category, access_type))
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_portfolio_access(check_portfolio_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (SELECT 1 FROM portfolio_shares WHERE portfolio_id = check_portfolio_id AND shared_with_email = (auth.jwt()->>'email') AND status = 'accepted');
-END;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.has_portfolio_access(check_portfolio_id uuid, category text, access_type text)
@@ -4203,17 +4546,6 @@ AS $function$
      )
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.has_property_access(check_property_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN has_portfolio_access((SELECT portfolio_id FROM properties WHERE id = check_property_id));
-END;
-$function$
-;
 CREATE OR REPLACE FUNCTION public.has_property_access(check_property_id uuid, category text, access_type text)
  RETURNS boolean
  LANGUAGE sql
@@ -4224,36 +4556,6 @@ AS $function$
     select 1 from public.properties pr
     where pr.id = check_property_id
       and public.has_portfolio_access(pr.portfolio_id, category, access_type))
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_renovation_calc_trade_access(check_trade_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM renovation_calc_trades t
-        WHERE t.id = check_trade_id
-        AND has_renovation_calculation_access(t.calculation_id)
-    );
-END;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_renovation_calculation_access(check_calc_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM renovation_calculations c
-        WHERE c.id = check_calc_id
-        AND has_property_access(c.property_id)
-    );
-END;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.has_renovation_calculation_access(check_calc_id uuid, category text, access_type text)
@@ -4269,21 +4571,6 @@ AS $function$
            or public.has_property_access(c.property_id, category, access_type)))
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.has_renovation_project_access(check_project_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM renovation_projects p
-        WHERE p.id = check_project_id
-        AND has_property_access(p.property_id)
-    );
-END;
-$function$
-;
 CREATE OR REPLACE FUNCTION public.has_renovation_project_access(check_project_id uuid, category text, access_type text)
  RETURNS boolean
  LANGUAGE sql
@@ -4295,41 +4582,6 @@ AS $function$
     where p.id = check_project_id
       and (p.user_id = auth.uid()
            or public.has_property_access(p.property_id, category, access_type)))
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_renovation_project_trade_access(check_trade_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM renovation_project_trades t
-        WHERE t.id = check_trade_id
-        AND has_renovation_project_access(t.project_id)
-    );
-END;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.has_tenant_access(check_tenant_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- STABLE SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-begin
-    return exists (
-        select 1 from public.tenants t
-        join public.leases l on l.tenant_id = t.id
-        join public.units u on l.unit_id = u.id
-        join public.properties p on u.property_id = p.id
-        join public.portfolios po on po.id = p.portfolio_id
-        where t.id = check_tenant_id
-          and po.user_id = t.user_id
-          and public.has_portfolio_access(p.portfolio_id)
-    );
-end;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.has_tenant_access(check_tenant_id uuid, category text, access_type text)
@@ -4354,17 +4606,6 @@ AS $function$
      )
 $function$
 ;
-CREATE OR REPLACE FUNCTION public.has_unit_access(check_unit_id uuid)
- RETURNS boolean
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-BEGIN
-    RETURN has_property_access((SELECT property_id FROM units WHERE id = check_unit_id));
-END;
-$function$
-;
 CREATE OR REPLACE FUNCTION public.has_unit_access(check_unit_id uuid, category text, access_type text)
  RETURNS boolean
  LANGUAGE sql
@@ -4376,6 +4617,268 @@ AS $function$
     join public.properties pr on pr.id = u.property_id
     where u.id = check_unit_id
       and public.has_portfolio_access(pr.portfolio_id, category, access_type))
+$function$
+;
+CREATE OR REPLACE FUNCTION public.import_rows(p_plan jsonb)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+ SET statement_timeout TO '60s'
+AS $function$
+declare
+    c_max constant integer := 5000;
+    v_uid uuid := auth.uid();
+    v_list text;
+    v_item jsonb;
+    v_i integer;
+    v_idx integer;
+    v_id uuid;
+    v_ref uuid;
+    v_unit_id uuid;
+    v_tenant_id uuid;
+    v_rows text;
+    v_ctx text;
+    v_portfolio_ids uuid[] := '{}';
+    v_property_ids uuid[] := '{}';
+    v_unit_ids uuid[] := '{}';
+    v_tenant_ids uuid[] := '{}';
+    v_leases integer := 0;
+    v_booking integer := 0;
+    v_booking_start date;
+    v_state text;
+    v_msg text;
+    v_detail text;
+    v_hint text;
+    v_column text;
+    v_constraint text;
+    v_reason text;
+begin
+    if v_uid is null then
+        raise exception 'Nicht angemeldet.' using errcode = '42501';
+    end if;
+    if p_plan is null or jsonb_typeof(p_plan) <> 'object' then
+        raise exception 'Ungültiger Importplan.' using errcode = '22023';
+    end if;
+    foreach v_list in array array['portfolios', 'properties', 'units', 'tenants', 'leases'] loop
+        if p_plan ? v_list and jsonb_typeof(p_plan -> v_list) <> 'array' then
+            raise exception 'Ungültiger Importplan (%).', v_list using errcode = '22023';
+        end if;
+        if jsonb_array_length(coalesce(p_plan -> v_list, '[]'::jsonb)) > c_max then
+            raise exception 'Zu viele Einträge im Import (%): höchstens % je Art.', v_list, c_max using errcode = '22023';
+        end if;
+    end loop;
+
+    begin
+        -- 1. Portfolios
+        v_i := 0;
+        for v_item in select value from jsonb_array_elements(coalesce(p_plan -> 'portfolios', '[]'::jsonb)) loop
+            v_i := v_i + 1;
+            v_rows := (select string_agg(r, ', ') from jsonb_array_elements_text(
+                           case when jsonb_typeof(v_item -> 'rows') = 'array' then v_item -> 'rows' else '[]'::jsonb end) r);
+            v_ctx := coalesce('Zeile ' || v_rows || ': ', '')
+                     || 'Portfolio „' || coalesce(v_item ->> 'name', '') || '“ konnte nicht angelegt werden';
+
+            insert into public.portfolios (user_id, name)
+            values (v_uid, nullif(btrim(v_item ->> 'name'), ''))
+            returning id into v_id;
+            v_portfolio_ids[v_i] := v_id;
+        end loop;
+
+        -- 2. Immobilien
+        v_i := 0;
+        for v_item in select value from jsonb_array_elements(coalesce(p_plan -> 'properties', '[]'::jsonb)) loop
+            v_i := v_i + 1;
+            v_rows := (select string_agg(r, ', ') from jsonb_array_elements_text(
+                           case when jsonb_typeof(v_item -> 'rows') = 'array' then v_item -> 'rows' else '[]'::jsonb end) r);
+            v_ctx := coalesce('Zeile ' || v_rows || ': ', '')
+                     || 'Immobilie ' || btrim(coalesce(v_item ->> 'street', '') || ' ' || coalesce(v_item ->> 'house_number', ''))
+                     || ' konnte nicht angelegt werden';
+
+            v_ref := nullif(v_item ->> 'portfolio_id', '')::uuid;
+            if v_ref is null then
+                v_idx := (v_item ->> 'portfolio_idx')::integer;
+                if v_idx >= 0 and v_idx < coalesce(array_length(v_portfolio_ids, 1), 0) then
+                    v_ref := v_portfolio_ids[v_idx + 1];
+                end if;
+                if v_ref is null then
+                    raise exception 'Verweis auf das Portfolio fehlt im Importplan.';
+                end if;
+            elsif not exists (select 1 from public.portfolios po where po.id = v_ref and po.user_id = v_uid) then
+                raise exception 'Das Portfolio wurde nicht gefunden oder gehört nicht zu Ihrem Konto.';
+            end if;
+
+            insert into public.properties (user_id, portfolio_id, street, house_number, zip, city, construction_year, property_type)
+            values (v_uid, v_ref,
+                    nullif(btrim(v_item ->> 'street'), ''),
+                    nullif(btrim(v_item ->> 'house_number'), ''),
+                    nullif(btrim(v_item ->> 'zip'), ''),
+                    nullif(btrim(v_item ->> 'city'), ''),
+                    (v_item ->> 'construction_year')::integer,
+                    coalesce(nullif(btrim(v_item ->> 'property_type'), ''), 'residential'))
+            returning id into v_id;
+            v_property_ids[v_i] := v_id;
+        end loop;
+
+        -- 3. Einheiten
+        v_i := 0;
+        for v_item in select value from jsonb_array_elements(coalesce(p_plan -> 'units', '[]'::jsonb)) loop
+            v_i := v_i + 1;
+            v_rows := (select string_agg(r, ', ') from jsonb_array_elements_text(
+                           case when jsonb_typeof(v_item -> 'rows') = 'array' then v_item -> 'rows' else '[]'::jsonb end) r);
+            v_ctx := coalesce('Zeile ' || v_rows || ': ', '')
+                     || 'Einheit „' || coalesce(v_item ->> 'unit_name', '') || '“ konnte nicht angelegt werden';
+
+            v_ref := nullif(v_item ->> 'property_id', '')::uuid;
+            if v_ref is null then
+                v_idx := (v_item ->> 'property_idx')::integer;
+                if v_idx >= 0 and v_idx < coalesce(array_length(v_property_ids, 1), 0) then
+                    v_ref := v_property_ids[v_idx + 1];
+                end if;
+                if v_ref is null then
+                    raise exception 'Verweis auf die Immobilie fehlt im Importplan.';
+                end if;
+            elsif not exists (select 1
+                                from public.properties pr
+                                join public.portfolios po on po.id = pr.portfolio_id
+                               where pr.id = v_ref and po.user_id = v_uid) then
+                raise exception 'Die Immobilie wurde nicht gefunden oder gehört nicht zu Ihrem Konto.';
+            end if;
+
+            insert into public.units (user_id, property_id, unit_name, floor, sqm, rooms, bathrooms, bedrooms,
+                                      balcony, fitted_kitchen, is_vacation_rental, cold_rent_ist, target_rent)
+            values (v_uid, v_ref,
+                    nullif(btrim(v_item ->> 'unit_name'), ''),
+                    nullif(btrim(v_item ->> 'floor'), ''),
+                    (v_item ->> 'sqm')::numeric,
+                    (v_item ->> 'rooms')::numeric,
+                    (v_item ->> 'bathrooms')::integer,
+                    (v_item ->> 'bedrooms')::integer,
+                    coalesce((v_item ->> 'balcony')::boolean, false),
+                    coalesce((v_item ->> 'fitted_kitchen')::boolean, false),
+                    coalesce((v_item ->> 'is_vacation_rental')::boolean, false),
+                    (v_item ->> 'cold_rent_ist')::numeric,
+                    (v_item ->> 'target_rent')::numeric)
+            returning id into v_id;
+            v_unit_ids[v_i] := v_id;
+        end loop;
+
+        -- 4. Mieter
+        v_i := 0;
+        for v_item in select value from jsonb_array_elements(coalesce(p_plan -> 'tenants', '[]'::jsonb)) loop
+            v_i := v_i + 1;
+            v_rows := (select string_agg(r, ', ') from jsonb_array_elements_text(
+                           case when jsonb_typeof(v_item -> 'rows') = 'array' then v_item -> 'rows' else '[]'::jsonb end) r);
+            v_ctx := coalesce('Zeile ' || v_rows || ': ', '')
+                     || 'Mieter ' || coalesce(v_item ->> 'last_name', '') || ' konnte nicht angelegt werden';
+
+            insert into public.tenants (user_id, first_name, last_name, email, phone, occupants)
+            values (v_uid,
+                    nullif(btrim(v_item ->> 'first_name'), ''),
+                    nullif(btrim(v_item ->> 'last_name'), ''),
+                    nullif(btrim(v_item ->> 'email'), ''),
+                    nullif(btrim(v_item ->> 'phone'), ''),
+                    (v_item ->> 'occupants')::integer)
+            returning id into v_id;
+            v_tenant_ids[v_i] := v_id;
+        end loop;
+
+        -- 5. Mietverträge
+        for v_item in select value from jsonb_array_elements(coalesce(p_plan -> 'leases', '[]'::jsonb)) loop
+            v_rows := (select string_agg(r, ', ') from jsonb_array_elements_text(
+                           case when jsonb_typeof(v_item -> 'rows') = 'array' then v_item -> 'rows' else '[]'::jsonb end) r);
+            v_ctx := coalesce('Zeile ' || v_rows || ': ', '') || 'Mietvertrag konnte nicht angelegt werden';
+
+            v_unit_id := nullif(v_item ->> 'unit_id', '')::uuid;
+            if v_unit_id is null then
+                v_idx := (v_item ->> 'unit_idx')::integer;
+                if v_idx >= 0 and v_idx < coalesce(array_length(v_unit_ids, 1), 0) then
+                    v_unit_id := v_unit_ids[v_idx + 1];
+                end if;
+                if v_unit_id is null then
+                    raise exception 'Verweis auf die Einheit fehlt im Importplan.';
+                end if;
+            elsif not exists (select 1
+                                from public.units u
+                                join public.properties pr on pr.id = u.property_id
+                                join public.portfolios po on po.id = pr.portfolio_id
+                               where u.id = v_unit_id and po.user_id = v_uid) then
+                raise exception 'Die Einheit wurde nicht gefunden oder gehört nicht zu Ihrem Konto.';
+            end if;
+
+            v_tenant_id := nullif(v_item ->> 'tenant_id', '')::uuid;
+            if v_tenant_id is null then
+                v_idx := (v_item ->> 'tenant_idx')::integer;
+                if v_idx >= 0 and v_idx < coalesce(array_length(v_tenant_ids, 1), 0) then
+                    v_tenant_id := v_tenant_ids[v_idx + 1];
+                end if;
+                if v_tenant_id is null then
+                    raise exception 'Verweis auf den Mieter fehlt im Importplan.';
+                end if;
+            elsif not exists (select 1 from public.tenants t where t.id = v_tenant_id) then
+                raise exception 'Der Mieter wurde nicht gefunden.';
+            end if;
+
+            v_booking_start := (v_item ->> 'booking_start_date')::date;
+
+            insert into public.leases (user_id, unit_id, tenant_id, status, start_date, cold_rent, service_charge,
+                                       heating_cost, other_costs, deposit, last_rent_increase, booking_start_date)
+            values (v_uid, v_unit_id, v_tenant_id, 'active',
+                    (v_item ->> 'start_date')::date,
+                    coalesce((v_item ->> 'cold_rent')::numeric, 0),
+                    coalesce((v_item ->> 'service_charge')::numeric, 0),
+                    coalesce((v_item ->> 'heating_cost')::numeric, 0),
+                    coalesce((v_item ->> 'other_costs')::numeric, 0),
+                    (v_item ->> 'deposit')::numeric,
+                    (v_item ->> 'last_rent_increase')::date,
+                    v_booking_start);
+            v_leases := v_leases + 1;
+            if v_booking_start is not null then
+                v_booking := v_booking + 1;
+            end if;
+        end loop;
+
+    exception when others then
+        -- Zeitüberschreitung/Abbruch (query_canceled) fängt "others" nicht – rollt ebenfalls alles zurück.
+        get stacked diagnostics
+            v_state = returned_sqlstate,
+            v_msg = message_text,
+            v_detail = pg_exception_detail,
+            v_hint = pg_exception_hint,
+            v_column = column_name,
+            v_constraint = constraint_name;
+
+        v_reason := case
+            when v_state = '42501' and (v_msg like 'new row violates row-level security policy%' or v_msg like 'permission denied%')
+                then 'keine Berechtigung für diesen Datensatz'
+            when v_state = '23502'
+                then 'Pflichtangabe fehlt' || coalesce(' (' || v_column || ')', '')
+            when v_state = '23505'
+                then 'ein gleichartiger Datensatz ist bereits vorhanden' || coalesce(' (' || v_constraint || ')', '')
+            when v_state = '23503'
+                then 'ein verknüpfter Datensatz fehlt oder wurde inzwischen gelöscht'
+            when v_state = '23514'
+                then 'unzulässiger Wert' || coalesce(' (' || v_constraint || ')', '')
+            when v_state in ('22P02', '22007', '22008', '22003', '22023', '2200N')
+                then 'ungültiger Wert im Importplan'
+            else null
+        end;
+
+        raise exception using
+            errcode = v_state,
+            message = coalesce(v_ctx || ': ', '') || coalesce(v_reason, v_msg),
+            detail = case when v_reason is not null then v_msg else coalesce(v_detail, '') end,
+            hint = coalesce(v_hint, '');
+    end;
+
+    return jsonb_build_object(
+        'portfolios', coalesce(array_length(v_portfolio_ids, 1), 0),
+        'properties', coalesce(array_length(v_property_ids, 1), 0),
+        'units', coalesce(array_length(v_unit_ids, 1), 0),
+        'tenants', coalesce(array_length(v_tenant_ids, 1), 0),
+        'leases', v_leases,
+        'booking_start_leases', v_booking
+    );
+end;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.is_applicant_document_owner(p_object_name text)
@@ -4402,26 +4905,6 @@ begin
     return exists (select 1 from public.rental_applicants a
                    where a.id = v_id and a.user_id = auth.uid());
 end;
-$function$
-;
-CREATE OR REPLACE FUNCTION public.is_user_shared_with_me(check_user_id uuid)
- RETURNS boolean
- LANGUAGE sql
- STABLE SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-    select auth.uid() is not null
-       and check_user_id is not null
-       and exists (
-           select 1
-           from public.portfolio_shares ps
-           join public.portfolios p on p.id = ps.portfolio_id
-           where p.user_id = check_user_id
-             and ps.created_by = p.user_id
-             and ps.status = 'accepted'
-             and lower(ps.shared_with_email) = lower(coalesce(auth.jwt() ->> 'email', ''))
-             and public.share_permits(ps.permissions, '*', 'read')
-       )
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.keep_user_id_on_update()
@@ -4475,6 +4958,18 @@ begin
     end if;
 
     return old;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.lease_notes_set_meta()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  new.updated_at := now();
+  new.updated_by := coalesce(auth.uid(), new.updated_by);
+  return new;
 end;
 $function$
 ;
@@ -4546,6 +5041,121 @@ begin
     NEW.other_costs := coalesce(NEW.other_costs, 0);
     NEW.payment_due_day := coalesce(NEW.payment_due_day, 3);
     return NEW;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.leases_check_overlap()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_new_end date := coalesce(new.end_date, 'infinity'::date);
+  v_check_old boolean := false;
+  v_old_start date;
+  v_old_end date;
+  v_conflict record;
+begin
+  if new.unit_id is null or new.start_date is null then
+    return new;
+  end if;
+  -- beendet ohne Enddatum (Altdaten): belegt die Einheit nicht
+  if new.status is distinct from 'active' and new.end_date is null then
+    return new;
+  end if;
+
+  if tg_op = 'UPDATE' then
+    if new.unit_id is not distinct from old.unit_id
+       and new.start_date is not distinct from old.start_date
+       and new.end_date is not distinct from old.end_date
+       and new.status is not distinct from old.status then
+      return new;
+    end if;
+    v_check_old := old.unit_id = new.unit_id
+                   and not (old.status is distinct from 'active' and old.end_date is null)
+                   and old.start_date is not null;
+    v_old_start := old.start_date;
+    v_old_end := coalesce(old.end_date, 'infinity'::date);
+  end if;
+
+  -- gleichzeitige Anlage auf derselben Einheit nacheinander prüfen
+  perform pg_advisory_xact_lock(hashtextextended('public.leases.unit:' || new.unit_id::text, 0));
+
+  select l.id, l.start_date, l.end_date
+    into v_conflict
+    from public.leases l
+   where l.unit_id = new.unit_id
+     and l.id <> new.id
+     and not (l.status is distinct from 'active' and l.end_date is null)
+     and l.start_date <= v_new_end
+     and new.start_date <= coalesce(l.end_date, 'infinity'::date)
+     and not (v_check_old
+              and l.start_date <= v_old_end
+              and v_old_start <= coalesce(l.end_date, 'infinity'::date))
+   order by l.start_date
+   limit 1;
+
+  if found then
+    raise exception 'Für diese Einheit besteht im gewählten Zeitraum bereits ein Mietvertrag (% – %). Bitte beenden Sie zuerst den bestehenden Vertrag oder wählen Sie einen Mietbeginn nach dessen Ende.',
+      to_char(v_conflict.start_date, 'DD.MM.YYYY'),
+      coalesce(to_char(v_conflict.end_date, 'DD.MM.YYYY'), 'unbefristet')
+      using hint = 'lease_overlap';
+  end if;
+
+  return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.leases_sync_tenant_owner()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_uid uuid := auth.uid();
+  v_owner uuid;
+  v_tenant_owner uuid;
+begin
+  if new.tenant_id is null or v_uid is null then
+    return null;
+  end if;
+  if tg_op = 'UPDATE'
+     and new.tenant_id is not distinct from old.tenant_id
+     and new.unit_id is not distinct from old.unit_id then
+    return null;
+  end if;
+
+  select po.user_id into v_owner
+    from public.units u
+    join public.properties pr on pr.id = u.property_id
+    join public.portfolios po on po.id = pr.portfolio_id
+   where u.id = new.unit_id;
+
+  select t.user_id into v_tenant_owner from public.tenants t where t.id = new.tenant_id;
+
+  if v_owner is null or v_tenant_owner is null or v_tenant_owner = v_owner or v_tenant_owner <> v_uid then
+    return null;
+  end if;
+
+  if exists (select 1
+               from public.leases l
+               join public.units u on u.id = l.unit_id
+               join public.properties pr on pr.id = u.property_id
+               join public.portfolios po on po.id = pr.portfolio_id
+              where l.tenant_id = new.tenant_id
+                and l.id <> new.id
+                and po.user_id <> v_owner) then
+    return null;
+  end if;
+
+  update public.tenants set user_id = v_owner
+   where id = new.tenant_id and user_id = v_tenant_owner;
+  update public.contacts set user_id = v_owner
+   where tenant_id = new.tenant_id and user_id = v_tenant_owner;
+
+  return null;
 end;
 $function$
 ;
@@ -4764,6 +5374,40 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.profiles_protect_stripe_connect()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+    if current_user in ('authenticated', 'anon') then
+        if tg_op = 'INSERT' then
+            new.stripe_connect_id := null;
+            new.stripe_connect_enabled := false;
+        else
+            new.stripe_connect_id := old.stripe_connect_id;
+            new.stripe_connect_enabled := old.stripe_connect_enabled;
+        end if;
+    end if;
+    return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.protect_claim_item_created_at()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  if tg_op = 'INSERT' then
+    new.created_at := now();
+  else
+    new.created_at := old.created_at;
+  end if;
+  return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.protect_claim_item_original_amount()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -4849,7 +5493,22 @@ begin
     return new;
   end if;
 
-  if old.note is not null and old.note like '%Verrechnung%Forderungsakte%' then
+  -- Die Verknüpfung setzt/ändert nur die Forderungsbuchung (record_claim_payment)
+  if tg_op in ('INSERT', 'UPDATE')
+     and new.claim_payment_id is not null
+     and (tg_op = 'INSERT' or new.claim_payment_id is distinct from old.claim_payment_id)
+     and coalesce(current_setting('app.claims_rpc_bypass', true), '') <> '1' then
+    raise exception 'Die Verknüpfung mit einer Forderungszahlung wird ausschließlich von der Forderungsakte gesetzt.';
+  end if;
+
+  if tg_op = 'INSERT' then
+    return new;
+  end if;
+
+  if old.claim_payment_id is not null then
+    v_linked := exists (select 1 from public.claim_payments cp
+                         where cp.id = old.claim_payment_id and cp.status = 'posted');
+  elsif old.note is not null and old.note like '%Verrechnung%Forderungsakte%' then
     v_ref := substring(old.note from '\(Ref: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)');
     if v_ref is not null then
       v_linked := exists (select 1 from public.claim_payments cp where cp.id = v_ref::uuid and cp.status = 'posted');
@@ -4869,10 +5528,85 @@ begin
      or new.note is distinct from old.note
      or new.lease_id is distinct from old.lease_id
      or new.period_month is distinct from old.period_month
-     or new.user_id is distinct from old.user_id then
+     or new.user_id is distinct from old.user_id
+     or new.claim_payment_id is distinct from old.claim_payment_id then
     raise exception 'Eine forderungsgebundene Zahlung kann nicht manuell in der Buchhaltung geändert werden. Bitte stornieren Sie die Zahlung in der zugehörigen Forderungsakte.';
   end if;
   return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.protect_issued_invoice()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+-- SECURITY DEFINER nur für die Existenzprüfungen (gelöschte Kontakte/Objekte/Einheiten/Konten,
+-- Eigentümer der Portfolios) ohne RLS des Aufrufers. Ändert selbst keine Daten.
+declare
+    v_uid uuid := auth.uid();
+    v_locked constant text := 'Ausgestellte Rechnungen und Gutschriften sind festgeschrieben und können nicht mehr geändert werden. Eine Korrektur ist nur über eine Gutschrift möglich.';
+    v_fixed text[] := array['status', 'portfolio_id', 'contact_id', 'property_id', 'unit_id'];
+begin
+    if tg_op = 'DELETE' then
+        if old.status = 'draft' then
+            return old;
+        end if;
+        -- Löschen des Benutzerkontos (auth.users ON DELETE CASCADE): das Konto ist dann schon entfernt
+        if not exists (select 1 from auth.users u where u.id = old.user_id) then
+            return old;
+        end if;
+        raise exception 'Ausgestellte Rechnungen und Gutschriften können nicht gelöscht werden (Aufbewahrungspflicht). Eine Korrektur ist nur über eine Gutschrift möglich.'
+            using errcode = '42501';
+    end if;
+
+    -- UPDATE eines Entwurfs: frei änderbar; als neuer Status nur Entwurf oder ausgestellt
+    if old.status = 'draft' then
+        if new.status is distinct from 'draft' and new.status is distinct from 'issued' then
+            raise exception 'Ein Entwurf kann nur ausgestellt werden. Gutschriften entstehen nur zu ausgestellten Rechnungen.'
+                using errcode = '42501';
+        end if;
+        return new;
+    end if;
+
+    -- a) Status: nur issued -> credited
+    if new.status is distinct from old.status
+       and not (old.status = 'issued' and new.status = 'credited') then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+
+    -- b) Portfolio: nur zwischen Portfolios desselben Eigentümers (der selbst handelt)
+    if new.portfolio_id is distinct from old.portfolio_id
+       and not (v_uid is not null
+                and exists (select 1 from public.portfolios p where p.id = old.portfolio_id and p.user_id = v_uid)
+                and exists (select 1 from public.portfolios p where p.id = new.portfolio_id and p.user_id = v_uid)) then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+
+    -- c) Verweise: nur auf NULL, wenn der verwiesene Datensatz nicht mehr existiert (ON DELETE SET NULL)
+    if new.contact_id is distinct from old.contact_id
+       and not (new.contact_id is null
+                and not exists (select 1 from public.contacts c where c.id = old.contact_id)) then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+    if new.property_id is distinct from old.property_id
+       and not (new.property_id is null
+                and not exists (select 1 from public.properties p where p.id = old.property_id)) then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+    if new.unit_id is distinct from old.unit_id
+       and not (new.unit_id is null
+                and not exists (select 1 from public.units u where u.id = old.unit_id)) then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+
+    -- Alle übrigen Spalten (auch künftige) bleiben unverändert
+    if (to_jsonb(new) - v_fixed) is distinct from (to_jsonb(old) - v_fixed) then
+        raise exception '%', v_locked using errcode = '42501';
+    end if;
+
+    return new;
 end;
 $function$
 ;
@@ -5112,6 +5846,8 @@ declare
   v_plan_completed boolean := false;
   v_event_metadata jsonb;
   v_rent_remaining numeric;
+  v_rent_unbooked numeric := 0;
+  v_rl_ids uuid[];
   v_rl record;
   v_rl_alloc numeric;
 begin
@@ -5282,7 +6018,7 @@ begin
   -- Reihenfolge der Posten: Zielposition, dann Zielbereich (Rate: Planposten; sonst
   -- Posten außerhalb des Plans), dann übrige Posten; je nach Monat/Anlage.
   for v_item in
-    select ci.id, ci.period_month, ci.rent_ledger_ids, ctv.open_amount,
+    select ci.id, ci.item_type, ci.period_month, ci.rent_ledger_id, ci.rent_ledger_ids, ctv.open_amount,
            case
              when v_target = 'specific_item' and ci.id = p_target_claim_item_id then 0
              when v_plan_created_at is null then 1
@@ -5315,8 +6051,12 @@ begin
     v_item_alloc := least(v_remaining, v_item.open_amount);
     if v_item_alloc > 0 then
       v_allocs := v_allocs || jsonb_build_array(jsonb_build_object(
-        'item_id', v_item.id, 'amount', v_item_alloc,
-        'period_month', v_item.period_month, 'rent_ledger_ids', to_jsonb(v_item.rent_ledger_ids)));
+        'item_id', v_item.id, 'amount', v_item_alloc, 'item_type', v_item.item_type,
+        'period_month', v_item.period_month,
+        'rent_ledger_ids', to_jsonb(array(
+           select distinct x
+             from unnest(array_append(coalesce(v_item.rent_ledger_ids, '{}'::uuid[]), v_item.rent_ledger_id)) as t(x)
+            where x is not null))));
       v_alloc_principal := v_alloc_principal + v_item_alloc;
       v_remaining := v_remaining - v_item_alloc;
       if v_item.prio = 0 then
@@ -5373,30 +6113,38 @@ begin
     insert into public.claim_payment_allocations (claim_payment_id, user_id, claim_id, allocation_bucket, claim_item_id, amount)
     values (v_payment_id, v_owner, p_claim_id, 'principal', (v_alloc->>'item_id')::uuid, (v_alloc->>'amount')::numeric);
 
-    -- Mietkonto spiegeln (Notiz-Format unverändert, Schutz siehe protect_claim_rent_payments)
-    if v_claim.lease_id is not null then
-      if jsonb_typeof(v_alloc->'rent_ledger_ids') = 'array' and jsonb_array_length(v_alloc->'rent_ledger_ids') > 0 then
-        v_rent_remaining := (v_alloc->>'amount')::numeric;
-        for v_rl in
-          select id, period_month, expected_rent, coalesce(paid_amount, 0) as paid_amount
-            from public.rent_ledger
-           where id in (select t.v::uuid from jsonb_array_elements_text(v_alloc->'rent_ledger_ids') as t(v))
-           order by period_month asc
-        loop
-          exit when v_rent_remaining <= 0;
-          v_rl_alloc := least(v_rent_remaining, v_rl.expected_rent - v_rl.paid_amount);
-          if v_rl_alloc > 0 then
-            insert into public.rent_payments (user_id, lease_id, payment_date, period_month, amount, note)
-            values (v_owner, v_claim.lease_id, p_payment_date, v_rl.period_month, v_rl_alloc,
-                    'Verrechnung Forderungsakte (Ref: ' || v_payment_id || ')');
-            v_rent_remaining := v_rent_remaining - v_rl_alloc;
-          end if;
-        end loop;
-      elsif v_alloc->>'period_month' is not null then
-        insert into public.rent_payments (user_id, lease_id, payment_date, period_month, amount, note)
-        values (v_owner, v_claim.lease_id, p_payment_date, (v_alloc->>'period_month')::date,
-                (v_alloc->>'amount')::numeric,
-                'Verrechnung Forderungsakte (Ref: ' || v_payment_id || ')');
+    -- Mietkonto spiegeln (D1b-18, H1-10, H4-16): nur Mietpositionen, nur Mietzeilen des
+    -- Eigentümers und dieses Vertrags; Bindung über rent_payments.claim_payment_id (die Notiz
+    -- bleibt reiner Anzeigetext). Je Monat höchstens bis zur Sollmiete – ein Rest wird bewusst
+    -- NICHT ins Mietkonto gebucht (die Miete wäre sonst überzahlt), sondern im Ereignis als
+    -- rent_mirror_unbooked ausgewiesen. Altpositionen ohne Mietzeilen-Bezug: Monat aus period_month.
+    if v_claim.lease_id is not null and coalesce(v_alloc->>'item_type', '') = 'rent' then
+      v_rent_remaining := (v_alloc->>'amount')::numeric;
+      v_rl_ids := case when jsonb_typeof(v_alloc->'rent_ledger_ids') = 'array'
+                       then array(select t.v::uuid from jsonb_array_elements_text(v_alloc->'rent_ledger_ids') as t(v))
+                       else '{}'::uuid[] end;
+      for v_rl in
+        select rl.id, rl.period_month, rl.expected_rent, coalesce(rl.paid_amount, 0) as paid_amount
+          from public.rent_ledger rl
+         where rl.user_id = v_owner
+           and rl.lease_id = v_claim.lease_id
+           and (rl.id = any(v_rl_ids)
+                or (cardinality(v_rl_ids) = 0
+                    and v_alloc->>'period_month' is not null
+                    and rl.period_month = date_trunc('month', (v_alloc->>'period_month')::date)::date))
+         order by rl.period_month asc
+      loop
+        exit when v_rent_remaining <= 0;
+        v_rl_alloc := least(v_rent_remaining, v_rl.expected_rent - v_rl.paid_amount);
+        if v_rl_alloc > 0 then
+          insert into public.rent_payments (user_id, lease_id, payment_date, period_month, amount, note, claim_payment_id)
+          values (v_owner, v_claim.lease_id, p_payment_date, v_rl.period_month, v_rl_alloc,
+                  'Verrechnung Forderungsakte (Ref: ' || v_payment_id || ')', v_payment_id);
+          v_rent_remaining := v_rent_remaining - v_rl_alloc;
+        end if;
+      end loop;
+      if v_rent_remaining > 0 then
+        v_rent_unbooked := v_rent_unbooked + v_rent_remaining;
       end if;
     end if;
   end loop;
@@ -5464,6 +6212,10 @@ begin
     'old_accumulated_unpaid_interest', v_claim.accumulated_unpaid_interest,
     'old_claim_status', v_claim.status);
 
+  if v_rent_unbooked > 0 then
+    v_event_metadata := v_event_metadata || jsonb_build_object('rent_mirror_unbooked', round(v_rent_unbooked, 2));
+  end if;
+
   if v_target = 'specific_item' then
     v_event_metadata := v_event_metadata || jsonb_build_object(
       'target_type', 'specific_item',
@@ -5491,7 +6243,6 @@ begin
   values (coalesce(v_caller, v_owner), p_claim_id, 'payment_received', 'Zahlung erfasst', v_event_metadata);
 
   perform set_config('app.claims_rpc_bypass', '', true);
-  perform public.sync_all_rent_ledgers();
 end;
 $function$
 ;
@@ -5548,6 +6299,54 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.renovation_set_created_by()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  if tg_op = 'INSERT' then
+    -- Angemeldete Konten: immer das eigene Konto; Dienste ohne Anmeldung behalten ihren Wert
+    if auth.uid() is not null then
+      new.created_by := auth.uid();
+    end if;
+  elsif tg_op = 'UPDATE' then
+    -- Ersteller ist unveränderlich. Erlaubt sind nur das Leeren (ON DELETE SET NULL) und das
+    -- Nachtragen eines fehlenden Werts ohne Anmeldung (Migration / Dienst).
+    if new.created_by is distinct from old.created_by then
+      if new.created_by is null then
+        null;
+      elsif old.created_by is null and auth.uid() is null then
+        null;
+      else
+        new.created_by := old.created_by;
+      end if;
+    end if;
+  end if;
+  return new;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.rent_ledger_block_claimed_delete()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+    if exists (select 1
+                 from public.claim_items ci
+                where ci.rent_ledger_id = old.id
+                   or ci.rent_ledger_ids @> array[old.id]) then
+        raise exception 'Die Sollstellung für % ist Teil einer Forderung und kann nicht gelöscht werden.',
+                        coalesce(to_char(old.period_month, 'MM/YYYY'), 'diesen Monat')
+            using errcode = '23503',
+                  hint = 'Sollstellungen, die in einer Forderung verwendet werden (auch in stornierten), bleiben erhalten.';
+    end if;
+    return old;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.reverse_appended_claim(p_event_id uuid)
  RETURNS void
  LANGUAGE plpgsql
@@ -5582,6 +6381,15 @@ begin
   if not found
      or (v_claim.user_id <> v_caller and not public.has_claim_access(v_claim.id, 'finanzen', 'write')) then
     raise exception 'Keine Berechtigung.';
+  end if;
+
+  -- Der Nachtrags-Eintrag bleibt erhalten; nur einmal rückgängig machen
+  if exists (select 1 from public.claim_events r
+              where r.claim_id = v_claim.id
+                and r.event_type = 'note_added'
+                and r.event_metadata->>'source' = 'append_reversed'
+                and r.event_metadata->>'reversed_event_id' = p_event_id::text) then
+    raise exception 'Dieser Nachtrag wurde bereits rückgängig gemacht.';
   end if;
 
   -- Positionen des Nachtrags: in derselben Transaktion angelegt (created_at = Ereignis)
@@ -5668,7 +6476,6 @@ begin
   where id = v_claim.id;
 
   delete from public.claim_items where id = any(v_ids);
-  delete from public.claim_events where id = p_event_id;
 
   insert into public.claim_events (user_id, claim_id, event_type, description, event_metadata)
   values (v_caller, v_claim.id, 'note_added', 'Nachtrag rückgängig gemacht',
@@ -5706,7 +6513,8 @@ declare
   v_new_status text;
   v_uuid_re constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 begin
-  if v_caller is null then
+  -- Angemeldeter Nutzer oder Server-Rolle (Stripe-Webhook: Erstattung/Rückbuchung)
+  if v_caller is null and coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'Not authenticated';
   end if;
 
@@ -5718,7 +6526,9 @@ begin
   -- Berechtigung auf die FORDERUNG (nicht nur auf die Zahlungszeile)
   select * into v_claim from public.claims where id = v_pay.claim_id for update;
   if not found
-     or (v_claim.user_id <> v_caller and not public.has_claim_access(v_claim.id, 'finanzen', 'write')) then
+     or (v_caller is not null
+         and v_claim.user_id <> v_caller
+         and not public.has_claim_access(v_claim.id, 'finanzen', 'write')) then
     raise exception 'Zahlung nicht gefunden oder keine Berechtigung.';
   end if;
 
@@ -5855,11 +6665,14 @@ begin
   end;
   update public.claims set status = v_new_status, updated_at = now() where id = v_claim.id;
 
-  -- Gespiegelte Mietzahlungen entfernen (Mietkonto zeigt den Rückstand wieder)
+  -- Gespiegelte Mietzahlungen entfernen (Mietkonto zeigt den Rückstand wieder).
+  -- Verknüpfung über claim_payment_id; Altzeilen ohne Verknüpfung über den Notiztext.
   perform set_config('app.bypass_rent_payment_protect', '1', true);
   delete from public.rent_payments
    where user_id = v_claim.user_id
-     and note like '%(Ref: ' || p_payment_id::text || ')%';
+     and (claim_payment_id = p_payment_id
+          or (claim_payment_id is null
+              and note like '%(Ref: ' || p_payment_id::text || ')%'));
   perform set_config('app.bypass_rent_payment_protect', '', true);
 
   -- Zahlung bleibt als storniert erhalten; Zuordnungen werden entfernt (sie stehen im
@@ -5868,13 +6681,17 @@ begin
   update public.claim_payments set status = 'cancelled' where id = p_payment_id;
 
   insert into public.claim_events (user_id, claim_id, event_type, description, event_metadata)
-  values (v_caller, v_claim.id, 'payment_reversed', 'Zahlung storniert',
+  values (coalesce(v_caller, v_claim.user_id), v_claim.id, 'payment_reversed', 'Zahlung storniert',
       jsonb_build_object(
           'payment_id', p_payment_id,
           'amount', v_pay.amount,
           'original_payment_date', v_pay.payment_date,
           'reversal_date', current_date,
-          'reason', 'Manuell storniert',
+          'reason', case when v_caller is null
+                         then 'Automatisch storniert (Erstattung/Rückbuchung beim Zahlungsdienstleister)'
+                         else 'Manuell storniert' end,
+          'reversed_by', v_caller,
+          'waiver', v_pay.allocation_type = 'waiver',
           'reversed_fees', v_alloc_fees,
           'reversed_interest', v_alloc_interest,
           'reversed_principal', v_alloc_principal,
@@ -5884,7 +6701,6 @@ begin
           'new_claim_status', v_new_status));
 
   perform set_config('app.claims_rpc_bypass', '', true);
-  perform public.sync_all_rent_ledgers();
 end;
 $function$
 ;
@@ -5928,7 +6744,7 @@ begin
   perform set_config('app.claims_rpc_bypass', '1', true);
 
   -- Zinsen bis heute (Planpositionen waren zinsfrei) festschreiben
-  v_cap := coalesce(public.claim_live_interest(p_claim_id, current_date), 0);
+  v_cap := coalesce(public.claim_live_interest(p_claim_id, public.claim_today()), 0);
 
   -- Aufschlag nur ausbuchen, wenn ihn create_payment_plan als Gebühr gebucht hat
   v_booked := exists (
@@ -5967,7 +6783,7 @@ begin
   update public.claims set
     accumulated_unpaid_interest = round(coalesce(accumulated_unpaid_interest, 0) + v_cap, 2),
     interest_start_date = case when interest_start_date is null then null
-                               else greatest(interest_start_date, current_date) end,
+                               else greatest(interest_start_date, public.claim_today()) end,
     accumulated_unpaid_fees = v_new_fees,
     status = case when status = 'payment_plan_active' then 'open' else status end,
     next_action_at = null,
@@ -5986,6 +6802,17 @@ begin
 
   perform set_config('app.claims_rpc_bypass', '', true);
 end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.rls_contact_user_id_unchanged(p_contact_id uuid, p_user_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select not exists (select 1 from public.contacts c
+                      where c.id = p_contact_id
+                        and c.user_id is distinct from p_user_id)
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.rls_is_my_landlord(p_user_id uuid)
@@ -6190,6 +7017,21 @@ AS $function$
                        and t.user_id is distinct from p_user_id)
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.rls_ticket_message_visible(p_ticket_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  select coalesce(
+    auth.uid() is not null
+    and p_ticket_id is not null
+    and exists (select 1 from public.tickets t
+                 where t.id = p_ticket_id
+                   and public.has_property_access(t.property_id, 'mieterportal', 'read')),
+    false)
+$function$
+;
 CREATE OR REPLACE FUNCTION public.rls_user_ok(p_user_id uuid, p_kind text, p_id uuid)
  RETURNS boolean
  LANGUAGE sql
@@ -6253,6 +7095,192 @@ AS $function$
     ), false)
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.save_property_economic_unit(p_property_id uuid, p_portfolio_id uuid, p_property jsonb, p_we_id uuid DEFAULT NULL::uuid, p_join_ids uuid[] DEFAULT '{}'::uuid[], p_remove_ids uuid[] DEFAULT '{}'::uuid[], p_add_member_values boolean DEFAULT true)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_uid uuid := auth.uid();
+    v_owner uuid;
+    v_prop_id uuid := p_property_id;
+    v_join uuid[];
+    v_remove uuid[];
+    v_joining uuid[] := '{}'::uuid[];
+    v_street text;
+    v_house text;
+    v_investment numeric;
+    v_equity numeric;
+    v_join_investment numeric := 0;
+    v_join_equity numeric := 0;
+    v_other_portfolio int := 0;
+    v_other_we int := 0;
+    v_rows int;
+begin
+    if v_uid is null then
+        raise exception 'Bitte melden Sie sich an.';
+    end if;
+    if p_portfolio_id is null then
+        raise exception 'Bitte wählen Sie ein Portfolio aus.';
+    end if;
+    if p_property is null or jsonb_typeof(p_property) <> 'object' then
+        raise exception 'Die Angaben zur Immobilie fehlen.';
+    end if;
+
+    v_join := coalesce((select array_agg(distinct x) from unnest(coalesce(p_join_ids, '{}'::uuid[])) as t(x) where x is not null), '{}'::uuid[]);
+    v_remove := coalesce((select array_agg(distinct x) from unnest(coalesce(p_remove_ids, '{}'::uuid[])) as t(x) where x is not null), '{}'::uuid[]);
+
+    v_street := btrim(coalesce(p_property ->> 'street', ''));
+    v_house := btrim(coalesce(p_property ->> 'house_number', ''));
+    if v_street = '' or v_house = '' then
+        raise exception 'Bitte geben Sie Straße und Hausnummer an.';
+    end if;
+
+    v_investment := coalesce(nullif(p_property ->> 'total_investment_cost', '')::numeric, 0);
+    v_equity := coalesce(nullif(p_property ->> 'equity_invested', '')::numeric, 0);
+    if v_investment < 0 or v_equity < 0 then
+        raise exception 'Gesamtinvestition und Eigenkapital dürfen nicht negativ sein.';
+    end if;
+
+    if p_we_id is null and (cardinality(v_join) > 0 or cardinality(v_remove) > 0) then
+        raise exception 'Ohne Wirtschaftseinheit können keine Objekte zugeordnet oder gelöst werden.';
+    end if;
+    if (v_join && v_remove) or (v_prop_id is not null and (v_prop_id = any(v_join) or v_prop_id = any(v_remove))) then
+        raise exception 'Die Auswahl der Wirtschaftseinheit ist widersprüchlich. Bitte laden Sie die Seite neu.';
+    end if;
+
+    -- Eigentümer des Portfolios (neue Wirtschaftseinheiten gehören ihm); nur sichtbare Portfolios
+    select po.user_id into v_owner from public.portfolios po where po.id = p_portfolio_id;
+    if v_owner is null then
+        raise exception 'Das Portfolio wurde nicht gefunden oder Sie haben keinen Zugriff darauf.';
+    end if;
+
+    -- 1. Mitglieder sperren. FOR UPDATE liefert nur Zeilen, die der Nutzer auch ändern darf.
+    if cardinality(v_join) > 0 then
+        select count(*) into v_rows
+          from (select pr.id from public.properties pr where pr.id = any(v_join) for update) s;
+        if v_rows <> cardinality(v_join) then
+            raise exception 'Mindestens ein ausgewähltes Objekt der Wirtschaftseinheit ist nicht mehr verfügbar oder Sie haben keine Schreibberechtigung dafür. Es wurde nichts geändert.';
+        end if;
+
+        select count(*) filter (where pr.portfolio_id <> p_portfolio_id),
+               count(*) filter (where pr.economic_unit_id is not null and pr.economic_unit_id <> p_we_id),
+               coalesce(array_agg(pr.id) filter (where pr.economic_unit_id is distinct from p_we_id), '{}'::uuid[]),
+               coalesce(sum(coalesce(pr.total_investment_cost, 0)) filter (where pr.economic_unit_id is distinct from p_we_id), 0),
+               coalesce(sum(coalesce(pr.equity_invested, 0)) filter (where pr.economic_unit_id is distinct from p_we_id), 0)
+          into v_other_portfolio, v_other_we, v_joining, v_join_investment, v_join_equity
+          from public.properties pr
+         where pr.id = any(v_join);
+
+        if v_other_portfolio > 0 then
+            raise exception 'Eine Wirtschaftseinheit kann nur Objekte desselben Portfolios enthalten. Es wurde nichts geändert.';
+        end if;
+        if v_other_we > 0 then
+            raise exception 'Mindestens ein ausgewähltes Objekt gehört bereits zu einer anderen Wirtschaftseinheit. Bitte lösen Sie es zuerst dort heraus. Es wurde nichts geändert.';
+        end if;
+    end if;
+
+    if cardinality(v_remove) > 0 then
+        select count(*) into v_rows
+          from (select pr.id from public.properties pr
+                 where pr.id = any(v_remove) and pr.economic_unit_id = p_we_id
+                 for update) s;
+        if v_rows <> cardinality(v_remove) then
+            raise exception 'Mindestens ein zu lösendes Objekt gehört nicht mehr zu dieser Wirtschaftseinheit oder Sie haben keine Schreibberechtigung dafür. Bitte laden Sie die Seite neu. Es wurde nichts geändert.';
+        end if;
+    end if;
+
+    -- 2. Wirtschaftseinheit: Gesamtwerte (user_id nur beim Anlegen)
+    if p_we_id is not null then
+        update public.economic_units e
+           set total_investment_cost = v_investment + case when p_add_member_values then v_join_investment else 0 end,
+               equity_invested = v_equity + case when p_add_member_values then v_join_equity else 0 end,
+               updated_at = now()
+         where e.id = p_we_id;
+        get diagnostics v_rows = row_count;
+        if v_rows = 0 then
+            begin
+                insert into public.economic_units (id, user_id, total_investment_cost, equity_invested, updated_at)
+                values (p_we_id, v_owner,
+                        v_investment + case when p_add_member_values then v_join_investment else 0 end,
+                        v_equity + case when p_add_member_values then v_join_equity else 0 end,
+                        now());
+            exception when unique_violation then
+                -- existiert, ist für den Nutzer aber nicht änderbar
+                raise exception 'Die Gesamtwerte der Wirtschaftseinheit konnten nicht gespeichert werden (keine Berechtigung). Es wurde nichts geändert.';
+            end;
+        end if;
+    end if;
+
+    -- 3. Objekt (Eigentümer und Portfolio bleiben beim Bearbeiten unverändert)
+    if v_prop_id is null then
+        insert into public.properties (
+            user_id, portfolio_id, street, house_number, zip, city, construction_year, property_type,
+            total_investment_cost, equity_invested, economic_unit_id, thumbnail_image)
+        values (
+            v_owner, p_portfolio_id, v_street, v_house,
+            btrim(coalesce(p_property ->> 'zip', '')),
+            btrim(coalesce(p_property ->> 'city', '')),
+            nullif(p_property ->> 'construction_year', '')::integer,
+            coalesce(nullif(p_property ->> 'property_type', ''), 'residential'),
+            case when p_we_id is null then v_investment else 0 end,
+            case when p_we_id is null then v_equity else 0 end,
+            p_we_id,
+            nullif(p_property ->> 'thumbnail_image', ''))
+        returning id into v_prop_id;
+    else
+        update public.properties pr
+           set street = v_street,
+               house_number = v_house,
+               zip = btrim(coalesce(p_property ->> 'zip', '')),
+               city = btrim(coalesce(p_property ->> 'city', '')),
+               construction_year = nullif(p_property ->> 'construction_year', '')::integer,
+               property_type = case when p_property ? 'property_type'
+                                    then coalesce(nullif(p_property ->> 'property_type', ''), pr.property_type)
+                                    else pr.property_type end,
+               total_investment_cost = case when p_we_id is null then v_investment else 0 end,
+               equity_invested = case when p_we_id is null then v_equity else 0 end,
+               economic_unit_id = p_we_id,
+               thumbnail_image = case when p_property ? 'thumbnail_image'
+                                      then nullif(p_property ->> 'thumbnail_image', '')
+                                      else pr.thumbnail_image end
+         where pr.id = v_prop_id
+           and pr.portfolio_id = p_portfolio_id;
+        get diagnostics v_rows = row_count;
+        if v_rows = 0 then
+            raise exception 'Die Immobilie konnte nicht gespeichert werden (keine Berechtigung oder nicht mehr vorhanden). Es wurde nichts geändert.';
+        end if;
+    end if;
+
+    -- 4. Neue Mitglieder zuordnen; ihre Einzelwerte stecken (optional) in den WE-Gesamtwerten
+    if cardinality(v_joining) > 0 then
+        update public.properties pr
+           set economic_unit_id = p_we_id,
+               total_investment_cost = 0,
+               equity_invested = 0
+         where pr.id = any(v_joining);
+        get diagnostics v_rows = row_count;
+        if v_rows <> cardinality(v_joining) then
+            raise exception 'Mindestens ein Objekt konnte der Wirtschaftseinheit nicht zugeordnet werden (keine Berechtigung). Es wurde nichts geändert.';
+        end if;
+    end if;
+
+    -- 5. Mitglieder lösen (ihre Einzelwerte trägt der Nutzer danach selbst ein)
+    if cardinality(v_remove) > 0 then
+        update public.properties pr
+           set economic_unit_id = null
+         where pr.id = any(v_remove)
+           and pr.economic_unit_id = p_we_id;
+        get diagnostics v_rows = row_count;
+        if v_rows <> cardinality(v_remove) then
+            raise exception 'Mindestens ein Objekt konnte nicht aus der Wirtschaftseinheit gelöst werden (keine Berechtigung). Es wurde nichts geändert.';
+        end if;
+    end if;
+
+    return v_prop_id;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.set_forderungsmanagement_updated_at()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -6288,6 +7316,15 @@ begin
          where pr.id = new.property_id;
         if tg_op = 'UPDATE' then
             v_moved := new.property_id is distinct from old.property_id;
+        end if;
+    elsif tg_table_name = 'leases' then
+        select po.user_id into v_owner
+          from public.units u
+          join public.properties pr on pr.id = u.property_id
+          join public.portfolios po on po.id = pr.portfolio_id
+         where u.id = new.unit_id;
+        if tg_op = 'UPDATE' then
+            v_moved := new.unit_id is distinct from old.unit_id;
         end if;
     end if;
 
@@ -6375,16 +7412,17 @@ begin
   end if;
 
   -- Zinsen bis heute festschreiben, dann die Hauptforderung der Position ausbuchen
-  v_cap := coalesce(public.claim_live_interest(v_claim_id, current_date), 0);
+  v_cap := coalesce(public.claim_live_interest(v_claim_id, public.claim_today()), 0);
   update public.claims set
     accumulated_unpaid_interest = round(coalesce(accumulated_unpaid_interest, 0) + v_cap, 2),
     interest_start_date = case when interest_start_date is null then null
-                               else greatest(interest_start_date, current_date) end,
+                               else greatest(interest_start_date, public.claim_today()) end,
     updated_at = now()
   where id = v_claim_id;
 
+  -- Erlass/Ausbuchung: eigene Zuordnungsart 'waiver' (kein Geldeingang)
   insert into public.claim_payments (user_id, claim_id, payment_date, amount, allocation_type, status, note)
-  values (v_claim.user_id, v_claim_id, current_date, v_open, 'manual', 'posted', 'Als erledigt markiert (Erlass/Ausbuchung)')
+  values (v_claim.user_id, v_claim_id, public.claim_today(), v_open, 'waiver', 'posted', 'Als erledigt markiert (Erlass/Ausbuchung)')
   returning id into v_payment_id;
 
   insert into public.claim_payment_allocations (claim_payment_id, user_id, claim_id, allocation_bucket, claim_item_id, amount)
@@ -6396,12 +7434,13 @@ begin
   values (v_caller, v_claim_id, 'payment_received', 'Position manuell als erledigt markiert (Erlass/Ausbuchung, kein Geldeingang)',
       jsonb_build_object(
           'payment_id', v_payment_id,
-          'payment_date', current_date,
+          'payment_date', public.claim_today(),
           'amount', v_open,
           'allocated_to_fees', 0,
           'allocated_to_interest', 0,
           'allocated_to_principal', v_open,
           'waiver', true,
+          'allocation_type', 'waiver',
           'target_type', 'specific_item',
           'target_item_id', p_item_id,
           'target_item_description', v_desc,
@@ -6445,6 +7484,87 @@ AS $function$
     when p_segment ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
       then p_segment::uuid
   end
+$function$
+;
+CREATE OR REPLACE FUNCTION public.stripe_webhook_event_begin(p_event_id text, p_event_type text, p_livemode boolean DEFAULT NULL::boolean, p_account text DEFAULT NULL::text, p_created bigint DEFAULT NULL::bigint)
+ RETURNS text
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_status text;
+  v_started timestamptz;
+begin
+  if p_event_id is null or p_event_id !~ '^evt_[A-Za-z0-9]{1,255}$' then
+    raise exception 'Ungültige Stripe-Ereignis-ID.' using errcode = '22023';
+  end if;
+
+  insert into public.stripe_webhook_events (event_id, event_type, livemode, connect_account, stripe_created_at)
+  values (
+    p_event_id,
+    left(coalesce(nullif(btrim(p_event_type), ''), 'unknown'), 100),
+    p_livemode,
+    case when p_account ~ '^acct_[A-Za-z0-9]{1,255}$' then p_account end,
+    case when p_created > 0 and p_created < 32503680000 then to_timestamp(p_created) end)
+  on conflict (event_id) do nothing;
+  if found then
+    return 'process';
+  end if;
+
+  -- Ereignis ist bekannt: Zeile sperren, damit nur EINE Zustellung es übernimmt
+  select e.status, e.started_at into v_status, v_started
+    from public.stripe_webhook_events e
+   where e.event_id = p_event_id
+   for update;
+
+  if v_status = 'processed' then
+    return 'duplicate';
+  end if;
+  if v_status = 'processing' and v_started > clock_timestamp() - interval '10 minutes' then
+    return 'in_progress';
+  end if;
+
+  -- fehlgeschlagen oder abgebrochen → erneut verarbeiten
+  update public.stripe_webhook_events
+     set status = 'processing',
+         attempts = attempts + 1,
+         started_at = clock_timestamp()
+   where event_id = p_event_id;
+  return 'process';
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.stripe_webhook_event_finish(p_event_id text, p_success boolean, p_outcome text DEFAULT NULL::text, p_error text DEFAULT NULL::text)
+ RETURNS void
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  update public.stripe_webhook_events
+     set status = case when coalesce(p_success, false) then 'processed' else 'failed' end,
+         processed_at = case when coalesce(p_success, false) then clock_timestamp() end,
+         outcome = case when p_outcome ~ '^[a-z_]{1,100}$' then p_outcome end,
+         last_error = case
+                        when coalesce(p_success, false) then null
+                        else left(coalesce(nullif(btrim(p_error), ''), 'Unbekannter Fehler'), 500)
+                      end
+   where event_id = p_event_id;
+
+  -- Aufbewahrung: erledigte Einträge nach 180 Tagen löschen (höchstens 200 je Aufruf)
+  begin
+    delete from public.stripe_webhook_events
+     where ctid = any (array(
+             select e.ctid
+               from public.stripe_webhook_events e
+              where e.status = 'processed'
+                and e.received_at < now() - interval '180 days'
+              order by e.received_at
+              limit 200
+                for update skip locked));
+  exception when others then
+    raise warning 'stripe_webhook_events: Aufräumen übersprungen (%)', sqlerrm;
+  end;
+end;
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.submit_public_payment_plan_request(p_token text, p_pin text, p_requested_months integer, p_requested_rate numeric, p_requested_total numeric, p_adjustment_amount numeric, p_tenant_message text)
@@ -6680,8 +7800,11 @@ CREATE OR REPLACE FUNCTION public.sync_all_rent_ledgers()
 AS $function$
 declare
     v_user_id uuid;
+    v_email text;
     v_lease record;
     v_current_month date;
+    v_shared uuid[];
+    v_lease_ids uuid[];
 begin
     v_user_id := auth.uid();
     if v_user_id is null then
@@ -6689,10 +7812,38 @@ begin
     end if;
 
     v_current_month := date_trunc('month', current_date)::date;
+    v_email := lower(coalesce(auth.jwt() ->> 'email', ''));
+
+    -- Freigegebene Portfolios (angenommene Freigaben an die E-Mail des Aufrufers)
+    v_shared := array(
+        select distinct s.portfolio_id
+          from public.portfolio_shares s
+         where v_email <> ''
+           and s.status = 'accepted'
+           and lower(s.shared_with_email) = v_email);
+
+    -- Eigene Verträge + Verträge freigegebener Portfolios mit Schreibrecht auf das Mietkonto
+    v_lease_ids := array(
+        select l.id
+          from public.leases l
+         where l.user_id = v_user_id
+        union
+        select l.id
+          from public.leases l
+          join public.units u on u.id = l.unit_id
+          join public.properties pr on pr.id = u.property_id
+         where cardinality(v_shared) > 0
+           and pr.portfolio_id = any(v_shared)
+           and l.user_id <> v_user_id
+           and public.can_write_rent_ledger(l.id));
+
+    if cardinality(v_lease_ids) = 0 then
+        return;
+    end if;
 
     update public.leases
        set status = 'ended'
-     where user_id = v_user_id
+     where id = any(v_lease_ids)
        and status = 'active'
        and end_date is not null
        and end_date < current_date;
@@ -6700,7 +7851,7 @@ begin
     for v_lease in
         select id
           from public.leases
-         where user_id = v_user_id
+         where id = any(v_lease_ids)
            and start_date <= current_date
            and (end_date is null or end_date >= v_current_month)
     loop
@@ -6795,7 +7946,7 @@ begin
       v_house := '';
     else
       v_matches := regexp_match(btrim(new.street),
-                                '^(.*?\S)\s+(\d+\s?[A-Za-z]?(?:\s?[-/]\s?\d*\s?[A-Za-z]?)*)$');
+                                '^(.*?\S)\s+(\d+\s?[A-Za-z]?(?:\s\d+/\d+)?(?:\s?[A-Za-z](?![A-Za-z]))?(?:\s?[-/]\s?\d*\s?[A-Za-z]?)*)$');
       if v_matches is not null then
         v_street := btrim(v_matches[1]);
         v_house := btrim(v_matches[2]);
@@ -7062,6 +8213,61 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.tenants_log_portal_change()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_uid uuid := auth.uid();
+begin
+  -- Der Mieterdaten-Link protokolliert selbst (update_tenant_by_token)
+  if v_uid is null
+     or coalesce(current_setting('immo.tenant_update_source', true), '') = 'token_link' then
+    return null;
+  end if;
+
+  if (old.first_name, old.last_name, old.street, old.house_number, old.postal_code, old.city, old.phone, old.email)
+     is not distinct from
+     (new.first_name, new.last_name, new.street, new.house_number, new.postal_code, new.city, new.phone, new.email) then
+    return null;
+  end if;
+
+  -- nur Selbständerungen des Mieters (Portal-Konto dieses Mieters)
+  if not exists (select 1 from public.user_roles ur
+                  where ur.user_id = v_uid
+                    and ur.role = 'tenant'
+                    and ur.tenant_id = new.id) then
+    return null;
+  end if;
+
+  -- Konto mit Vermieter-/Team-Rechten auf diesen Mieter (z. B. Vermieter mit eigener Mieterrolle zum
+  -- Testen): wie trg_tenants_protect_columns eine Vermieter-Änderung, keine Portal-Änderung
+  if old.user_id = v_uid or public.has_tenant_access(old.id, 'mietverhaeltnisse', 'write') then
+    return null;
+  end if;
+
+  insert into public.tenant_change_log (tenant_id, link_id, source, old_values, new_values)
+  values (
+    new.id,
+    null,
+    'tenant_portal',
+    jsonb_build_object(
+      'first_name', old.first_name, 'last_name', old.last_name,
+      'street', old.street, 'house_number', old.house_number,
+      'postal_code', old.postal_code, 'city', old.city,
+      'phone', old.phone, 'email', old.email),
+    jsonb_build_object(
+      'first_name', new.first_name, 'last_name', new.last_name,
+      'street', new.street, 'house_number', new.house_number,
+      'postal_code', new.postal_code, 'city', new.city,
+      'phone', new.phone, 'email', new.email)
+  );
+  return null;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.tenants_protect_columns()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -7262,22 +8468,28 @@ begin
     raise exception 'Not authenticated';
   end if;
 
+  -- skip locked: läuft dieselbe Prüfung parallel (z. B. Eigentümer und Mitnutzer), wird jede
+  -- Forderung nur einmal umgestellt und protokolliert.
   for claim_record in
-    select id, status from public.claims
-     where user_id = current_user_id
-       and status in ('sent', 'open')
-       and deadline < current_date
+    select c.id, c.status, c.user_id
+      from public.claims c
+     where c.status in ('sent', 'open')
+       and c.deadline < current_date
+       and (c.user_id = current_user_id
+            or public.has_claim_access(c.id, 'finanzen', 'write'))
+       for update of c skip locked
   loop
     v_old_status := claim_record.status;
-    update public.claims set status = 'action_required' where id = claim_record.id and user_id = current_user_id;
+    update public.claims set status = 'action_required' where id = claim_record.id;
 
     insert into public.claim_events (user_id, claim_id, event_type, description, event_metadata)
     values (
-      current_user_id,
+      claim_record.user_id,
       claim_record.id,
       'deadline_expired',
       'Die gesetzte Frist ist abgelaufen. Status wurde automatisch auf Aktion erforderlich gesetzt.',
-      jsonb_build_object('old_status', v_old_status, 'new_status', 'action_required')
+      jsonb_build_object('old_status', v_old_status, 'new_status', 'action_required',
+                         'triggered_by', current_user_id)
     );
     updated_count := updated_count + 1;
   end loop;
@@ -7296,6 +8508,7 @@ declare
   v_hash text := public.tenant_link_token_hash(p_token);
   v_link public.tenant_verification_links%rowtype;
   v_old public.tenants%rowtype;
+  v_new public.tenants%rowtype;
   v_first text := nullif(btrim(coalesce(p_first_name, '')), '');
   v_last text := nullif(btrim(coalesce(p_last_name, '')), '');
   v_street text := nullif(btrim(coalesce(p_street, '')), '');
@@ -7354,9 +8567,28 @@ begin
          city = v_city,
          phone = v_phone,
          email = coalesce(v_email, v_old.email)
-   where id = v_old.id;
+   where id = v_old.id
+  returning * into v_new;
 
   perform set_config('immo.tenant_update_source', '', true);
+
+  -- G17b-07/G19-10: alte und neue Werte sichern (der Vermieter sieht den Vergleich im Verlauf)
+  insert into public.tenant_change_log (tenant_id, link_id, source, old_values, new_values)
+  values (
+    v_old.id,
+    v_link.id,
+    'token_link',
+    jsonb_build_object(
+      'first_name', v_old.first_name, 'last_name', v_old.last_name,
+      'street', v_old.street, 'house_number', v_old.house_number,
+      'postal_code', v_old.postal_code, 'city', v_old.city,
+      'phone', v_old.phone, 'email', v_old.email),
+    jsonb_build_object(
+      'first_name', v_new.first_name, 'last_name', v_new.last_name,
+      'street', v_new.street, 'house_number', v_new.house_number,
+      'postal_code', v_new.postal_code, 'city', v_new.city,
+      'phone', v_new.phone, 'email', v_new.email)
+  );
 
   update public.tenant_verification_links
      set is_updated = true,
@@ -7414,6 +8646,72 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.user_smtp_settings_drop_secret()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  -- Nur über den Namen löschen (nie über einen fremden Verweis)
+  delete from vault.secrets s where s.name = 'smtp_pass:' || old.user_id::text;
+  return old;
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.user_smtp_settings_secure_pass()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_uid uuid := auth.uid();
+  v_name text;
+  v_secret_id uuid;
+  v_new_pass text := nullif(new.smtp_pass, '');
+  v_has_stored boolean := false;
+begin
+  -- Angemeldete Nutzer nur für die eigene Zeile (vor dem Vault-Zugriff; RLS prüft erst danach)
+  if v_uid is not null and new.user_id is distinct from v_uid then
+    raise exception 'Keine Berechtigung für diese E-Mail-Einstellungen.' using errcode = '42501';
+  end if;
+
+  if tg_op = 'UPDATE' then
+    if new.user_id is distinct from old.user_id then
+      raise exception 'Die Zuordnung der E-Mail-Einstellungen kann nicht geändert werden.' using errcode = '42501';
+    end if;
+    -- Der Vault-Verweis wird nur hier im Trigger gesetzt, nie vom Aufrufer
+    new.smtp_pass_secret_id := old.smtp_pass_secret_id;
+    v_has_stored := old.smtp_pass_secret_id is not null or nullif(old.smtp_pass, '') is not null;
+
+    if v_new_pass is null and v_has_stored and (
+         lower(btrim(coalesce(new.smtp_host, ''))) is distinct from lower(btrim(coalesce(old.smtp_host, '')))
+         or btrim(coalesce(new.smtp_user, '')) is distinct from btrim(coalesce(old.smtp_user, ''))
+       ) then
+      raise exception 'Bei geändertem SMTP-Server oder Benutzernamen geben Sie bitte das Passwort erneut ein.'
+        using errcode = '22023';
+    end if;
+  else
+    new.smtp_pass_secret_id := null;
+  end if;
+
+  if v_new_pass is not null then
+    v_name := 'smtp_pass:' || new.user_id::text;
+    select s.id into v_secret_id from vault.secrets s where s.name = v_name;
+    if v_secret_id is null then
+      v_secret_id := vault.create_secret(v_new_pass, v_name, 'SMTP-Passwort (user_smtp_settings)');
+    else
+      perform vault.update_secret(v_secret_id, v_new_pass);
+    end if;
+    new.smtp_pass_secret_id := v_secret_id;
+  end if;
+
+  new.smtp_pass := null;
+  return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.verify_payment_allocations_sum()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -7440,7 +8738,7 @@ BEGIN
   END IF;
 
   SELECT amount INTO v_payment_amount FROM claim_payments WHERE id = v_check_id AND status = 'posted';
-  
+
   IF v_payment_amount IS NOT NULL THEN
     SELECT COALESCE(SUM(amount), 0) INTO v_allocations_sum FROM claim_payment_allocations WHERE claim_payment_id = v_check_id;
     IF v_allocations_sum != v_payment_amount THEN
@@ -7456,23 +8754,11 @@ $function$
 -- -----------------------------------------------------------------------------
 -- 6 · Sichten
 -- -----------------------------------------------------------------------------
-create view public.invoice_totals with (security_invoker=on) as
- SELECT i.id AS invoice_id,
-    i.user_id,
-    COALESCE(sum(r.net_amount), 0::numeric)::numeric(12,2) AS net_amount,
-    COALESCE(sum(r.vat_amount), 0::numeric)::numeric(12,2) AS vat_amount,
-    COALESCE(sum(r.net_amount + r.vat_amount), 0::numeric)::numeric(12,2) AS gross_amount
-   FROM public.invoices i
-     LEFT JOIN LATERAL ( SELECT round(sum(ii.quantity * ii.unit_price), 2) AS net_amount,
-            round(sum(ii.quantity * ii.unit_price * (ii.vat_rate / 100.0)), 2) AS vat_amount
-           FROM public.invoice_items ii
-          WHERE ii.invoice_id = i.id
-          GROUP BY ii.vat_rate) r ON true
-  GROUP BY i.id, i.user_id;
 create view public.claim_item_totals_view with (security_invoker=true) as
  WITH posted_allocations AS (
          SELECT cpa.claim_item_id,
-            sum(cpa.amount) AS paid_principal
+            sum(cpa.amount) AS paid_principal,
+            sum(cpa.amount) FILTER (WHERE cp.allocation_type = 'waiver'::text) AS waived_principal
            FROM public.claim_payment_allocations cpa
              JOIN public.claim_payments cp ON cp.id = cpa.claim_payment_id
           WHERE cp.status = 'posted'::text AND cpa.allocation_bucket = 'principal'::text
@@ -7483,7 +8769,8 @@ create view public.claim_item_totals_view with (security_invoker=true) as
     ci.user_id,
     ci.original_amount,
     COALESCE(pa.paid_principal, 0::numeric) AS paid_principal,
-    GREATEST(0::numeric, ci.original_amount - COALESCE(pa.paid_principal, 0::numeric)) AS open_amount
+    GREATEST(0::numeric, ci.original_amount - COALESCE(pa.paid_principal, 0::numeric)) AS open_amount,
+    COALESCE(pa.waived_principal, 0::numeric) AS waived_principal
    FROM public.claim_items ci
      LEFT JOIN posted_allocations pa ON pa.claim_item_id = ci.id;
 create view public.claim_totals_view with (security_invoker=true) as
@@ -7491,7 +8778,8 @@ create view public.claim_totals_view with (security_invoker=true) as
          SELECT cp.claim_id,
             sum(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'principal'::text) AS principal_paid,
             sum(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'fees'::text) AS fees_paid,
-            sum(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'interest'::text) AS interest_paid
+            sum(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'interest'::text) AS interest_paid,
+            sum(cpa.amount) FILTER (WHERE cpa.allocation_bucket = 'principal'::text AND cp.allocation_type = 'waiver'::text) AS principal_waived
            FROM public.claim_payments cp
              JOIN public.claim_payment_allocations cpa ON cp.id = cpa.claim_payment_id
           WHERE cp.status = 'posted'::text
@@ -7514,11 +8802,12 @@ create view public.claim_totals_view with (security_invoker=true) as
     COALESCE(a.interest_paid, 0::numeric) AS interest_paid,
     li.live_interest AS live_interest_since_start,
     GREATEST(0::numeric, c.accumulated_unpaid_interest + li.live_interest) AS total_interest_open,
-    GREATEST(0::numeric, COALESCE(i.original_principal, 0::numeric) - COALESCE(a.principal_paid, 0::numeric)) + GREATEST(0::numeric, c.accumulated_unpaid_fees - COALESCE(a.fees_paid, 0::numeric)) + GREATEST(0::numeric, c.accumulated_unpaid_interest + li.live_interest) AS total_due
+    GREATEST(0::numeric, COALESCE(i.original_principal, 0::numeric) - COALESCE(a.principal_paid, 0::numeric)) + GREATEST(0::numeric, c.accumulated_unpaid_fees - COALESCE(a.fees_paid, 0::numeric)) + GREATEST(0::numeric, c.accumulated_unpaid_interest + li.live_interest) AS total_due,
+    COALESCE(a.principal_waived, 0::numeric) AS principal_waived
    FROM public.claims c
      LEFT JOIN item_sums i ON c.id = i.claim_id
      LEFT JOIN allocation_sums a ON c.id = a.claim_id
-     CROSS JOIN LATERAL ( SELECT COALESCE(public.claim_live_interest(c.id, CURRENT_DATE), 0::numeric) AS live_interest) li;
+     CROSS JOIN LATERAL ( SELECT COALESCE(public.claim_live_interest(c.id, public.claim_today()), 0::numeric) AS live_interest) li;
 create view public.tenant_auth_info with (security_invoker=true) as
  SELECT tenant_user_id,
     tenant_id,
@@ -7535,6 +8824,7 @@ CREATE INDEX idx_fk_bank_connections_user_id ON public.bank_connections USING bt
 CREATE INDEX idx_bank_matching_rules_user_id ON public.bank_matching_rules USING btree (user_id);
 CREATE INDEX idx_fk_bank_matching_rules_property_id ON public.bank_matching_rules USING btree (property_id);
 CREATE INDEX idx_fk_bank_matching_rules_unit_id ON public.bank_matching_rules USING btree (unit_id);
+CREATE INDEX idx_bank_transactions_matched_target_id ON public.bank_transactions USING btree (matched_target_id) WHERE (matched_target_id IS NOT NULL);
 CREATE INDEX idx_bank_transactions_status ON public.bank_transactions USING btree (status);
 CREATE INDEX idx_bank_transactions_user_id ON public.bank_transactions USING btree (user_id);
 CREATE INDEX idx_claim_access_links_claim_id ON public.claim_access_links USING btree (claim_id);
@@ -7547,6 +8837,7 @@ CREATE INDEX idx_claim_events_user_id ON public.claim_events USING btree (user_i
 CREATE INDEX idx_fk_claim_events_document_id ON public.claim_events USING btree (document_id);
 CREATE INDEX idx_claim_items_claim_id ON public.claim_items USING btree (claim_id);
 CREATE INDEX idx_claim_items_rent_ledger_id ON public.claim_items USING btree (rent_ledger_id);
+CREATE INDEX idx_claim_items_rent_ledger_ids_gin ON public.claim_items USING gin (rent_ledger_ids);
 CREATE INDEX idx_claim_items_user_id ON public.claim_items USING btree (user_id);
 CREATE INDEX idx_claim_allocations_claim_id ON public.claim_payment_allocations USING btree (claim_id);
 CREATE INDEX idx_claim_allocations_item_id ON public.claim_payment_allocations USING btree (claim_item_id);
@@ -7565,6 +8856,7 @@ CREATE INDEX idx_claims_user_deadline ON public.claims USING btree (user_id, dea
 CREATE INDEX idx_claims_user_id ON public.claims USING btree (user_id);
 CREATE INDEX idx_claims_user_status ON public.claims USING btree (user_id, status);
 CREATE INDEX idx_fk_claims_cancelled_by ON public.claims USING btree (cancelled_by);
+CREATE UNIQUE INDEX cloud_connections_user_provider_email_key ON public.cloud_connections USING btree (user_id, provider, account_email);
 CREATE INDEX idx_fk_cloud_connections_user_id ON public.cloud_connections USING btree (user_id);
 CREATE INDEX contact_requests_client_hash_idx ON public.contact_requests USING btree (client_hash, created_at DESC) WHERE (client_hash IS NOT NULL);
 CREATE INDEX contact_requests_created_at_idx ON public.contact_requests USING btree (created_at DESC);
@@ -7598,8 +8890,6 @@ CREATE INDEX idx_fk_floor_plans_unit_id ON public.floor_plans USING btree (unit_
 CREATE INDEX idx_floor_plans_property_id ON public.floor_plans USING btree (property_id);
 CREATE INDEX idx_floor_plans_user_id ON public.floor_plans USING btree (user_id);
 CREATE INDEX idx_fk_invoice_counters_user_id ON public.invoice_counters USING btree (user_id);
-CREATE INDEX idx_invoice_items_invoice_id ON public.invoice_items USING btree (invoice_id);
-CREATE INDEX idx_invoice_items_user_id ON public.invoice_items USING btree (user_id);
 CREATE INDEX idx_fk_invoices_contact_id ON public.invoices USING btree (contact_id);
 CREATE INDEX idx_fk_invoices_property_id ON public.invoices USING btree (property_id);
 CREATE INDEX idx_fk_invoices_unit_id ON public.invoices USING btree (unit_id);
@@ -7607,6 +8897,9 @@ CREATE INDEX idx_invoices_portfolio_id ON public.invoices USING btree (portfolio
 CREATE INDEX idx_invoices_portfolio_unit ON public.invoices USING btree (portfolio_id, unit_id);
 CREATE INDEX idx_invoices_user_id ON public.invoices USING btree (user_id);
 CREATE UNIQUE INDEX invoices_portfolio_id_invoice_number_key ON public.invoices USING btree (portfolio_id, invoice_number);
+CREATE INDEX idx_fk_lease_cloud_folders_cloud_connection_id ON public.lease_cloud_folders USING btree (cloud_connection_id);
+CREATE INDEX idx_lease_cloud_folders_user_id ON public.lease_cloud_folders USING btree (user_id);
+CREATE INDEX idx_fk_lease_notes_updated_by ON public.lease_notes USING btree (updated_by);
 CREATE INDEX idx_fk_lease_rent_periods_created_by ON public.lease_rent_periods USING btree (created_by);
 CREATE UNIQUE INDEX lease_rent_periods_lease_month_uidx ON public.lease_rent_periods USING btree (lease_id, date_trunc('month'::text, (valid_from)::timestamp without time zone));
 CREATE INDEX lease_rent_periods_lease_valid_idx ON public.lease_rent_periods USING btree (lease_id, valid_from);
@@ -7669,14 +8962,13 @@ CREATE INDEX idx_rct_calc ON public.renovation_calc_trades USING btree (calculat
 CREATE INDEX idx_fk_renovation_calculations_property_id ON public.renovation_calculations USING btree (property_id);
 CREATE INDEX idx_fk_renovation_calculations_unit_id ON public.renovation_calculations USING btree (unit_id);
 CREATE INDEX idx_rc_user ON public.renovation_calculations USING btree (user_id);
+CREATE INDEX idx_fk_renovation_invoices_created_by ON public.renovation_invoices USING btree (created_by);
 CREATE INDEX idx_fk_renovation_invoices_user_id ON public.renovation_invoices USING btree (user_id);
 CREATE INDEX idx_ri_project ON public.renovation_invoices USING btree (project_id);
 CREATE INDEX idx_ri_subtrade ON public.renovation_invoices USING btree (project_subtrade_id);
 CREATE INDEX idx_fk_renovation_milestone_templates_user_id ON public.renovation_milestone_templates USING btree (user_id);
 CREATE INDEX idx_fk_renovation_milestones_project_trade_id ON public.renovation_milestones USING btree (project_trade_id);
 CREATE INDEX idx_fk_renovation_milestones_user_id ON public.renovation_milestones USING btree (user_id);
-CREATE INDEX idx_rp_subtrade ON public.renovation_positions USING btree (subtrade_id);
-CREATE INDEX idx_rp_user ON public.renovation_positions USING btree (user_id);
 CREATE INDEX idx_fk_renovation_project_subtrades_project_id ON public.renovation_project_subtrades USING btree (project_id);
 CREATE INDEX idx_fk_renovation_project_subtrades_responsible_contact_id ON public.renovation_project_subtrades USING btree (responsible_contact_id);
 CREATE INDEX idx_fk_renovation_project_subtrades_user_id ON public.renovation_project_subtrades USING btree (user_id);
@@ -7684,11 +8976,13 @@ CREATE INDEX idx_rps_trade ON public.renovation_project_subtrades USING btree (p
 CREATE INDEX idx_fk_renovation_project_trades_depends_on ON public.renovation_project_trades USING btree (depends_on);
 CREATE INDEX idx_fk_renovation_project_trades_user_id ON public.renovation_project_trades USING btree (user_id);
 CREATE INDEX idx_rpt_project ON public.renovation_project_trades USING btree (project_id);
+CREATE INDEX idx_fk_renovation_projects_created_by ON public.renovation_projects USING btree (created_by);
 CREATE INDEX idx_fk_renovation_projects_unit_id ON public.renovation_projects USING btree (unit_id);
 CREATE INDEX idx_renovation_projects_property ON public.renovation_projects USING btree (property_id);
 CREATE INDEX idx_renovation_projects_user ON public.renovation_projects USING btree (user_id);
 CREATE INDEX idx_fk_renovation_subtrades_trade_id ON public.renovation_subtrades USING btree (trade_id);
 CREATE INDEX idx_fk_renovation_subtrades_user_id ON public.renovation_subtrades USING btree (user_id);
+CREATE INDEX idx_fk_renovation_tasks_created_by ON public.renovation_tasks USING btree (created_by);
 CREATE INDEX idx_fk_renovation_tasks_project_trade_id ON public.renovation_tasks USING btree (project_trade_id);
 CREATE INDEX idx_fk_renovation_tasks_property_id ON public.renovation_tasks USING btree (property_id);
 CREATE INDEX idx_fk_renovation_tasks_user_id ON public.renovation_tasks USING btree (user_id);
@@ -7700,6 +8994,7 @@ CREATE INDEX idx_fk_rent_ledger_user_id ON public.rent_ledger USING btree (user_
 CREATE INDEX idx_rent_ledger_lease_id ON public.rent_ledger USING btree (lease_id);
 CREATE INDEX idx_rent_ledger_period_month ON public.rent_ledger USING btree (period_month);
 CREATE INDEX idx_rent_ledger_status ON public.rent_ledger USING btree (status);
+CREATE INDEX idx_rent_payments_claim_payment_id ON public.rent_payments USING btree (claim_payment_id) WHERE (claim_payment_id IS NOT NULL);
 CREATE INDEX idx_rent_payments_lease_id ON public.rent_payments USING btree (lease_id);
 CREATE INDEX idx_rent_payments_user_id ON public.rent_payments USING btree (user_id);
 CREATE INDEX idx_fk_rental_applicants_process_id ON public.rental_applicants USING btree (process_id);
@@ -7712,6 +9007,9 @@ CREATE INDEX idx_fk_rental_viewing_bookings_viewing_id ON public.rental_viewing_
 CREATE UNIQUE INDEX unique_active_viewing_booking_slot ON public.rental_viewing_bookings USING btree (viewing_id, start_time) WHERE (status = 'booked'::text);
 CREATE INDEX idx_fk_rental_viewings_process_id ON public.rental_viewings USING btree (process_id);
 CREATE INDEX idx_fk_rental_viewings_user_id ON public.rental_viewings USING btree (user_id);
+CREATE INDEX stripe_webhook_events_status_received_idx ON public.stripe_webhook_events USING btree (status, received_at DESC);
+CREATE INDEX idx_tenant_change_log_link ON public.tenant_change_log USING btree (link_id);
+CREATE INDEX idx_tenant_change_log_tenant ON public.tenant_change_log USING btree (tenant_id, created_at DESC);
 CREATE INDEX idx_fk_tenant_invitations_invited_by ON public.tenant_invitations USING btree (invited_by);
 CREATE INDEX idx_fk_tenant_invitations_property_id ON public.tenant_invitations USING btree (property_id);
 CREATE INDEX idx_fk_tenant_invitations_tenant_id ON public.tenant_invitations USING btree (tenant_id);
@@ -7746,6 +9044,7 @@ CREATE TRIGGER trigger_protect_claim_events BEFORE DELETE OR UPDATE ON public.cl
 CREATE TRIGGER handle_claim_items_updated_at BEFORE UPDATE ON public.claim_items FOR EACH ROW EXECUTE FUNCTION public.set_forderungsmanagement_updated_at();
 CREATE TRIGGER trigger_check_claim_item_rent_ledger BEFORE INSERT OR UPDATE ON public.claim_items FOR EACH ROW EXECUTE FUNCTION public.check_claim_item_rent_ledger_owner();
 CREATE TRIGGER trigger_check_duplicate_active_claim_item BEFORE INSERT OR UPDATE ON public.claim_items FOR EACH ROW EXECUTE FUNCTION public.check_duplicate_active_claim_item();
+CREATE TRIGGER trigger_protect_claim_item_created_at BEFORE INSERT OR UPDATE ON public.claim_items FOR EACH ROW EXECUTE FUNCTION public.protect_claim_item_created_at();
 CREATE TRIGGER trigger_protect_claim_item_original_amount BEFORE UPDATE ON public.claim_items FOR EACH ROW EXECUTE FUNCTION public.protect_claim_item_original_amount();
 CREATE CONSTRAINT TRIGGER check_payment_allocations_after_allocation AFTER INSERT OR DELETE OR UPDATE ON public.claim_payment_allocations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.verify_payment_allocations_sum();
 CREATE TRIGGER trigger_block_posted_allocation_update BEFORE UPDATE ON public.claim_payment_allocations FOR EACH ROW EXECUTE FUNCTION public.block_posted_allocation_update();
@@ -7757,12 +9056,20 @@ CREATE TRIGGER trigger_check_claim_payment_rent_payment BEFORE INSERT OR UPDATE 
 CREATE TRIGGER trigger_protect_claim_payments_delete BEFORE DELETE ON public.claim_payments FOR EACH ROW EXECUTE FUNCTION public.protect_claim_payment_records();
 CREATE TRIGGER block_claims_delete BEFORE DELETE ON public.claims FOR EACH ROW EXECUTE FUNCTION public.block_physical_delete();
 CREATE TRIGGER handle_claims_updated_at BEFORE UPDATE ON public.claims FOR EACH ROW EXECUTE FUNCTION public.set_forderungsmanagement_updated_at();
+CREATE TRIGGER trigger_check_claim_reactivation BEFORE UPDATE OF status ON public.claims FOR EACH ROW EXECUTE FUNCTION public.check_claim_reactivation_duplicates();
+CREATE TRIGGER cloud_connections_delete_secrets AFTER DELETE ON public.cloud_connections FOR EACH ROW EXECUTE FUNCTION public.cloud_connections_delete_secrets();
 CREATE TRIGGER trg_sync_contact_to_tenant AFTER UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION public.sync_contact_to_tenant();
 CREATE TRIGGER trigger_update_document_templates_updated_at BEFORE UPDATE ON public.document_templates FOR EACH ROW EXECUTE FUNCTION public.update_document_templates_updated_at();
 CREATE TRIGGER push_on_document AFTER INSERT ON public.documents FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_document();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.economic_units FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
+CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.expenses FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
+CREATE TRIGGER trg_invoices_protect_issued BEFORE DELETE OR UPDATE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.protect_issued_invoice();
+CREATE TRIGGER trg_lease_notes_set_meta BEFORE INSERT OR UPDATE ON public.lease_notes FOR EACH ROW EXECUTE FUNCTION public.lease_notes_set_meta();
 CREATE TRIGGER trigger_lease_rent_periods_before_write BEFORE INSERT OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.lease_rent_periods_before_write();
 CREATE TRIGGER trigger_on_lease_rent_period_change AFTER INSERT OR DELETE OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.on_lease_rent_period_change();
+CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
+CREATE TRIGGER trg_leases_check_overlap BEFORE INSERT OR UPDATE OF unit_id, start_date, end_date, status ON public.leases FOR EACH ROW EXECUTE FUNCTION public.leases_check_overlap();
+CREATE TRIGGER trg_leases_owner_sync AFTER INSERT OR UPDATE OF tenant_id, unit_id ON public.leases FOR EACH ROW EXECUTE FUNCTION public.leases_sync_tenant_owner();
 CREATE TRIGGER trg_sync_lease_to_contact AFTER INSERT OR UPDATE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.sync_lease_to_contact();
 CREATE TRIGGER trigger_lease_before_delete BEFORE DELETE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.lease_before_delete();
 CREATE TRIGGER trigger_on_lease_change AFTER INSERT OR UPDATE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.on_lease_change();
@@ -7774,27 +9081,39 @@ CREATE TRIGGER handle_payment_plans_updated_at BEFORE UPDATE ON public.payment_p
 CREATE TRIGGER trigger_protect_payment_plans BEFORE INSERT OR DELETE OR UPDATE ON public.payment_plans FOR EACH ROW EXECUTE FUNCTION public.protect_claim_payment_records();
 CREATE TRIGGER portfolio_shares_guard BEFORE INSERT OR UPDATE ON public.portfolio_shares FOR EACH ROW EXECUTE FUNCTION public.portfolio_shares_guard();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.portfolios FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
+CREATE TRIGGER profiles_protect_stripe_connect BEFORE INSERT OR UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION public.profiles_protect_stripe_connect();
 CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER trigger_push_subscriptions_release_token BEFORE INSERT OR UPDATE OF fcm_token, user_id ON public.push_subscriptions FOR EACH ROW EXECUTE FUNCTION public.push_subscriptions_release_token();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_calculations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_invoices_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_milestone_templates FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_trades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_projects_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_subtrades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
-CREATE TRIGGER block_claim_rent_payments_modification BEFORE DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.protect_claim_rent_payments();
+CREATE TRIGGER trg_renovation_tasks_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
+CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_trades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
+CREATE TRIGGER trigger_rent_ledger_block_claimed_delete BEFORE DELETE ON public.rent_ledger FOR EACH ROW EXECUTE FUNCTION public.rent_ledger_block_claimed_delete();
+CREATE TRIGGER block_claim_rent_payments_modification BEFORE INSERT OR DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.protect_claim_rent_payments();
+CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
 CREATE TRIGGER trigger_on_rent_payment_change AFTER INSERT OR DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.on_rent_payment_change();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.rental_processes FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER on_subscription_update BEFORE UPDATE ON public.subscriptions FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 CREATE TRIGGER trg_tenant_invitations_guard BEFORE INSERT OR UPDATE ON public.tenant_invitations FOR EACH ROW EXECUTE FUNCTION public.tenant_invitations_guard();
 CREATE TRIGGER trg_tenant_verification_links_hash_token BEFORE INSERT OR UPDATE ON public.tenant_verification_links FOR EACH ROW EXECUTE FUNCTION public.tenant_verification_links_hash_token();
 CREATE TRIGGER trg_sync_tenant_to_contact AFTER INSERT OR UPDATE ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.sync_tenant_to_contact();
+CREATE TRIGGER trg_tenants_portal_change_log AFTER UPDATE ON public.tenants FOR EACH ROW WHEN (((old.first_name IS DISTINCT FROM new.first_name) OR (old.last_name IS DISTINCT FROM new.last_name) OR (old.street IS DISTINCT FROM new.street) OR (old.house_number IS DISTINCT FROM new.house_number) OR (old.postal_code IS DISTINCT FROM new.postal_code) OR (old.city IS DISTINCT FROM new.city) OR (old.phone IS DISTINCT FROM new.phone) OR (old.email IS DISTINCT FROM new.email))) EXECUTE FUNCTION public.tenants_log_portal_change();
 CREATE TRIGGER trg_tenants_protect_columns BEFORE UPDATE ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.tenants_protect_columns();
 CREATE TRIGGER push_on_ticket AFTER INSERT ON public.tickets FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_ticket();
 CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.units FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER push_on_registration AFTER INSERT ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_registration();
 CREATE TRIGGER trg_user_roles_mark_invitation_accepted AFTER INSERT ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.user_roles_mark_invitation_accepted();
 CREATE TRIGGER trg_user_roles_protect_identity BEFORE UPDATE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.user_roles_protect_identity();
+CREATE TRIGGER trg_user_smtp_settings_drop_secret AFTER DELETE ON public.user_smtp_settings FOR EACH ROW EXECUTE FUNCTION public.user_smtp_settings_drop_secret();
+CREATE TRIGGER trg_user_smtp_settings_secure_pass BEFORE INSERT OR UPDATE ON public.user_smtp_settings FOR EACH ROW EXECUTE FUNCTION public.user_smtp_settings_secure_pass();
 
 -- -----------------------------------------------------------------------------
 -- 9 · Zeilenschutz (RLS)
@@ -7821,8 +9140,9 @@ alter table public.expense_categories enable row level security;
 alter table public.expenses enable row level security;
 alter table public.floor_plans enable row level security;
 alter table public.invoice_counters enable row level security;
-alter table public.invoice_items enable row level security;
 alter table public.invoices enable row level security;
+alter table public.lease_cloud_folders enable row level security;
+alter table public.lease_notes enable row level security;
 alter table public.lease_rent_periods enable row level security;
 alter table public.leases enable row level security;
 alter table public.loans enable row level security;
@@ -7848,7 +9168,6 @@ alter table public.renovation_calculations enable row level security;
 alter table public.renovation_invoices enable row level security;
 alter table public.renovation_milestone_templates enable row level security;
 alter table public.renovation_milestones enable row level security;
-alter table public.renovation_positions enable row level security;
 alter table public.renovation_project_subtrades enable row level security;
 alter table public.renovation_project_trades enable row level security;
 alter table public.renovation_projects enable row level security;
@@ -7862,7 +9181,9 @@ alter table public.rental_applicants enable row level security;
 alter table public.rental_processes enable row level security;
 alter table public.rental_viewing_bookings enable row level security;
 alter table public.rental_viewings enable row level security;
+alter table public.stripe_webhook_events enable row level security;
 alter table public.subscriptions enable row level security;
+alter table public.tenant_change_log enable row level security;
 alter table public.tenant_invitations enable row level security;
 alter table public.tenant_verification_links enable row level security;
 alter table public.tenants enable row level security;
@@ -7884,10 +9205,10 @@ create policy announcements_select on public.announcements as permissive for sel
 create policy announcements_update on public.announcements as permissive for update to authenticated
     using (public.has_property_access(property_id, 'mieterportal'::text, 'write'::text))
     with check (public.has_property_access(property_id, 'mieterportal'::text, 'write'::text));
-create policy tenants_read_announcements on public.announcements as permissive for select to public
+create policy tenants_read_announcements on public.announcements as permissive for select to authenticated
     using ((property_id IN ( SELECT ur.property_id
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text)))));
 create policy bank_connections_delete on public.bank_connections as permissive for delete to authenticated
     using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy bank_connections_insert on public.bank_connections as permissive for insert to authenticated
@@ -7972,11 +9293,11 @@ create policy claims_update on public.claims as permissive for update to authent
     using (public.has_lease_access(lease_id, 'finanzen'::text, 'write'::text))
     with check ((public.has_lease_access(lease_id, 'finanzen'::text, 'write'::text) AND (public.rls_tenant_ok(tenant_id, 'lease'::text, lease_id) OR public.rls_tenant_link_unchanged('claims'::text, id, tenant_id))));
 create policy cloud_connections_delete_own on public.cloud_connections as permissive for delete to authenticated
-    using ((user_id = auth.uid()));
-create policy cloud_connections_select_own on public.cloud_connections as permissive for select to authenticated
-    using ((user_id = auth.uid()));
-create policy contacts_delete on public.contacts as permissive for delete to authenticated
     using ((user_id = ( SELECT auth.uid() AS uid)));
+create policy cloud_connections_select_own on public.cloud_connections as permissive for select to authenticated
+    using ((user_id = ( SELECT auth.uid() AS uid)));
+create policy contacts_delete on public.contacts as permissive for delete to authenticated
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR ((tenant_id IS NULL) AND public.rls_owner_shares(user_id, 'kontakte'::text, 'write'::text))));
 create policy contacts_insert on public.contacts as permissive for insert to authenticated
     with check ((((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'kontakte'::text, 'write'::text)) AND public.rls_tenant_ok(tenant_id, 'user'::text, user_id)));
 create policy contacts_select on public.contacts as permissive for select to authenticated
@@ -7990,8 +9311,11 @@ END) OR (EXISTS ( SELECT 1
    FROM public.renovation_project_subtrades s
   WHERE ((s.responsible_contact_id = contacts.id) AND (public.has_renovation_project_access(s.project_id, 'immobilien'::text, 'read'::text) OR public.has_renovation_project_access(s.project_id, 'investorportal'::text, 'read'::text)))))));
 create policy contacts_update on public.contacts as permissive for update to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)))
-    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (public.rls_tenant_ok(tenant_id, 'user'::text, user_id) OR public.rls_tenant_link_unchanged('contacts'::text, id, tenant_id))));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR ((tenant_id IS NULL) AND public.rls_owner_shares(user_id, 'kontakte'::text, 'write'::text))))
+    with check ((((user_id = ( SELECT auth.uid() AS uid)) OR ((tenant_id IS NULL) AND public.rls_owner_shares(user_id, 'kontakte'::text, 'write'::text))) AND (public.rls_tenant_ok(tenant_id, 'user'::text, user_id) OR public.rls_tenant_link_unchanged('contacts'::text, id, tenant_id))));
+create policy contacts_user_id_unchanged on public.contacts as restrictive for update to authenticated
+    using (true)
+    with check (public.rls_contact_user_id_unchanged(id, user_id));
 create policy deals_delete on public.deals as permissive for delete to authenticated
     using (
 CASE
@@ -8095,22 +9419,22 @@ CASE
     WHEN (unit_id IS NOT NULL) THEN 'unit'::text
     ELSE 'user'::text
 END, COALESCE(property_id, unit_id, user_id)) OR public.rls_tenant_link_unchanged('documents'::text, id, tenant_id))));
-create policy tenants_read_general_docs on public.documents as permissive for select to public
+create policy tenants_read_general_docs on public.documents as permissive for select to authenticated
     using (((tenant_id IS NULL) AND (property_id IN ( SELECT user_roles.property_id
    FROM public.user_roles
-  WHERE ((user_roles.user_id = auth.uid()) AND (user_roles.role = 'tenant'::text))))));
-create policy tenants_read_personal_docs on public.documents as permissive for select to public
+  WHERE ((user_roles.user_id = ( SELECT auth.uid() AS uid)) AND (user_roles.role = 'tenant'::text))))));
+create policy tenants_read_personal_docs on public.documents as permissive for select to authenticated
     using ((tenant_id IN ( SELECT user_roles.tenant_id
    FROM public.user_roles
-  WHERE ((user_roles.user_id = auth.uid()) AND (user_roles.role = 'tenant'::text)))));
+  WHERE ((user_roles.user_id = ( SELECT auth.uid() AS uid)) AND (user_roles.role = 'tenant'::text)))));
 create policy economic_units_delete on public.economic_units as permissive for delete to authenticated
     using (public.has_economic_unit_access(id, 'immobilien'::text, 'write'::text));
 create policy economic_units_insert on public.economic_units as permissive for insert to authenticated
-    with check (((user_id = auth.uid()) OR (EXISTS ( SELECT 1
+    with check (((user_id = ( SELECT auth.uid() AS uid)) OR (EXISTS ( SELECT 1
    FROM public.portfolios po
   WHERE ((po.user_id = economic_units.user_id) AND public.has_portfolio_access(po.id, 'immobilien'::text, 'write'::text))))));
 create policy economic_units_select on public.economic_units as permissive for select to authenticated
-    using (((user_id = auth.uid()) OR public.has_economic_unit_access(id, '*'::text, 'read'::text) OR ((NOT public.economic_unit_is_linked(id)) AND (EXISTS ( SELECT 1
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.has_economic_unit_access(id, '*'::text, 'read'::text) OR ((NOT public.economic_unit_is_linked(id)) AND (EXISTS ( SELECT 1
    FROM public.portfolios po
   WHERE ((po.user_id = economic_units.user_id) AND public.has_portfolio_access(po.id, 'immobilien'::text, 'write'::text)))))));
 create policy economic_units_update on public.economic_units as permissive for update to authenticated
@@ -8202,15 +9526,6 @@ create policy invoice_counters_select on public.invoice_counters as permissive f
 create policy invoice_counters_update on public.invoice_counters as permissive for update to authenticated
     using (public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text))
     with check ((public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text) AND ((object_unit_id IS NULL) OR public.has_unit_access(object_unit_id, 'finanzen'::text, 'write'::text))));
-create policy invoice_items_delete on public.invoice_items as permissive for delete to authenticated
-    using (public.has_invoice_access(invoice_id, 'finanzen'::text, 'write'::text));
-create policy invoice_items_insert on public.invoice_items as permissive for insert to authenticated
-    with check ((public.has_invoice_access(invoice_id, 'finanzen'::text, 'write'::text) AND public.rls_user_ok(user_id, 'invoice'::text, invoice_id)));
-create policy invoice_items_select on public.invoice_items as permissive for select to authenticated
-    using (public.has_invoice_access(invoice_id, 'finanzen'::text, 'read'::text));
-create policy invoice_items_update on public.invoice_items as permissive for update to authenticated
-    using (public.has_invoice_access(invoice_id, 'finanzen'::text, 'write'::text))
-    with check (public.has_invoice_access(invoice_id, 'finanzen'::text, 'write'::text));
 create policy invoices_delete on public.invoices as permissive for delete to authenticated
     using (public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text));
 create policy invoices_insert on public.invoices as permissive for insert to authenticated
@@ -8220,6 +9535,28 @@ create policy invoices_select on public.invoices as permissive for select to aut
 create policy invoices_update on public.invoices as permissive for update to authenticated
     using (public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text))
     with check ((public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text) AND ((property_id IS NULL) OR public.has_property_access(property_id, 'finanzen'::text, 'write'::text)) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'finanzen'::text, 'write'::text))));
+create policy lease_cloud_folders_delete_own on public.lease_cloud_folders as permissive for delete to authenticated
+    using ((user_id = ( SELECT auth.uid() AS uid)));
+create policy lease_cloud_folders_insert_own on public.lease_cloud_folders as permissive for insert to authenticated
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
+   FROM public.cloud_connections c
+  WHERE ((c.id = lease_cloud_folders.cloud_connection_id) AND (c.user_id = ( SELECT auth.uid() AS uid))))) AND public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'read'::text)));
+create policy lease_cloud_folders_select_own on public.lease_cloud_folders as permissive for select to authenticated
+    using ((user_id = ( SELECT auth.uid() AS uid)));
+create policy lease_cloud_folders_update_own on public.lease_cloud_folders as permissive for update to authenticated
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
+   FROM public.cloud_connections c
+  WHERE ((c.id = lease_cloud_folders.cloud_connection_id) AND (c.user_id = ( SELECT auth.uid() AS uid))))) AND public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'read'::text)));
+create policy lease_notes_delete on public.lease_notes as permissive for delete to authenticated
+    using (public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text));
+create policy lease_notes_insert on public.lease_notes as permissive for insert to authenticated
+    with check (public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text));
+create policy lease_notes_select on public.lease_notes as permissive for select to authenticated
+    using (public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'read'::text));
+create policy lease_notes_update on public.lease_notes as permissive for update to authenticated
+    using (public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text))
+    with check (public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text));
 create policy lease_rent_periods_delete on public.lease_rent_periods as permissive for delete to authenticated
     using ((public.can_write_lease_rent(lease_id) AND public.lease_rent_period_has_earlier(lease_id, valid_from)));
 create policy lease_rent_periods_insert on public.lease_rent_periods as permissive for insert to authenticated
@@ -8238,10 +9575,10 @@ create policy leases_select on public.leases as permissive for select to authent
 create policy leases_update on public.leases as permissive for update to authenticated
     using (public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text))
     with check ((public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text) AND (public.rls_tenant_ok(tenant_id, 'unit'::text, unit_id) OR public.rls_tenant_link_unchanged('leases'::text, id, tenant_id))));
-create policy tenants_read_own_leases on public.leases as permissive for select to public
+create policy tenants_read_own_leases on public.leases as permissive for select to authenticated
     using ((tenant_id IN ( SELECT user_roles.tenant_id
    FROM public.user_roles
-  WHERE ((user_roles.user_id = auth.uid()) AND (user_roles.role = 'tenant'::text)))));
+  WHERE ((user_roles.user_id = ( SELECT auth.uid() AS uid)) AND (user_roles.role = 'tenant'::text)))));
 create policy loans_delete on public.loans as permissive for delete to authenticated
     using ((public.has_portfolio_access(portfolio_id, 'finanzen'::text, 'write'::text) OR public.has_portfolio_access(portfolio_id, 'investorportal'::text, 'write'::text)));
 create policy loans_insert on public.loans as permissive for insert to authenticated
@@ -8254,7 +9591,7 @@ create policy loans_update on public.loans as permissive for update to authentic
 create policy messages_insert on public.messages as permissive for insert to authenticated
     with check (((sender_id = ( SELECT auth.uid() AS uid)) AND public.rls_message_allowed(receiver_id, ticket_id, is_system)));
 create policy messages_select on public.messages as permissive for select to authenticated
-    using (((sender_id = ( SELECT auth.uid() AS uid)) OR (receiver_id = ( SELECT auth.uid() AS uid))));
+    using (((sender_id = ( SELECT auth.uid() AS uid)) OR (receiver_id = ( SELECT auth.uid() AS uid)) OR ((ticket_id IS NOT NULL) AND public.rls_ticket_message_visible(ticket_id))));
 create policy messages_update on public.messages as permissive for update to authenticated
     using ((receiver_id = ( SELECT auth.uid() AS uid)))
     with check ((receiver_id = ( SELECT auth.uid() AS uid)));
@@ -8289,10 +9626,10 @@ create policy objektkalender_events_select on public.objektkalender_events as pe
 create policy objektkalender_events_update on public.objektkalender_events as permissive for update to authenticated
     using ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'mieterportal'::text, 'write'::text)))
     with check (((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'mieterportal'::text, 'write'::text)) AND ((assigned_unit_id IS NULL) OR public.has_unit_access(assigned_unit_id, 'immobilien'::text, 'write'::text) OR public.has_unit_access(assigned_unit_id, 'mieterportal'::text, 'write'::text))));
-create policy ok_tenants_read_events on public.objektkalender_events as permissive for select to public
+create policy ok_tenants_read_events on public.objektkalender_events as permissive for select to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_events.property_id)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_events.property_id)))));
 create policy ok_tenants_update_own_events on public.objektkalender_events as permissive for update to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.user_roles ur
@@ -8316,10 +9653,10 @@ create policy ok_tenants_insert_history on public.objektkalender_history as perm
    FROM (public.objektkalender_events e
      JOIN public.user_roles ur ON (((ur.property_id = e.property_id) AND (ur.unit_id = e.assigned_unit_id))))
   WHERE ((e.id = objektkalender_history.event_id) AND (e.property_id = objektkalender_history.property_id) AND (ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text))))));
-create policy ok_tenants_read_history on public.objektkalender_history as permissive for select to public
+create policy ok_tenants_read_history on public.objektkalender_history as permissive for select to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_history.property_id)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_history.property_id)))));
 create policy objektkalender_settings_delete on public.objektkalender_settings as permissive for delete to authenticated
     using ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'mieterportal'::text, 'write'::text)));
 create policy objektkalender_settings_insert on public.objektkalender_settings as permissive for insert to authenticated
@@ -8329,10 +9666,10 @@ create policy objektkalender_settings_select on public.objektkalender_settings a
 create policy objektkalender_settings_update on public.objektkalender_settings as permissive for update to authenticated
     using ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'mieterportal'::text, 'write'::text)))
     with check ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'mieterportal'::text, 'write'::text)));
-create policy ok_tenants_read_settings on public.objektkalender_settings as permissive for select to public
+create policy ok_tenants_read_settings on public.objektkalender_settings as permissive for select to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_settings.property_id)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text) AND (ur.property_id = objektkalender_settings.property_id)))));
 create policy payment_plan_installments_delete on public.payment_plan_installments as permissive for delete to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.payment_plans pp
@@ -8380,54 +9717,46 @@ create policy pdf_templates_update on public.pdf_templates as permissive for upd
     using (public.rls_is_portfolio_owner(portfolio_id))
     with check (public.rls_is_portfolio_owner(portfolio_id));
 create policy portfolio_cloud_links_delete_own on public.portfolio_cloud_links as permissive for delete to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy portfolio_cloud_links_insert_own on public.portfolio_cloud_links as permissive for insert to authenticated
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.cloud_connections c
-  WHERE ((c.id = portfolio_cloud_links.cloud_connection_id) AND (c.user_id = auth.uid())))) AND public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'read'::text)));
+  WHERE ((c.id = portfolio_cloud_links.cloud_connection_id) AND (c.user_id = ( SELECT auth.uid() AS uid))))) AND public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'read'::text)));
 create policy portfolio_cloud_links_select_own on public.portfolio_cloud_links as permissive for select to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy portfolio_cloud_links_update_own on public.portfolio_cloud_links as permissive for update to authenticated
-    using ((user_id = auth.uid()))
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.cloud_connections c
-  WHERE ((c.id = portfolio_cloud_links.cloud_connection_id) AND (c.user_id = auth.uid())))) AND public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'read'::text)));
+  WHERE ((c.id = portfolio_cloud_links.cloud_connection_id) AND (c.user_id = ( SELECT auth.uid() AS uid))))) AND public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'read'::text)));
 create policy portfolio_shares_delete on public.portfolio_shares as permissive for delete to authenticated
-    using (((created_by = auth.uid()) OR (EXISTS ( SELECT 1
+    using (((created_by = ( SELECT auth.uid() AS uid)) OR (EXISTS ( SELECT 1
    FROM public.portfolios p
-  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = auth.uid())))) OR (lower(shared_with_email) = lower(COALESCE((auth.jwt() ->> 'email'::text), ''::text)))));
+  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = ( SELECT auth.uid() AS uid))))) OR (lower(shared_with_email) = lower(COALESCE((( SELECT auth.jwt() AS jwt) ->> 'email'::text), ''::text)))));
 create policy portfolio_shares_insert on public.portfolio_shares as permissive for insert to authenticated
-    with check (((created_by = auth.uid()) AND (status = 'pending'::text) AND (EXISTS ( SELECT 1
+    with check (((created_by = ( SELECT auth.uid() AS uid)) AND (status = 'pending'::text) AND (EXISTS ( SELECT 1
    FROM public.portfolios p
-  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy portfolio_shares_select on public.portfolio_shares as permissive for select to authenticated
     using (((EXISTS ( SELECT 1
    FROM public.portfolios p
-  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = auth.uid())))) OR (lower(shared_with_email) = lower(COALESCE((auth.jwt() ->> 'email'::text), ''::text)))));
+  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = ( SELECT auth.uid() AS uid))))) OR (lower(shared_with_email) = lower(COALESCE((( SELECT auth.jwt() AS jwt) ->> 'email'::text), ''::text)))));
 create policy portfolio_shares_update on public.portfolio_shares as permissive for update to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.portfolios p
-  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = auth.uid())))))
+  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = ( SELECT auth.uid() AS uid))))))
     with check ((EXISTS ( SELECT 1
    FROM public.portfolios p
-  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = auth.uid())))));
-create policy "Tenants can view their property portfolio" on public.portfolios as permissive for select to public
-    using ((id IN ( SELECT properties.portfolio_id
-   FROM public.properties
-  WHERE (properties.id IN ( SELECT user_roles.property_id
-           FROM public.user_roles
-          WHERE (user_roles.user_id = auth.uid()))))));
+  WHERE ((p.id = portfolio_shares.portfolio_id) AND (p.user_id = ( SELECT auth.uid() AS uid))))));
 create policy portfolios_delete on public.portfolios as permissive for delete to authenticated
-    using (((user_id = auth.uid()) AND (COALESCE(is_primary, false) = false)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) AND (COALESCE(is_primary, false) = false)));
 create policy portfolios_insert on public.portfolios as permissive for insert to authenticated
-    with check ((user_id = auth.uid()));
+    with check ((user_id = ( SELECT auth.uid() AS uid)));
 create policy portfolios_select on public.portfolios as permissive for select to authenticated
-    using (((user_id = auth.uid()) OR public.has_portfolio_access(id, '*'::text, 'read'::text)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.has_portfolio_access(id, '*'::text, 'read'::text)));
 create policy portfolios_update on public.portfolios as permissive for update to authenticated
-    using ((user_id = auth.uid()))
-    with check ((user_id = auth.uid()));
-create policy "Tenants can view owner profile settings" on public.profiles as permissive for select to authenticated
-    using (public.rls_is_my_landlord(id));
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check ((user_id = ( SELECT auth.uid() AS uid)));
 create policy profiles_insert on public.profiles as permissive for insert to authenticated
     with check ((id = ( SELECT auth.uid() AS uid)));
 create policy profiles_select on public.profiles as permissive for select to authenticated
@@ -8444,10 +9773,6 @@ create policy properties_select on public.properties as permissive for select to
 create policy properties_update on public.properties as permissive for update to authenticated
     using (public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'write'::text))
     with check ((public.has_portfolio_access(portfolio_id, 'immobilien'::text, 'write'::text) AND ((economic_unit_id IS NULL) OR public.has_economic_unit_access(economic_unit_id, 'immobilien'::text, 'write'::text))));
-create policy tenants_read_own_property on public.properties as permissive for select to public
-    using ((id IN ( SELECT user_roles.property_id
-   FROM public.user_roles
-  WHERE ((user_roles.user_id = auth.uid()) AND (user_roles.role = 'tenant'::text)))));
 create policy push_subscriptions_delete on public.push_subscriptions as permissive for delete to authenticated
     using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy push_subscriptions_insert on public.push_subscriptions as permissive for insert to authenticated
@@ -8524,14 +9849,14 @@ create policy renovation_invoices_update on public.renovation_invoices as permis
    FROM public.renovation_project_subtrades s
   WHERE ((s.id = renovation_invoices.project_subtrade_id) AND (s.project_id = renovation_invoices.project_id))))));
 create policy renovation_milestone_templates_delete on public.renovation_milestone_templates as permissive for delete to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_milestone_templates_insert on public.renovation_milestone_templates as permissive for insert to authenticated
     with check (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_milestone_templates_select on public.renovation_milestone_templates as permissive for select to authenticated
     using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'read'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'read'::text)));
 create policy renovation_milestone_templates_update on public.renovation_milestone_templates as permissive for update to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)))
-    with check ((user_id = ( SELECT auth.uid() AS uid)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_milestones_delete on public.renovation_milestones as permissive for delete to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.renovation_project_trades t
@@ -8551,19 +9876,6 @@ create policy renovation_milestones_update on public.renovation_milestones as pe
     with check ((EXISTS ( SELECT 1
    FROM public.renovation_project_trades t
   WHERE ((t.id = renovation_milestones.project_trade_id) AND (public.has_renovation_project_access(t.project_id, 'immobilien'::text, 'write'::text) OR public.has_renovation_project_access(t.project_id, 'investorportal'::text, 'write'::text))))));
-create policy renovation_positions_delete on public.renovation_positions as permissive for delete to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)));
-create policy renovation_positions_insert on public.renovation_positions as permissive for insert to authenticated
-    with check ((((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)) AND (EXISTS ( SELECT 1
-   FROM public.renovation_subtrades s
-  WHERE ((s.id = renovation_positions.subtrade_id) AND (s.user_id = renovation_positions.user_id))))));
-create policy renovation_positions_select on public.renovation_positions as permissive for select to authenticated
-    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'read'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'read'::text)));
-create policy renovation_positions_update on public.renovation_positions as permissive for update to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)))
-    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
-   FROM public.renovation_subtrades s
-  WHERE ((s.id = renovation_positions.subtrade_id) AND (s.user_id = renovation_positions.user_id))))));
 create policy renovation_project_subtrades_delete on public.renovation_project_subtrades as permissive for delete to authenticated
     using ((public.has_renovation_project_access(project_id, 'immobilien'::text, 'write'::text) OR public.has_renovation_project_access(project_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_project_subtrades_insert on public.renovation_project_subtrades as permissive for insert to authenticated
@@ -8596,7 +9908,7 @@ create policy renovation_projects_update on public.renovation_projects as permis
     using ((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)))
     with check (((public.has_property_access(property_id, 'immobilien'::text, 'write'::text) OR public.has_property_access(property_id, 'investorportal'::text, 'write'::text)) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'immobilien'::text, 'write'::text) OR public.has_unit_access(unit_id, 'investorportal'::text, 'write'::text))));
 create policy renovation_subtrades_delete on public.renovation_subtrades as permissive for delete to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_subtrades_insert on public.renovation_subtrades as permissive for insert to authenticated
     with check ((((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)) AND (EXISTS ( SELECT 1
    FROM public.renovation_trades t
@@ -8604,8 +9916,8 @@ create policy renovation_subtrades_insert on public.renovation_subtrades as perm
 create policy renovation_subtrades_select on public.renovation_subtrades as permissive for select to authenticated
     using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'read'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'read'::text)));
 create policy renovation_subtrades_update on public.renovation_subtrades as permissive for update to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)))
-    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)))
+    with check ((((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)) AND (EXISTS ( SELECT 1
    FROM public.renovation_trades t
   WHERE ((t.id = renovation_subtrades.trade_id) AND (t.user_id = renovation_subtrades.user_id))))));
 create policy renovation_tasks_delete on public.renovation_tasks as permissive for delete to authenticated
@@ -8622,20 +9934,20 @@ create policy renovation_tasks_update on public.renovation_tasks as permissive f
    FROM public.renovation_project_trades t
   WHERE ((t.id = renovation_tasks.project_trade_id) AND (t.project_id = renovation_tasks.project_id)))))));
 create policy renovation_trades_delete on public.renovation_trades as permissive for delete to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_trades_insert on public.renovation_trades as permissive for insert to authenticated
     with check (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy renovation_trades_select on public.renovation_trades as permissive for select to authenticated
     using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'read'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'read'::text)));
 create policy renovation_trades_update on public.renovation_trades as permissive for update to authenticated
-    using ((user_id = ( SELECT auth.uid() AS uid)))
-    with check ((user_id = ( SELECT auth.uid() AS uid)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) OR public.rls_owner_shares(user_id, 'immobilien'::text, 'write'::text) OR public.rls_owner_shares(user_id, 'investorportal'::text, 'write'::text)));
 create policy rent_charges_delete on public.rent_charges as permissive for delete to authenticated
     using (public.can_write_rent_ledger(lease_id));
 create policy rent_charges_insert on public.rent_charges as permissive for insert to authenticated
     with check (public.can_write_rent_ledger(lease_id));
 create policy rent_charges_select on public.rent_charges as permissive for select to authenticated
-    using (((user_id = auth.uid()) OR public.can_read_rent_ledger(lease_id)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.can_read_rent_ledger(lease_id)));
 create policy rent_charges_update on public.rent_charges as permissive for update to authenticated
     using (public.can_write_rent_ledger(lease_id))
     with check (public.can_write_rent_ledger(lease_id));
@@ -8644,7 +9956,7 @@ create policy rent_ledger_delete on public.rent_ledger as permissive for delete 
 create policy rent_ledger_insert on public.rent_ledger as permissive for insert to authenticated
     with check (public.can_write_rent_ledger(lease_id));
 create policy rent_ledger_select on public.rent_ledger as permissive for select to authenticated
-    using (((user_id = auth.uid()) OR public.can_read_rent_ledger(lease_id)));
+    using (((user_id = ( SELECT auth.uid() AS uid)) OR public.can_read_rent_ledger(lease_id)));
 create policy rent_ledger_update on public.rent_ledger as permissive for update to authenticated
     using (public.can_write_rent_ledger(lease_id))
     with check (public.can_write_rent_ledger(lease_id));
@@ -8658,82 +9970,84 @@ create policy rent_payments_update on public.rent_payments as permissive for upd
     using ((public.has_lease_access(lease_id, 'finanzen'::text, 'write'::text) OR public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text)))
     with check ((public.has_lease_access(lease_id, 'finanzen'::text, 'write'::text) OR public.has_lease_access(lease_id, 'mietverhaeltnisse'::text, 'write'::text)));
 create policy rental_applicants_owner_delete on public.rental_applicants as permissive for delete to authenticated
-    using (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy rental_applicants_owner_select on public.rental_applicants as permissive for select to authenticated
-    using (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy rental_applicants_owner_update on public.rental_applicants as permissive for update to authenticated
-    using (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = auth.uid()))))))
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = rental_applicants.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy rental_processes_owner_delete on public.rental_processes as permissive for delete to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy rental_processes_owner_insert on public.rental_processes as permissive for insert to authenticated
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.units u
-  WHERE ((u.id = rental_processes.unit_id) AND ((u.user_id = auth.uid()) OR public.has_unit_access(u.id, 'mieterportal'::text, 'write'::text)))))));
+  WHERE ((u.id = rental_processes.unit_id) AND ((u.user_id = ( SELECT auth.uid() AS uid)) OR public.has_unit_access(u.id, 'mieterportal'::text, 'write'::text)))))));
 create policy rental_processes_owner_select on public.rental_processes as permissive for select to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy rental_processes_owner_update on public.rental_processes as permissive for update to authenticated
-    using ((user_id = auth.uid()))
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.units u
-  WHERE ((u.id = rental_processes.unit_id) AND ((u.user_id = auth.uid()) OR public.has_unit_access(u.id, 'mieterportal'::text, 'write'::text)))))));
+  WHERE ((u.id = rental_processes.unit_id) AND ((u.user_id = ( SELECT auth.uid() AS uid)) OR public.has_unit_access(u.id, 'mieterportal'::text, 'write'::text)))))));
 create policy rental_viewing_bookings_owner_delete on public.rental_viewing_bookings as permissive for delete to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.rental_viewings v
-  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = auth.uid())))));
+  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = ( SELECT auth.uid() AS uid))))));
 create policy rental_viewing_bookings_owner_select on public.rental_viewing_bookings as permissive for select to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.rental_viewings v
-  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = auth.uid())))));
+  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = ( SELECT auth.uid() AS uid))))));
 create policy rental_viewing_bookings_owner_update on public.rental_viewing_bookings as permissive for update to authenticated
     using ((EXISTS ( SELECT 1
    FROM public.rental_viewings v
-  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = auth.uid())))))
+  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = ( SELECT auth.uid() AS uid))))))
     with check ((EXISTS ( SELECT 1
    FROM public.rental_viewings v
-  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = auth.uid())))));
+  WHERE ((v.id = rental_viewing_bookings.viewing_id) AND (v.user_id = ( SELECT auth.uid() AS uid))))));
 create policy rental_viewings_owner_delete on public.rental_viewings as permissive for delete to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy rental_viewings_owner_insert on public.rental_viewings as permissive for insert to authenticated
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_viewings.process_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = rental_viewings.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy rental_viewings_owner_select on public.rental_viewings as permissive for select to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy rental_viewings_owner_update on public.rental_viewings as permissive for update to authenticated
-    using ((user_id = auth.uid()))
-    with check (((user_id = auth.uid()) AND (EXISTS ( SELECT 1
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (EXISTS ( SELECT 1
    FROM public.rental_processes p
-  WHERE ((p.id = rental_viewings.process_id) AND (p.user_id = auth.uid()))))));
+  WHERE ((p.id = rental_viewings.process_id) AND (p.user_id = ( SELECT auth.uid() AS uid)))))));
 create policy subscriptions_select_own on public.subscriptions as permissive for select to authenticated
     using ((user_id = ( SELECT auth.uid() AS uid)));
+create policy tenant_change_log_select on public.tenant_change_log as permissive for select to authenticated
+    using (public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text));
 create policy tenant_invitations_delete_landlord on public.tenant_invitations as permissive for delete to authenticated
-    using (((invited_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
+    using (((invited_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
 create policy tenant_invitations_insert_landlord on public.tenant_invitations as permissive for insert to authenticated
-    with check (((invited_by = auth.uid()) AND (tenant_id IS NOT NULL) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text)) AND ((property_id IS NULL) OR public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'write'::text))));
+    with check (((invited_by = ( SELECT auth.uid() AS uid)) AND (tenant_id IS NOT NULL) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text)) AND ((property_id IS NULL) OR public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'write'::text))));
 create policy tenant_invitations_select_invitee on public.tenant_invitations as permissive for select to authenticated
-    using (((COALESCE((auth.jwt() ->> 'email'::text), ''::text) <> ''::text) AND (lower(TRIM(BOTH FROM email)) = lower(TRIM(BOTH FROM (auth.jwt() ->> 'email'::text))))));
+    using (((COALESCE((( SELECT auth.jwt() AS jwt) ->> 'email'::text), ''::text) <> ''::text) AND (lower(TRIM(BOTH FROM email)) = lower(TRIM(BOTH FROM (( SELECT auth.jwt() AS jwt) ->> 'email'::text))))));
 create policy tenant_invitations_select_landlord on public.tenant_invitations as permissive for select to authenticated
-    using (((invited_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text)));
+    using (((invited_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text)));
 create policy tenant_invitations_update_landlord on public.tenant_invitations as permissive for update to authenticated
-    using (((invited_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)))
+    using (((invited_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)))
     with check (((tenant_id IS NOT NULL) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text)) AND ((property_id IS NULL) OR public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'write'::text))));
 create policy tenant_verification_links_delete on public.tenant_verification_links as permissive for delete to authenticated
-    using (((created_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
+    using (((created_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
 create policy tenant_verification_links_insert on public.tenant_verification_links as permissive for insert to authenticated
-    with check (((created_by = auth.uid()) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
+    with check (((created_by = ( SELECT auth.uid() AS uid)) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)));
 create policy tenant_verification_links_select on public.tenant_verification_links as permissive for select to authenticated
-    using (((created_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text)));
+    using (((created_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text)));
 create policy tenant_verification_links_update on public.tenant_verification_links as permissive for update to authenticated
-    using (((created_by = auth.uid()) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)))
+    using (((created_by = ( SELECT auth.uid() AS uid)) OR public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)))
     with check (public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text));
 create policy shared_tenant_delete on public.tenants as permissive for delete to authenticated
     using ((public.has_tenant_access(id, 'mietverhaeltnisse'::text, 'write'::text) OR public.rls_tenant_unleased_shared(id, user_id, 'mietverhaeltnisse'::text, 'write'::text)));
@@ -8747,20 +10061,20 @@ create policy shared_tenant_update on public.tenants as permissive for update to
 create policy tenant_user_id_unchanged on public.tenants as restrictive for update to authenticated
     using (true)
     with check (public.rls_tenant_user_id_unchanged(id, user_id));
-create policy tenants_owner_all on public.tenants as permissive for all to public
-    using ((user_id = auth.uid()))
-    with check ((user_id = auth.uid()));
+create policy tenants_owner_all on public.tenants as permissive for all to authenticated
+    using ((user_id = ( SELECT auth.uid() AS uid)))
+    with check ((user_id = ( SELECT auth.uid() AS uid)));
 create policy tenants_read_own_tenant on public.tenants as permissive for select to authenticated
     using ((id IN ( SELECT ur.tenant_id
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text)))));
 create policy tenants_update_own_tenant on public.tenants as permissive for update to authenticated
     using ((id IN ( SELECT ur.tenant_id
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text)))))
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text)))))
     with check ((id IN ( SELECT ur.tenant_id
    FROM public.user_roles ur
-  WHERE ((ur.user_id = auth.uid()) AND (ur.role = 'tenant'::text)))));
+  WHERE ((ur.user_id = ( SELECT auth.uid() AS uid)) AND (ur.role = 'tenant'::text)))));
 create policy tickets_delete on public.tickets as permissive for delete to authenticated
     using (public.has_property_access(property_id, 'mieterportal'::text, 'write'::text));
 create policy tickets_insert on public.tickets as permissive for insert to authenticated
@@ -8772,10 +10086,6 @@ create policy tickets_select on public.tickets as permissive for select to authe
 create policy tickets_update on public.tickets as permissive for update to authenticated
     using (public.has_property_access(property_id, 'mieterportal'::text, 'write'::text))
     with check ((public.has_property_access(property_id, 'mieterportal'::text, 'write'::text) AND public.has_unit_access(unit_id, 'mieterportal'::text, 'write'::text)));
-create policy tenants_read_own_unit on public.units as permissive for select to public
-    using ((id IN ( SELECT user_roles.unit_id
-   FROM public.user_roles
-  WHERE ((user_roles.user_id = auth.uid()) AND (user_roles.role = 'tenant'::text)))));
 create policy units_delete on public.units as permissive for delete to authenticated
     using (public.has_property_access(property_id, 'immobilien'::text, 'write'::text));
 create policy units_insert on public.units as permissive for insert to authenticated
@@ -8788,11 +10098,11 @@ create policy units_update on public.units as permissive for update to authentic
 create policy user_roles_delete_landlord on public.user_roles as permissive for delete to authenticated
     using (((role = 'tenant'::text) AND (public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text) OR ((property_id IS NOT NULL) AND public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'write'::text)))));
 create policy user_roles_insert_invited_tenant on public.user_roles as permissive for insert to authenticated
-    with check (((user_id = auth.uid()) AND (role = 'tenant'::text) AND public.can_self_assign_tenant_role(tenant_id, unit_id, property_id)));
+    with check (((user_id = ( SELECT auth.uid() AS uid)) AND (role = 'tenant'::text) AND public.can_self_assign_tenant_role(tenant_id, unit_id, property_id)));
 create policy user_roles_select_landlord on public.user_roles as permissive for select to authenticated
     using (((role = 'tenant'::text) AND (public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'read'::text) OR ((property_id IS NOT NULL) AND public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'read'::text)))));
 create policy user_roles_select_own on public.user_roles as permissive for select to authenticated
-    using ((user_id = auth.uid()));
+    using ((user_id = ( SELECT auth.uid() AS uid)));
 create policy user_roles_update_landlord on public.user_roles as permissive for update to authenticated
     using (((role = 'tenant'::text) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text)))
     with check (((role = 'tenant'::text) AND public.has_tenant_access(tenant_id, 'mietverhaeltnisse'::text, 'write'::text) AND ((unit_id IS NULL) OR public.has_unit_access(unit_id, 'mietverhaeltnisse'::text, 'write'::text)) AND ((property_id IS NULL) OR public.has_property_access(property_id, 'mietverhaeltnisse'::text, 'write'::text))));
@@ -8856,7 +10166,7 @@ revoke all on table public.bank_transactions from public, anon, authenticated, s
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.bank_transactions to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.bank_transactions to service_role;
 revoke all on table public.claim_access_links from public, anon, authenticated, service_role;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.claim_access_links to authenticated;
+grant delete on table public.claim_access_links to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.claim_access_links to service_role;
 revoke all on table public.claim_events from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.claim_events to authenticated;
@@ -8914,15 +10224,15 @@ grant delete, insert, maintain, references, select, trigger, truncate, update on
 revoke all on table public.invoice_counters from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_counters to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_counters to service_role;
-revoke all on table public.invoice_items from public, anon, authenticated, service_role;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_items to authenticated;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_items to service_role;
-revoke all on table public.invoice_totals from public, anon, authenticated, service_role;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_totals to authenticated;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoice_totals to service_role;
 revoke all on table public.invoices from public, anon, authenticated, service_role;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoices to authenticated;
+grant delete, insert, maintain, references, select, trigger, update on table public.invoices to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.invoices to service_role;
+revoke all on table public.lease_cloud_folders from public, anon, authenticated, service_role;
+grant delete, insert, select, update on table public.lease_cloud_folders to authenticated;
+grant delete, insert, maintain, references, select, trigger, truncate, update on table public.lease_cloud_folders to service_role;
+revoke all on table public.lease_notes from public, anon, authenticated, service_role;
+grant delete, insert, maintain, select, update on table public.lease_notes to authenticated;
+grant delete, insert, maintain, references, select, trigger, truncate, update on table public.lease_notes to service_role;
 revoke all on table public.lease_rent_periods from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.lease_rent_periods to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.lease_rent_periods to service_role;
@@ -8998,9 +10308,6 @@ grant delete, insert, maintain, references, select, trigger, truncate, update on
 revoke all on table public.renovation_milestones from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_milestones to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_milestones to service_role;
-revoke all on table public.renovation_positions from public, anon, authenticated, service_role;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_positions to authenticated;
-grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_positions to service_role;
 revoke all on table public.renovation_project_subtrades from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_project_subtrades to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.renovation_project_subtrades to service_role;
@@ -9040,12 +10347,17 @@ grant delete, insert, maintain, references, select, trigger, truncate, update on
 revoke all on table public.rental_viewings from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.rental_viewings to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.rental_viewings to service_role;
+revoke all on table public.stripe_webhook_events from public, anon, authenticated, service_role;
+grant delete, insert, maintain, references, select, trigger, truncate, update on table public.stripe_webhook_events to service_role;
 revoke all on table public.subscriptions from public, anon, authenticated, service_role;
 grant select on table public.subscriptions to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.subscriptions to service_role;
 revoke all on table public.tenant_auth_info from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.tenant_auth_info to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.tenant_auth_info to service_role;
+revoke all on table public.tenant_change_log from public, anon, authenticated, service_role;
+grant maintain, select on table public.tenant_change_log to authenticated;
+grant delete, insert, maintain, references, select, trigger, truncate, update on table public.tenant_change_log to service_role;
 revoke all on table public.tenant_invitations from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.tenant_invitations to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.tenant_invitations to service_role;
@@ -9065,7 +10377,7 @@ revoke all on table public.user_roles from public, anon, authenticated, service_
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.user_roles to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.user_roles to service_role;
 revoke all on table public.user_smtp_settings from public, anon, authenticated, service_role;
-grant delete, insert, update on table public.user_smtp_settings to authenticated;
+grant delete on table public.user_smtp_settings to authenticated;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.user_smtp_settings to service_role;
 revoke all on table public.utility_settlements from public, anon, authenticated, service_role;
 grant delete, insert, maintain, references, select, trigger, truncate, update on table public.utility_settlements to authenticated;
@@ -9074,6 +10386,16 @@ grant delete, insert, maintain, references, select, trigger, truncate, update on
 -- -----------------------------------------------------------------------------
 -- 12 · Spaltenrechte
 -- -----------------------------------------------------------------------------
+grant select (id) on table public.claim_access_links to authenticated;
+grant select (claim_id) on table public.claim_access_links to authenticated;
+grant select (expires_at) on table public.claim_access_links to authenticated;
+grant select (revoked_at) on table public.claim_access_links to authenticated;
+grant update (revoked_at) on table public.claim_access_links to authenticated;
+grant select (last_used_at) on table public.claim_access_links to authenticated;
+grant select (created_at) on table public.claim_access_links to authenticated;
+grant select (created_by) on table public.claim_access_links to authenticated;
+grant select (is_active) on table public.claim_access_links to authenticated;
+grant update (is_active) on table public.claim_access_links to authenticated;
 grant select (id) on table public.cloud_connections to authenticated;
 grant select (user_id) on table public.cloud_connections to authenticated;
 grant select (provider) on table public.cloud_connections to authenticated;
@@ -9082,13 +10404,26 @@ grant select (account_email) on table public.cloud_connections to authenticated;
 grant select (created_at) on table public.cloud_connections to authenticated;
 grant update (read) on table public.messages to authenticated;
 grant select (id) on table public.user_smtp_settings to authenticated;
+grant insert (user_id) on table public.user_smtp_settings to authenticated;
 grant select (user_id) on table public.user_smtp_settings to authenticated;
+grant insert (smtp_host) on table public.user_smtp_settings to authenticated;
 grant select (smtp_host) on table public.user_smtp_settings to authenticated;
+grant update (smtp_host) on table public.user_smtp_settings to authenticated;
+grant insert (smtp_port) on table public.user_smtp_settings to authenticated;
 grant select (smtp_port) on table public.user_smtp_settings to authenticated;
+grant update (smtp_port) on table public.user_smtp_settings to authenticated;
+grant insert (smtp_user) on table public.user_smtp_settings to authenticated;
 grant select (smtp_user) on table public.user_smtp_settings to authenticated;
+grant update (smtp_user) on table public.user_smtp_settings to authenticated;
+grant insert (smtp_pass) on table public.user_smtp_settings to authenticated;
+grant update (smtp_pass) on table public.user_smtp_settings to authenticated;
+grant insert (smtp_sender) on table public.user_smtp_settings to authenticated;
 grant select (smtp_sender) on table public.user_smtp_settings to authenticated;
+grant update (smtp_sender) on table public.user_smtp_settings to authenticated;
 grant select (created_at) on table public.user_smtp_settings to authenticated;
+grant insert (updated_at) on table public.user_smtp_settings to authenticated;
 grant select (updated_at) on table public.user_smtp_settings to authenticated;
+grant update (updated_at) on table public.user_smtp_settings to authenticated;
 
 -- -----------------------------------------------------------------------------
 -- 13 · Rechte auf Funktionen
@@ -9102,12 +10437,11 @@ grant execute on function public.accept_tenant_invitation() to service_role;
 revoke all on function public.applicant_document_upload_allowed(text) from public, anon, authenticated, service_role;
 grant execute on function public.applicant_document_upload_allowed(text) to anon;
 grant execute on function public.applicant_document_upload_allowed(text) to authenticated;
-grant execute on function public.applicant_document_upload_allowed(text) to public;
 grant execute on function public.applicant_document_upload_allowed(text) to service_role;
+revoke all on function public.bank_transactions_unmatch_deleted_target() from public, anon, authenticated, service_role;
+grant execute on function public.bank_transactions_unmatch_deleted_target() to service_role;
 revoke all on function public.block_claim_events_modification() from public, anon, authenticated, service_role;
 grant execute on function public.block_claim_events_modification() to service_role;
-revoke all on function public.block_claim_events_update() from public, anon, authenticated, service_role;
-grant execute on function public.block_claim_events_update() to service_role;
 revoke all on function public.block_physical_delete() from public, anon, authenticated, service_role;
 grant execute on function public.block_physical_delete() to service_role;
 revoke all on function public.block_posted_allocation_update() from public, anon, authenticated, service_role;
@@ -9117,7 +10451,6 @@ grant execute on function public.block_posted_payment_update() to service_role;
 revoke all on function public.book_viewing(text,uuid,uuid,time without time zone) from public, anon, authenticated, service_role;
 grant execute on function public.book_viewing(text,uuid,uuid,time without time zone) to anon;
 grant execute on function public.book_viewing(text,uuid,uuid,time without time zone) to authenticated;
-grant execute on function public.book_viewing(text,uuid,uuid,time without time zone) to public;
 grant execute on function public.book_viewing(text,uuid,uuid,time without time zone) to service_role;
 revoke all on function public.can_read_lease_rent(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.can_read_lease_rent(uuid) to authenticated;
@@ -9137,7 +10470,6 @@ grant execute on function public.can_write_rent_ledger(uuid) to service_role;
 revoke all on function public.cancel_viewing_booking(text,uuid,uuid) from public, anon, authenticated, service_role;
 grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to anon;
 grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to authenticated;
-grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to public;
 grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to service_role;
 revoke all on function public.check_claim_allocation_integrity() from public, anon, authenticated, service_role;
 grant execute on function public.check_claim_allocation_integrity() to service_role;
@@ -9147,6 +10479,8 @@ revoke all on function public.check_claim_item_rent_ledger_owner() from public, 
 grant execute on function public.check_claim_item_rent_ledger_owner() to service_role;
 revoke all on function public.check_claim_payment_rent_payment_owner() from public, anon, authenticated, service_role;
 grant execute on function public.check_claim_payment_rent_payment_owner() to service_role;
+revoke all on function public.check_claim_reactivation_duplicates() from public, anon, authenticated, service_role;
+grant execute on function public.check_claim_reactivation_duplicates() to service_role;
 revoke all on function public.check_duplicate_active_claim_item() from public, anon, authenticated, service_role;
 grant execute on function public.check_duplicate_active_claim_item() to service_role;
 revoke all on function public.check_user_exists_by_email(text) from public, anon, authenticated, service_role;
@@ -9162,7 +10496,6 @@ revoke all on function public.claim_live_interest(uuid,date) from public, anon, 
 grant execute on function public.claim_live_interest(uuid,date) to authenticated;
 grant execute on function public.claim_live_interest(uuid,date) to service_role;
 revoke all on function public.claim_portal_check_access(text,text) from public, anon, authenticated, service_role;
-grant execute on function public.claim_portal_check_access(text,text) to authenticated;
 grant execute on function public.claim_portal_check_access(text,text) to service_role;
 revoke all on function public.claim_portal_installment_options(jsonb) from public, anon, authenticated, service_role;
 grant execute on function public.claim_portal_installment_options(jsonb) to authenticated;
@@ -9170,21 +10503,28 @@ grant execute on function public.claim_portal_installment_options(jsonb) to serv
 revoke all on function public.claim_portal_plan_request_block_reason(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.claim_portal_plan_request_block_reason(uuid) to authenticated;
 grant execute on function public.claim_portal_plan_request_block_reason(uuid) to service_role;
+revoke all on function public.claim_today() from public, anon, authenticated, service_role;
+grant execute on function public.claim_today() to authenticated;
+grant execute on function public.claim_today() to service_role;
+revoke all on function public.cloud_connections_delete_secrets() from public, anon, authenticated, service_role;
+revoke all on function public.cloud_get_tokens(uuid,uuid) from public, anon, authenticated, service_role;
+grant execute on function public.cloud_get_tokens(uuid,uuid) to service_role;
+revoke all on function public.cloud_store_tokens(uuid,uuid,text,text,timestamp with time zone) from public, anon, authenticated, service_role;
+grant execute on function public.cloud_store_tokens(uuid,uuid,text,text,timestamp with time zone) to service_role;
+revoke all on function public.cloud_tokens_keep_plaintext() from public, anon, authenticated, service_role;
+revoke all on function public.cloud_vault_put(uuid,text,text) from public, anon, authenticated, service_role;
 revoke all on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) from public, anon, authenticated, service_role;
 grant execute on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) to authenticated;
 grant execute on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) to service_role;
 revoke all on function public.create_claim_advanced(uuid,uuid[],jsonb,numeric,numeric,numeric,date,integer,text) from public, anon, authenticated, service_role;
 grant execute on function public.create_claim_advanced(uuid,uuid[],jsonb,numeric,numeric,numeric,date,integer,text) to authenticated;
 grant execute on function public.create_claim_advanced(uuid,uuid[],jsonb,numeric,numeric,numeric,date,integer,text) to service_role;
-revoke all on function public.create_claim_from_rent_ledger(uuid,numeric,numeric,date,integer,text) from public, anon, authenticated, service_role;
-grant execute on function public.create_claim_from_rent_ledger(uuid,numeric,numeric,date,integer,text) to authenticated;
-grant execute on function public.create_claim_from_rent_ledger(uuid,numeric,numeric,date,integer,text) to service_role;
-revoke all on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,date,integer,text) from public, anon, authenticated, service_role;
-grant execute on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,date,integer,text) to authenticated;
-grant execute on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,date,integer,text) to service_role;
-revoke all on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,numeric,date,integer,text) from public, anon, authenticated, service_role;
-grant execute on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,numeric,date,integer,text) to authenticated;
-grant execute on function public.create_claim_from_rent_ledgers(uuid[],numeric,numeric,numeric,date,integer,text) to service_role;
+revoke all on function public.create_claim_portal_link(uuid,integer) from public, anon, authenticated, service_role;
+grant execute on function public.create_claim_portal_link(uuid,integer) to authenticated;
+grant execute on function public.create_claim_portal_link(uuid,integer) to service_role;
+revoke all on function public.create_credit_note(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.create_credit_note(uuid) to authenticated;
+grant execute on function public.create_credit_note(uuid) to service_role;
 revoke all on function public.create_payment_plan(uuid,date,integer,numeric,text) from public, anon, authenticated, service_role;
 grant execute on function public.create_payment_plan(uuid,date,integer,numeric,text) to authenticated;
 grant execute on function public.create_payment_plan(uuid,date,integer,numeric,text) to service_role;
@@ -9194,18 +10534,38 @@ grant execute on function public.decline_portfolio_share(uuid) to service_role;
 revoke all on function public.delete_claim_item(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.delete_claim_item(uuid) to authenticated;
 grant execute on function public.delete_claim_item(uuid) to service_role;
+revoke all on function public.delete_portfolio(uuid,uuid,boolean) from public, anon, authenticated, service_role;
+grant execute on function public.delete_portfolio(uuid,uuid,boolean) to authenticated;
+grant execute on function public.delete_portfolio(uuid,uuid,boolean) to service_role;
 revoke all on function public.delete_tenant_completely(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.delete_tenant_completely(uuid) to authenticated;
 grant execute on function public.delete_tenant_completely(uuid) to service_role;
 revoke all on function public.economic_unit_is_linked(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.economic_unit_is_linked(uuid) to authenticated;
 grant execute on function public.economic_unit_is_linked(uuid) to service_role;
+revoke all on function public.floor_plan_can_write(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.floor_plan_can_write(uuid) to authenticated;
+grant execute on function public.floor_plan_can_write(uuid) to service_role;
+revoke all on function public.floor_plan_room_count(jsonb) from public, anon, authenticated, service_role;
+grant execute on function public.floor_plan_room_count(jsonb) to authenticated;
+grant execute on function public.floor_plan_room_count(jsonb) to service_role;
+revoke all on function public.floor_plan_storey_labels(jsonb) from public, anon, authenticated, service_role;
+grant execute on function public.floor_plan_storey_labels(jsonb) to authenticated;
+grant execute on function public.floor_plan_storey_labels(jsonb) to service_role;
+revoke all on function public.floor_plan_total_area_mm2(jsonb) from public, anon, authenticated, service_role;
+grant execute on function public.floor_plan_total_area_mm2(jsonb) to authenticated;
+grant execute on function public.floor_plan_total_area_mm2(jsonb) to service_role;
 revoke all on function public.generate_claim_access_link(uuid,text,text,integer) from public, anon, authenticated, service_role;
 grant execute on function public.generate_claim_access_link(uuid,text,text,integer) to authenticated;
 grant execute on function public.generate_claim_access_link(uuid,text,text,integer) to service_role;
+revoke all on function public.get_auth_user_id_by_email(text) from public, anon, authenticated, service_role;
+grant execute on function public.get_auth_user_id_by_email(text) to service_role;
 revoke all on function public.get_investor_properties(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.get_investor_properties(uuid) to authenticated;
 grant execute on function public.get_investor_properties(uuid) to service_role;
+revoke all on function public.get_my_landlord_info(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.get_my_landlord_info(uuid) to authenticated;
+grant execute on function public.get_my_landlord_info(uuid) to service_role;
 revoke all on function public.get_my_role() from public, anon, authenticated, service_role;
 grant execute on function public.get_my_role() to authenticated;
 grant execute on function public.get_my_role() to service_role;
@@ -9221,118 +10581,72 @@ grant execute on function public.get_pending_invitations() to service_role;
 revoke all on function public.get_public_claim_by_token(text,text) from public, anon, authenticated, service_role;
 grant execute on function public.get_public_claim_by_token(text,text) to anon;
 grant execute on function public.get_public_claim_by_token(text,text) to authenticated;
-grant execute on function public.get_public_claim_by_token(text,text) to public;
 grant execute on function public.get_public_claim_by_token(text,text) to service_role;
 revoke all on function public.get_rental_applicant_for_booking(text,uuid) from public, anon, authenticated, service_role;
 grant execute on function public.get_rental_applicant_for_booking(text,uuid) to anon;
 grant execute on function public.get_rental_applicant_for_booking(text,uuid) to authenticated;
-grant execute on function public.get_rental_applicant_for_booking(text,uuid) to public;
 grant execute on function public.get_rental_applicant_for_booking(text,uuid) to service_role;
 revoke all on function public.get_rental_process_by_token(text) from public, anon, authenticated, service_role;
 grant execute on function public.get_rental_process_by_token(text) to anon;
 grant execute on function public.get_rental_process_by_token(text) to authenticated;
-grant execute on function public.get_rental_process_by_token(text) to public;
 grant execute on function public.get_rental_process_by_token(text) to service_role;
 revoke all on function public.get_rental_viewing_schedule(text) from public, anon, authenticated, service_role;
 grant execute on function public.get_rental_viewing_schedule(text) to anon;
 grant execute on function public.get_rental_viewing_schedule(text) to authenticated;
-grant execute on function public.get_rental_viewing_schedule(text) to public;
 grant execute on function public.get_rental_viewing_schedule(text) to service_role;
+revoke all on function public.get_smtp_password(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.get_smtp_password(uuid) to service_role;
 revoke all on function public.get_tenant_auth_info() from public, anon, authenticated, service_role;
 grant execute on function public.get_tenant_auth_info() to authenticated;
 grant execute on function public.get_tenant_auth_info() to service_role;
 revoke all on function public.get_tenant_by_token(text) from public, anon, authenticated, service_role;
 grant execute on function public.get_tenant_by_token(text) to anon;
 grant execute on function public.get_tenant_by_token(text) to authenticated;
-grant execute on function public.get_tenant_by_token(text) to public;
 grant execute on function public.get_tenant_by_token(text) to service_role;
 revoke all on function public.handle_updated_at() from public, anon, authenticated, service_role;
 grant execute on function public.handle_updated_at() to service_role;
-revoke all on function public.has_claim_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_claim_access(uuid) to authenticated;
-grant execute on function public.has_claim_access(uuid) to service_role;
 revoke all on function public.has_claim_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_claim_access(uuid,text,text) to authenticated;
 grant execute on function public.has_claim_access(uuid,text,text) to service_role;
-revoke all on function public.has_claim_columns_access(uuid,uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_claim_columns_access(uuid,uuid) to authenticated;
-grant execute on function public.has_claim_columns_access(uuid,uuid) to service_role;
-revoke all on function public.has_contact_access(uuid,uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_contact_access(uuid,uuid) to authenticated;
-grant execute on function public.has_contact_access(uuid,uuid) to service_role;
-revoke all on function public.has_document_template_access(uuid,uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_document_template_access(uuid,uuid) to authenticated;
-grant execute on function public.has_document_template_access(uuid,uuid) to service_role;
-revoke all on function public.has_economic_unit_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_economic_unit_access(uuid) to authenticated;
-grant execute on function public.has_economic_unit_access(uuid) to service_role;
 revoke all on function public.has_economic_unit_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_economic_unit_access(uuid,text,text) to authenticated;
 grant execute on function public.has_economic_unit_access(uuid,text,text) to service_role;
-revoke all on function public.has_invoice_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_invoice_access(uuid) to authenticated;
-grant execute on function public.has_invoice_access(uuid) to service_role;
 revoke all on function public.has_invoice_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_invoice_access(uuid,text,text) to authenticated;
 grant execute on function public.has_invoice_access(uuid,text,text) to service_role;
-revoke all on function public.has_lease_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_lease_access(uuid) to authenticated;
-grant execute on function public.has_lease_access(uuid) to service_role;
 revoke all on function public.has_lease_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_lease_access(uuid,text,text) to authenticated;
 grant execute on function public.has_lease_access(uuid,text,text) to service_role;
-revoke all on function public.has_portfolio_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_portfolio_access(uuid) to authenticated;
-grant execute on function public.has_portfolio_access(uuid) to service_role;
 revoke all on function public.has_portfolio_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_portfolio_access(uuid,text,text) to authenticated;
 grant execute on function public.has_portfolio_access(uuid,text,text) to service_role;
-revoke all on function public.has_property_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_property_access(uuid) to authenticated;
-grant execute on function public.has_property_access(uuid) to service_role;
 revoke all on function public.has_property_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_property_access(uuid,text,text) to authenticated;
 grant execute on function public.has_property_access(uuid,text,text) to service_role;
-revoke all on function public.has_renovation_calc_trade_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_renovation_calc_trade_access(uuid) to authenticated;
-grant execute on function public.has_renovation_calc_trade_access(uuid) to service_role;
-revoke all on function public.has_renovation_calculation_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_renovation_calculation_access(uuid) to authenticated;
-grant execute on function public.has_renovation_calculation_access(uuid) to service_role;
 revoke all on function public.has_renovation_calculation_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_renovation_calculation_access(uuid,text,text) to authenticated;
 grant execute on function public.has_renovation_calculation_access(uuid,text,text) to service_role;
-revoke all on function public.has_renovation_project_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_renovation_project_access(uuid) to authenticated;
-grant execute on function public.has_renovation_project_access(uuid) to service_role;
 revoke all on function public.has_renovation_project_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_renovation_project_access(uuid,text,text) to authenticated;
 grant execute on function public.has_renovation_project_access(uuid,text,text) to service_role;
-revoke all on function public.has_renovation_project_trade_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_renovation_project_trade_access(uuid) to authenticated;
-grant execute on function public.has_renovation_project_trade_access(uuid) to service_role;
-revoke all on function public.has_tenant_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_tenant_access(uuid) to authenticated;
-grant execute on function public.has_tenant_access(uuid) to service_role;
 revoke all on function public.has_tenant_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_tenant_access(uuid,text,text) to authenticated;
 grant execute on function public.has_tenant_access(uuid,text,text) to service_role;
-revoke all on function public.has_unit_access(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.has_unit_access(uuid) to authenticated;
-grant execute on function public.has_unit_access(uuid) to service_role;
 revoke all on function public.has_unit_access(uuid,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.has_unit_access(uuid,text,text) to authenticated;
 grant execute on function public.has_unit_access(uuid,text,text) to service_role;
+revoke all on function public.import_rows(jsonb) from public, anon, authenticated, service_role;
+grant execute on function public.import_rows(jsonb) to authenticated;
+grant execute on function public.import_rows(jsonb) to service_role;
 revoke all on function public.is_applicant_document_owner(text) from public, anon, authenticated, service_role;
 grant execute on function public.is_applicant_document_owner(text) to authenticated;
 grant execute on function public.is_applicant_document_owner(text) to service_role;
-revoke all on function public.is_user_shared_with_me(uuid) from public, anon, authenticated, service_role;
-grant execute on function public.is_user_shared_with_me(uuid) to authenticated;
-grant execute on function public.is_user_shared_with_me(uuid) to service_role;
 revoke all on function public.keep_user_id_on_update() from public, anon, authenticated, service_role;
 grant execute on function public.keep_user_id_on_update() to service_role;
 revoke all on function public.lease_before_delete() from public, anon, authenticated, service_role;
 grant execute on function public.lease_before_delete() to service_role;
+revoke all on function public.lease_notes_set_meta() from public, anon, authenticated, service_role;
+grant execute on function public.lease_notes_set_meta() to service_role;
 revoke all on function public.lease_rent_period_for_month(uuid,date) from public, anon, authenticated, service_role;
 grant execute on function public.lease_rent_period_for_month(uuid,date) to authenticated;
 grant execute on function public.lease_rent_period_for_month(uuid,date) to service_role;
@@ -9341,8 +10655,11 @@ grant execute on function public.lease_rent_period_has_earlier(uuid,date) to aut
 grant execute on function public.lease_rent_period_has_earlier(uuid,date) to service_role;
 revoke all on function public.lease_rent_periods_before_write() from public, anon, authenticated, service_role;
 grant execute on function public.lease_rent_periods_before_write() to service_role;
+revoke all on function public.leases_check_overlap() from public, anon, authenticated, service_role;
+grant execute on function public.leases_check_overlap() to service_role;
+revoke all on function public.leases_sync_tenant_owner() from public, anon, authenticated, service_role;
+grant execute on function public.leases_sync_tenant_owner() to service_role;
 revoke all on function public.notify_push(text,jsonb) from public, anon, authenticated, service_role;
-grant execute on function public.notify_push(text,jsonb) to authenticated;
 grant execute on function public.notify_push(text,jsonb) to service_role;
 revoke all on function public.on_lease_change() from public, anon, authenticated, service_role;
 grant execute on function public.on_lease_change() to service_role;
@@ -9352,12 +10669,18 @@ revoke all on function public.on_rent_payment_change() from public, anon, authen
 grant execute on function public.on_rent_payment_change() to service_role;
 revoke all on function public.portfolio_shares_guard() from public, anon, authenticated, service_role;
 grant execute on function public.portfolio_shares_guard() to service_role;
+revoke all on function public.profiles_protect_stripe_connect() from public, anon, authenticated, service_role;
+grant execute on function public.profiles_protect_stripe_connect() to service_role;
+revoke all on function public.protect_claim_item_created_at() from public, anon, authenticated, service_role;
+grant execute on function public.protect_claim_item_created_at() to service_role;
 revoke all on function public.protect_claim_item_original_amount() from public, anon, authenticated, service_role;
 grant execute on function public.protect_claim_item_original_amount() to service_role;
 revoke all on function public.protect_claim_payment_records() from public, anon, authenticated, service_role;
 grant execute on function public.protect_claim_payment_records() to service_role;
 revoke all on function public.protect_claim_rent_payments() from public, anon, authenticated, service_role;
 grant execute on function public.protect_claim_rent_payments() to service_role;
+revoke all on function public.protect_issued_invoice() from public, anon, authenticated, service_role;
+grant execute on function public.protect_issued_invoice() to service_role;
 revoke all on function public.push_subscriptions_release_token() from public, anon, authenticated, service_role;
 grant execute on function public.push_subscriptions_release_token() to service_role;
 revoke all on function public.recalculate_lease_ledgers(uuid) from public, anon, authenticated, service_role;
@@ -9372,6 +10695,11 @@ grant execute on function public.record_claim_payment(uuid,date,numeric,text,uui
 revoke all on function public.register_trial_rate_check(text) from public, anon, authenticated, service_role;
 grant execute on function public.register_trial_rate_check(text) to authenticated;
 grant execute on function public.register_trial_rate_check(text) to service_role;
+revoke all on function public.renovation_set_created_by() from public, anon, authenticated, service_role;
+grant execute on function public.renovation_set_created_by() to authenticated;
+grant execute on function public.renovation_set_created_by() to service_role;
+revoke all on function public.rent_ledger_block_claimed_delete() from public, anon, authenticated, service_role;
+grant execute on function public.rent_ledger_block_claimed_delete() to service_role;
 revoke all on function public.reverse_appended_claim(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.reverse_appended_claim(uuid) to authenticated;
 grant execute on function public.reverse_appended_claim(uuid) to service_role;
@@ -9381,6 +10709,9 @@ grant execute on function public.reverse_claim_payment(uuid) to service_role;
 revoke all on function public.reverse_payment_plan(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.reverse_payment_plan(uuid) to authenticated;
 grant execute on function public.reverse_payment_plan(uuid) to service_role;
+revoke all on function public.rls_contact_user_id_unchanged(uuid,uuid) from public, anon, authenticated, service_role;
+grant execute on function public.rls_contact_user_id_unchanged(uuid,uuid) to authenticated;
+grant execute on function public.rls_contact_user_id_unchanged(uuid,uuid) to service_role;
 revoke all on function public.rls_is_my_landlord(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.rls_is_my_landlord(uuid) to authenticated;
 grant execute on function public.rls_is_my_landlord(uuid) to service_role;
@@ -9411,9 +10742,15 @@ grant execute on function public.rls_tenant_unleased_shared(uuid,uuid,text,text)
 revoke all on function public.rls_tenant_user_id_unchanged(uuid,uuid) from public, anon, authenticated, service_role;
 grant execute on function public.rls_tenant_user_id_unchanged(uuid,uuid) to authenticated;
 grant execute on function public.rls_tenant_user_id_unchanged(uuid,uuid) to service_role;
+revoke all on function public.rls_ticket_message_visible(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.rls_ticket_message_visible(uuid) to authenticated;
+grant execute on function public.rls_ticket_message_visible(uuid) to service_role;
 revoke all on function public.rls_user_ok(uuid,text,uuid) from public, anon, authenticated, service_role;
 grant execute on function public.rls_user_ok(uuid,text,uuid) to authenticated;
 grant execute on function public.rls_user_ok(uuid,text,uuid) to service_role;
+revoke all on function public.save_property_economic_unit(uuid,uuid,jsonb,uuid,uuid[],uuid[],boolean) from public, anon, authenticated, service_role;
+grant execute on function public.save_property_economic_unit(uuid,uuid,jsonb,uuid,uuid[],uuid[],boolean) to authenticated;
+grant execute on function public.save_property_economic_unit(uuid,uuid,jsonb,uuid,uuid[],uuid[],boolean) to service_role;
 revoke all on function public.set_forderungsmanagement_updated_at() from public, anon, authenticated, service_role;
 grant execute on function public.set_forderungsmanagement_updated_at() to service_role;
 revoke all on function public.set_owner_user_id() from public, anon, authenticated, service_role;
@@ -9427,15 +10764,17 @@ grant execute on function public.share_permits(jsonb,text,text) to service_role;
 revoke all on function public.storage_segment_uuid(text) from public, anon, authenticated, service_role;
 grant execute on function public.storage_segment_uuid(text) to authenticated;
 grant execute on function public.storage_segment_uuid(text) to service_role;
+revoke all on function public.stripe_webhook_event_begin(text,text,boolean,text,bigint) from public, anon, authenticated, service_role;
+grant execute on function public.stripe_webhook_event_begin(text,text,boolean,text,bigint) to service_role;
+revoke all on function public.stripe_webhook_event_finish(text,boolean,text,text) from public, anon, authenticated, service_role;
+grant execute on function public.stripe_webhook_event_finish(text,boolean,text,text) to service_role;
 revoke all on function public.submit_public_payment_plan_request(text,text,integer,numeric,numeric,numeric,text) from public, anon, authenticated, service_role;
 grant execute on function public.submit_public_payment_plan_request(text,text,integer,numeric,numeric,numeric,text) to anon;
 grant execute on function public.submit_public_payment_plan_request(text,text,integer,numeric,numeric,numeric,text) to authenticated;
-grant execute on function public.submit_public_payment_plan_request(text,text,integer,numeric,numeric,numeric,text) to public;
 grant execute on function public.submit_public_payment_plan_request(text,text,integer,numeric,numeric,numeric,text) to service_role;
 revoke all on function public.submit_rental_application(text,jsonb) from public, anon, authenticated, service_role;
 grant execute on function public.submit_rental_application(text,jsonb) to anon;
 grant execute on function public.submit_rental_application(text,jsonb) to authenticated;
-grant execute on function public.submit_rental_application(text,jsonb) to public;
 grant execute on function public.submit_rental_application(text,jsonb) to service_role;
 revoke all on function public.sync_all_rent_ledgers() from public, anon, authenticated, service_role;
 grant execute on function public.sync_all_rent_ledgers() to authenticated;
@@ -9456,6 +10795,8 @@ grant execute on function public.tenant_link_token_hash(text) to authenticated;
 grant execute on function public.tenant_link_token_hash(text) to service_role;
 revoke all on function public.tenant_verification_links_hash_token() from public, anon, authenticated, service_role;
 grant execute on function public.tenant_verification_links_hash_token() to service_role;
+revoke all on function public.tenants_log_portal_change() from public, anon, authenticated, service_role;
+grant execute on function public.tenants_log_portal_change() to service_role;
 revoke all on function public.tenants_protect_columns() from public, anon, authenticated, service_role;
 grant execute on function public.tenants_protect_columns() to service_role;
 revoke all on function public.trigger_push_on_announcement() from public, anon, authenticated, service_role;
@@ -9478,7 +10819,6 @@ grant execute on function public.update_overdue_claims_status() to service_role;
 revoke all on function public.update_tenant_by_token(text,text,text,text,text,text,text,text,text) from public, anon, authenticated, service_role;
 grant execute on function public.update_tenant_by_token(text,text,text,text,text,text,text,text,text) to anon;
 grant execute on function public.update_tenant_by_token(text,text,text,text,text,text,text,text,text) to authenticated;
-grant execute on function public.update_tenant_by_token(text,text,text,text,text,text,text,text,text) to public;
 grant execute on function public.update_tenant_by_token(text,text,text,text,text,text,text,text,text) to service_role;
 revoke all on function public.update_updated_at_column() from public, anon, authenticated, service_role;
 grant execute on function public.update_updated_at_column() to service_role;
@@ -9486,29 +10826,50 @@ revoke all on function public.user_roles_mark_invitation_accepted() from public,
 grant execute on function public.user_roles_mark_invitation_accepted() to service_role;
 revoke all on function public.user_roles_protect_identity() from public, anon, authenticated, service_role;
 grant execute on function public.user_roles_protect_identity() to service_role;
+revoke all on function public.user_smtp_settings_drop_secret() from public, anon, authenticated, service_role;
+grant execute on function public.user_smtp_settings_drop_secret() to service_role;
+revoke all on function public.user_smtp_settings_secure_pass() from public, anon, authenticated, service_role;
+grant execute on function public.user_smtp_settings_secure_pass() to service_role;
 revoke all on function public.verify_payment_allocations_sum() from public, anon, authenticated, service_role;
 grant execute on function public.verify_payment_allocations_sum() to service_role;
 
 -- -----------------------------------------------------------------------------
 -- 14 · Kommentare
 -- -----------------------------------------------------------------------------
+comment on view public.claim_item_totals_view is 'Je Position: paid_principal = getilgt (Zahlung oder Erlass), waived_principal = davon Erlass/Ausbuchung ohne Geldeingang, open_amount = offen.';
+comment on view public.claim_totals_view is 'Summen je Forderung. principal_paid = getilgt (Zahlung oder Erlass), principal_waived = davon Erlass/Ausbuchung ohne Geldeingang. Zinsen bis claim_today() (Berliner Kalendertag).';
 comment on table public.contact_requests is 'Anfragen aus dem Kontaktformular der Website. Schreiben nur über die Edge Function contact-form (service_role).';
+comment on table public.lease_cloud_folders is 'Cloud-Ordner (Pfad unterhalb ImmoControlpro360) je Mietverhältnis und Cloud-Verbindung – bleibt nach Umbenennungen gültig.';
+comment on table public.lease_notes is 'Interne Notizen des Vermieters/Teams zu einem Mietverhältnis (nicht für Mieter sichtbar).';
 comment on table public.lease_rent_periods is 'Miethistorie: Kaltmiete/NK/Heizkosten/Sonstiges/Zahltag je Mietvertrag, gültig ab valid_from (monatsgenau, ein Zeitraum je Monat).';
 comment on table public.renovation_invoices is 'Rechnungen pro Untergewerk';
 comment on table public.renovation_milestone_templates is 'Benutzer-eigene Meilenstein-Templates';
 comment on table public.renovation_milestones is 'Meilensteine pro Gewerk – frei abhackbar';
-comment on table public.renovation_positions is 'Benutzer-eigene Positions-Templates für Untergewerke (Ebene 3)';
 comment on table public.renovation_project_subtrades is 'Untergewerke (Ebene 2) mit eigenem Budget & Rechnungen';
 comment on table public.renovation_project_trades is 'Gewerke (Ebene 1) innerhalb eines Projekts';
 comment on table public.renovation_projects is 'Sanierungsprojekte – mehrere pro Immobilie möglich';
 comment on table public.renovation_subtrades is 'Benutzer-eigene Untergewerke-Templates';
 comment on table public.renovation_tasks is 'Projektbezogene Aufgaben – optional Gewerk-bezogen';
 comment on table public.renovation_trades is 'Benutzer-eigene Gewerke-Templates (Einstellungen)';
+comment on table public.stripe_webhook_events is 'Ereignisprotokoll des Stripe-Webhooks (Edge Function stripe-webhook, nur service_role): je Stripe-Ereignis (event.id) Status, Versuche, Ergebnis-Code und kurze Fehlermeldung. Kein Ereignisinhalt, keine Personendaten.';
+comment on table public.tenant_change_log is 'Änderungsprotokoll der Mieter-Stammdaten: Aktualisierung über den Mieterdaten-Link (source token_link, geschrieben von update_tenant_by_token) und Selbständerungen im Mieterportal (source tenant_portal, Trigger trg_tenants_portal_change_log). App-Konten dürfen nur lesen.';
+comment on column public.claim_access_links.token is 'Veraltet: immer NULL (Klartext wird nicht gespeichert, siehe token_hash). Wird später entfernt.';
+comment on column public.claim_access_links.pin is 'Veraltet: immer NULL (Klartext wird nicht gespeichert, siehe pin_hash). Wird später entfernt.';
+comment on column public.claims.tenant_id is 'Mieter der Forderung; bewusst nullable: delete_tenant_completely löst den Bezug (Lösch-Regel D2-17), die Forderung bleibt über lease_id zugeordnet.';
 comment on column public.claims.interest_rate is 'Verzugszinssatz in Prozent p. a. (5.0000 = 5 %).';
-comment on column public.cloud_connections.access_token is 'OAuth-Access-Token. Nur für service_role lesbar (Edge Functions), nie an den Browser ausliefern.';
-comment on column public.cloud_connections.refresh_token is 'OAuth-Refresh-Token. Nur für service_role lesbar (Edge Functions), nie an den Browser ausliefern.';
+comment on column public.cloud_connections.access_token is 'Veraltet: Klartext nur im Übergangsbetrieb (bis 08b_cloud_tokens_finalize). Maßgeblich ist der Vault.';
+comment on column public.cloud_connections.refresh_token is 'Veraltet: Klartext nur im Übergangsbetrieb (bis 08b_cloud_tokens_finalize). Maßgeblich ist der Vault.';
+comment on column public.cloud_connections.access_token_secret_id is 'Verweis auf vault.secrets (verschlüsseltes Access-Token). Lesen/Schreiben nur über cloud_get_tokens/cloud_store_tokens (service_role).';
+comment on column public.cloud_connections.refresh_token_secret_id is 'Verweis auf vault.secrets (verschlüsseltes Refresh-Token). Lesen/Schreiben nur über cloud_get_tokens/cloud_store_tokens (service_role).';
 comment on column public.contact_requests.client_hash is 'HMAC-Pseudonym der Absender-IP (nur für die Missbrauchsbremse, keine IP im Klartext).';
 comment on column public.contact_requests.notified_at is 'Zeitpunkt der E-Mail-Benachrichtigung an das Team (null = keine Benachrichtigung verschickt).';
+comment on column public.expense_categories.user_id is 'Eigentümer der Kategorie; NULL = globale Standardkategorie (für alle sichtbar, nicht änderbar).';
+comment on column public.floor_plans.room_count is 'Generiert aus plan_data: Anzahl Räume (Grundriss-Liste ohne plan_data).';
+comment on column public.floor_plans.total_area_mm2 is 'Generiert aus plan_data: Summe der Raumflächen in mm² (netto, wie im Editor).';
+comment on column public.floor_plans.storey_labels is 'Generiert aus plan_data: Geschoss-Bezeichnungen in Reihenfolge.';
+comment on column public.invoice_counters.object_unit_id is 'Veraltet: wird von get_next_invoice_number ignoriert (ein Zähler je Portfolio und Jahr, object_unit_id NULL).';
+comment on column public.leases.tenant_id is 'Mieter des Vertrags; bewusst nullable: delete_tenant_completely löst den Bezug (Lösch-Regel D2-17), Vertrag und Mietkonto bleiben erhalten.';
+comment on column public.leases.booking_start_date is 'Beginn der Mietkonto-Führung in ImmoControl360 (z. B. Importmonat bei Bestandsverträgen). Monate vor diesem Stichtag gelten in der App nicht als Mietrückstand (einblendbar). NULL = Heuristik über den Erfassungszeitpunkt des Vertrags.';
 comment on column public.loans.bank_name is 'Bank / Co-Invest / sonstiges Darlehen';
 comment on column public.loans.interest_rate is 'Sollzinssatz in Prozent p. a. (z. B. 3.5 = 3,5 %).';
 comment on column public.portfolios.is_small_business is 'Kleinunternehmer nach § 19 UStG: Rechnungen dieses Portfolios ohne Umsatzsteuer-Ausweis (Voreinstellung im Rechnungsformular).';
@@ -9529,20 +10890,52 @@ comment on column public.properties.dd_energy_windows is 'DD Energiestand Fenste
 comment on column public.properties.dd_energy_heating is 'DD Energiestand Heizung (0-5 Stufensystem)';
 comment on column public.properties.building_share_percent is 'Gebäudeanteil in % (für AfA-Berechnung)';
 comment on column public.properties.afa_percent is 'AfA-Satz in % (Standard 2%)';
+comment on column public.renovation_invoices.created_by is 'Anlegendes Konto (Trigger); user_id = Eigentümer der Daten.';
+comment on column public.renovation_projects.created_by is 'Anlegendes Konto (Trigger); user_id = Eigentümer der Daten.';
+comment on column public.renovation_tasks.created_by is 'Anlegendes Konto (Trigger); user_id = Eigentümer der Daten.';
+comment on column public.rent_payments.claim_payment_id is 'Forderungszahlung, aus der diese Mietzahlung gespiegelt wurde (gesetzt nur von record_claim_payment). Die Notiz "Verrechnung Forderungsakte (Ref: …)" ist reiner Anzeigetext.';
+comment on column public.rental_applicants.received_mail_sent_at is 'Zeitpunkt, zu dem send-letting-email die Eingangsbestätigung belegt/verschickt hat (NULL = noch nicht).';
+comment on column public.rental_viewing_bookings.confirmed_mail_sent_at is 'Zeitpunkt, zu dem send-letting-email die Terminbestätigung belegt/verschickt hat (NULL = noch nicht).';
+comment on column public.rental_viewing_bookings.canceled_mail_sent_at is 'Zeitpunkt, zu dem send-letting-email die Absagebestätigung belegt/verschickt hat (NULL = noch nicht).';
+comment on column public.stripe_webhook_events.outcome is 'Ergebnis-Code der Verarbeitung, z. B. claim_payment_booked, claim_payment_duplicate, claim_payment_unbooked (fachlich nicht verbuchbar, Hinweis in der Forderungsakte), claim_payment_unbooked_no_claim, unhandled.';
+comment on column public.stripe_webhook_events.started_at is 'Beginn des letzten Verarbeitungsversuchs; ein Versuch im Status processing gilt nach 10 Minuten als abgebrochen.';
 comment on column public.subscriptions.cancel_at_period_end is 'Stripe: Abo ist zum Ende der laufenden Periode gekündigt (gepflegt von stripe-webhook).';
+comment on column public.tenants.salutation is 'Anrede für Briefe: female = Frau, male = Herr, diverse; NULL = keine Angabe (neutrale Anrede).';
 comment on column public.units.cold_rent_ist is 'Kaltmiete IST (€) – wird automatisch aus Mietvertrag synchronisiert';
 comment on column public.units.service_charge_soll is 'Nebenkosten (€) – wird automatisch aus Mietvertrag synchronisiert';
 comment on column public.units.heating_cost_soll is 'Heizkosten (€) – wird automatisch aus Mietvertrag synchronisiert';
 comment on column public.units.other_costs_soll is 'Sonstige Kosten (€) – wird automatisch aus Mietvertrag synchronisiert';
 comment on column public.units.deposit_soll is 'Kaution (€) – wird automatisch aus Mietvertrag synchronisiert';
-comment on column public.user_smtp_settings.smtp_pass is 'SMTP-Passwort. Für authenticated nur schreibbar (kein SELECT-Recht), lesen nur service_role (Edge Function send-letting-email).';
+comment on column public.user_smtp_settings.smtp_pass is 'Nur Eingabekanal: wird vom Trigger trg_user_smtp_settings_secure_pass in den Vault verschoben und ist immer NULL.';
+comment on column public.user_smtp_settings.smtp_pass_secret_id is 'Verweis auf vault.secrets (Name smtp_pass:<user_id>). Nur über get_smtp_password (service_role) lesbar.';
 comment on column public.utility_settlements.calculation_snapshot is 'Festschreibung beim Fertigstellen (status = done): alle Rechengrundlagen und Ergebnisse je Mieter. Das PDF einer fertigen Abrechnung wird ausschließlich hieraus erzeugt.';
-comment on function public.claim_interest_amount(numeric,numeric,date,date) is 'Einzige Zinsformel des Forderungsmoduls: Kapital x Satz/100 x Tage/365, auf Cent gerundet.';
+comment on function public.bank_transactions_unmatch_deleted_target() is 'Setzt Bankumsätze auf pending zurück, wenn die zugeordnete Mietzahlung (income) bzw. Ausgabe (expense) gelöscht wird.';
+comment on function public.claim_interest_amount(numeric,numeric,date,date) is 'Einzige Zinsformel des Forderungsmoduls: Kapital x Satz/100 x Tage/365, auf Cent gerundet. Bewusste Vereinfachung: immer 365 Tage (auch in Schaltjahren). Stichtag der Sichten und RPCs ist claim_today() (Kalendertag Europe/Berlin).';
 comment on function public.claim_live_interest(uuid,date) is 'Laufende Zinsen einer Forderung seit interest_start_date bis zum Stichtag (ohne Positionen eines aktiven Ratenplans).';
+comment on function public.claim_portal_check_access(text,text) is 'Interne Prüfung des Mieterportal-Zugangs (Token-SHA-256 + PIN-bcrypt, Fehlversuchs-Sperre). Nur über get_public_claim_by_token / submit_public_payment_plan_request aufrufen.';
+comment on function public.claim_today() is 'Heutiger Kalendertag des Forderungsmoduls (Europe/Berlin, Transaktionsbeginn). Stichtag für Zinsen in claim_totals_view und den Forderungs-RPCs (D1b-16).';
+comment on function public.create_claim_portal_link(uuid,integer) is 'Erzeugt einen Mieterportal-Link (Token + PIN) für eine Forderung. Gespeichert werden nur Hashes; Token und PIN werden nur in dieser Antwort geliefert (G15-05, G17b-12, R1-08, D3a-16).';
+comment on function public.create_credit_note(uuid) is 'Erstellt zur ausgestellten Rechnung eine Gutschrift (eigene Nummer, negative Beträge, Bezug je Position) und kennzeichnet die Rechnung als storniert – in einer Transaktion. SECURITY INVOKER (RLS des Aufrufers). Aufruf: lib/invoiceDocument.js createCreditNote.';
+comment on function public.delete_portfolio(uuid,uuid,boolean) is 'Löscht ein eigenes Nicht-Hauptportfolio; mit Ziel werden alle Inhalte vorher übertragen. Alles in einer Transaktion. SECURITY DEFINER mit Eigentümer-Prüfung (Quelle und Ziel). Aufruf: Settings.jsx.';
+comment on function public.floor_plan_can_write(uuid) is 'FLOORPLAN G30a-05: Schreibrecht des aktuellen Kontos am Grundriss (wie floor_plans_update); für die Storage-Policies des Buckets floorplan-backgrounds.';
+comment on function public.floor_plan_room_count(jsonb) is 'FLOORPLAN G29-05: Anzahl Räume aller Geschosse in plan_data (für die generierte Spalte floor_plans.room_count).';
+comment on function public.floor_plan_storey_labels(jsonb) is 'FLOORPLAN G29-05: Geschoss-Bezeichnungen in Reihenfolge (für floor_plans.storey_labels).';
+comment on function public.floor_plan_total_area_mm2(jsonb) is 'FLOORPLAN G29-05: Summe area_mm2 aller Räume in plan_data (für floor_plans.total_area_mm2).';
+comment on function public.generate_claim_access_link(uuid,text,text,integer) is 'Altweg (App bis 27.11.2026): legt einen Portal-Link mit vom Aufrufer erzeugtem Token/PIN an; gespeichert werden nur Hashes. Neue App: create_claim_portal_link.';
+comment on function public.get_my_landlord_info(uuid) is 'Mieterportal: Vermieter-ID (Nachrichten-Empfänger) und Öffnungszeiten für das eigene Objekt. Keine weiteren Profil-, Portfolio- oder Objektspalten.';
+comment on function public.get_next_invoice_number(uuid,uuid,integer) is 'Nächste Rechnungsnummer „JJJJ-NNN“ je Portfolio und Jahr (p_object_unit_id wird ignoriert). Berücksichtigt Zähler und bereits vergebene Nummern. Aufruf: create_credit_note.';
+comment on function public.import_rows(jsonb) is 'Excel-Import (Import.jsx): legt Portfolios, Immobilien, Einheiten, Mieter und Mietverträge aus dem geprüften Importplan in einer Transaktion an (alles oder nichts). SECURITY INVOKER – RLS des Aufrufers.';
 comment on function public.lease_before_delete() is 'BEFORE-DELETE-Trigger auf leases (Paket DB-SCHEMA): verhindert das direkte Löschen von Verträgen mit Buchungsdaten und entfernt unbearbeitete Auto-Sollstellungen.';
+comment on function public.profiles_protect_stripe_connect() is 'Stripe-Connect-Konto und -Status sind nur für service_role (Edge Functions stripe-connect-onboard/stripe-webhook) änderbar.';
+comment on function public.protect_issued_invoice() is 'Trigger (invoices, BEFORE UPDATE OR DELETE): Entwürfe frei; ausgestellte/stornierte Rechnungen und Gutschriften unveränderlich und nicht löschbar (Ausnahmen: issued->credited, Portfolio-Übertrag durch den Eigentümer, Verweis->NULL nach Löschen des Datensatzes, Löschen mit dem Benutzerkonto).';
 comment on function public.push_subscriptions_release_token() is 'BEFORE-Trigger auf push_subscriptions (Paket DB-SCHEMA): ein FCM-Token gehört nur dem zuletzt angemeldeten Konto.';
 comment on function public.register_trial_rate_check(text) is 'Missbrauchsbremse für die Edge Function register-trial (nur service_role). Paket BILLING, 2026-11-27.';
+comment on function public.renovation_set_created_by() is 'FLOORPLAN G29-13: setzt created_by beim Anlegen auf auth.uid() und hält es danach fest.';
+comment on function public.save_property_economic_unit(uuid,uuid,jsonb,uuid,uuid[],uuid[],boolean) is 'Speichert ein Objekt samt Wirtschaftseinheit (Gesamtwerte, Zuordnen, Lösen) in einer Transaktion. SECURITY INVOKER: es gelten die RLS-Regeln des aufrufenden Nutzers. Aufruf: Properties.jsx handleSaveProperty.';
 comment on function public.storage_segment_uuid(text) is 'SEC-STORAGE: wandelt ein Storage-Pfadsegment in uuid um (NULL bei ungültigem Format).';
+comment on function public.stripe_webhook_event_begin(text,text,boolean,text,bigint) is 'Stripe-Webhook (nur service_role): Ereignis vermerken. Rückgabe process | duplicate | in_progress.';
+comment on function public.stripe_webhook_event_finish(text,boolean,text,text) is 'Stripe-Webhook (nur service_role): Ergebnis eines Ereignisses vermerken (processed/failed).';
+comment on function public.tenants_log_portal_change() is 'Trigger (AFTER UPDATE auf tenants): protokolliert Selbständerungen des Mieters im Mieterportal in tenant_change_log (source tenant_portal).';
 
 -- -----------------------------------------------------------------------------
 -- 15 · Realtime-Publikation
@@ -9559,9 +10952,11 @@ do $pub$ begin if not exists (select 1 from pg_catalog.pg_publication_tables whe
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('announcements', 'announcements', 'f', 10485760, '{image/*,application/pdf}') on conflict (id) do nothing;
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('applicant-documents', 'applicant-documents', 'f', 10485760, '{application/pdf,image/jpeg,image/png}') on conflict (id) do nothing;
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('chat-attachments', 'chat-attachments', 'f', 10485760, '{image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/csv}') on conflict (id) do nothing;
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('documents', 'documents', 'f', 10485760, NULL) on conflict (id) do nothing;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('claim-documents', 'claim-documents', 'f', 10485760, '{application/pdf}') on conflict (id) do nothing;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('documents', 'documents', 'f', 10485760, '{application/pdf,image/jpeg,image/png,image/gif,image/webp,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet}') on conflict (id) do nothing;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('floorplan-backgrounds', 'floorplan-backgrounds', 'f', 15728640, '{image/png,image/jpeg}') on conflict (id) do nothing;
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('pdf-assets', 'pdf-assets', 't', 5242880, '{image/png,image/jpeg,image/webp,image/gif}') on conflict (id) do nothing;
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('tenant-documents', 'tenant-documents', 'f', 10485760, NULL) on conflict (id) do nothing;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('tenant-documents', 'tenant-documents', 'f', 10485760, '{application/pdf,image/jpeg,image/png,image/gif,image/webp}') on conflict (id) do nothing;
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values ('tickets', 'tickets', 'f', 10485760, '{image/*}') on conflict (id) do nothing;
 create policy allow_authenticated_read_buckets on storage.buckets as permissive for select to public
     using ((auth.role() = 'authenticated'::text));
@@ -9589,6 +10984,10 @@ create policy chat_attachments_read_access on storage.objects as permissive for 
     using (((bucket_id = 'chat-attachments'::text) AND (((storage.foldername(name))[1] = (auth.uid())::text) OR (EXISTS ( SELECT 1
    FROM public.messages m
   WHERE ((m.receiver_id = auth.uid()) AND ((m.sender_id)::text = (storage.foldername(objects.name))[1]) AND (m.attachment_url = objects.name)))))));
+create policy claim_documents_insert on storage.objects as permissive for insert to authenticated
+    with check (((bucket_id = 'claim-documents'::text) AND (COALESCE(array_length(storage.foldername(name), 1), 0) = 1) AND (lower(COALESCE(storage.extension(name), ''::text)) = 'pdf'::text) AND public.has_claim_access(public.storage_segment_uuid((storage.foldername(name))[1]), 'finanzen'::text, 'write'::text)));
+create policy claim_documents_read on storage.objects as permissive for select to authenticated
+    using (((bucket_id = 'claim-documents'::text) AND public.has_claim_access(public.storage_segment_uuid((storage.foldername(name))[1]), 'finanzen'::text, 'write'::text)));
 create policy documents_delete_access on storage.objects as permissive for delete to authenticated
     using (((bucket_id = 'documents'::text) AND (public.has_property_access(public.storage_segment_uuid((storage.foldername(name))[1]), 'immobilien'::text, 'write'::text) OR public.has_property_access(public.storage_segment_uuid((storage.foldername(name))[1]), 'mieterportal'::text, 'write'::text))));
 create policy documents_delete_own_folder on storage.objects as permissive for delete to authenticated
@@ -9612,6 +11011,14 @@ create policy documents_read_own_folder on storage.objects as permissive for sel
 create policy documents_update_own_folder on storage.objects as permissive for update to authenticated
     using (((bucket_id = 'documents'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text)))
     with check (((bucket_id = 'documents'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text)));
+create policy floorplan_backgrounds_delete on storage.objects as permissive for delete to authenticated
+    using (((bucket_id = 'floorplan-backgrounds'::text) AND public.floor_plan_can_write(public.storage_segment_uuid((storage.foldername(name))[1]))));
+create policy floorplan_backgrounds_insert on storage.objects as permissive for insert to authenticated
+    with check (((bucket_id = 'floorplan-backgrounds'::text) AND (COALESCE(array_length(storage.foldername(name), 1), 0) = 1) AND public.floor_plan_can_write(public.storage_segment_uuid((storage.foldername(name))[1]))));
+create policy floorplan_backgrounds_read on storage.objects as permissive for select to authenticated
+    using (((bucket_id = 'floorplan-backgrounds'::text) AND (EXISTS ( SELECT 1
+   FROM public.floor_plans fp
+  WHERE (fp.id = public.storage_segment_uuid((storage.foldername(objects.name))[1]))))));
 create policy pdf_assets_delete_access on storage.objects as permissive for delete to authenticated
     using (((bucket_id = 'pdf-assets'::text) AND ((owner_id = (auth.uid())::text) OR (((storage.foldername(name))[1] = 'logos'::text) AND (EXISTS ( SELECT 1
    FROM public.portfolios p
@@ -9650,7 +11057,6 @@ create policy tickets_read_access on storage.objects as permissive for select to
 -- 17 · Standardrechte für künftige Objekte (Rolle postgres, Schema public)
 -- -----------------------------------------------------------------------------
 alter default privileges for role postgres in schema public revoke all on sequences from public, anon, authenticated, service_role;
-alter default privileges for role postgres in schema public grant select, update, usage on sequences to anon;
 alter default privileges for role postgres in schema public grant select, update, usage on sequences to authenticated;
 alter default privileges for role postgres in schema public grant select, update, usage on sequences to postgres;
 alter default privileges for role postgres in schema public grant select, update, usage on sequences to service_role;
@@ -9659,9 +11065,8 @@ alter default privileges for role postgres in schema public grant execute on fun
 alter default privileges for role postgres in schema public grant execute on functions to postgres;
 alter default privileges for role postgres in schema public grant execute on functions to service_role;
 alter default privileges for role postgres in schema public revoke all on tables from public, anon, authenticated, service_role;
-alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to anon;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to authenticated;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to postgres;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to service_role;
 
--- Prüfsumme (md5 des Inhalts vor dieser Zeile): 008d3474584c6de1415947b205c41a02
+-- Prüfsumme (md5 des Inhalts vor dieser Zeile): 2a87b40a0dd891e86fb61fd41134081b

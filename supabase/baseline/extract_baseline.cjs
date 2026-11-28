@@ -8,7 +8,9 @@
 // Prüft vor dem Schreiben:
 //   - md5-Prüfsumme in der letzten Zeile von ddl (Übertragung vollständig und unverändert)
 //   - kein JWT-artiges Literal (eyJ…) in ddl/seed (der Schlüssel aus notify_push darf nie ins Repo)
-//   - Prüfbericht: jede Zeile "OK" außer den bekannten Abweichungen (notify_push, contact_requests_email_len)
+//   - Prüfbericht: jede Zeile "OK" außer den bekannten Abweichungen (notify_push, contact_requests_email_len,
+//     lease_cloud_folders_path_check – die beiden CHECKs wurden mit BETWEEN angelegt: gleiche Bedingung,
+//     nur andere Klammerung nach dem erneuten Einlesen)
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -61,7 +63,11 @@ if (jwt.test(ddl) || jwt.test(seed)) {
 }
 
 // 3. Prüfbericht
-const known = ['notify_push(p_table text, p_record jsonb)', 'contact_requests.contact_requests_email_len'];
+const known = [
+    'notify_push(p_table text, p_record jsonb)',
+    'contact_requests.contact_requests_email_len',
+    'lease_cloud_folders.lease_cloud_folders_path_check',
+];
 const bad = String(report || '')
     .split('\n')
     .filter((l) => l.trim() && !/\bOK$/.test(l))
