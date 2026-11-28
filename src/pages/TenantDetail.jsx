@@ -760,6 +760,8 @@ const TenantDetail = () => {
     // Ist-/Soll-Werte der Einheit nur für den heute laufenden Vertrag angleichen
     const syncUnitFromLease = async (leaseLike, rentValues) => {
         if (!leaseLike?.unit_id || getLeaseTimeState(leaseLike) !== 'running') return null;
+        // Kaution ohne Angabe (NULL) auch in der Einheit als NULL führen, nicht als 0 (G03-16)
+        const depositRaw = leaseLike.deposit;
         const { error: unitError } = await supabase
             .from('units')
             .update({
@@ -767,7 +769,7 @@ const TenantDetail = () => {
                 service_charge_soll: toAmount(rentValues?.service_charge),
                 heating_cost_soll: toAmount(rentValues?.heating_cost),
                 other_costs_soll: toAmount(rentValues?.other_costs),
-                deposit_soll: toAmount(leaseLike.deposit)
+                deposit_soll: depositRaw === null || depositRaw === undefined || depositRaw === '' ? null : toAmount(depositRaw)
             })
             .eq('id', leaseLike.unit_id);
         return unitError
@@ -2479,6 +2481,7 @@ const TenantDetail = () => {
                         <CurrencyInput
                             label="Kaution (€)"
                             allowDecimals
+                            allowEmpty
                             value={leaseForm.deposit}
                             onChange={(e) => setLeaseForm({ ...leaseForm, deposit: e.target.value })}
                         />

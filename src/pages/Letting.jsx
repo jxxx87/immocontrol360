@@ -21,7 +21,10 @@ const APPLICANT_BUCKET = 'applicant-documents';
 const isMissingRpc = (error, status) =>
   !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
 
-// Anrede aus dem Bewerbungsportal ("Herr"/"Frau") als tenants.salutation; "Divers"/leer = keine Angabe (neutrale Briefanrede)
+// Anrede aus dem Bewerbungsportal ("Herr"/"Frau") als tenants.salutation für Einzelschritte und Nachtragen;
+// "Divers"/leer -> null (nichts senden, neutrale Briefanrede). Die Datenbank-Funktion convert_rental_applicant_to_tenant
+// bildet seit Welle-5-Migration applicant_salutation selbst ab (Frau -> female, Herr -> male, Divers -> diverse,
+// sonst NULL); 'diverse' ergibt in den Schreibvorlagen ebenfalls die neutrale Briefanrede.
 const applicantSalutation = (app) => {
   const s = String(app?.salutation || '').trim().toLowerCase();
   if (s === 'frau') return 'female';
@@ -53,6 +56,9 @@ const toAmount = (v) => {
   const n = typeof v === 'number' ? v : parseFloat(v);
   return isNaN(n) ? 0 : n;
 };
+
+// Optionaler Betrag (Kaution): leeres Feld = keine Angabe (NULL), eine bewusst eingegebene 0 bleibt 0 (G03-16)
+const toOptionalAmount = (v) => (v === '' || v === null || v === undefined ? null : toAmount(v));
 
 const Letting = () => {
   const { user } = useAuth();
@@ -307,7 +313,7 @@ const Letting = () => {
         target_rent: toAmount(startForm.target_rent),
         service_charge_soll: toAmount(startForm.service_charge_soll),
         heating_cost_soll: toAmount(startForm.heating_cost_soll),
-        deposit_soll: toAmount(startForm.deposit_soll)
+        deposit_soll: toOptionalAmount(startForm.deposit_soll)
       }).eq('id', startForm.unit_id).select('id');
       if (unitErr) throw unitErr;
       if (!updatedUnits || updatedUnits.length === 0) {
@@ -601,7 +607,7 @@ const Letting = () => {
         cold_rent: toAmount(dialog.cold_rent),
         service_charge: toAmount(dialog.service_charge),
         heating_cost: toAmount(dialog.heating_cost),
-        deposit: toAmount(dialog.deposit),
+        deposit: toOptionalAmount(dialog.deposit),
         payment_due_day: dialog.payment_due_day,
         lease_type: 'normal',
         status: 'active'
@@ -654,14 +660,16 @@ const Letting = () => {
         p_cold_rent: toAmount(dialog.cold_rent),
         p_service_charge: toAmount(dialog.service_charge),
         p_heating_cost: toAmount(dialog.heating_cost),
-        p_deposit: toAmount(dialog.deposit),
+        p_deposit: toOptionalAmount(dialog.deposit),
         p_payment_due_day: dueDay
       });
 
       if (error && !isMissingRpc(error, status)) throw error;
       if (error) await convertApplicantLegacy({ ...dialog, payment_due_day: dueDay });
 
-      // Die Datenbank-Funktion übernimmt die Anrede nicht: hier nachtragen (Mieter und Vertrag sind bereits angelegt)
+      // Anrede nachtragen (Mieter und Vertrag sind bereits angelegt): Die Datenbank-Funktion übernimmt sie seit
+      // Welle-5-Migration applicant_salutation selbst, ältere Fassungen nicht. Für "Herr"/"Frau" wird hier derselbe
+      // Wert erneut geschrieben (unschädlich); "Divers" wird nicht gesendet, die Funktion speichert dafür 'diverse'.
       let salutationHint = '';
       const salutation = applicantSalutation(dialog.app);
       const newTenantId = !error ? rpcResult?.tenant_id : null;

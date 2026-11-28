@@ -39,6 +39,19 @@ const detectMime = (file) => {
 
 const getRequiredDocs = (info) => (Array.isArray(info?.required_documents) ? info.required_documents : []);
 
+// Anrede: keine Vorauswahl (eine Vorgabe erzeugt falsche Briefanreden). Gespeichert werden
+// 'Frau'/'Herr'/'Divers' (die Datenbank übernimmt sie als female/male/diverse in den Mieter);
+// "Keine Angabe" wird leer gespeichert (neutrale Briefanrede).
+const NO_SALUTATION = 'keine_angabe';
+const SALUTATION_OPTIONS = [
+  { value: 'Frau', label: 'Frau' },
+  { value: 'Herr', label: 'Herr' },
+  { value: 'Divers', label: 'Divers' },
+  { value: NO_SALUTATION, label: 'Keine Angabe' }
+];
+const salutationForDb = (value) =>
+  (value && value !== NO_SALUTATION && SALUTATION_OPTIONS.some(opt => opt.value === value) ? value : null);
+
 const PublicLettingPortal = () => {
   const { token } = useParams();
   const navigate = useNavigate();
@@ -62,7 +75,7 @@ const PublicLettingPortal = () => {
   const [formData, setFormData] = useState({
     // Step 1: General Info & Contact
     earliest_move_in: '',
-    salutation: 'Herr',
+    salutation: '',
     first_name: '',
     last_name: '',
     birth_date: '',
@@ -73,7 +86,7 @@ const PublicLettingPortal = () => {
 
     // Step 2: Co-Applicant
     has_co_applicant: false,
-    co_salutation: 'Herr',
+    co_salutation: '',
     co_first_name: '',
     co_last_name: '',
     co_birth_date: '',
@@ -160,6 +173,7 @@ const PublicLettingPortal = () => {
 
   const validateStep = () => {
     if (step === 1) {
+      if (!formData.salutation) return 'Bitte wählen Sie eine Anrede aus (oder „Keine Angabe“).';
       if (!formData.first_name.trim()) return 'Bitte geben Sie Ihren Vornamen ein.';
       if (!formData.last_name.trim()) return 'Bitte geben Sie Ihren Nachnamen ein.';
       if (!formData.email.trim()) return 'Bitte geben Sie Ihre E-Mail-Adresse ein.';
@@ -167,6 +181,7 @@ const PublicLettingPortal = () => {
       if (!formData.phone.trim()) return 'Bitte geben Sie Ihre Telefonnummer ein.';
     }
     if (step === 2 && formData.has_co_applicant) {
+      if (!formData.co_salutation) return 'Bitte Anrede des Mitbewerbers auswählen (oder „Keine Angabe“).';
       if (!formData.co_first_name.trim()) return 'Bitte Vornamen des Mitbewerbers eingeben.';
       if (!formData.co_last_name.trim()) return 'Bitte Nachnamen des Mitbewerbers eingeben.';
     }
@@ -262,7 +277,7 @@ const PublicLettingPortal = () => {
       // Felder der Selbstauskunft (user_id und status setzt die Datenbank selbst)
       const application = {
         earliest_move_in: formData.earliest_move_in || null,
-        salutation: formData.salutation,
+        salutation: salutationForDb(formData.salutation),
         first_name: formData.first_name.trim(),
         last_name: formData.last_name.trim(),
         birth_date: formData.birth_date || null,
@@ -272,7 +287,7 @@ const PublicLettingPortal = () => {
         introduction: trimOrNull(formData.introduction),
 
         has_co_applicant: hasCo,
-        co_salutation: hasCo ? formData.co_salutation : null,
+        co_salutation: hasCo ? salutationForDb(formData.co_salutation) : null,
         co_first_name: hasCo ? trimOrNull(formData.co_first_name) : null,
         co_last_name: hasCo ? trimOrNull(formData.co_last_name) : null,
         co_birth_date: (hasCo && formData.co_birth_date) ? formData.co_birth_date : null,
@@ -530,13 +545,15 @@ const PublicLettingPortal = () => {
                 <div>
                   <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '6px' }}>Anrede</label>
                   <select 
-                    value={formData.salutation} 
+                    value={formData.salutation}
                     onChange={(e) => handleInputChange('salutation', e.target.value)}
-                    style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)' }}
+                    required
+                    style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: formData.salutation ? 'var(--text-primary)' : 'var(--text-secondary)' }}
                   >
-                    <option value="Herr">Herr</option>
-                    <option value="Frau">Frau</option>
-                    <option value="Divers">Divers</option>
+                    <option value="" disabled>Bitte wählen</option>
+                    {SALUTATION_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -613,13 +630,15 @@ const PublicLettingPortal = () => {
                   <div>
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '6px' }}>Anrede</label>
                     <select 
-                      value={formData.co_salutation} 
+                      value={formData.co_salutation}
                       onChange={(e) => handleInputChange('co_salutation', e.target.value)}
-                      style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: 'var(--text-primary)' }}
+                      required
+                      style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', backgroundColor: 'var(--surface-color)', color: formData.co_salutation ? 'var(--text-primary)' : 'var(--text-secondary)' }}
                     >
-                      <option value="Herr">Herr</option>
-                      <option value="Frau">Frau</option>
-                      <option value="Divers">Divers</option>
+                      <option value="" disabled>Bitte wählen</option>
+                      {SALUTATION_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
                     </select>
                   </div>
                   <div>

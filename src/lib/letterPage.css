@@ -23,6 +23,9 @@
   box-shadow: 0 0 0 1px #cbd5e1, 0 4px 20px rgba(0, 0, 0, 0.08) !important;
   border-radius: 4px !important;
   font-family: 'Open Sans', 'Arial', 'Helvetica', sans-serif !important;
+  /* Fest Regular: Im Hauptdokument erbt die Seite sonst die App-Schriftstärke 500 (body), im
+     Druckfenster gilt 400 – Medium läuft ~1,8 % breiter und verschiebt Zeilen- und Seitenumbrüche */
+  font-weight: 400 !important;
   font-size: 11pt !important;
   line-height: 1.5 !important;
   box-sizing: border-box !important;

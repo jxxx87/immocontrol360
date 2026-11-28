@@ -186,6 +186,9 @@ const PAGINATION_META = 'immoTemplatePagination';
 const EMPTY_MANUAL_VALUES = Object.freeze({});
 const TEMPLATE_LOAD_META = 'immoTemplateLoad';
 const UNSAVED_LEAVE_MESSAGE = 'Diese Vorlage hat ungespeicherte Änderungen. Seite trotzdem verlassen? Die Änderungen gehen verloren.';
+// Mieterdaten aus dem Router-State (flaches Objekt aus buildTemplateTenantData) inhaltlich vergleichen:
+// Nach einer Rück-Navigation (Settings.jsx stellt den State wieder her) liefert der Router eine Kopie.
+const sameTenantData = (a, b) => a === b || (!!a && !!b && JSON.stringify(a) === JSON.stringify(b));
 const VARIABLE_DRAG_MIME = 'application/x-immo-variable';
 
 const TABLE_VARIABLE_IDS = new Set(['forderungs_tabelle', 'forderungs_detail_tabelle', 'nebenkosten_tabelle', 'nebenkosten_detail_tabelle', 'positions_tabelle']);
@@ -1688,14 +1691,32 @@ export const DocumentTemplates = ({ onDirtyChange } = {}) => {
     const { portfolios } = usePortfolio();
     const location = useLocation();
 
-    // Echtdaten-Modus: "Dokument erstellen" beim Mieter übergibt dessen Daten per Router-State
-    const tenantState = location.state?.tenant || null;
+    // Echtdaten-Modus: "Dokument erstellen" beim Mieter übergibt dessen Daten per Router-State.
+    // Die Daten werden beim Einstieg gemerkt und danach nur durch eine Navigation ersetzt, die ANDERE
+    // Mieterdaten mitbringt. Ein Router-State ohne Mieter (Topbar-Link auf einen anderen Reiter, den
+    // Settings.jsx nach "Abbrechen" zurücknimmt; Sidebar "Einstellungen") lässt Echtdaten, Portfolio,
+    // Saldo-Bestätigung und Editor-Inhalt unverändert. Beendet wird der Modus, wenn der Editor entfernt
+    // wird (andere Seite, anderer Reiter) und ohne Mieter-State wieder geöffnet wird.
+    const incomingTenant = location.state?.tenant || null;
+    const [tenantEntry, setTenantEntry] = useState({ source: incomingTenant, data: incomingTenant });
+    const tenantState = tenantEntry.data;
     const isRealMode = !!tenantState;
 
     // Portfolio: im Echtdaten-Modus das Portfolio des Mieters vorbelegen (falls übergeben bzw.
     // eindeutig), damit Vermieter-/Bankdaten nicht fehlen. Eine manuelle Auswahl hat Vorrang.
-    const [selectedPortfolioId, setSelectedPortfolioId] = useState(() => tenantState?.portfolio_id || 'global');
+    const [selectedPortfolioId, setSelectedPortfolioId] = useState(() => incomingTenant?.portfolio_id || 'global');
     const [portfolioTouched, setPortfolioTouched] = useState(false);
+    // Neue Navigation mit Mieterdaten: beim Rendern übernehmen (nicht erst im Effekt, sonst würde
+    // kurz mit den alten Daten gerechnet). Gleicher Inhalt (z. B. wiederhergestellter State) ändert nichts.
+    if (incomingTenant && incomingTenant !== tenantEntry.source) {
+        const tenantChanged = !sameTenantData(incomingTenant, tenantState);
+        setTenantEntry({ source: incomingTenant, data: tenantChanged ? incomingTenant : tenantState });
+        // Mieter aus einem anderen Portfolio: dessen Portfolio wie beim Einstieg vorbelegen
+        if (tenantChanged && (incomingTenant.portfolio_id || null) !== (tenantState?.portfolio_id || null)) {
+            setSelectedPortfolioId(incomingTenant.portfolio_id || 'global');
+            setPortfolioTouched(false);
+        }
+    }
     const portfolioList = portfolios || [];
     const effectivePortfolioId = (isRealMode && !portfolioTouched && selectedPortfolioId === 'global' && portfolioList.length === 1)
         ? portfolioList[0].id

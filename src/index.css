@@ -529,6 +529,12 @@ tr:last-child td {
 /* ── RESPONSIVE UTILITIES ─────────────────────────────────── */
 
 /* ── MOBILE APP OPTIMIZATIONS (Capacitor / Android) ──────── */
+/* Nicht in Dokumenten: Briefseiten (Vorlagen-Editor .tiptap, Live-Vorschau), Nebenkostenabrechnung,
+   Rechnung, Mahnschreiben und alles, was lib/htmlToPdf zum Rendern ins App-Dokument klont. Die
+   Mobil-Regeln für Karten, Inline-Raster/-Flex, Tabellen und Überschriften gelten dort NICHT
+   (Ausnahme per :not(:where(...)) an den Regeln, Spezifität unverändert) – auf dem Handy erzeugte
+   PDFs und Briefe sehen aus wie am PC. Die Container-Liste in allen Ausnahmen gleich halten
+   (Dunkelmodus-Liste oben plus .tiptap). */
 @media (max-width: 768px) {
   .hidden-mobile {
     display: none !important;
@@ -552,16 +558,17 @@ tr:last-child td {
   }
 
   /* ALL cards: prevent overflow, full width */
-  /* Exclude flex column containers (modals) that need overflow:hidden and fixed height */
-  [class*="card"],
-  div[style*="border-radius"]:not([style*="flex-direction"]):not([style*="position: fixed"]):not([style*="position:fixed"]) {
+  /* Exclude flex column containers (modals) that need overflow:hidden and fixed height
+     (nicht in Dokumenten und nicht am Dokument-Container selbst, siehe oben) */
+  [class*="card"]:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *),
+  div[style*="border-radius"]:not([style*="flex-direction"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     max-width: 100% !important;
     overflow: visible !important;
     height: auto !important;
   }
 
-  /* Grids: force single column on mobile (but NOT calendar grids) */
-  div[style*="grid-template-columns: repeat"]:not(.cal-grid) {
+  /* Grids: force single column on mobile (but NOT calendar grids, nicht in Dokumenten) */
+  div[style*="grid-template-columns: repeat"]:not(.cal-grid):not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     grid-template-columns: 1fr !important;
   }
 
@@ -571,15 +578,16 @@ tr:last-child td {
     gap: 0 !important;
   }
 
-  /* Two-column grids: allow 2 cols but smaller gap */
-  div[style*="grid-template-columns: 1fr 1fr"] {
+  /* Two-column grids: allow 2 cols but smaller gap (nicht in Dokumenten) */
+  div[style*="grid-template-columns: 1fr 1fr"]:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     gap: 8px !important;
   }
 
   /* Tables: horizontal scroll.
      Ohne eigenen Scroll-Wrapper scrollt die Tabelle selbst (display:block). Kopf und Zeilen bleiben
-     dabei EINE Tabelle (anonyme Tabellenbox), damit die Spalten fluchten und colSpan funktioniert. */
-  table {
+     dabei EINE Tabelle (anonyme Tabellenbox), damit die Spalten fluchten und colSpan funktioniert.
+     Briefseiten / Vorlagen-Editor / PDF-Dokumente: Tabellen wie im Druck (kein Mobil-Layout). */
+  table:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     display: block;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -590,21 +598,12 @@ tr:last-child td {
     display: table;
   }
 
-  /* Briefseiten / Vorlagen-Editor / PDF-Dokumente: Tabellen wie im Druck (kein Mobil-Layout) */
-  .letter-page table,
-  .tiptap table,
-  .nk-doc table,
-  .ic-invoice-doc table {
-    display: table;
-    overflow-x: hidden;
-  }
-
-  table:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *) {
+  table:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     font-size: 0.78rem !important;
   }
 
-  th:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *),
-  td:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc) *) {
+  th:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *),
+  td:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     padding: 8px 10px !important;
     font-size: 0.78rem !important;
   }
@@ -639,27 +638,27 @@ tr:last-child td {
     /* Prevents iOS zoom on focus */
   }
 
-  /* Page headings: smaller on mobile */
-  h1 {
+  /* Page headings: smaller on mobile (nicht in Dokumenten – dort Schriftgröße des Blatts) */
+  h1:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     font-size: 1.35rem !important;
     line-height: 1.3 !important;
   }
 
-  h2 {
+  h2:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     font-size: 1.15rem !important;
   }
 
-  h3 {
+  h3:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     font-size: 1rem !important;
   }
 
-  /* Flex rows that overflow: allow wrapping (only horizontal flex, NOT column) */
-  div[style*="flex-direction: row"] {
+  /* Flex rows that overflow: allow wrapping (only horizontal flex, NOT column; nicht in Dokumenten) */
+  div[style*="flex-direction: row"]:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     flex-wrap: wrap;
   }
 
-  /* KPI cards / stat boxes smaller on mobile */
-  div[style*="minmax(200px"] {
+  /* KPI cards / stat boxes smaller on mobile (nicht in Dokumenten) */
+  div[style*="minmax(200px"]:not(:where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container), :where(.letter-page, .tiptap, .nk-doc, .ic-invoice-doc, .ic-claim-doc, .html2pdf__container) *) {
     grid-template-columns: 1fr 1fr !important;
   }
 

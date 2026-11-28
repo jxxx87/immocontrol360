@@ -221,9 +221,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 //   sonst einen Streifen auf eine Leerseite schneiden. Der untere Innenabstand ist dafür 1 mm
 //   kleiner, die Textfläche bleibt damit genau so groß wie im Editor,
 // - Umbruch vor jeder Folgeseite (jede Briefseite beginnt oben auf einem PDF-Blatt),
-// - Tabellen ohne App-Design (Glas-Hintergrund, Schatten, Dunkelmodus-Farben); im Dunkelmodus der App
-//   färbt index.css Tabellenköpfe (Hintergrund !important) und Überschriften (fast weiß, !important) –
-//   hier zurück auf das Blatt-Design, sonst stünde schwarzer Text auf dunklem Kopf bzw. weißer auf weißem Blatt.
+// - Tabellen ohne App-Design (Glas-Hintergrund, Schatten, Rundung).
+// Dunkelmodus der App: index.css nimmt .ic-claim-doc und den PDF-Container von seinen Dunkelmodus-Regeln
+// (Tabellenköpfe, Überschriften, Linien) aus und setzt dort die Farbvariablen auf die Hellmodus-Werte –
+// eigene Gegenregeln sind hier deshalb nicht nötig; das PDF sieht in beiden Modi gleich aus.
 const CLAIM_DOC_CSS = `
 .ic-claim-doc { width: 210mm; background: #ffffff; color: #000000; text-align: left; }
 ${scopeLetterCss(LETTER_PAGE_CSS, '.ic-claim-doc')}
@@ -232,8 +233,6 @@ ${scopeLetterCss(LETTER_PAGE_CSS, '.ic-claim-doc')}
 .ic-claim-doc > p:empty { display: none; }
 .ic-claim-doc table { background: transparent !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
 .ic-claim-doc th, .ic-claim-doc td { color: #000000; background-color: transparent; font-size: inherit; }
-[data-theme="dark"] .ic-claim-doc th { background-color: transparent !important; color: #000000; }
-[data-theme="dark"] .ic-claim-doc h1, [data-theme="dark"] .ic-claim-doc h2, [data-theme="dark"] .ic-claim-doc h3, [data-theme="dark"] .ic-claim-doc h4 { color: #000000 !important; }
 `;
 
 const formatCurrency = formatCurrencyDE;

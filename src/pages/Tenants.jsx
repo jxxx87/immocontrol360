@@ -491,7 +491,8 @@ const Tenants = () => {
         const serviceCharge = parseFloat(leaseForm.service_charge) || 0;
         const heatingCost = parseFloat(leaseForm.heating_cost) || 0;
         const otherCosts = parseFloat(leaseForm.other_costs) || 0;
-        const deposit = parseFloat(leaseForm.deposit) || 0;
+        // Kaution ist optional: leer = keine Angabe (NULL), nicht 0 (G03-16)
+        const deposit = leaseForm.deposit === '' || leaseForm.deposit == null ? null : (parseFloat(leaseForm.deposit) || 0);
         const paymentDueDay = parseInt(leaseForm.payment_due_day, 10);
 
         if ([coldRent, serviceCharge, heatingCost, otherCosts, deposit].some(v => v < 0)) return alert('Beträge dürfen nicht negativ sein.');
@@ -783,7 +784,9 @@ const Tenants = () => {
                     </div>
                     <div>
                         <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Kaution</div>
-                        <div>{(parseFloat(row.activeLease.deposit) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
+                        <div>{row.activeLease.deposit === null || row.activeLease.deposit === undefined || row.activeLease.deposit === ''
+                            ? '—'
+                            : (parseFloat(row.activeLease.deposit) || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</div>
                     </div>
                 </div>
             )}
@@ -838,7 +841,8 @@ const Tenants = () => {
                                 warmmiete: isVacation ? vacationIncome : sumRent(u.activeLease),
                                 mietbeginn: isVacation ? '–' : (u.activeLease?.start_date || ''),
                                 wohnflaeche: u.sqm || 0,
-                                kaution: isVacation ? 0 : (u.activeLease?.deposit || 0),
+                                // Kaution ohne Angabe (NULL) erscheint im Export als „–“, nicht als 0,00 €
+                                kaution: isVacation ? 0 : (u.activeLease ? (u.activeLease.deposit ?? '') : 0),
                                 status: EXPORT_STATUS_LABELS[u.status] || 'Leerstand',
                                 _propertyLabel: u.propertyLabel || '–',
                             };
@@ -1161,7 +1165,7 @@ const Tenants = () => {
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <CurrencyInput label="Sonstige Kosten (€)" allowDecimals value={leaseForm.other_costs} onChange={e => setLeaseForm({ ...leaseForm, other_costs: e.target.value })} />
-                            <CurrencyInput label="Kaution (€)" allowDecimals value={leaseForm.deposit} onChange={e => setLeaseForm({ ...leaseForm, deposit: e.target.value })} />
+                            <CurrencyInput label="Kaution (€)" allowDecimals allowEmpty value={leaseForm.deposit} onChange={e => setLeaseForm({ ...leaseForm, deposit: e.target.value })} />
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--spacing-md)' }}>
                             <Input

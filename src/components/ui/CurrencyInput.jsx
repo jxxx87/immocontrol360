@@ -2,8 +2,11 @@ import React, { useState, useRef, useId } from 'react';
 
 // -----------------------------------------------------------------------------
 // Wert-Schnittstelle (für alle Aufrufer kompatibel):
-//   onChange(e)          -> e.target.value ist die Zahl (bei leerem Feld 0, wie bisher)
+//   onChange(e)          -> e.target.value ist die Zahl (bei leerem Feld 0, wie bisher;
+//                           mit allowEmpty bei leerem Feld '' = "keine Angabe")
 //   onValueChange(num)   -> die Zahl direkt; bei leerem Feld null ("keine Angabe")
+// allowEmpty ist für optionale Betragsfelder gedacht (z. B. Kaution), bei denen ein
+// geleertes Feld nicht als 0 gespeichert werden soll (G03-16).
 // Weitere Props (disabled, readOnly, name, id, required, aria-*, onBlur ...) werden
 // an das <input> durchgereicht.
 // -----------------------------------------------------------------------------
@@ -77,6 +80,7 @@ const CurrencyInput = ({
     onValueChange,
     placeholder,
     allowDecimals = false,
+    allowEmpty = false,
     id,
     style,
     onFocus,
@@ -180,7 +184,9 @@ const CurrencyInput = ({
     }
 
     const emitValue = (num) => {
-        if (onChange) onChange({ target: { value: num === null ? 0 : num, name: rest.name } });
+        // Leeres Feld: Standard 0 (bisheriges Verhalten), mit allowEmpty '' (keine Angabe)
+        const emptyValue = allowEmpty ? '' : 0;
+        if (onChange) onChange({ target: { value: num === null ? emptyValue : num, name: rest.name } });
         if (onValueChange) onValueChange(num);
     };
 

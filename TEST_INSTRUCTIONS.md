@@ -56,16 +56,19 @@ Manuell kaum erreichbar – zum Testen das Limit vorübergehend im Code senken u
 1. Im Paywall-Modal auf „Wählen" klicken.
 2. **Erwartet**: Weiterleitung zu Stripe.
 
-**Wichtig – Price IDs:** Die Preis-IDs sind fest im Code hinterlegt und müssen an **zwei** Stellen gleich sein:
-`supabase/functions/create-checkout-session/index.ts` (`PRICE_IDS`) und
-`supabase/functions/stripe-webhook/index.ts` (`PRICE_TO_PLAN`). Eine Price ID gehört immer zu **einem** Stripe-Modus:
-Mit einem Test-Schlüssel (`sk_test_…`) funktionieren nur Test-Preise, mit dem Live-Schlüssel nur Live-Preise.
+**Wichtig – Price IDs:** Die Preis-IDs sind fest im Code hinterlegt, und zwar nur an **einer** Stelle:
+`supabase/functions/_shared/stripePlans.ts` (`PLAN_PRICES`). Beide Functions lesen sie von dort –
+`create-checkout-session` (Tarif + Zeitraum → Preis-ID, `priceIdFor`) und `stripe-webhook` (Preis-ID → Tarif,
+`planForPriceId`). Nach einer Änderung **beide** Functions neu ausrollen; beim Ausrollen über Management-API/MCP
+die Datei `_shared/stripePlans.ts` mit hochladen (siehe `supabase/config.toml`).
+Eine Price ID gehört immer zu **einem** Stripe-Modus: Mit einem Test-Schlüssel (`sk_test_…`) funktionieren nur Test-Preise, mit dem Live-Schlüssel nur Live-Preise.
 Erscheint beim Klick ein Fehler, passen Price IDs und Modus des hinterlegten Function-Secrets
 `STRIPE_SECRET_KEY` nicht zusammen.
 
 **Offen (nicht im Code lösbar):** Abgleich der Price IDs mit dem Stripe-Konto (Test- und Live-Modus) ist noch
 nicht dokumentiert; der Stripe-Secret-Key liegt dem Projekt nicht vor. Sobald er da ist: im Stripe-Dashboard
-unter *Produkte* die IDs beider Modi prüfen und hier festhalten.
+unter *Produkte* die IDs beider Modi prüfen und mit `supabase/functions/_shared/stripePlans.ts` abgleichen
+(die IDs selbst nicht in diese Anleitung kopieren – maßgeblich ist nur die Datei).
 
 ## 7. Webhook & Success
 

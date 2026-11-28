@@ -363,14 +363,21 @@ export const fetchInvoiceTemplates = async (user, portfolioId, { ownerId = null 
 // Steht im <body>, damit die PDF-Erzeugung (klont den Inhalt ins App-Dokument) dieselben Regeln mitnimmt.
 // Seitengeometrie aus derselben Quelle wie Editor und Druckfenster (lib/letterPage.css), auf den
 // Container begrenzt; hier nur Rechnungs-Besonderheiten (kein Schatten, Seitenumbrüche, Entwurfsvermerk).
+// Im PDF (lib/htmlToPdf klont den Inhalt ins App-Dokument) gelten zusätzlich die globalen Regeln aus
+// index.css: Schriftstärke 500 von body und table/th/td (Glasfläche, Rundung, Schatten, overflow hidden,
+// graue Kopfschrift 600 in 14px statt 10pt, Zellenlinien). Hier auf die Werte des Druckfensters
+// zurückgesetzt, in Hell- und Dunkelmodus: Schriftstärke 400, Tabellen per `revert` auf den
+// Browser-Standard (= Druckfenster, das index.css nicht lädt). Bewusst ohne !important, damit die
+// Inline-Stile der Positionstabelle und der Vorlage weiter gelten (Druck bleibt unverändert).
 const SCOPED_CSS = `
-.ic-invoice-doc { position: relative; background: #ffffff; color: #000000; font-family: 'Open Sans', Arial, Helvetica, sans-serif; font-size: 11pt; line-height: 1.5; text-align: left; }
+.ic-invoice-doc { position: relative; background: #ffffff; color: #000000; font-family: 'Open Sans', Arial, Helvetica, sans-serif; font-size: 11pt; font-weight: 400; line-height: 1.5; text-align: left; }
 .ic-invoice-doc *, .ic-invoice-doc *::before, .ic-invoice-doc *::after { box-sizing: border-box; margin: 0; padding: 0; }
 ${scopeLetterCss(LETTER_PAGE_CSS, '.ic-invoice-doc')}
 .ic-invoice-doc .letter-page { box-shadow: none !important; border-radius: 0 !important; page-break-after: always; break-after: page; page-break-inside: avoid; }
 .ic-invoice-doc .letter-page:last-child { page-break-after: auto; break-after: auto; }
 .ic-invoice-doc .variable-chip { background: transparent !important; border: none !important; padding: 0 !important; color: inherit !important; font-weight: inherit !important; font-size: inherit !important; display: inline !important; }
-.ic-invoice-doc table { width: 100%; border-collapse: collapse; }
+.ic-invoice-doc table { width: 100%; border-collapse: collapse; background-color: revert; border: revert; border-radius: revert; box-shadow: revert; overflow: revert; }
+.ic-invoice-doc th, .ic-invoice-doc td { color: revert; background-color: revert; font-size: revert; font-weight: revert; text-align: revert; border: revert; }
 .ic-invoice-doc tr { break-inside: avoid; page-break-inside: avoid; }
 .ic-invoice-doc .ic-missing { color: #b91c1c; border: 1px dashed #b91c1c; padding: 0 2px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .ic-invoice-doc .ic-tax-notes { margin-top: 8px; font-size: 9pt; line-height: 1.4; color: #333333; }

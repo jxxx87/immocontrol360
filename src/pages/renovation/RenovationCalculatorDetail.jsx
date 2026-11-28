@@ -110,6 +110,9 @@ const RenovationCalculatorDetail = () => {
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [calcId, setCalcId] = useState(isNew ? null : id);
+    // Gespeicherter Stand (Konto + Objekt): Wird das Objekt entfernt, ordnet die Datenbank die Kalkulation
+    // dem Bearbeiter zu (Trigger trg_renovation_calculations_owner) – dafür die Rückfrage in handleSave
+    const [savedOwner, setSavedOwner] = useState({ userId: null, propertyId: null });
     const [dirty, setDirty] = useState(false);
     const markDirty = () => setDirty(true);
 
@@ -237,6 +240,7 @@ const RenovationCalculatorDetail = () => {
             setCalcType(data.calc_type);
             setPropertyId(data.property_id || '');
             setUnitId(data.unit_id || '');
+            setSavedOwner({ userId: data.user_id || null, propertyId: data.property_id || null });
             if (data.property_id) loadUnits(data.property_id);
 
             // Load building config from JSON
@@ -547,6 +551,10 @@ const RenovationCalculatorDetail = () => {
     const handleSave = async () => {
         if (saving || loadError) return;
         if (!name.trim()) { alert('Bitte Name der Kalkulation eingeben.'); return; }
+        // Objekt entfernt (oder statt Objekt ein Deal gewählt) bei einer Kalkulation eines anderen Kontos:
+        // Ohne Objekt sieht sie nur ihr user_id-Konto, die Datenbank ordnet sie deshalb dem Bearbeiter zu.
+        if (calcId && savedOwner.propertyId && !propertyId && savedOwner.userId && savedOwner.userId !== user?.id
+            && !window.confirm('Diese Kalkulation gehört einem anderen Konto (meist dem Eigentümer des Objekts). Ohne zugeordnetes Objekt – auch bei Verknüpfung mit einem Deal – wird sie beim Speichern Ihrem Konto zugeordnet und ist danach nur noch für Sie sichtbar, nicht mehr für den Eigentümer bzw. das bisherige Konto und andere Mitnutzer.\n\nFortfahren?')) return;
         setSaving(true);
         try {
             // Summe auf Cent gerundet speichern (keine Float-Reste in total_cost / deal_data)
@@ -559,12 +567,15 @@ const RenovationCalculatorDetail = () => {
 
             if (calcId) {
                 // Fehler und "0 Zeilen geändert" (RLS/gelöscht) erkennen – sonst wäre die Eingabe still verloren
-                assertWrite(await supabase.from('renovation_calculations').update({
+                const savedRows = assertWrite(await supabase.from('renovation_calculations').update({
                     name: name.trim(), calc_type: calcType,
                     property_id: propertyId || null, unit_id: unitId || null,
                     building_config: buildingConfig,
                     total_cost: totalCost,
-                }).eq('id', calcId).select('id'), 'Kalkulation speichern');
+                }).eq('id', calcId).select('id, user_id, property_id'), 'Kalkulation speichern');
+                // user_id kann die Datenbank beim Objektwechsel angepasst haben
+                const savedRow = Array.isArray(savedRows) ? savedRows[0] : null;
+                if (savedRow) setSavedOwner({ userId: savedRow.user_id || null, propertyId: savedRow.property_id || null });
             } else {
                 // Kalkulation zu einem Objekt gehört dem Portfolio-Eigentümer (wie Sanierungsprojekte,
                 // G29-13), damit sie nicht am Konto eines Teammitglieds hängt. Die Datenbank lässt als
@@ -580,6 +591,7 @@ const RenovationCalculatorDetail = () => {
                 }).select().single();
                 if (error) throw error;
                 setCalcId(data.id);
+                setSavedOwner({ userId: data.user_id || null, propertyId: data.property_id || null });
                 // Preserve query params (returnTo, dealId) when updating URL
                 const currentParams = new URLSearchParams(window.location.search);
                 const qs = currentParams.toString();

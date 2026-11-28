@@ -1050,7 +1050,8 @@ export const DEFAULT_UTILITY_TEMPLATE = DEFAULT_TEMPLATES.utility_costs.content_
 // Seitenhöhe 295 mm statt 297 mm: die PDF-Erzeugung (lib/htmlToPdf) rundet die Blatthöhe auf 1122 px ab und
 // würde sonst einen Streifen auf eine zusätzliche Leerseite schneiden; der Umbruch
 // vor jeder Folgeseite (Abstandshalter ≈ 7 px) setzt jede Seite exakt an den Blattanfang.
-// Dunkelmodus der App: index.css färbt Tabellenköpfe und Überschriften mit !important – auf dem Blatt zurücksetzen.
+// Dunkelmodus der App: index.css nimmt .nk-doc und den PDF-Container von seinen Dunkelmodus-Regeln aus
+// (Tabellenköpfe, Überschriften, Linien) und setzt dort die Hellmodus-Farbvariablen – keine Gegenregeln nötig.
 export const SETTLEMENT_DOC_CSS = `
 .nk-doc { width: 210mm; background: #ffffff; color: #000000; }
 .nk-doc * { transition: none !important; }
@@ -1058,8 +1059,6 @@ export const SETTLEMENT_DOC_CSS = `
 .nk-doc .letter-page ~ .letter-page { page-break-before: always; break-before: page; }
 .nk-doc table { background: transparent !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
 .nk-doc th, .nk-doc td { color: #000000; background-color: transparent; font-size: inherit; }
-[data-theme="dark"] .nk-doc th { background-color: transparent !important; color: #000000; }
-[data-theme="dark"] .nk-doc h1, [data-theme="dark"] .nk-doc h2, [data-theme="dark"] .nk-doc h3, [data-theme="dark"] .nk-doc h4 { color: #000000 !important; }
 .nk-doc.is-draft .letter-page::after { content: 'ENTWURF'; position: absolute; left: 0; right: 0; top: 42%; text-align: center; font-size: 72pt; font-weight: 700; letter-spacing: 6mm; color: rgba(220, 38, 38, 0.12); transform: rotate(-30deg); pointer-events: none; z-index: 5; }
 `;
 

@@ -91,7 +91,12 @@ export const REPORT_CONFIGS = {
         defaultOrientation: 'landscape',
         sumsEnabled: true,
         groupByProperty: false,
-        dsgvoRelevant: true,
+        // Keine Spalte mit Personenbezug: nur Objektadresse und Kennzahlen wie bei 'immobilien' (Adressen sind auch
+        // dort und bei 'mietverhaeltnisse' kein DSGVO-Feld); Mieterliste/Transaktionen werden nicht angehängt (s. u.).
+        // Ohne DSGVO-Felder bliebe der Schalter „Namen pseudonymisieren" wirkungslos – daher nicht angeboten.
+        // Kommen Spalten mit Namen, IBAN oder Verwendungszweck hinzu: dsgvoRelevant: true und deren Schlüssel hier eintragen.
+        dsgvoRelevant: false,
+        dsgvoFields: [],
         hasCoverPage: true,
         sumColumns: ['kaufpreis', 'marktpreis', 'restschuld', 'miete_monat', 'bankrate', 'cashflow_monat'],
         // Keine extraOptions: "Mieterliste/Transaktionen anhängen" wurde nie ausgewertet (pdfGenerator.js kennt
