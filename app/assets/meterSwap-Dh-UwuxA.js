@@ -1,0 +1,1 @@
+const a="Zählerwechsel:",r=e=>typeof e?.note=="string"&&e.note.startsWith(a),i=(e,t)=>String(e.reading_date||"").slice(0,10).localeCompare(String(t.reading_date||"").slice(0,10))||(r(e)?1:0)-(r(t)?1:0)||String(e.created_at||"").localeCompare(String(t.created_at||""))||String(e.id??"").localeCompare(String(t.id??""));export{a as M,i as c,r as i};

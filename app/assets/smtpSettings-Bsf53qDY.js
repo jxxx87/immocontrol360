@@ -1,0 +1,1 @@
+import{s as r}from"./index-DQA7em8L.js";const i=async s=>{if(!s)return!1;const{data:e,error:t}=await r.from("user_smtp_settings").select("id").eq("user_id",s).maybeSingle();if(t)throw t;return!!e};export{i as h};
