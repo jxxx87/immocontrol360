@@ -41,6 +41,15 @@
   margin-bottom: 1em;
 }
 
+/* Verweise (TipTap-Link mit Autolink): überall in Textfarbe und unterstrichen, damit eine URL auf
+   Papier erkennbar ist. Ohne diese Regel: Editor und PDF (index.css: a ohne Unterstreichung) schwarz,
+   Druckfenster (Browser-Standard) blau unterstrichen. Farbe und Unterstreichung ändern weder
+   Laufweite noch Zeilenhöhe. Ohne !important: eigene Farben im Verweis gelten überall gleich. */
+.letter-page a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* Leerzeilen (leere Absätze): gleiche Höhe wie gefüllte Absätze */
 .letter-page p:empty,
 .letter-page p:has(> br:only-child),

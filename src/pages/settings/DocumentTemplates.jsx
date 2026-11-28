@@ -25,6 +25,7 @@ import { openSansFontFaceCss, fontOrigin } from '../../lib/fontFaces';
 import { DEFAULT_TEMPLATES } from '../../lib/defaultTemplates';
 import { LETTER_PAGE_CSS, LETTER_CONTENT_CSS, editorTextFlowCss } from '../../lib/letterDocumentCss';
 import { loadLeaseBalance, RENT_TOLERANCE } from '../../lib/rentArrears';
+import { buildLetterSalutation } from '../../lib/utilitySettlement';
 import { useUnsavedChangesGuard } from '../../lib/useUnsavedChangesGuard';
 import { 
     Bold, Italic, Underline as UnderlineIcon, 
@@ -535,15 +536,10 @@ const buildVariableValues = ({ tenant, portfolio, manualValues, group, dates }) 
     const fullName = joinParts([firstName, lastName], ' ');
     values.mieter_name = textValue(fullName);
     values.mieter_nachname = textValue(lastName);
-    // Anrede aus tenants.salutation (über buildTemplateTenantData als "gender"); ohne Angabe neutral
+    // Anrede aus tenants.salutation (über buildTemplateTenantData als "gender"); ohne Angabe neutral.
+    // Gemeinsame Regel mit Mahnschreiben und Nebenkostenabrechnung (lib/utilitySettlement.js).
     const gender = t.gender || t.salutation || null;
-    let salutation = 'Sehr geehrte Damen und Herren';
-    if (fullName) {
-        if (gender === 'female' && lastName) salutation = `Sehr geehrte Frau ${lastName}`;
-        else if (gender === 'male' && lastName) salutation = `Sehr geehrter Herr ${lastName}`;
-        else salutation = `Sehr geehrte/r ${fullName}`;
-    }
-    values.mieter_anrede = { text: salutation };
+    values.mieter_anrede = { text: buildLetterSalutation({ fullName, lastName, salutation: gender }) };
     values.mieter_adresse = textValue(joinParts([
         joinParts([t.street, t.house_number], ' '),
         joinParts([t.zip, t.city], ' ')

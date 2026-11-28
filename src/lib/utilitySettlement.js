@@ -299,8 +299,8 @@ export const tenantFullName = (t) => (t ? (joinNonEmpty([t.first_name, t.last_na
 const LETTER_SALUTATIONS = ['female', 'male', 'diverse'];
 export const tenantSalutation = (t) => (LETTER_SALUTATIONS.includes(t?.salutation) ? t.salutation : null);
 
-// Briefanrede (Variable „mieter_anrede") – dieselbe Regel wie im Vorlagen-Editor (buildVariableValues in
-// DocumentTemplates.jsx): Anrede „Frau"/„Herr" mit Nachname, sonst (keine Angabe/divers) neutral.
+// Briefanrede (Variable „mieter_anrede") – EINE Regel für Vorlagen-Editor (DocumentTemplates.jsx),
+// Mahnung (claimPdfGenerator.js) und NK-Abrechnung: Anrede „Frau"/„Herr" mit Nachname, sonst (keine Angabe/divers) neutral.
 export const buildLetterSalutation = ({ fullName, lastName, salutation } = {}) => {
     const full = String(fullName || '').trim();
     const last = String(lastName || '').trim();
@@ -1052,13 +1052,19 @@ export const DEFAULT_UTILITY_TEMPLATE = DEFAULT_TEMPLATES.utility_costs.content_
 // vor jeder Folgeseite (Abstandshalter ≈ 7 px) setzt jede Seite exakt an den Blattanfang.
 // Dunkelmodus der App: index.css nimmt .nk-doc und den PDF-Container von seinen Dunkelmodus-Regeln aus
 // (Tabellenköpfe, Überschriften, Linien) und setzt dort die Hellmodus-Farbvariablen – keine Gegenregeln nötig.
+// Das PDF entsteht im App-Dokument, dort gelten body 500 und die globalen th/td-Regeln aus index.css:
+// - Schriftstärke: Briefseite 400 (letterPage.css), die Wurzel ebenso für Text außerhalb einer Briefseite,
+//   Tabellenköpfe fett wie im Druck (index.css th: 600),
+// - Zellrahmen: border revert = Browser-Standard (keiner). Sonst überdeckt die weiße 1px-Linie aus index.css
+//   im PDF die Kopflinie der Zeile und Zellen ohne eigene Linie werden höher. Inline-Linien gelten weiter.
 export const SETTLEMENT_DOC_CSS = `
-.nk-doc { width: 210mm; background: #ffffff; color: #000000; }
+.nk-doc { width: 210mm; background: #ffffff; color: #000000; font-weight: 400; }
 .nk-doc * { transition: none !important; }
 .nk-doc .letter-page { height: 295mm !important; min-height: 295mm !important; max-height: 295mm !important; margin: 0 !important; border: none !important; border-radius: 0 !important; box-shadow: none !important; page-break-inside: avoid; break-inside: avoid; }
 .nk-doc .letter-page ~ .letter-page { page-break-before: always; break-before: page; }
 .nk-doc table { background: transparent !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
-.nk-doc th, .nk-doc td { color: #000000; background-color: transparent; font-size: inherit; }
+.nk-doc th, .nk-doc td { color: #000000; background-color: transparent; font-size: inherit; border: revert; }
+.nk-doc th { font-weight: bold; }
 .nk-doc.is-draft .letter-page::after { content: 'ENTWURF'; position: absolute; left: 0; right: 0; top: 42%; text-align: center; font-size: 72pt; font-weight: 700; letter-spacing: 6mm; color: rgba(220, 38, 38, 0.12); transform: rotate(-30deg); pointer-events: none; z-index: 5; }
 `;
 

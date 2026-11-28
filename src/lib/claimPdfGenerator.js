@@ -225,14 +225,20 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // Dunkelmodus der App: index.css nimmt .ic-claim-doc und den PDF-Container von seinen Dunkelmodus-Regeln
 // (Tabellenköpfe, Überschriften, Linien) aus und setzt dort die Farbvariablen auf die Hellmodus-Werte –
 // eigene Gegenregeln sind hier deshalb nicht nötig; das PDF sieht in beiden Modi gleich aus.
+// Im App-Dokument gelten zusätzlich body 500 und die globalen th/td-Regeln aus index.css:
+// - Schriftstärke: Briefseite 400 (letterPage.css), die Wurzel ebenso für Text außerhalb einer Briefseite,
+//   Tabellenköpfe fett wie im Hilfs-iframe (index.css th: 600),
+// - Zellrahmen: border revert = Browser-Standard (keiner). Sonst überdeckt die weiße 1px-Linie aus index.css
+//   die Zeilenlinien, und Zeilen ohne eigene Linie werden im PDF höher als im iframe. Inline-Linien gelten weiter.
 const CLAIM_DOC_CSS = `
-.ic-claim-doc { width: 210mm; background: #ffffff; color: #000000; text-align: left; }
+.ic-claim-doc { width: 210mm; background: #ffffff; color: #000000; text-align: left; font-weight: 400; }
 ${scopeLetterCss(LETTER_PAGE_CSS, '.ic-claim-doc')}
 .ic-claim-doc .letter-page { height: 296mm !important; min-height: 296mm !important; max-height: 296mm !important; padding-bottom: 34mm !important; margin: 0 !important; box-shadow: none !important; border-radius: 0 !important; page-break-inside: avoid; break-inside: avoid; }
 .ic-claim-doc .letter-page ~ .letter-page { page-break-before: always; break-before: page; }
 .ic-claim-doc > p:empty { display: none; }
 .ic-claim-doc table { background: transparent !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
-.ic-claim-doc th, .ic-claim-doc td { color: #000000; background-color: transparent; font-size: inherit; }
+.ic-claim-doc th, .ic-claim-doc td { color: #000000; background-color: transparent; font-size: inherit; border: revert; }
+.ic-claim-doc th { font-weight: bold; }
 `;
 
 const formatCurrency = formatCurrencyDE;

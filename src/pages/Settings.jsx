@@ -204,8 +204,11 @@ const Settings = () => {
             // Links auf /settings mit anderem Reiter (z. B. Topbar) bleiben auf demselben Pfad und laufen
             // am Navigations-Schutz des Editors vorbei – daher wie beim Reiter-Klick nachfragen
             if (!mayLeaveTemplatesTab(activeTabRef.current, templatesDirtyRef.current, location.state.activeTab)) {
-                // Reiter bleibt: vorherigen Router-State zurückschreiben (der Editor liest z. B. die
-                // Mieterdaten im Echtdaten-Modus aus location.state)
+                // Reiter bleibt: vorherigen Router-State zurückschreiben, damit der Verlaufseintrag wieder
+                // zum angezeigten Reiter passt (Neuladen, Zurück/Vor). Der geöffnete Editor braucht das nicht:
+                // die Vorlage liest er aus location.state nur beim Einhängen, Mieterdaten zusätzlich nur bei
+                // einer Navigation mit anderen Mieterdaten – ein State ohne bzw. mit gleichen Mieterdaten
+                // ändert dort nichts.
                 restoringLocationRef.current = true;
                 navigate(
                     { pathname: location.pathname, search: location.search, hash: location.hash },
