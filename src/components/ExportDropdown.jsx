@@ -51,7 +51,7 @@ const ExportDropdown = ({
     const handleQuickExport = (preset) => {
         setOpen(false);
         const config = REPORT_CONFIGS[reportType];
-        // Berichte mit personenbezogenen Daten: Dialog öffnen, damit über die DSGVO-Anonymisierung entschieden wird
+        // Berichte mit personenbezogenen Daten: Dialog öffnen, damit über die DSGVO-Pseudonymisierung entschieden wird
         if (config?.dsgvoRelevant) {
             openModal(preset);
             return;

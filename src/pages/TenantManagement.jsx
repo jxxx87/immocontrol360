@@ -42,6 +42,24 @@ const CHANGE_LOG_FIELDS = [
     ['email', 'E-Mail']
 ];
 
+// Herkunft eines Protokolleintrags (tenant_change_log.source)
+const CHANGE_LOG_SOURCE_LABELS = {
+    token_link: 'über den Mieterdaten-Link',
+    tenant_portal: 'im Mieterportal'
+};
+
+// Satz für einen Verlaufseintrag (ohne Mietername), z. B. "hat seine Kontaktdaten im Mieterportal aktualisiert."
+const describeHistoryEntry = (entry) => {
+    const via = CHANGE_LOG_SOURCE_LABELS[entry.source];
+    const prefix = via ? `hat seine Kontaktdaten ${via}` : 'hat seine Kontaktdaten';
+    if (entry.changes && entry.changes.length === 0) {
+        return entry.source === 'tenant_portal'
+            ? `${prefix} ohne inhaltliche Änderung gespeichert.`
+            : `${prefix} ohne Änderung bestätigt.`;
+    }
+    return `${prefix} aktualisiert.`;
+};
+
 const normalizeLogValue = (key, value) => {
     const text = value === null || value === undefined ? '' : String(value).trim();
     return key === 'email' ? text.toLowerCase() : text;
@@ -276,18 +294,20 @@ const TenantManagement = () => {
 
     const registeredTenantIds = useMemo(() => new Set(tenantRoles.map(r => r.tenant_id).filter(Boolean)), [tenantRoles]);
 
-    // Verlauf: Protokolleinträge mit Vorher/Nachher; verwendete Links ohne Protokoll (vor Einführung) wie bisher
+    // Verlauf: Protokolleinträge mit Vorher/Nachher (Mieterdaten-Link und Selbständerung im Mieterportal);
+    // verwendete Links ohne Protokoll (vor Einführung) wie bisher
     const updateHistory = useMemo(() => {
         const loggedLinkIds = new Set(changeLog.map(e => e.link_id).filter(Boolean));
         const entries = changeLog.map(e => ({
             key: `log-${e.id}`,
             tenantId: e.tenant_id,
             date: e.created_at,
+            source: e.source,
             changes: getChangedFields(e)
         }));
         verificationLinks
             .filter(l => l.is_updated && !loggedLinkIds.has(l.id))
-            .forEach(l => entries.push({ key: `link-${l.id}`, tenantId: l.tenant_id, date: l.updated_at, changes: null }));
+            .forEach(l => entries.push({ key: `link-${l.id}`, tenantId: l.tenant_id, date: l.updated_at, source: 'token_link', changes: null }));
         return entries.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
     }, [changeLog, verificationLinks]);
 
@@ -295,7 +315,9 @@ const TenantManagement = () => {
     const inviteEmailChangedByLink = useMemo(() => {
         if (!inviteForm.tenant_id) return null;
         // changeLog ist nach Datum absteigend sortiert -> erster Treffer = letzte Änderung
+        // (nur Link-Einträge – der Hinweis unten spricht vom Mieterdaten-Link)
         const entry = changeLog.find(e => e.tenant_id === inviteForm.tenant_id &&
+            e.source !== 'tenant_portal' &&
             normalizeLogValue('email', e.old_values?.email) !== normalizeLogValue('email', e.new_values?.email));
         if (!entry) return null;
         const linkEmail = normalizeLogValue('email', entry.new_values?.email);
@@ -1704,14 +1726,15 @@ const TenantManagement = () => {
                         </h2>
                         {changeLogSupported && (
                             <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '-6px 0 14px 0' }}>
-                                Änderungen über den Mieterdaten-Link werden direkt übernommen. Hier sehen Sie je Aktualisierung die bisherigen
-                                und die neuen Angaben – bitte prüfen Sie insbesondere geänderte E-Mail-Adressen, bevor Sie diese verwenden.
+                                Änderungen über den Mieterdaten-Link und Änderungen, die Mieter selbst im Mieterportal vornehmen, werden
+                                direkt übernommen. Hier sehen Sie je Aktualisierung, wo sie vorgenommen wurde, sowie die bisherigen und die
+                                neuen Angaben – bitte prüfen Sie insbesondere geänderte E-Mail-Adressen, bevor Sie diese verwenden.
                             </p>
                         )}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             {updateHistory.length === 0 ? (
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', fontStyle: 'italic' }}>
-                                    Es wurden noch keine Daten über die Verifikationslinks aktualisiert.
+                                    Es wurden noch keine Kontaktdaten über den Mieterdaten-Link oder im Mieterportal aktualisiert.
                                 </div>
                             ) : (
                                 updateHistory.map(h => {
@@ -1725,9 +1748,7 @@ const TenantManagement = () => {
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                                                 <div style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>
                                                     Mieter <strong>{name}</strong>{' '}
-                                                    {h.changes && h.changes.length === 0
-                                                        ? 'hat seine Kontaktdaten ohne Änderung bestätigt.'
-                                                        : 'hat seine Kontaktdaten aktualisiert.'}
+                                                    {describeHistoryEntry(h)}
                                                 </div>
                                                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                                     {h.date ? `am ${formatDateTimeDE(h.date)}` : '—'}

@@ -1,7 +1,6 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.7.1"
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────
 // send-push-notification
 //
 // Nur interne Aufrufe (Komplett-Check 2026-11-27):
@@ -15,7 +14,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.7.1"
 // werden so nie als Push verschickt.
 // Optional: PUSH_HIDE_CONTENT=true sendet nur neutrale Texte (keine Nachrichten-
 // inhalte/Namen an Google FCM).
-// ─────────────────────────────────────────────────────────────────────────────
+// Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.168.0.
+// ───────────────────────────────────────────────────────────────────────────
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -431,7 +431,7 @@ function buildFromDirectCall(payload: any): PushContent {
 }
 
 // ── MAIN HANDLER ────────────────────────────────────────────────
-serve(async (req) => {
+Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders })
     }

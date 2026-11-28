@@ -1,3 +1,4 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/supabase_setup.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
 -- Führen Sie diesen SQL-Code im Supabase SQL Editor aus, um die fehlenden Spalten zu erstellen.

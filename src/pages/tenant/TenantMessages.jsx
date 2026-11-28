@@ -6,10 +6,6 @@ import Messenger from '../../components/Messenger';
 import { MessageSquare } from 'lucide-react';
 import { useViewMode } from '../../context/ViewModeContext';
 
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
 const TenantMessages = () => {
     const { user, roleData } = useAuth();
     const { clearByType } = useNotifications();
@@ -38,23 +34,13 @@ const TenantMessages = () => {
             try {
                 let landlordId = null;
 
-                // Nur die Vermieter-ID über die Datenbank-Funktion (keine ganze Objektzeile)
-                const { data: info, error: infoError, status: infoStatus } = await supabase.rpc('get_my_landlord_info');
-                if (!infoError) {
-                    landlordId = info?.landlord_user_id || null;
-                } else if (isMissingRpc(infoError, infoStatus)) {
-                    // Bisheriger Weg (Funktion noch nicht eingespielt)
-                    if (propertyId) {
-                        const { data: property, error: propError } = await supabase
-                            .from('properties')
-                            .select('user_id')
-                            .eq('id', propertyId)
-                            .maybeSingle();
-                        if (propError) console.error('Error loading property owner:', propError);
-                        if (property?.user_id) landlordId = property.user_id;
-                    }
-                } else {
+                // Nur die Vermieter-ID über die Datenbank-Funktion (keine ganze Objektzeile;
+                // Mieter lesen properties/units nicht direkt)
+                const { data: info, error: infoError } = await supabase.rpc('get_my_landlord_info');
+                if (infoError) {
                     console.error('Error loading landlord:', infoError);
+                } else {
+                    landlordId = info?.landlord_user_id || null;
                 }
 
                 if (!landlordId) {
@@ -85,6 +71,7 @@ const TenantMessages = () => {
 
         findLandlord();
         return () => { cancelled = true; };
+        // propertyId: neu ermitteln, wenn sich die Mieterrolle ändert (die Funktion liest sie serverseitig)
     }, [userId, propertyId]);
 
     if (loading) {

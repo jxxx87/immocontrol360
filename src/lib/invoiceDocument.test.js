@@ -1,15 +1,21 @@
 // Unit-Tests der reinen Rechen-/Formatierungslogik von invoiceDocument.js:
 // Cent-Rundung, Steuersatz je Position, Summen je Steuersatz (19/7/0 %), Kleinunternehmer (§ 19 UStG),
-// Gutschrift (negative Beträge), leere Rechnung, Betragsformat im Druck-HTML, Rechnungsnummern-Format.
-// Keine Netzwerk-/Datenbankzugriffe: supabase wird durch einen Abfrage-Stub ersetzt, fontFaces
+// Gutschrift (negative Beträge), leere Rechnung, Betragsformat im Druck-HTML, Rechnungsnummern-Format
+// und -Vergabe (get_next_invoice_number bzw. bisheriger Weg in der App).
+// Keine Netzwerk-/Datenbankzugriffe: supabase wird durch einen Abfrage-/RPC-Stub ersetzt, fontFaces
 // (braucht window.location) durch Konstanten. Kein DOM: in Node greifen die DOMParser-losen Pfade.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const db = vi.hoisted(() => {
     const state = {};
+    // Voreinstellung: Datenbank-Funktionen fehlen (PostgREST PGRST202) -> die Tests prüfen den App-Weg
+    const missingRpc = () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 });
     const reset = () => {
         state.queries = [];
+        state.rpcCalls = [];
+        state.rpcHandler = missingRpc;
         state.selectHandler = () => ({ data: [], error: null });
+        state.counterHandler = () => ({ data: [], error: null });
         state.insertHandler = (rows) => ({ data: { id: 'neu-1', ...rows[0] }, error: null });
         state.updateHandler = () => ({ data: [{ id: 'orig-1' }], error: null });
     };
@@ -17,7 +23,12 @@ const db = vi.hoisted(() => {
         if (q.op === 'insert') return state.insertHandler(q.rows, q);
         if (q.op === 'update') return state.updateHandler(q.values, q);
         if (q.op === 'delete') return { data: null, error: null };
+        if (q.table === 'invoice_counters') return state.counterHandler(q);
         return state.selectHandler(q);
+    };
+    const rpc = (name, args) => {
+        state.rpcCalls.push({ name, args });
+        return Promise.resolve().then(() => state.rpcHandler(name, args));
     };
     const from = (table) => {
         const q = { table, op: 'select', filters: [], range: null };
@@ -39,10 +50,10 @@ const db = vi.hoisted(() => {
         return b;
     };
     reset();
-    return { state, from, reset };
+    return { state, from, rpc, reset, missingRpc };
 });
 
-vi.mock('./supabase', () => ({ supabase: { from: db.from } }));
+vi.mock('./supabase', () => ({ supabase: { from: db.from, rpc: db.rpc } }));
 vi.mock('./fontFaces', () => ({ openSansFontFaceCss: () => '', fontOrigin: () => 'http://localhost' }));
 
 import {
@@ -581,10 +592,36 @@ describe('fetchNextInvoiceNumber', () => {
 
     it('beginnt jedes Jahr mit -001 und sucht nur im Portfolio und Jahr des Rechnungsdatums', async () => {
         expect(await fetchNextInvoiceNumber('pf-1', '2025-12-31')).toBe('2025-001');
-        const q = db.state.queries[0];
+        const [q, c] = db.state.queries;
         expect(q.table).toBe('invoices');
         expect(q.filters).toEqual([['eq', 'portfolio_id', 'pf-1'], ['like', 'invoice_number', '2025-%']]);
+        expect(c.table).toBe('invoice_counters');
+        expect(c.filters).toEqual([['eq', 'portfolio_id', 'pf-1'], ['eq', 'year', 2025]]);
         expect(await fetchNextInvoiceNumber('pf-1', '2027-01-01')).toBe('2027-001');
+    });
+
+    it('nur lesend: verbraucht keine Nummer (keine RPC, kein Schreibzugriff)', async () => {
+        db.state.selectHandler = pages(numberRows(['2026-004']));
+        expect(await fetchNextInvoiceNumber('pf-1', '2026-03-15')).toBe('2026-005');
+        expect(db.state.rpcCalls).toHaveLength(0);
+        expect(db.state.queries.every(q => q.op === 'select')).toBe(true);
+    });
+
+    it('berücksichtigt wie get_next_invoice_number einen höheren Zählerstand des Portfolios', async () => {
+        db.state.selectHandler = pages(numberRows(['2026-004']));
+        db.state.counterHandler = () => ({ data: [{ last_number: 12 }, { last_number: null }], error: null });
+        expect(await fetchNextInvoiceNumber('pf-1', '2026-03-15')).toBe('2026-013');
+
+        db.reset();
+        db.state.selectHandler = pages(numberRows(['2026-009']));
+        db.state.counterHandler = () => ({ data: [{ last_number: 2 }], error: null });
+        expect(await fetchNextInvoiceNumber('pf-1', '2026-03-15')).toBe('2026-010');
+    });
+
+    it('meldet Fehler beim Lesen des Zählers', async () => {
+        const error = { message: 'permission denied', code: '42501' };
+        db.state.counterHandler = () => ({ data: null, error });
+        await expect(fetchNextInvoiceNumber('pf-1', '2026-03-15')).rejects.toBe(error);
     });
 
     it('zählt fortlaufend weiter (Lücken zählen nicht, Maximum + 1)', async () => {
@@ -606,7 +643,7 @@ describe('fetchNextInvoiceNumber', () => {
         const first = Array.from({ length: 1000 }, (_, i) => `2026-${String(i + 1).padStart(3, '0')}`);
         db.state.selectHandler = pages(numberRows(first), numberRows(['2026-1500']));
         expect(await fetchNextInvoiceNumber('pf-1', '2026-03-15')).toBe('2026-1501');
-        expect(db.state.queries.map(q => q.range)).toEqual([[0, 999], [1000, 1999]]);
+        expect(db.state.queries.filter(q => q.table === 'invoices').map(q => q.range)).toEqual([[0, 999], [1000, 1999]]);
     });
 
     it('meldet Abfragefehler, statt mit -001 neu zu beginnen', async () => {
@@ -616,7 +653,78 @@ describe('fetchNextInvoiceNumber', () => {
     });
 });
 
-describe('insertInvoiceWithNumber', () => {
+describe('insertInvoiceWithNumber über get_next_invoice_number', () => {
+    // Zähler der Datenbank-Funktion: jeder Aufruf vergibt die nächste Nummer
+    const serverNumbers = (...numbers) => {
+        let i = 0;
+        db.state.rpcHandler = (name) => (name === 'get_next_invoice_number'
+            ? { data: numbers[Math.min(i++, numbers.length - 1)], error: null, status: 200 }
+            : db.missingRpc());
+    };
+
+    it('holt die Nummer beim Speichern serverseitig (Portfolio + Jahr des Rechnungsdatums), ohne selbst zu zählen', async () => {
+        serverNumbers('2026-007');
+        const saved = await insertInvoiceWithNumber({ portfolio_id: 'pf-1', unit_id: 'u-9', invoice_date: '2026-03-15', status: 'draft' });
+        expect(saved.invoice_number).toBe('2026-007');
+        expect(saved.status).toBe('draft');
+        expect(db.state.rpcCalls).toEqual([{
+            name: 'get_next_invoice_number',
+            args: { p_portfolio_id: 'pf-1', p_object_unit_id: null, p_year: 2026 },
+        }]);
+        expect(db.state.queries.map(q => `${q.table}:${q.op}`)).toEqual(['invoices:insert']);
+    });
+
+    it('Jahr aus dem Rechnungsdatum (nicht aus dem heutigen Datum)', async () => {
+        serverNumbers('2025-031');
+        await insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2025-12-31' });
+        expect(db.state.rpcCalls[0].args.p_year).toBe(2025);
+    });
+
+    it('holt bei einer Nummernkollision (23505) eine neue Nummer', async () => {
+        serverNumbers('2026-005', '2026-006');
+        let attempt = 0;
+        db.state.insertHandler = (rows) => (attempt++ === 0
+            ? { data: null, error: { code: '23505' } }
+            : { data: { id: 'neu-1', ...rows[0] }, error: null });
+        const saved = await insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2026-03-15' });
+        expect(saved.invoice_number).toBe('2026-006');
+        expect(db.state.rpcCalls).toHaveLength(2);
+    });
+
+    it('meldet Fehler der Funktion (z. B. keine Berechtigung) unverändert – ohne Rückfall und ohne Speichern', async () => {
+        const err = { code: 'P0001', message: 'Portfolio nicht gefunden oder keine Berechtigung.' };
+        db.state.rpcHandler = () => ({ data: null, error: err, status: 400 });
+        await expect(insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2026-03-15' })).rejects.toBe(err);
+        expect(db.state.queries).toHaveLength(0);
+    });
+
+    it('meldet eine leere Antwort, statt ohne Nummer zu speichern', async () => {
+        db.state.rpcHandler = () => ({ data: '  ', error: null, status: 200 });
+        await expect(insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2026-03-15' })).rejects.toThrow(/nicht vergeben/);
+        expect(db.state.queries).toHaveLength(0);
+    });
+
+    it('verlangt ein Portfolio, bevor eine Nummer vergeben wird', async () => {
+        serverNumbers('2026-001');
+        await expect(insertInvoiceWithNumber({ portfolio_id: null, invoice_date: '2026-03-15' })).rejects.toThrow(/Portfolio/);
+        expect(db.state.rpcCalls).toHaveLength(0);
+        expect(db.state.queries).toHaveLength(0);
+    });
+
+    it.each([
+        ['PGRST202', { code: 'PGRST202', message: 'Could not find the function' }, 404],
+        ['42883', { code: '42883', message: 'function does not exist' }, 404],
+        ['HTTP 404', { code: '', message: 'Not Found' }, 404],
+    ])('ohne eingespielte Funktion (%s): bisheriger Weg in der App', async (_label, err, status) => {
+        db.state.rpcHandler = () => ({ data: null, error: err, status });
+        db.state.selectHandler = pages(numberRows(['2026-004']));
+        const saved = await insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2026-03-15' });
+        expect(saved.invoice_number).toBe('2026-005');
+        expect(db.state.queries.map(q => `${q.table}:${q.op}`)).toEqual(['invoices:select', 'invoice_counters:select', 'invoices:insert']);
+    });
+});
+
+describe('insertInvoiceWithNumber ohne get_next_invoice_number (bisheriger Weg)', () => {
     it('vergibt die Nummer beim Speichern', async () => {
         db.state.selectHandler = pages(numberRows(['2026-004']));
         const saved = await insertInvoiceWithNumber({ portfolio_id: 'pf-1', invoice_date: '2026-03-15' });

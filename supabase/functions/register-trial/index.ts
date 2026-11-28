@@ -16,10 +16,9 @@
  *   über die normale Supabase-Registrierung angelegt und erst nach Klick auf den Bestätigungslink
  *   nutzbar. Voraussetzung: funktionierender E-Mail-Versand in Supabase Auth (eigener SMTP).
  *   Ohne die Variable bleibt es beim bisherigen Sofort-Zugang – aber nur für NEUE Adressen.
+ *
+ * Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0 (keine externen Importe mehr).
  */
-
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -186,7 +185,7 @@ async function deleteUser(userId: string): Promise<void> {
     }
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }

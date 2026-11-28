@@ -24,10 +24,10 @@
  *  - CONTACT_FORM_ALLOWED_ORIGINS    optional, kommagetrennt (Standard: immocontrol360.de, www., lokale Entwicklung)
  *  - CONTACT_FORM_HASH_SECRET        optional, Schlüssel für die Pseudonymisierung der IP
  *                                    (Standard: Service-Role-Key; die IP selbst wird nie gespeichert)
+ *
+ * Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.168.0.
  */
 
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // @ts-ignore
 import nodemailer from "npm:nodemailer@6.9.13";
 
@@ -337,7 +337,7 @@ async function sendNotification(
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     const origin = req.headers.get("origin");
 
     if (req.method === "OPTIONS") {

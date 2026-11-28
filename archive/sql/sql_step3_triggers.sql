@@ -1,3 +1,4 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/supabase/sql_step3_triggers.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
 DROP TRIGGER IF EXISTS push_on_message ON messages;

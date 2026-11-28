@@ -676,12 +676,23 @@ export const downloadInvoicePdf = async (inv, { user, portfolios = [], legacyCre
 };
 
 // ─── Nummernvergabe ──────────────────────────────────────────────────
-// Fortlaufende Nummer „JJJJ-NNN" je Portfolio; Jahr aus dem Rechnungsdatum, numerisches Maximum
-// (nicht Textsortierung: '2026-1000' > '2026-999'), Abfragefehler werden gemeldet statt '-001'.
-// Die DB-Eindeutigkeit (user_id, invoice_number, portfolio_id) fängt Doppelvergaben ab -> neuer Versuch.
+// Fortlaufende Nummer „JJJJ-NNN" je Portfolio; Jahr aus dem Rechnungsdatum. Die Nummer wird beim
+// ersten Speichern vergeben (auch Entwürfe brauchen eine – invoices.invoice_number ist NOT NULL) und
+// bleibt danach unverändert; das Formular zeigt vorher nur eine Vorschau, die nichts verbraucht.
+const PORTFOLIO_REQUIRED_MESSAGE = 'Bitte zuerst eine Ferienwohnung bzw. ein Portfolio wählen – die Rechnungsnummer wird je Portfolio vergeben.';
+const invoiceYear = (invoiceDate) => (parseLocalDate(invoiceDate) || new Date()).getFullYear();
+
+// Datenbank-Funktion (noch) nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
+const isMissingRpc = (error, status) =>
+    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
+
+// Vorschau bzw. bisheriger Weg ohne get_next_invoice_number: liest nur, vergibt nichts. Wie die
+// Datenbank-Funktion: numerisches Maximum der Nummern des Portfolios im Jahr (nicht Textsortierung:
+// '2026-1000' > '2026-999') bzw. Zählerstand des Portfolios, falls höher, + 1. Abfragefehler werden
+// gemeldet statt mit '-001' neu zu beginnen.
 export const fetchNextInvoiceNumber = async (portfolioId, invoiceDate) => {
-    if (!portfolioId) throw new Error('Bitte zuerst eine Ferienwohnung bzw. ein Portfolio wählen – die Rechnungsnummer wird je Portfolio vergeben.');
-    const year = (parseLocalDate(invoiceDate) || new Date()).getFullYear();
+    if (!portfolioId) throw new Error(PORTFOLIO_REQUIRED_MESSAGE);
+    const year = invoiceYear(invoiceDate);
     const prefix = `${year}-`;
     const pattern = new RegExp(`^${year}-(\\d+)$`);
     const PAGE = 1000;
@@ -701,15 +712,47 @@ export const fetchNextInvoiceNumber = async (portfolioId, invoiceDate) => {
         });
         if (!data || data.length < PAGE) break;
     }
+    const { data: counters, error: counterError } = await supabase
+        .from('invoice_counters')
+        .select('last_number')
+        .eq('portfolio_id', portfolioId)
+        .eq('year', year);
+    if (counterError) throw counterError;
+    (counters || []).forEach(c => {
+        const n = Number(c.last_number);
+        if (Number.isInteger(n)) max = Math.max(max, n);
+    });
     return `${prefix}${String(max + 1).padStart(3, '0')}`;
+};
+
+// Endgültige Nummer serverseitig (get_next_invoice_number: ein Zähler je Portfolio und Jahr, bereits
+// vergebene Nummern zählen mit, Vergabe per Advisory-Lock serialisiert, Rechte: Eigentümer bzw.
+// finanzen/write). Jeder Aufruf verbraucht eine Nummer – deshalb nur beim Speichern, nie für die
+// Vorschau. Nur wenn die Funktion fehlt, der bisherige Weg in der App.
+const reserveInvoiceNumber = async (portfolioId, invoiceDate) => {
+    if (!portfolioId) throw new Error(PORTFOLIO_REQUIRED_MESSAGE);
+    const { data, error, status } = await supabase.rpc('get_next_invoice_number', {
+        p_portfolio_id: portfolioId,
+        p_object_unit_id: null, // wird serverseitig ignoriert (ein Nummernkreis je Portfolio)
+        p_year: invoiceYear(invoiceDate)
+    });
+    if (error) {
+        if (isMissingRpc(error, status)) return fetchNextInvoiceNumber(portfolioId, invoiceDate);
+        throw error;
+    }
+    const number = typeof data === 'string' ? data.trim() : '';
+    if (!number) throw new Error('Die Rechnungsnummer konnte nicht vergeben werden. Bitte versuchen Sie es erneut.');
+    return number;
 };
 
 export const isUniqueViolation = (error) => error?.code === '23505';
 
-// Legt eine Rechnung an und vergibt die Nummer erst beim Speichern (mit Wiederholung bei Kollision).
+// Legt eine Rechnung an und vergibt die Nummer erst beim Speichern. Die DB-Eindeutigkeit
+// (user_id, invoice_number, portfolio_id) fängt Doppelvergaben ab (z. B. parallel über den
+// bisherigen Weg vergeben) -> neuer Versuch mit neuer Nummer.
 export const insertInvoiceWithNumber = async (payload, { maxAttempts = 5 } = {}) => {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const invoice_number = await fetchNextInvoiceNumber(payload.portfolio_id, payload.invoice_date);
+        const invoice_number = await reserveInvoiceNumber(payload.portfolio_id, payload.invoice_date);
         const { data, error } = await supabase.from('invoices').insert([{ ...payload, invoice_number }]).select().single();
         if (!error) return data;
         if (!isUniqueViolation(error)) throw error;
@@ -733,10 +776,6 @@ export const issueInvoice = async (invoiceId) => {
     return data[0];
 };
 
-// Datenbank-Funktion (noch) nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
 // Korrektur einer ausgestellten Rechnung: eigener Gutschrift-Beleg (eigene Nummer aus dem Nummernkreis,
 // eigenes Datum, Bezug zur Rechnung, negative Beträge); das Original bleibt unverändert und wird als
 // 'credited' (storniert) markiert. Bevorzugt serverseitig in EINER Transaktion (create_credit_note,
@@ -746,8 +785,6 @@ export const createCreditNote = async (original) => {
     if (getInvoiceStatus(original) !== INVOICE_STATUS.ISSUED) {
         throw new Error('Eine Gutschrift kann nur zu einer ausgestellten Rechnung erstellt werden.');
     }
-    // Ohne RPC-Unterstützung des Clients (z. B. Abfrage-Stub der Unit-Tests) gilt der bisherige Weg
-    if (typeof supabase.rpc !== 'function') return createCreditNoteInApp(original);
     const { data, error, status } = await supabase.rpc('create_credit_note', { p_invoice_id: original.id });
     if (!error) {
         const creditNote = Array.isArray(data) ? data[0] : data;

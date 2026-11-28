@@ -19,7 +19,8 @@ import {
     RENT_PERIOD_FIELDS, localISODate, monthStart, addMonths, formatDateDE, formatMonthDE, formatEUR,
     isValidISODate, sumRent, getLeaseTimeState, fetchRentPeriods, getEffectivePeriod, saveRentPeriod,
     deleteRentPeriod, checkLeaseDeletion, describeDeletionBlock, deletionConfirmText,
-    translateLeaseDeleteError, findOverlappingLeases, describeLease, buildTemplateTenantData
+    translateLeaseDeleteError, findOverlappingLeases, describeLease, buildTemplateTenantData,
+    TENANT_SALUTATIONS, TENANT_SALUTATION_OPTIONS
 } from '../lib/leaseRentPeriods';
 import { validateUploadFile, prepareUploadBody } from '../lib/storageFiles';
 import { translateError } from '../lib/errorTranslator';
@@ -124,6 +125,8 @@ const isMissingTableError = (error) => ['42P01', '42703', 'PGRST204', 'PGRST205'
 const normalizeCloudPath = (path) => String(path || '').split('/').filter(Boolean).join('/');
 
 const buildTenantForm = (t = {}) => ({
+    // Anrede (tenants.salutation): '' = keine Angabe → neutrale Briefanrede
+    salutation: TENANT_SALUTATIONS.includes(t.salutation) ? t.salutation : '',
     first_name: t.first_name || '',
     last_name: t.last_name || '',
     phone: t.phone || '',
@@ -140,7 +143,9 @@ const buildLeaseForm = (l) => ({
     end_date: l?.end_date || '',
     deposit: l?.deposit ?? '',
     lease_type: l?.lease_type || 'normal',
-    last_rent_increase: l?.last_rent_increase || ''
+    last_rent_increase: l?.last_rent_increase || '',
+    // Buchungsbeginn des Mietkontos (leases.booking_start_date); leer = automatisch
+    booking_start_date: l?.booking_start_date || ''
 });
 
 const buildRentForm = (l, periodsState) => {
@@ -801,6 +806,7 @@ const TenantDetail = () => {
             const { data, error: tError } = await supabase
                 .from('tenants')
                 .update({
+                    salutation: TENANT_SALUTATIONS.includes(tenantForm.salutation) ? tenantForm.salutation : null,
                     first_name: tenantForm.first_name.trim(),
                     last_name: tenantForm.last_name.trim(),
                     phone: tenantForm.phone,
@@ -842,6 +848,9 @@ const TenantDetail = () => {
         if (f.end_date && !isValidISODate(f.end_date)) return alert('Bitte ein gültiges Datum für das Mietende angeben.');
         if (f.end_date && f.end_date < f.start_date) return alert('Das Mietende darf nicht vor dem Mietbeginn liegen.');
         if (f.last_rent_increase && !isValidISODate(f.last_rent_increase)) return alert('Bitte ein gültiges Datum für die letzte Mieterhöhung angeben.');
+        if (f.booking_start_date && !isValidISODate(f.booking_start_date)) return alert('Bitte ein gültiges Datum für „Mietkonto geführt ab“ angeben.');
+        // Ausgewertet wird monatsweise (rentArrears.js) → nur ein Monat vor dem Mietbeginn ist unzulässig
+        if (f.booking_start_date && f.booking_start_date.slice(0, 7) < f.start_date.slice(0, 7)) return alert('„Mietkonto geführt ab“ darf nicht vor dem Monat des Mietbeginns liegen.');
 
         const deposit = f.deposit === '' || f.deposit === null || f.deposit === undefined ? null : toAmount(f.deposit);
         if (deposit !== null && deposit < 0) return alert('Die Kaution darf nicht negativ sein.');
@@ -878,6 +887,8 @@ const TenantDetail = () => {
             deposit,
             lease_type: f.lease_type || 'normal',
             last_rent_increase: f.last_rent_increase || null,
+            // Leer = NULL: Buchungsbeginn wieder automatisch (Mietbeginn bzw. Erfassung, siehe rentArrears.js)
+            booking_start_date: f.booking_start_date || null,
             // Status folgt dem Vertragsende: beendet erst nach Ablauf
             status: f.end_date && f.end_date < today ? 'ended' : 'active'
         };
@@ -2344,6 +2355,26 @@ const TenantDetail = () => {
             {/* EDIT TENANT MODAL */}
             <Modal isOpen={isEditTenantOpen} title="Mieter-Stammdaten bearbeiten" onClose={() => setIsEditTenantOpen(false)}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '8px 0' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label htmlFor="edit-tenant-salutation" style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Anrede</label>
+                        <select
+                            id="edit-tenant-salutation"
+                            value={tenantForm.salutation}
+                            onChange={(e) => setTenantForm({ ...tenantForm, salutation: e.target.value })}
+                            style={selectStyle}
+                        >
+                            {TENANT_SALUTATION_OPTIONS.map(opt => (
+                                <option key={opt.value || 'none'} value={opt.value}>{opt.label}</option>
+                            ))}
+                            {/* Gespeicherter Wert ohne eigene Auswahl (z. B. 'diverse') bleibt erhalten */}
+                            {tenantForm.salutation && !TENANT_SALUTATION_OPTIONS.some(opt => opt.value === tenantForm.salutation) && (
+                                <option value={tenantForm.salutation}>Divers</option>
+                            )}
+                        </select>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                            Für die Briefanrede in Schreibvorlagen („Sehr geehrte Frau …“ / „Sehr geehrter Herr …“).
+                        </div>
+                    </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                         <Input
                             label="Vorname"
@@ -2459,6 +2490,19 @@ const TenantDetail = () => {
                         value={leaseForm.last_rent_increase}
                         onChange={(e) => setLeaseForm({ ...leaseForm, last_rent_increase: e.target.value })}
                     />
+
+                    <div>
+                        <Input
+                            label="Mietkonto geführt ab (optional)"
+                            type="date"
+                            value={leaseForm.booking_start_date}
+                            onChange={(e) => setLeaseForm({ ...leaseForm, booking_start_date: e.target.value })}
+                        />
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                            Monate davor zählen nicht als Mietrückstand (maßgeblich ist der Monat des Datums).
+                            Leer lassen = automatisch: ab Mietbeginn, bei nachträglich erfassten Altverträgen ab dem Monat der Erfassung.
+                        </div>
+                    </div>
 
                     <div style={infoBoxStyle}>
                         Miete, Nebenkosten und Zahltag ändern Sie über <strong>„Mietänderung"</strong> in der Kachel „Mietkosten & Fälligkeit" –

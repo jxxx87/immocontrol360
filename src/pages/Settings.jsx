@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useOutletContext, useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -148,6 +148,15 @@ const IMPACT_LABELS = [
     ['documentTemplates', 'Portfolio-eigene Schreibvorlagen']
 ];
 
+// Gleicher Text wie UNSAVED_LEAVE_MESSAGE in settings/DocumentTemplates.jsx
+const TEMPLATES_UNSAVED_MESSAGE = 'Diese Vorlage hat ungespeicherte Änderungen. Seite trotzdem verlassen? Die Änderungen gehen verloren.';
+
+// Ein Reiterwechsel entfernt den Schreibvorlagen-Editor ohne Router-Wechsel – dessen
+// useUnsavedChangesGuard greift dann nicht. Daher hier nachfragen (true = Wechsel erlaubt).
+const mayLeaveTemplatesTab = (currentTab, templatesDirty, nextTab) =>
+    currentTab !== 'document-templates' || nextTab === 'document-templates' || !templatesDirty
+    || window.confirm(TEMPLATES_UNSAVED_MESSAGE);
+
 const Settings = () => {
     const { user } = useAuth();
     const { isMobile } = useViewMode();
@@ -157,7 +166,16 @@ const Settings = () => {
     const location = useLocation();
     const [activeTab, setActiveTab] = useState('profile');
     const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-    
+    // Ungespeicherte Änderungen im Schreibvorlagen-Editor (meldet DocumentTemplates über onDirtyChange;
+    // beim Entfernen des Editors kommt kein false – nach bestätigtem Reiterwechsel selbst zurücksetzen)
+    const [templatesDirty, setTemplatesDirty] = useState(false);
+    // Für den location-Effekt, der nur auf Navigationen reagieren soll
+    const activeTabRef = useRef(activeTab);
+    const templatesDirtyRef = useRef(templatesDirty);
+    // Router-State der zuletzt übernommenen Navigation (wird nach abgebrochenem Wechsel wiederhergestellt)
+    const acceptedLocationStateRef = useRef(location.state);
+    const restoringLocationRef = useRef(false);
+
     // Sharing modal state
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [sharePortfolioId, setSharePortfolioId] = useState(null);
@@ -172,7 +190,30 @@ const Settings = () => {
     });
 
     useEffect(() => {
+        activeTabRef.current = activeTab;
+        templatesDirtyRef.current = templatesDirty;
+    }, [activeTab, templatesDirty]);
+
+    useEffect(() => {
+        // Nach abgebrochenem Wechsel wiederhergestellter State: nicht erneut auswerten (keine zweite Rückfrage)
+        if (restoringLocationRef.current) {
+            restoringLocationRef.current = false;
+            return;
+        }
         if (location.state && location.state.activeTab) {
+            // Links auf /settings mit anderem Reiter (z. B. Topbar) bleiben auf demselben Pfad und laufen
+            // am Navigations-Schutz des Editors vorbei – daher wie beim Reiter-Klick nachfragen
+            if (!mayLeaveTemplatesTab(activeTabRef.current, templatesDirtyRef.current, location.state.activeTab)) {
+                // Reiter bleibt: vorherigen Router-State zurückschreiben (der Editor liest z. B. die
+                // Mieterdaten im Echtdaten-Modus aus location.state)
+                restoringLocationRef.current = true;
+                navigate(
+                    { pathname: location.pathname, search: location.search, hash: location.hash },
+                    { replace: true, state: acceptedLocationStateRef.current }
+                );
+                return;
+            }
+            if (location.state.activeTab !== 'document-templates') setTemplatesDirty(false);
             setActiveTab(location.state.activeTab);
             if (location.state.activeTab === 'document-templates') {
                 setIsSidebarCollapsed(true);
@@ -180,7 +221,8 @@ const Settings = () => {
                 setIsSidebarCollapsed(false);
             }
         }
-    }, [location]);
+        acceptedLocationStateRef.current = location.state;
+    }, [location, navigate]);
 
     // Push-Schalter (eigener State statt Hilfsfeld im Profil, das sonst mitgespeichert würde)
     const [pushEnabled, setPushEnabled] = useState(() => {
@@ -1038,8 +1080,10 @@ const Settings = () => {
                                         onClick={() => {
                                             if (!isDisabled) {
                                                 if (tab.link) {
+                                                    // Anderer Pfad: hier fragt der Navigations-Schutz des Editors nach
                                                     navigate(tab.link);
-                                                } else {
+                                                } else if (mayLeaveTemplatesTab(activeTab, templatesDirty, tab.id)) {
+                                                    if (tab.id !== 'document-templates') setTemplatesDirty(false);
                                                     setActiveTab(tab.id);
                                                     if (tab.id === 'document-templates') {
                                                         setIsSidebarCollapsed(true);
@@ -1526,7 +1570,7 @@ const Settings = () => {
                     )}
 
                     {activeTab === 'document-templates' && (
-                        <DocumentTemplates />
+                        <DocumentTemplates onDirtyChange={setTemplatesDirty} />
                     )}
                 </div>
             </div>
@@ -1850,6 +1894,13 @@ const Settings = () => {
                                 </div>
                             </div>
                         ))}
+                    </div>
+
+                    {/* Eingebauter Schlüssel (kein Datensatz in distribution_keys, nur in der Nebenkostenabrechnung wählbar) */}
+                    <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', fontSize: '0.85rem', color: 'var(--text-secondary)', backgroundColor: 'var(--background-color, #F9FAFB)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}>
+                        <strong>Hinweis:</strong> Zusätzlich gibt es den eingebauten Schlüssel „HeizkostenV (Grund-/Verbrauchskosten)“ für Heiz- und Warmwasserkosten
+                        (Grundkosten nach Wohnfläche, Verbrauchskosten nach erfasstem Verbrauch, Verbrauchsanteil 50–70 %).
+                        Er erscheint nicht in dieser Liste und wird direkt in der Nebenkostenabrechnung je Kostenposition gewählt.
                     </div>
 
                     <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>

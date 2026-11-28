@@ -1,34 +1,11 @@
 -- ============================================================================
--- Migration: Cleanup stuck payments from before the Reverse feature
+-- NEUTRALISIERT (Welle 3, Paket SCHEMA, 27.11.2026): Bereinigung der Forderungszahlungen (H1-03)
+-- Einmalige Datenkorrektur vom Mai 2026, live bereits ausgeführt (Version steht in
+-- supabase_migrations.schema_migrations). Der ursprüngliche Inhalt arbeitete ohne Einschränkung
+-- auf den Daten ALLER Nutzer und war nicht wiederholbar; ein erneutes Abspielen (manuell oder
+-- beim Neuaufbau) hätte alle Forderungszahlungen samt Zuordnungen und Verrechnungsbuchungen gelöscht
+-- und erledigte Forderungen wieder geöffnet (Zinsstand 0). Dateiname und Version bleiben,
+-- damit die Migrationsliste synchron bleibt. Ursprünglicher Inhalt: Git-Historie dieser Datei.
+-- Neuaufbau einer Datenbank: supabase/baseline/README.md
 -- ============================================================================
-
-DO $$ 
-DECLARE 
-  v_user_id uuid;
-BEGIN
-  -- We just delete all claim_payments and associated data to clean up the test state.
-  
-  ALTER TABLE rent_payments DISABLE TRIGGER block_claim_rent_payments_modification;
-
-  -- Delete all rent_payments created via Forderungsakte (both old format without Ref and new format)
-  DELETE FROM rent_payments WHERE note LIKE 'Verrechnung über Forderungsakte%';
-
-  ALTER TABLE rent_payments ENABLE TRIGGER block_claim_rent_payments_modification;
-
-  -- Delete all claim payment allocations
-  DELETE FROM claim_payment_allocations;
-
-  -- Delete all claim payments
-  DELETE FROM claim_payments;
-
-  -- Reset claims status if it was settled by those payments
-  UPDATE claims 
-  SET 
-    accumulated_unpaid_interest = 0,
-    status = 'open'
-  WHERE status = 'settled' OR accumulated_unpaid_interest > 0;
-  
-  -- Perform sync
-  PERFORM sync_all_rent_ledgers();
-
-END $$;
+select 1;

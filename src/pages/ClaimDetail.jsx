@@ -43,6 +43,17 @@ const isMissingRpcError = (err) => err?.code === 'PGRST202' || /could not find t
 // Erlass/Ausbuchung (settle_claim_item): Buchung ohne Geldeingang
 const isWaiverMeta = (meta) => meta?.waiver === true || meta?.waiver === 'true' || meta?.allocation_type === 'waiver';
 
+// Systemhinweise (note_added mit event_metadata.portal_event) aus Mieterportal und Online-Zahlung:
+// claim_portal_check_access (pin_failed, link_locked), create-portal-checkout-session (checkout_started),
+// stripe-webhook (stripe_unbooked)
+const SYSTEM_NOTE_TITLES = {
+    checkout_started: 'Mieterportal: Online-Zahlung gestartet',
+    stripe_unbooked: 'Online-Zahlung nicht verbucht – bitte prüfen',
+    pin_failed: 'Mieterportal: falsche PIN eingegeben',
+    link_locked: 'Mieterportal: Link gesperrt'
+};
+const isSystemNoteMeta = (meta) => !!meta && (!!meta.portal_event || meta.source === 'claim_portal' || meta.source === 'stripe');
+
 const getFirstOfNextMonth = () => {
     const d = new Date();
     return toLocalDateString(new Date(d.getFullYear(), d.getMonth() + 1, 1));
@@ -158,13 +169,14 @@ const ClaimDetail = () => {
         const failed = [];
         try {
             // Fetch A & E) claim + tenant + lease
-            const { data: claimData, error: claimError } = await supabase
+            // tenants.salutation = Anrede für Mahnschreiben (claimPdfGenerator); fehlt die Spalte, ohne sie erneut laden
+            const fetchClaim = (withSalutation) => supabase
                 .from('claims')
                 .select(`
                     id, user_id, lease_id, tenant_id, status, escalation_level,
                     interest_start_date, interest_rate, accumulated_unpaid_interest,
                     accumulated_unpaid_fees, deadline, next_action_at, created_at,
-                    tenants ( first_name, last_name, email, phone, street, house_number, postal_code, city ),
+                    tenants ( first_name, last_name, email, phone, street, house_number, postal_code, city${withSalutation ? ', salutation' : ''} ),
                     leases (
                         id, start_date,
                         units (
@@ -175,6 +187,11 @@ const ClaimDetail = () => {
                 `)
                 .eq('id', claimId)
                 .single();
+
+            let { data: claimData, error: claimError } = await fetchClaim(true);
+            if (claimError && (claimError.code === 'PGRST204' || claimError.code === '42703') && /salutation/i.test(claimError.message || '')) {
+                ({ data: claimData, error: claimError } = await fetchClaim(false));
+            }
 
             if (claimError) throw claimError;
             setClaim(claimData);
@@ -1198,6 +1215,10 @@ const ClaimDetail = () => {
         if (event.event_type === 'note_added' && meta.source === 'append_advanced') {
             return reversedAppendEventIds.has(event.id) ? 'Positionen hinzugefügt (rückgängig gemacht)' : 'Positionen hinzugefügt';
         }
+        if (event.event_type === 'note_added' && isSystemNoteMeta(meta)) {
+            if (SYSTEM_NOTE_TITLES[meta.portal_event]) return SYSTEM_NOTE_TITLES[meta.portal_event];
+            return meta.source === 'stripe' ? 'Hinweis zur Online-Zahlung (Stripe)' : 'Hinweis aus dem Mieterportal';
+        }
         return translateEventType(event.event_type);
     };
 
@@ -1324,6 +1345,16 @@ const ClaimDetail = () => {
                             </div>
                         </div>
                     )}
+
+                    {/* record_claim_payment spiegelt Mietpositionen je Monat nur bis zur Sollmiete ins Mietkonto;
+                        ohne passende Mietzeile (Monat/Sollmiete) bleibt der Betrag ebenfalls ungespiegelt */}
+                    {!isReversed && num(meta.rent_mirror_unbooked) > 0 && (
+                        <div style={{ marginTop: '8px', padding: '8px', borderRadius: '4px', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' }}>
+                            <strong>Hinweis Mietkonto:</strong> {formatCurrency(num(meta.rent_mirror_unbooked))} dieser Zahlung wurden nicht ins Mietkonto übernommen –
+                            entweder ist die Sollmiete der betroffenen Monate dort bereits erreicht (die Miete wäre sonst überzahlt) oder im Mietkonto fehlt ein passender Monat mit Sollmiete.
+                            In der Forderung ist der Betrag verrechnet. Bitte das Mietkonto prüfen, z. B. ob die Miete zusätzlich direkt gezahlt wurde (Doppelzahlung).
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -1420,6 +1451,37 @@ const ClaimDetail = () => {
                             Diese Vereinbarung wurde aufgehoben (siehe Eintrag „Ratenzahlungsvereinbarung rückgängig gemacht“).
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // Systemhinweise aus Mieterportal/Stripe: Der Hinweistext steht in der Beschreibung (Betrag,
+        // Grund, Handlungsbedarf), hier nur ergänzende Eckdaten statt der Rohdaten
+        if (event.event_type === 'note_added' && isSystemNoteMeta(meta)) {
+            const rows = [];
+            let hint = null;
+            const unbooked = meta.portal_event === 'stripe_unbooked';
+            if (meta.portal_event === 'checkout_started') {
+                if (meta.quote_date) rows.push(['Forderungsstand vom', formatDate(meta.quote_date)]);
+                const expiresAt = Number(meta.expires_at);
+                if (Number.isFinite(expiresAt) && expiresAt > 0) rows.push(['Zahlungsseite gültig bis', new Date(expiresAt * 1000).toLocaleString('de-DE')]);
+                if (typeof meta.session_id === 'string' && meta.session_id) rows.push(['Stripe-Zahlungssitzung', meta.session_id]);
+                hint = 'Noch kein Geldeingang: Gebucht wird erst, wenn Stripe die Zahlung bestätigt. Startet der Mieter erneut eine Online-Zahlung, wird diese Zahlungsseite ungültig.';
+            } else if (unbooked) {
+                hint = 'Nicht automatisch gebucht: Die Zahlung ist erst nach manueller Erfassung in den Summen dieser Forderungsakte enthalten.';
+            } else if (meta.portal_event === 'link_locked') {
+                if (meta.failed_attempts !== undefined && meta.failed_attempts !== null) rows.push(['Falsche PIN-Eingaben', String(meta.failed_attempts)]);
+            } else if (meta.auto_reversed !== undefined) {
+                rows.push(['Zahlung automatisch storniert', meta.auto_reversed === true ? 'Ja' : 'Nein']);
+                if (typeof meta.payment_intent === 'string' && meta.payment_intent) rows.push(['Stripe-Zahlung', meta.payment_intent]);
+            }
+            if (rows.length === 0 && !hint) return null;
+            return (
+                <div style={{ backgroundColor: unbooked ? '#FEF2F2' : '#F9FAFB', border: `1px solid ${unbooked ? '#FECACA' : '#E5E7EB'}`, padding: '12px', borderRadius: '6px', marginTop: '8px', fontSize: '0.85rem' }}>
+                    {rows.map(([label, value]) => (
+                        <div key={label} style={{ marginBottom: '4px', overflowWrap: 'anywhere' }}><strong>{label}:</strong> {value}</div>
+                    ))}
+                    {hint && <div style={{ marginTop: rows.length > 0 ? '8px' : 0, color: unbooked ? '#991B1B' : 'var(--text-secondary)', fontWeight: unbooked ? 600 : 400 }}>{hint}</div>}
                 </div>
             );
         }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
     ArrowLeft,
@@ -17,6 +17,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
@@ -44,6 +45,8 @@ import {
     LEGACY_VAT_RATE,
     SMALL_BUSINESS_NOTE
 } from '../lib/invoiceDocument';
+
+const READ_ONLY_NOTICE = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Rechnungen können nur mit Schreibrecht „Finanzen“ angelegt, geändert oder ausgestellt werden.';
 
 // Helpers
 const toNum = (v) => {
@@ -92,7 +95,15 @@ const InvoiceForm = () => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
     const hasPortfolioSelection = !!selectedPortfolioID && selectedPortfolioID !== 'all';
+
+    // Schreibrecht „Finanzen“ im Portfolio der Rechnung (Freigaben, wie Invoices.jsx); ohne Portfolio:
+    // aktueller Bereich. Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich per RLS.
+    const canWriteInvoices = useCallback((portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite('finanzen', portfolioId) : perm.canWrite('finanzen');
+    }, [perm]);
 
     // State
     const [loading, setLoading] = useState(true);
@@ -145,7 +156,15 @@ const InvoiceForm = () => {
     const [contactSearch, setContactSearch] = useState('');
 
     const invoiceStatus = isEdit ? getInvoiceStatus(loadedInvoice) : INVOICE_STATUS.DRAFT;
-    const readOnly = isEdit && !!loadedInvoice && !isInvoiceEditable(loadedInvoice);
+    // Festgeschrieben (ausgestellt/storniert/Gutschrift) – unabhängig von Freigaben
+    const lockedByStatus = isEdit && !!loadedInvoice && !isInvoiceEditable(loadedInvoice);
+    // Lesemodus bei Freigabe ohne Schreibrecht „Finanzen“ für das Portfolio der Rechnung; bei Neuanlage
+    // zählt der aktuelle Bereich (die Auswahl der Ferienwohnung zeigt nur beschreibbare Portfolios,
+    // handleSave prüft das Portfolio der gewählten Wohnung)
+    const noWriteAccess = isEdit
+        ? !!loadedInvoice && !canWriteInvoices(loadedInvoice.portfolio_id || null)
+        : !canWriteInvoices(hasPortfolioSelection ? selectedPortfolioID : null);
+    const readOnly = lockedByStatus || noWriteAccess;
 
     // Derived
     const vacationUnits = useMemo(() => {
@@ -155,8 +174,13 @@ const InvoiceForm = () => {
             const portfolioProps = properties.filter(p => p.portfolio_id === selectedPortfolioID).map(p => p.id);
             filtered = filtered.filter(u => portfolioProps.includes(u.property_id));
         }
+        // Neuanlage nur für Ferienwohnungen aus Portfolios mit Schreibrecht „Finanzen“
+        if (!isEdit) {
+            const portfolioOf = new Map(properties.map(p => [p.id, p.portfolio_id]));
+            filtered = filtered.filter(u => canWriteInvoices(portfolioOf.get(u.property_id) || null));
+        }
         return filtered;
-    }, [allUnits, properties, selectedPortfolioID, hasPortfolioSelection]);
+    }, [allUnits, properties, selectedPortfolioID, hasPortfolioSelection, isEdit, canWriteInvoices]);
     const selectedUnit = useMemo(() => allUnits.find(u => u.id === selectedUnitId), [allUnits, selectedUnitId]);
     const senderPortfolio = useMemo(() => portfolios.find(p => p.id === senderPortfolioId) || null, [portfolios, senderPortfolioId]);
 
@@ -628,6 +652,10 @@ const InvoiceForm = () => {
     // ===== AUSSTELLEN =====
     const handleIssue = async () => {
         if (!savedInvoice) return;
+        if (!canWriteInvoices(savedInvoice.portfolio_id || null)) {
+            alert(READ_ONLY_NOTICE);
+            return;
+        }
         const missing = getInvoiceMissingFields(savedInvoice, portfolios.find(p => p.id === savedInvoice.portfolio_id));
         const msg = (missing.length
             ? `Achtung, es fehlen Angaben:\n- ${missing.join('\n- ')}\n\nFehlende Angaben werden im Dokument rot markiert.\n\n`
@@ -669,6 +697,10 @@ const InvoiceForm = () => {
         const errors = validate();
         if (errors.length) {
             alert('Bitte prüfen Sie folgende Angaben:\n- ' + errors.join('\n- '));
+            return;
+        }
+        if (!canWriteInvoices(senderPortfolioId || null)) {
+            alert(READ_ONLY_NOTICE);
             return;
         }
         setSaving(true);
@@ -816,7 +848,27 @@ const InvoiceForm = () => {
                 </div>
             </div>
 
-            {readOnly && (
+            {noWriteAccess && !lockedByStatus && (
+                <div style={noticeStyle('info')}>
+                    <Lock size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 4 }}>Nur lesen – Freigabe ohne Schreibrecht „Finanzen“</div>
+                        <div>
+                            {isEdit
+                                ? 'Diesen Entwurf können Sie ansehen und als Vorschau drucken, aber nicht ändern oder ausstellen.'
+                                : 'In diesem Portfolio können Sie keine Rechnungen anlegen. Bitte wählen Sie oben ein Portfolio, für das Sie Schreibrecht „Finanzen“ haben.'}
+                        </div>
+                        {isEdit && loadedInvoice && (
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                                <Button variant="secondary" size="sm" icon={Printer} onClick={() => handlePrint(loadedInvoice)}>Vorschau drucken (Entwurf)</Button>
+                                <Button variant="secondary" size="sm" icon={Download} onClick={() => handlePDF(loadedInvoice)}>Vorschau als PDF (Entwurf)</Button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {lockedByStatus && (
                 <div style={noticeStyle('info')}>
                     <Lock size={18} style={{ flexShrink: 0, marginTop: 2 }} />
                     <div style={{ flex: 1 }}>
@@ -825,7 +877,7 @@ const InvoiceForm = () => {
                         </div>
                         <div>
                             Ausgestellte Belege können nicht mehr geändert werden.
-                            {invoiceStatus === INVOICE_STATUS.ISSUED && ' Korrekturen erfolgen über „Gutschrift / Storno erstellen" in der Rechnungsliste; danach kann eine neue Rechnung erstellt werden.'}
+                            {invoiceStatus === INVOICE_STATUS.ISSUED && !noWriteAccess && ' Korrekturen erfolgen über „Gutschrift / Storno erstellen" in der Rechnungsliste; danach kann eine neue Rechnung erstellt werden.'}
                         </div>
                         <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
                             <Button variant="secondary" size="sm" icon={Printer} onClick={() => handlePrint(loadedInvoice)}>Drucken</Button>

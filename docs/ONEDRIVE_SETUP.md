@@ -37,9 +37,9 @@ Die Anwendung benötigt Berechtigungen, um im Namen des Benutzers auf OneDrive z
      `Files.ReadWrite.All` erlauben würde, ist nicht nötig)
    * `User.Read` (zum Auslesen des Profils und der E-Mail-Adresse des Benutzers für die Verbindungsanzeige)
 
-   Hinweis: Neue Verbindungen fordern `Files.ReadWrite` an, sobald die aktuelle Version der Edge Function
-   `cloud-auth` bereitgestellt ist (vorher noch `Files.ReadWrite.All`). Bestehende Verbindungen behalten ihre
-   bisherige Freigabe; niemand muss neu verbinden.
+   Hinweis: Neue Verbindungen fordern `Files.ReadWrite` an (die Edge Function `cloud-auth` liefert die Scopes
+   über ihre Aktion `config`; ältere Verbindungen wurden noch mit `Files.ReadWrite.All` angelegt). Bestehende
+   Verbindungen behalten ihre bisherige Freigabe; niemand muss neu verbinden.
 4. Klicken Sie unten auf **Berechtigungen hinzufügen**.
 
 ---
@@ -79,13 +79,21 @@ supabase secrets set ONEDRIVE_CLIENT_SECRET="dein-kopiertes-client-secret"
 
 1. Unter **Einstellungen ➔ Cloud-Verbindungen** kann der Anwender auf *Mit Microsoft OneDrive verbinden* klicken.
 2. Er wird zur Microsoft-Anmeldeseite weitergeleitet, authentifiziert sich und stimmt den Berechtigungen zu.
-3. Microsoft leitet den User zurück zur Callback-Seite, wo die Supabase Edge Function `cloud-auth` aufgerufen wird. Diese tauscht den Autorisierungscode gegen Access- und Refresh-Token und speichert sie in der Tabelle `cloud_connections`.
+3. Microsoft leitet den User zurück zur Callback-Seite, wo die Supabase Edge Function `cloud-auth` aufgerufen wird. Diese tauscht den Autorisierungscode gegen Access- und Refresh-Token und legt die Verbindung in der Tabelle `cloud_connections` an; die Tokens selbst speichert sie verschlüsselt im Supabase Vault.
 
-   **Wichtig zur Speicherung:** Die Tokens liegen dort **unverschlüsselt** (Klartext-Spalten). Geschützt sind sie
-   nur über Zugriffsrechte: Die Edge Functions geben keine Tokens an den Browser zurück, und mit der Migration
-   des Pakets CLOUD (Komplett-Check 2026-11-27, noch einzuspielen) sind die Token-Spalten für `anon`/`authenticated`
-   gesperrt – lesen und schreiben darf sie dann nur noch `service_role` (also die Edge Functions). Bis dahin kann
-   jeder angemeldete Nutzer die eigenen Zeilen samt Tokens lesen. Eine echte Verschlüsselung (z. B. Supabase Vault
-   bzw. `pgcrypto` mit Schlüssel als Function-Secret) ist noch offen; wer Zugriff auf die Datenbank hat
-   (Service-Role-Schlüssel, DB-Passwort, Backups), hat damit dauerhaften Zugriff auf die verbundenen OneDrives.
+   **Wichtig zur Speicherung (Stand 28.11.2026):**
+   * Access- und Refresh-Token liegen **verschlüsselt im Supabase Vault** (`vault.secrets`, ein Eintrag je Token
+     und Verbindung). `cloud_connections` enthält nur noch die Verweise `access_token_secret_id` /
+     `refresh_token_secret_id`; die alten Klartext-Spalten `access_token` / `refresh_token` sind leer.
+   * Gelesen und geschrieben werden die Tokens ausschließlich über die Datenbankfunktionen
+     `cloud_get_tokens(p_connection_id, p_user_id)` und `cloud_store_tokens(p_connection_id, p_user_id,
+     p_access_token, p_refresh_token, p_expires_at)`. Beide sind **nur für `service_role`** ausführbar, also nur für
+     die Edge Functions (`cloud-auth`, `cloud-drive`, `cloud-sync`, `sync-applicant-files`). Für `anon` und
+     `authenticated` sind die Token- und Verweis-Spalten gesperrt; der Browser sieht nur Anbieter, Konto-Anzeige,
+     Ablaufzeit und Anlagedatum.
+   * Die Edge Functions geben keine Tokens an den Browser zurück. Wird eine Verbindung gelöscht, entfernt ein
+     Trigger (`cloud_connections_delete_secrets`) auch die zugehörigen Vault-Einträge.
+   * Grenze: Die Verschlüsselung verhindert, dass die Tokens im Klartext in Tabellen-Exporten oder Dumps von
+     `cloud_connections` auftauchen. Wer `service_role`-Schlüssel oder DB-Passwort besitzt, kann die Tokens über Vault bzw. die Funktionen
+     weiterhin entschlüsseln – diese Schlüssel also wie das Client-Secret behandeln.
 4. Der User kann nun jedem Portfolio diese Verbindung zuweisen. Bei der Generierung von Rechnungen, Nebenkostenabrechnungen oder Verträgen synchronisiert der Hintergrunddienst `cloud-sync` diese Dokumente vollautomatisch in das entsprechende OneDrive des Users.

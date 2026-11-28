@@ -95,7 +95,7 @@ const RenovationCalculatorDetail = () => {
     const isNew = id === 'new';
     const navigate = useNavigate();
     const { user } = useAuth();
-    const { selectedPortfolioID } = usePortfolio();
+    const { selectedPortfolioID, portfolios } = usePortfolio();
     const { isMobile } = useViewMode();
     const [searchParams] = useSearchParams();
     const pdfTemplate = usePdfTemplate('sanierung_rechner');
@@ -566,8 +566,14 @@ const RenovationCalculatorDetail = () => {
                     total_cost: totalCost,
                 }).eq('id', calcId).select('id'), 'Kalkulation speichern');
             } else {
+                // Kalkulation zu einem Objekt gehört dem Portfolio-Eigentümer (wie Sanierungsprojekte,
+                // G29-13), damit sie nicht am Konto eines Teammitglieds hängt. Die Datenbank lässt als
+                // user_id das eigene Konto oder den Portfolio-Eigentümer zu (rls_user_ok); ohne Objekt
+                // bzw. ohne lesbares Portfolio bleibt es das eigene Konto.
+                const assignedProperty = propertyId ? propertyOptions.find(p => p.id === propertyId) : null;
+                const dataOwner = (assignedProperty && (portfolios || []).find(pf => pf.id === assignedProperty.portfolio_id)?.user_id) || user.id;
                 const { data, error } = await supabase.from('renovation_calculations').insert({
-                    user_id: user.id, name: name.trim(), calc_type: calcType,
+                    user_id: dataOwner, name: name.trim(), calc_type: calcType,
                     property_id: propertyId || null, unit_id: unitId || null,
                     building_config: buildingConfig,
                     total_cost: totalCost,

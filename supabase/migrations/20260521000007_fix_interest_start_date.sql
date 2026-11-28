@@ -1,22 +1,11 @@
 -- ============================================================================
--- Migration: Fix interest_start_date for cleaned up claims
+-- NEUTRALISIERT (Welle 3, Paket SCHEMA, 27.11.2026): Zinsbeginn aller offenen Forderungen (H1-13)
+-- Einmalige Datenkorrektur vom Mai 2026, live bereits ausgeführt (Version steht in
+-- supabase_migrations.schema_migrations). Der ursprüngliche Inhalt arbeitete ohne Einschränkung
+-- auf den Daten ALLER Nutzer und war nicht wiederholbar; ein erneutes Abspielen (manuell oder
+-- beim Neuaufbau) hätte den Zinsbeginn offener Forderungen (z. B. nach Teilzahlungen) zurückgedreht,
+-- bereits abgerechnete Zeiträume wären erneut verzinst worden. Dateiname und Version bleiben,
+-- damit die Migrationsliste synchron bleibt. Ursprünglicher Inhalt: Git-Historie dieser Datei.
+-- Neuaufbau einer Datenbank: supabase/baseline/README.md
 -- ============================================================================
-
-DO $$ 
-BEGIN
-  -- Set interest_start_date back to the 5th day of the oldest unpaid rent month 
-  -- (approximate start of default / Verzug)
-  UPDATE claims c
-  SET interest_start_date = (
-    SELECT min(ci.period_month) + interval '4 days'
-    FROM claim_items ci
-    WHERE ci.claim_id = c.id
-  )
-  WHERE c.status = 'open' 
-    AND c.interest_start_date > (
-      SELECT min(ci.period_month) + interval '4 days'
-      FROM claim_items ci
-      WHERE ci.claim_id = c.id
-    );
-
-END $$;
+select 1;

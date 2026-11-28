@@ -3,6 +3,8 @@ import QRCode from 'qrcode';
 import { openSansFontFaceCss } from './fontFaces';
 import { loadHtml2Pdf } from './htmlToPdf';
 import { DEFAULT_TEMPLATES, fixLegacyTemplateTypos } from './defaultTemplates';
+import { LETTER_PAGE_CSS, scopeLetterCss } from './letterDocumentCss';
+import { buildLetterSalutation } from './utilitySettlement';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemeinsame Hilfsfunktionen für das Forderungsmanagement (Forderungsliste,
@@ -210,6 +212,30 @@ export const sanitizeTemplateHtml = (html) => {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ── Dokument-CSS des Mahnschreibens (auf .ic-claim-doc begrenzt) ────────────
+// Steht im <body>: Die PDF-Erzeugung (lib/htmlToPdf) klont den Inhalt ins App-Dokument, Stile im
+// <head> des Hilfs-iframes kämen dort nicht an. Seitengeometrie aus derselben Quelle wie
+// Vorlagen-Editor und Druckfenster (lib/letterPage.css); hier nur die PDF-Besonderheiten:
+// - kein Seitenschatten/keine Rundung,
+// - Blatthöhe 296 mm statt 297 mm: die PDF-Erzeugung rundet das A4-Blatt auf 1122 px ab und würde
+//   sonst einen Streifen auf eine Leerseite schneiden. Der untere Innenabstand ist dafür 1 mm
+//   kleiner, die Textfläche bleibt damit genau so groß wie im Editor,
+// - Umbruch vor jeder Folgeseite (jede Briefseite beginnt oben auf einem PDF-Blatt),
+// - Tabellen ohne App-Design (Glas-Hintergrund, Schatten, Dunkelmodus-Farben); im Dunkelmodus der App
+//   färbt index.css Tabellenköpfe (Hintergrund !important) und Überschriften (fast weiß, !important) –
+//   hier zurück auf das Blatt-Design, sonst stünde schwarzer Text auf dunklem Kopf bzw. weißer auf weißem Blatt.
+const CLAIM_DOC_CSS = `
+.ic-claim-doc { width: 210mm; background: #ffffff; color: #000000; text-align: left; }
+${scopeLetterCss(LETTER_PAGE_CSS, '.ic-claim-doc')}
+.ic-claim-doc .letter-page { height: 296mm !important; min-height: 296mm !important; max-height: 296mm !important; padding-bottom: 34mm !important; margin: 0 !important; box-shadow: none !important; border-radius: 0 !important; page-break-inside: avoid; break-inside: avoid; }
+.ic-claim-doc .letter-page ~ .letter-page { page-break-before: always; break-before: page; }
+.ic-claim-doc > p:empty { display: none; }
+.ic-claim-doc table { background: transparent !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
+.ic-claim-doc th, .ic-claim-doc td { color: #000000; background-color: transparent; font-size: inherit; }
+[data-theme="dark"] .ic-claim-doc th { background-color: transparent !important; color: #000000; }
+[data-theme="dark"] .ic-claim-doc h1, [data-theme="dark"] .ic-claim-doc h2, [data-theme="dark"] .ic-claim-doc h3, [data-theme="dark"] .ic-claim-doc h4 { color: #000000 !important; }
+`;
+
 const formatCurrency = formatCurrencyDE;
 const formatDate = formatDateDE;
 
@@ -305,6 +331,18 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
         throw new Error('Keine Empfängeranschrift vorhanden: Bitte die Anschrift des Mieters im Mieterstamm hinterlegen.');
     }
     if (!tenantName) warnings.push('Für den Mieter ist kein Name hinterlegt.');
+
+    // Anrede für die Briefanrede (tenants.salutation); fehlt sie in den übergebenen Mieterdaten, nachladen
+    let tenantSalutation = tenant.salutation;
+    if (tenantSalutation === undefined && claim.tenant_id) {
+        const { data: salutationRow, error: salutationError } = await supabase
+            .from('tenants')
+            .select('salutation')
+            .eq('id', claim.tenant_id)
+            .maybeSingle();
+        if (salutationError) console.warn('Anrede des Mieters nicht lesbar – neutrale Briefanrede:', salutationError);
+        tenantSalutation = salutationRow?.salutation ?? null;
+    }
 
     // 3. Vorlage bestimmen
     let templateType = 'payment_reminder';
@@ -669,7 +707,8 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     }
 
     // 8. Variablen (alle Texte escaped; Tabellen sind eigenes, geprüftes HTML)
-    const mieterAnrede = tenantName ? `Sehr geehrte/r ${tenantName}` : 'Sehr geehrte Damen und Herren';
+    // Gleiche Regel wie Vorlagen-Editor und Nebenkostenabrechnung (Frau/Herr + Nachname, sonst neutral)
+    const mieterAnrede = buildLetterSalutation({ fullName: tenantName, lastName: tenant.last_name, salutation: tenantSalutation });
     const localVars = {
         mieter_name: escapeHtml(tenantName),
         mieter_anrede: escapeHtml(mieterAnrede),
@@ -705,130 +744,14 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
     // Vorlage bereinigen; doppelte Anrede vermeiden ('Sehr geehrte/r ' + Variable, die bereits die Anrede enthält)
     const rawTemplateHtml = fixLegacyTemplateTypos(template?.content_html || DEFAULT_TEMPLATES[templateType].content_html);
     const fullTemplateHtml = sanitizeTemplateHtml(rawTemplateHtml)
-        .replace(/Sehr geehrte(?:\/r|\(r\))?(?:\s|&nbsp;)*(?=<span[^>]*data-id="mieter_anrede")/gi, '')
-        .replace(/Sehr geehrte(?:\/r|\(r\))?(?:\s|&nbsp;)*(?=\{mieter_anrede\})/gi, '');
+        .replace(/Sehr geehrte(?:\/r|\(r\)|r)?(?:\s|&nbsp;)*(?=<span[^>]*data-id="mieter_anrede")/gi, '')
+        .replace(/Sehr geehrte(?:\/r|\(r\)|r)?(?:\s|&nbsp;)*(?=\{mieter_anrede\})/gi, '');
     const renderedContent = replaceHTMLVariables(fullTemplateHtml, localVars);
 
-    // Build the final printed HTML
+    // Druckdokument: Seiten-CSS aus derselben Quelle wie Editor und Druckfenster (CLAIM_DOC_CSS, im <body>)
     const finalHtml = `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><title>${escapeHtml(docType)} - ${escapeHtml(tenantName)}</title>
-    <style>
-        ${openSansFontFaceCss()}
-        @page { size: A4; margin: 0; }
-        * { box-sizing: border-box; }
-        body { margin: 0; padding: 0; background: #fff; font-family: 'Open Sans', Arial, sans-serif; font-size: 11pt; color: #000; }
-        .letter-page {
-            width: 210mm;
-            height: 297mm;
-            padding: 20mm 20mm 35mm 25mm;
-            margin: 0 auto;
-            background: #ffffff;
-            color: #000000;
-            box-sizing: border-box;
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            text-align: left;
-            page-break-after: always;
-            page-break-inside: avoid;
-        }
-        .letter-page > p {
-            min-height: 1.2em;
-            margin: 0;
-        }
-        .letter-sender {
-            font-size: 8pt;
-            color: #555555;
-            border-bottom: 1px solid #cccccc;
-            padding-bottom: 2mm;
-            margin-bottom: 5mm;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .letter-header-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 10mm;
-        }
-        .letter-recipient {
-            width: 85mm;
-            font-size: 10pt;
-            line-height: 1.4;
-            color: #111111;
-            text-align: left;
-        }
-        .letter-date {
-            font-size: 10pt;
-            color: #333333;
-            text-align: right;
-        }
-        .letter-subject {
-            font-size: 13pt;
-            font-weight: bold;
-            margin-bottom: 4mm;
-            color: #000000;
-            text-align: left;
-        }
-        .letter-object {
-            font-size: 10pt;
-            color: #444444;
-            margin-bottom: 8mm;
-            padding-bottom: 2mm;
-            border-bottom: 1px dotted #e2e8f0;
-            text-align: left;
-        }
-        .letter-body {
-            flex-grow: 1;
-            flex-shrink: 1;
-            min-height: 0;
-            overflow: hidden;
-            font-size: 11pt;
-            line-height: 1.6;
-            text-align: left;
-        }
-        .letter-body p {
-            margin-bottom: 1em !important;
-        }
-        .letter-footer {
-            position: absolute !important;
-            bottom: 10mm !important;
-            left: 25mm !important;
-            right: 20mm !important;
-            height: 18mm !important;
-            margin-top: 0 !important;
-            display: flex !important;
-            justify-content: space-between !important;
-            border-top: 1px solid #dddddd !important;
-            padding-top: 3mm !important;
-            font-size: 8pt !important;
-            color: #666666 !important;
-            line-height: 1.4 !important;
-            text-align: left !important;
-            box-sizing: border-box !important;
-            background-color: #ffffff !important;
-        }
-        .footer-col {
-            width: 30%;
-        }
-        @media print {
-            body {
-                margin: 0;
-                padding: 0;
-                background: #fff;
-            }
-            .letter-page {
-                margin: 0 !important;
-                border: none !important;
-                box-shadow: none !important;
-                page-break-after: always !important;
-                page-break-inside: avoid !important;
-                width: 210mm !important;
-                height: 297mm !important;
-            }
-        }
-    </style></head><body style="background:#fff">
-    ${renderedContent}
-    </body></html>`;
+    <style>${openSansFontFaceCss()} @page { size: A4; margin: 0; } html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+    </head><body style="background:#fff"><div class="ic-claim-doc"><style>${CLAIM_DOC_CSS}</style>${renderedContent}</div></body></html>`;
 
     // 9. Dateiname (lokales Datum)
     const cleanTenantName = (tenantName || 'Mieter').replace(/[^a-z0-9äöüß]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'Mieter';
@@ -853,21 +776,29 @@ export const generateClaimPdf = async (claim, totals, items, documentType, deadl
 
         const html2pdf = await loadHtml2Pdf();
 
-        // Auf Webfonts warten (max. 3 s), dann kurz rendern lassen
+        // Auf die Briefschrift warten (max. 3 s): gerendert wird im App-Dokument, dort die Schnitte gezielt laden
         try {
-            if (document.fonts && document.fonts.ready) await Promise.race([document.fonts.ready, sleep(3000)]);
+            if (document.fonts && document.fonts.ready) {
+                const fontLoads = typeof document.fonts.load === 'function'
+                    ? Promise.all(['400 11pt "Open Sans"', '600 11pt "Open Sans"', '700 11pt "Open Sans"'].map(f => document.fonts.load(f)))
+                        .then(() => document.fonts.ready)
+                    : document.fonts.ready;
+                await Promise.race([fontLoads, sleep(3000)]);
+            }
         } catch {
             // Schriftstatus nicht ermittelbar – weiter mit fester Wartezeit
         }
         await sleep(600);
 
+        // Rand 0: Die Briefseiten sind bereits A4 (wie im Editor); jede Seite beginnt auf einem eigenen Blatt
         pdfArrayBuffer = await html2pdf().set({
-            margin: 10,
+            margin: 0,
             filename: fileName,
             image: { type: 'jpeg', quality: 0.98 },
-            html2canvas: { scale: 2, useCORS: true },
-            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-        }).from(frameDoc.body).output('arraybuffer');
+            html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0 },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+            pagebreak: { mode: ['css'] }
+        }).from(frameDoc.querySelector('.ic-claim-doc') || frameDoc.body).output('arraybuffer');
     } finally {
         if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
     }

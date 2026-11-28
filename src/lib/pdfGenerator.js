@@ -205,7 +205,7 @@ function renderTemplateElement(el, { title, subtitle, portfolioName, propertyNam
  * @param {string} options.orientation - 'portrait' | 'landscape' | 'auto'
  * @param {boolean} options.showSums - show sum row
  * @param {boolean} options.groupByProperty - group rows by property
- * @param {boolean} options.dsgvoAnonymize - anonymize DSGVO fields
+ * @param {boolean} options.dsgvoAnonymize - DSGVO-Felder pseudonymisieren (Namen → „Mieter 1", übrige maskiert)
  * @param {string} options.portfolioName - name of the portfolio
  * @param {string} options.propertyName - optional property name
  * @param {string} options.accentColor - brand accent color
@@ -216,6 +216,9 @@ function renderTemplateElement(el, { title, subtitle, portfolioName, propertyNam
  * @param {number} options.templateMargin - margin in mm (fallback)
  * @param {number} options.templateHeaderHeight - header height mm (fallback)
  * @param {number} options.templateFooterHeight - footer height mm (fallback)
+ * @param {Object} options.extraOptions - Zusatzoptionen aus REPORT_CONFIGS[reportType].extraOptions;
+ *   ausgewertet wird nur includeUnits (mit unitData). Neue Optionen erst eintragen, wenn sie hier wirken.
+ * @param {Object} options.unitData - Einheiten je property_id (für includeUnits)
  * @param {boolean} options.autoPrint - Druckdialog automatisch öffnen (Standard: true)
  * @param {Window} [options.targetWindow] - bereits (synchron im Klick) geöffnetes Fenster;
  *   empfohlen, wenn vor dem Aufruf noch auf Daten gewartet wird (Pop-up-Blocker)
@@ -302,7 +305,7 @@ export const generateClientPdf = ({
     const dateStr = new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const timeStr = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 
-    // Anonymize DSGVO fields
+    // DSGVO-Felder pseudonymisieren
     const processedData = dsgvoAnonymize && config.dsgvoRelevant
         ? anonymizeRows(data, config.dsgvoFields)
         : data;

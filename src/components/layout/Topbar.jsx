@@ -10,10 +10,6 @@ import { useSubscription } from '../../context/SubscriptionContext';
 
 const DEFAULT_OPENING_HOURS = 'Mo-Fr 9:00 - 17:00 Uhr';
 
-// Neue Datenbank-Funktion noch nicht eingespielt? (PostgREST: PGRST202 / HTTP 404)
-const isMissingRpc = (error, status) =>
-    !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
-
 const Topbar = ({ onboardingLocked }) => {
     const { user, signOut, isTenant, roleData } = useAuth();
     const { portfolios, selectedPortfolioID, setSelectedPortfolioID } = usePortfolio();
@@ -101,44 +97,17 @@ const Topbar = ({ onboardingLocked }) => {
         let cancelled = false;
 
         // Öffnungszeiten des Vermieters: nur diese zwei Werte über die Datenbank-Funktion –
-        // nicht mehr die ganze Profil-/Portfolio-Zeile (Bankverbindung, Steuernummer …)
+        // nicht mehr die ganze Profil-/Portfolio-Zeile (Bankverbindung, Steuernummer …);
+        // Mieter lesen properties/units nicht direkt
         const fetchOwnerSettings = async () => {
             let settings = null;
             try {
-                const { data: info, error: infoError, status: infoStatus } = await supabase.rpc('get_my_landlord_info');
+                const { data: info, error: infoError } = await supabase.rpc('get_my_landlord_info');
 
-                if (!infoError) {
-                    if (info) {
-                        settings = { visible: info.opening_hours_visible, text: info.opening_hours_text };
-                    }
-                } else if (isMissingRpc(infoError, infoStatus)) {
-                    // Bisheriger Weg (Funktion noch nicht eingespielt): property -> portfolio -> Profil
-                    if (roleData?.property_id) {
-                        const { data: propData } = await supabase
-                            .from('properties')
-                            .select('portfolio:portfolios(user_id)')
-                            .eq('id', roleData.property_id)
-                            .maybeSingle();
-
-                        if (propData?.portfolio?.user_id) {
-                            const { data: profile, error: profError } = await supabase
-                                .from('profiles')
-                                .select('settings_opening_hours_visible, settings_opening_hours_text')
-                                .eq('id', propData.portfolio.user_id)
-                                .maybeSingle();
-
-                            if (profError) {
-                                console.warn('Could not fetch owner profile settings:', profError.message);
-                            } else if (profile) {
-                                settings = {
-                                    visible: profile.settings_opening_hours_visible,
-                                    text: profile.settings_opening_hours_text
-                                };
-                            }
-                        }
-                    }
-                } else {
+                if (infoError) {
                     console.warn('Could not fetch owner opening hours:', infoError.message);
+                } else if (info) {
+                    settings = { visible: info.opening_hours_visible, text: info.opening_hours_text };
                 }
             } catch (err) {
                 console.error('Error fetching owner settings:', err);
@@ -155,6 +124,7 @@ const Topbar = ({ onboardingLocked }) => {
 
         fetchOwnerSettings();
         return () => { cancelled = true; };
+        // roleData: neu laden, wenn sich die Mieterrolle ändert (die Funktion liest sie serverseitig)
     }, [isTenant, roleData]);
 
     const handleLogout = async () => {

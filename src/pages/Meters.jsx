@@ -11,10 +11,12 @@ import { Plus, Zap, Droplets, Flame, MoreHorizontal, Filter, Loader2, Gauge, Tra
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { translateError } from '../lib/errorTranslator';
 
 // Kennzeichnung des Anfangsstands nach einem Zählerwechsel (Notiz-Präfix, ohne Schemaänderung)
 const METER_SWAP_NOTE = 'Zählerwechsel:';
+const READ_ONLY_HINT = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Zähler und Zählerstände können nur mit Schreibrecht „Zähler“ angelegt, geändert oder gelöscht werden.';
 const HISTORY_PAGE = 50;
 
 // Lokales Datum (toISOString() wäre UTC und liefert nachts den Vortag)
@@ -79,6 +81,7 @@ const recalcLastReading = async (meterId) => {
     return updateError || null;
 };
 
+// onReading/onEdit/onDelete fehlen bei Freigabe nur zum Lesen (dann nur „Historie“)
 const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
     const [isOpen, setIsOpen] = useState(false);
     const menuRef = useRef(null);
@@ -135,7 +138,7 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
             onClick={(e) => e.stopPropagation()} // Stop bubbling to prevent immediate close if table row has click handlers
         >
             <div style={{ display: 'flex', flexDirection: 'column', padding: '4px' }}>
-                <button
+                {onReading && <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onReading(); }}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
@@ -148,7 +151,7 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                 >
                     <Plus size={16} /> Stand erfassen
-                </button>
+                </button>}
                 <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onHistory(); }}
                     style={{
@@ -163,7 +166,7 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
                 >
                     <FileText size={16} /> Historie
                 </button>
-                <button
+                {onEdit && <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onEdit(); }}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
@@ -176,9 +179,9 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                 >
                     <Edit2 size={16} /> Bearbeiten
-                </button>
-                <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-                <button
+                </button>}
+                {onDelete && <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />}
+                {onDelete && <button
                     onClick={(e) => { e.stopPropagation(); setIsOpen(false); onDelete(); }}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
@@ -191,7 +194,10 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
                     onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
                 >
                     <Trash2 size={16} /> Löschen
-                </button>
+                </button>}
+                {!onReading && !onEdit && !onDelete && (
+                    <div style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Nur lesen (Freigabe)</div>
+                )}
             </div>
         </div>
     );
@@ -207,6 +213,15 @@ const ActionMenu =({ onEdit, onDelete, onHistory, onReading }) => {
 const Meters = () => {
     const { user } = useAuth();
     const { selectedPortfolioID } = usePortfolio();
+    const perm = usePermission();
+
+    // Schreibrecht „Zähler“ im Portfolio des Zählers (wie die RLS von meters/meter_readings); ohne Portfolio:
+    // aktueller Bereich. Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich.
+    const canWriteMeters = (portfolioId) => {
+        if (!perm || perm.loadingPermissions) return true;
+        return portfolioId ? perm.canWrite('zaehler', portfolioId) : perm.canWrite('zaehler');
+    };
+    const canCreateMeters = canWriteMeters(selectedPortfolioID || null);
 
     // Data State
     const [meters, setMeters] = useState([]);
@@ -377,6 +392,7 @@ const Meters = () => {
     // --- ACTIONS ---
 
     const handleOpenAdd = () => {
+        if (!canCreateMeters) return alert(READ_ONLY_HINT);
         setEditingMeter(null);
         setMeterForm({
             property_id: '',
@@ -395,6 +411,7 @@ const Meters = () => {
     };
 
     const handleOpenEdit = (meter) => {
+        if (!canWriteMeters(meter.portfolio_id)) return alert(READ_ONLY_HINT);
         setEditingMeter(meter);
         setMeterForm({
             property_id: meter.property_id,
@@ -417,6 +434,10 @@ const Meters = () => {
         if (!meterForm.property_id) return alert('Bitte wählen Sie eine Immobilie.');
         const meterNumber = String(meterForm.meter_number || '').trim();
         if (!meterNumber) return alert('Bitte geben Sie eine Zählernummer ein.');
+        const targetPortfolioId = properties.find(p => p.id === meterForm.property_id)?.portfolio_id || null;
+        if ((editingMeter && !canWriteMeters(editingMeter.portfolio_id)) || !canWriteMeters(targetPortfolioId)) {
+            return alert(READ_ONLY_HINT);
+        }
 
         try {
             setIsSaving(true);
@@ -476,12 +497,13 @@ const Meters = () => {
         }
     };
 
-    const handleDeleteMeter = async (id) => {
+    const handleDeleteMeter = async (meter) => {
         if (isSaving) return;
+        if (!canWriteMeters(meter.portfolio_id)) return alert(READ_ONLY_HINT);
         if (!window.confirm('Möchten Sie diesen Zähler wirklich löschen? Alle erfassten Stände werden ebenfalls gelöscht.')) return;
         try {
             setIsSaving(true); // show generic saving overlay
-            const { error } = await supabase.from('meters').delete().eq('id', id);
+            const { error } = await supabase.from('meters').delete().eq('id', meter.id);
             if (error) throw error;
             fetchData();
         } catch (error) {
@@ -493,6 +515,7 @@ const Meters = () => {
 
     // --- READING ACTIONS ---
     const handleOpenReading = (meter) => {
+        if (!canWriteMeters(meter.portfolio_id)) return alert(READ_ONLY_HINT);
         setReadingMeter(meter);
         setReadingForm(emptyReadingForm());
         setIsReadingModalOpen(true);
@@ -500,6 +523,7 @@ const Meters = () => {
 
     const handleSaveReading = async () => {
         if (isSaving || !readingMeter) return;
+        if (!canWriteMeters(readingMeter.portfolio_id)) return alert(READ_ONLY_HINT);
         const isSwap = !!readingForm.isSwap;
         const unit = readingMeter.unit || '';
         const value = parseNumber(readingForm.value);
@@ -646,12 +670,14 @@ const Meters = () => {
     };
 
     const handleStartEditReading = (r) => {
+        if (!canWriteMeters(detailMeter?.portfolio_id)) return alert(READ_ONLY_HINT);
         setEditingReadingId(r.id);
         setReadingEdit({ value: r.reading_value != null ? String(r.reading_value) : '', date: r.reading_date || '', note: r.note || '' });
     };
 
     const handleSaveReadingEdit = async (r) => {
         if (historyBusy || !detailMeter) return;
+        if (!canWriteMeters(detailMeter.portfolio_id)) return alert(READ_ONLY_HINT);
         const value = parseNumber(readingEdit.value);
         if (value === null) return alert('Bitte einen gültigen Zählerstand eingeben.');
         if (value < 0) return alert('Der Zählerstand darf nicht negativ sein.');
@@ -689,6 +715,7 @@ const Meters = () => {
 
     const handleDeleteReading = async (r) => {
         if (historyBusy || !detailMeter) return;
+        if (!canWriteMeters(detailMeter.portfolio_id)) return alert(READ_ONLY_HINT);
         if (!window.confirm(`Zählerstand vom ${fmtDate(r.reading_date)} (${fmtNumber(r.reading_value)} ${detailMeter.unit || ''}) wirklich löschen?`)) return;
         setHistoryBusy(true);
         try {
@@ -725,6 +752,19 @@ const Meters = () => {
 
     const formatReading = (value, unit) => (value != null ? `${fmtNumber(value)} ${unit || ''}`.trim() : '-');
 
+    // Ohne Schreibrecht nur „Historie“ (Lesemodus je Zähler-Portfolio)
+    const renderActionMenu = (row) => {
+        const writable = canWriteMeters(row.portfolio_id);
+        return (
+            <ActionMenu
+                onReading={writable ? () => handleOpenReading(row) : undefined}
+                onHistory={() => handleOpenDetail(row)}
+                onEdit={writable ? () => handleOpenEdit(row) : undefined}
+                onDelete={writable ? () => handleDeleteMeter(row) : undefined}
+            />
+        );
+    };
+
     const columns = [
         {
             header: 'Typ',
@@ -756,12 +796,7 @@ const Meters = () => {
             align: 'right',
             render: (row) => (
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <ActionMenu
-                        onReading={() => handleOpenReading(row)}
-                        onHistory={() => handleOpenDetail(row)}
-                        onEdit={() => handleOpenEdit(row)}
-                        onDelete={() => handleDeleteMeter(row.id)}
-                    />
+                    {renderActionMenu(row)}
                 </div>
             )
         }
@@ -778,6 +813,7 @@ const Meters = () => {
     });
 
     const inlineInputStyle = { width: '100%', minWidth: '110px', padding: '4px 6px', fontSize: '0.85rem' };
+    const historyWritable = !!detailMeter && canWriteMeters(detailMeter.portfolio_id);
     const historyColumns = [
         {
             header: 'Datum',
@@ -814,7 +850,8 @@ const Meters = () => {
                 ? <input type="text" style={inlineInputStyle} value={readingEdit.note} onChange={(e) => setReadingEdit({ ...readingEdit, note: e.target.value })} />
                 : (r.note || '-')
         },
-        {
+        // Bearbeiten/Löschen von Ständen nur mit Schreibrecht „Zähler“
+        ...(!historyWritable ? [] : [{
             header: '',
             accessor: 'actions',
             align: 'right',
@@ -829,7 +866,7 @@ const Meters = () => {
                     <Button size="sm" variant="ghost" icon={Trash2} title="Stand löschen" onClick={() => handleDeleteReading(r)} disabled={historyBusy || editingReadingId !== null} />
                 </div>
             )
-        }
+        }])
     ];
 
     const readingUnit = readingMeter?.unit || '';
@@ -843,7 +880,7 @@ const Meters = () => {
                     <h1 style={{ fontSize: '1.875rem', fontWeight: 700, marginBottom: 'var(--spacing-xs)' }}>Zähler</h1>
                     <p style={{ color: 'var(--text-secondary)' }}>Verwalten Sie Ihre Zähler und erfassen Sie Stände.</p>
                 </div>
-                <Button icon={Plus} onClick={handleOpenAdd}>Zähler hinzufügen</Button>
+                {canCreateMeters && <Button icon={Plus} onClick={handleOpenAdd}>Zähler hinzufügen</Button>}
             </div>
 
             {loadError && (
@@ -992,12 +1029,7 @@ const Meters = () => {
                                     </div>
 
                                     <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
-                                        <ActionMenu
-                                            onReading={() => handleOpenReading(row)}
-                                            onHistory={() => handleOpenDetail(row)}
-                                            onEdit={() => handleOpenEdit(row)}
-                                            onDelete={() => handleDeleteMeter(row.id)}
-                                        />
+                                        {renderActionMenu(row)}
                                     </div>
                                 </div>
                             ))}
@@ -1040,7 +1072,8 @@ const Meters = () => {
                             onChange={(e) => setMeterForm({ ...meterForm, property_id: e.target.value, unit_id: '' })}
                         >
                             <option value="">Bitte wählen...</option>
-                            {properties.map(p => (
+                            {/* Nur Objekte aus Portfolios mit Schreibrecht „Zähler“ (die aktuelle Zuordnung bleibt wählbar) */}
+                            {properties.filter(p => canWriteMeters(p.portfolio_id) || p.id === meterForm.property_id).map(p => (
                                 <option key={p.id} value={p.id}>{p.street} {p.house_number}, {p.city}</option>
                             ))}
                         </select>

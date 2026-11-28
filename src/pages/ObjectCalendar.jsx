@@ -182,6 +182,8 @@ const ObjectCalendar = () => {
     const [deleteConfirm, setDeleteConfirm] = useState(null); // event to confirm delete
     const [mobileMonth, setMobileMonth] = useState(new Date().getMonth()); // 0-11 for mobile month nav
     const fileInputRef = useRef(null);
+    // Mieter: eigene Einheit aus get_my_tenancy (die Einheiten-Tabelle ist für Mieter nicht lesbar)
+    const tenantUnitsRef = useRef([]);
 
     // ── Week Data / geladener Zeitraum ───────────────────────
     const weekStart = useMemo(() => addDays(getMondayOfWeek(new Date()), weekOffset * 7), [weekOffset]);
@@ -201,13 +203,23 @@ const ObjectCalendar = () => {
                 if (selectedPortfolioID) q = q.eq('portfolio_id', selectedPortfolioID);
                 const res = await q;
                 list = res.data || []; error = res.error;
-            } else {
-                // Tenant: use roleData property
-                const pid = roleData?.property_id;
-                if (pid) {
-                    const res = await supabase.from('properties').select('id, street, house_number, portfolio_id').eq('id', pid).maybeSingle();
-                    list = res.data ? [res.data] : []; error = res.error;
+            } else if (roleData?.property_id || roleData?.unit_id) {
+                // Mieter: Objekt und eigene Einheit über die eingeschränkte Mieter-Sicht get_my_tenancy
+                // (nur Adresse/Bezeichnung). Keine direkten Abfragen auf properties/units – die
+                // zeilenweisen Mieter-Freigaben dort entfallen.
+                const res = await supabase.rpc('get_my_tenancy');
+                if (cancelled) return;
+                error = res.error;
+                const tenancy = res.error ? null : res.data;
+                const roleUnit = tenancy?.role_unit || null;
+                const pid = roleData?.property_id || tenancy?.property_id || roleUnit?.property?.id || null;
+                if (tenancy && pid) {
+                    const prop = [roleUnit?.property, ...(tenancy.leases || []).map(l => l?.unit?.property)].find(p => p?.id === pid);
+                    list = [{ id: pid, street: prop?.street || 'Ihr Objekt', house_number: prop?.house_number || '' }];
                 }
+                tenantUnitsRef.current = roleUnit?.id
+                    ? [{ id: roleUnit.id, unit_name: roleUnit.unit_name, floor: roleUnit.floor, property_id: roleUnit.property?.id || null }]
+                    : [];
             }
             if (cancelled) return;
             setPropsError(error ? `Die Immobilien konnten nicht geladen werden: ${translateError(error)}` : null);
@@ -232,7 +244,10 @@ const ObjectCalendar = () => {
         const load = async () => {
             setLoading(true);
             const [uRes, sRes, hRes, pRes] = await Promise.all([
-                supabase.from('units').select('id, unit_name, floor').eq('property_id', selectedPropertyId).order('unit_name'),
+                isInvestor
+                    ? supabase.from('units').select('id, unit_name, floor').eq('property_id', selectedPropertyId).order('unit_name')
+                    // Mieter: nur die eigene Einheit aus get_my_tenancy (keine direkte Abfrage auf units)
+                    : Promise.resolve({ data: tenantUnitsRef.current.filter(u => u.property_id === selectedPropertyId), error: null }),
                 // Eigentümer und Teammitglied können je eine Zeile haben → deterministisch die zuletzt geänderte nehmen
                 supabase.from('objektkalender_settings').select('*').eq('property_id', selectedPropertyId).order('updated_at', { ascending: false, nullsFirst: false }).limit(1),
                 fetchHistoryRows(selectedPropertyId),
@@ -257,7 +272,7 @@ const ObjectCalendar = () => {
         };
         load();
         return () => { cancelled = true; };
-    }, [user, selectedPropertyId, reloadKey]);
+    }, [user, isInvestor, selectedPropertyId, reloadKey]);
 
     // ── Load events for the visible range ────────────────────
     useEffect(() => {

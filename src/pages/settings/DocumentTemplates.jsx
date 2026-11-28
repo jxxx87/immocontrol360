@@ -25,6 +25,7 @@ import { openSansFontFaceCss, fontOrigin } from '../../lib/fontFaces';
 import { DEFAULT_TEMPLATES } from '../../lib/defaultTemplates';
 import { LETTER_PAGE_CSS, LETTER_CONTENT_CSS, editorTextFlowCss } from '../../lib/letterDocumentCss';
 import { loadLeaseBalance, RENT_TOLERANCE } from '../../lib/rentArrears';
+import { useUnsavedChangesGuard } from '../../lib/useUnsavedChangesGuard';
 import { 
     Bold, Italic, Underline as UnderlineIcon, 
     AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -184,6 +185,7 @@ const SYSTEM_TEMPLATES = SYSTEM_TEMPLATE_LIST.map(t => ({ ...t, variables: getVa
 const PAGINATION_META = 'immoTemplatePagination';
 const EMPTY_MANUAL_VALUES = Object.freeze({});
 const TEMPLATE_LOAD_META = 'immoTemplateLoad';
+const UNSAVED_LEAVE_MESSAGE = 'Diese Vorlage hat ungespeicherte Änderungen. Seite trotzdem verlassen? Die Änderungen gehen verloren.';
 const VARIABLE_DRAG_MIME = 'application/x-immo-variable';
 
 const TABLE_VARIABLE_IDS = new Set(['forderungs_tabelle', 'forderungs_detail_tabelle', 'nebenkosten_tabelle', 'nebenkosten_detail_tabelle', 'positions_tabelle']);
@@ -1678,7 +1680,9 @@ const LetterFooter = Node.create({
 
 const FooterCol = createLayoutNode('footerCol', 'footer-col', 'inline*');
 
-export const DocumentTemplates = () => {
+// onDirtyChange (optional): meldet ungespeicherte Änderungen an die umgebende Seite (z. B. für eine
+// Rückfrage beim Wechsel des Einstellungs-Reiters, der diese Komponente sonst ohne Nachfrage entfernt)
+export const DocumentTemplates = ({ onDirtyChange } = {}) => {
     const { user } = useAuth();
     const userId = user?.id || null;
     const { portfolios } = usePortfolio();
@@ -1720,8 +1724,11 @@ export const DocumentTemplates = () => {
         dbDataFound: false,
         contentLength: 0
     });
-    // Ungespeicherte Änderungen (Pagination und Laden zählen nicht)
+    // Ungespeicherte Änderungen: nur Nutzer-Bearbeitungen (Pagination, Laden und die automatische
+    // Bereinigung beim Laden zählen nicht – die Bereinigung zeigt loadNotice an)
     const [isDirty, setIsDirty] = useState(false);
+    // Zähler der Nutzer-Bearbeitungen: Änderungen während eines laufenden Speicherns bleiben "ungespeichert"
+    const editVersionRef = useRef(0);
     // Ladefehler: Speichern gesperrt, damit die gespeicherte Fassung nicht überschrieben wird
     const [loadError, setLoadError] = useState(null);
     // Beim Laden automatisch bereinigte Punkte (Hinweis an den Nutzer)
@@ -1896,6 +1903,7 @@ export const DocumentTemplates = () => {
             setPageCount(count > 0 ? count : 1);
             // Nur echte Bearbeitungen zählen als ungespeicherte Änderung
             if (!transaction?.getMeta(PAGINATION_META) && !transaction?.getMeta(TEMPLATE_LOAD_META)) {
+                editVersionRef.current += 1;
                 setIsDirty(true);
             }
             // Re-Render höchstens einmal pro Frame (Toolbar-Status, Vorschau, fehlende Angaben)
@@ -2999,16 +3007,14 @@ export const DocumentTemplates = () => {
         return () => { cancelled = true; };
     }, [isClearanceDocument, clearanceLeaseId]);
 
-    // Ungespeicherte Änderungen: beim Schließen/Neuladen des Browser-Tabs nachfragen
+    // Ungespeicherte Änderungen: App-Navigation auf eine andere Seite (Sidebar, Topbar, Links) sowie
+    // Schließen/Neuladen des Browser-Tabs fragt nach (useUnsavedChangesGuard). Nicht abgedeckt: Wechsel
+    // des Einstellungs-Reiters (auch Topbar-Links auf /settings mit anderem Reiter) – dafür onDirtyChange
+    useUnsavedChangesGuard(isDirty ? UNSAVED_LEAVE_MESSAGE : null);
+
     useEffect(() => {
-        if (!isDirty) return undefined;
-        const onBeforeUnload = (event) => {
-            event.preventDefault();
-            event.returnValue = '';
-        };
-        window.addEventListener('beforeunload', onBeforeUnload);
-        return () => window.removeEventListener('beforeunload', onBeforeUnload);
-    }, [isDirty]);
+        onDirtyChange?.(isDirty);
+    }, [isDirty, onDirtyChange]);
 
     // Rückfrage vor Aktionen, die den Editor-Inhalt ersetzen würden
     const confirmDiscardChanges = () => {
@@ -3086,8 +3092,9 @@ export const DocumentTemplates = () => {
             const normalized = dbDataFound ? normalizeStoredTemplateHtml(contentHtml || '') : { html: contentHtml || '', changes: [] };
             setSubject(loadedSubject || '');
             setEditorContentFromLoad(normalized.html);
-            // Nur mit Schreibrecht als "ungespeichert" markieren (Mitnutzer können nicht speichern)
-            setIsDirty(normalized.changes.length > 0 && canWriteTemplates);
+            // Die automatische Bereinigung ist keine Nutzer-Änderung: sie wird bei jedem Laden gleich
+            // wiederholt, Verlassen ohne Speichern verliert also nichts (Hinweis über loadNotice).
+            setIsDirty(false);
             setLoadNotice(normalized.changes.length > 0 ? normalized.changes : null);
             setDiagnostics({
                 lastError: null,
@@ -3220,6 +3227,10 @@ export const DocumentTemplates = () => {
         try {
             // Neutral serialisiert: nur Kennung und Bezeichnung der Platzhalter
             const contentHtml = editor.getHTML();
+            // Stand dieser Fassung merken: spätere Eingaben bzw. ein inzwischen geladener anderer
+            // Vorlagen-/Portfolio-Stand dürfen nicht als "gespeichert" gelten
+            const savedEditVersion = editVersionRef.current;
+            const savedLoadSeq = loadSeqRef.current;
 
             let query = supabase
                 .from('document_templates')
@@ -3273,15 +3284,17 @@ export const DocumentTemplates = () => {
                 }
             }
 
-            setIsDirty(false);
-            setLoadNotice(null);
-            setDiagnostics(prev => ({
-                ...prev,
-                lastError: null,
-                loadSource: portfolioFilter ? 'Datenbank (Portfolio)' : 'Datenbank (Global)',
-                dbDataFound: true,
-                contentLength: contentHtml.length
-            }));
+            if (savedLoadSeq === loadSeqRef.current) {
+                setIsDirty(editVersionRef.current !== savedEditVersion);
+                setLoadNotice(null);
+                setDiagnostics(prev => ({
+                    ...prev,
+                    lastError: null,
+                    loadSource: portfolioFilter ? 'Datenbank (Portfolio)' : 'Datenbank (Global)',
+                    dbDataFound: true,
+                    contentLength: contentHtml.length
+                }));
+            }
             if (config.isCustom) await fetchCustomTemplates();
             alert('Vorlage erfolgreich gespeichert.');
         } catch (error) {
@@ -3300,6 +3313,7 @@ export const DocumentTemplates = () => {
             setSubject(defaultVal.subject || '');
             setEditorContentFromLoad(defaultVal.content_html || '');
             // Zurücksetzen ist eine (noch nicht gespeicherte) Änderung
+            editVersionRef.current += 1;
             setIsDirty(true);
         }
     };
@@ -3362,7 +3376,9 @@ export const DocumentTemplates = () => {
             ? `die Fassung für das Portfolio „${portfolioName}“`
             : 'die Standard-Fassung (alle Portfolios)';
         const moreText = template.versions > 1 ? ' Weitere Fassungen dieser Vorlage bleiben erhalten.' : '';
-        if (!window.confirm(`Möchten Sie ${versionText} der Vorlage „${template.label}“ wirklich löschen?${moreText}`)) return;
+        // Löschen der geöffneten Vorlage lädt eine andere Fassung bzw. Vorlage in den Editor
+        const unsavedText = template.id === activeType && isDirty ? ' Ungespeicherte Änderungen im Editor gehen verloren.' : '';
+        if (!window.confirm(`Möchten Sie ${versionText} der Vorlage „${template.label}“ wirklich löschen?${moreText}${unsavedText}`)) return;
         try {
             const { data: deleted, error } = await supabase
                 .from('document_templates')
@@ -4446,7 +4462,7 @@ export const DocumentTemplates = () => {
                                             disabled={saving || !!loadError || !canWriteTemplates}
                                             title={loadError ? 'Speichern gesperrt: Die Vorlage konnte nicht geladen werden.' : (!canWriteTemplates ? 'Nur der Portfolio-Eigentümer kann diese Vorlage ändern.' : undefined)}
                                         >
-                                            {saving ? 'Speichert…' : (isDirty ? 'Speichern *' : 'Speichern')}
+                                            {saving ? 'Speichert…' : ((isDirty || (loadNotice && canWriteTemplates)) ? 'Speichern *' : 'Speichern')}
                                         </Button>
                                     </div>
                                 </div>

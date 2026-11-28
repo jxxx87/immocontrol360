@@ -67,7 +67,9 @@ verify_jwt = false
 # entrypoint_path = "<name>/index.ts". Nach jeder Preisänderung BEIDE Functions neu ausrollen.
 #
 # Wave 3 (E3-21): stripe-webhook, create-checkout-session und create-portal-session nutzen das
-# eingebaute Deno.serve (keine Importe von deno.land/std mehr).
+# eingebaute Deno.serve (keine Importe von deno.land/std mehr). Seit Welle 4 ebenso:
+# create-portal-checkout-session, register-trial, start-trial, stripe-connect-onboard,
+# contact-form, send-push-notification, send-letting-email und sync-applicant-files.
 
 # Stripe sendet kein JWT – Prüfung über die Webhook-Signatur.
 # Ereignisprotokoll: Tabelle public.stripe_webhook_events (Migration _fixwork/sql/wave3/10_STRIPE.sql).

@@ -133,11 +133,8 @@ BEGIN
     RETURN v_new_claim_id;
 END; $$;
 
--- 2. Fix existing data in claim_items
-ALTER TABLE claim_items DISABLE TRIGGER trigger_protect_claim_item_original_amount;
-
-UPDATE claim_items 
-SET original_amount = original_amount - fee_amount - interest_amount 
-WHERE fee_amount > 0 OR interest_amount > 0;
-
-ALTER TABLE claim_items ENABLE TRIGGER trigger_protect_claim_item_original_amount;
+-- 2. Fix existing data in claim_items – NEUTRALISIERT (Welle 3, Paket SCHEMA, 27.11.2026, H3-04/H3-05):
+-- Einmalige Datenkorrektur, live bereits ausgeführt. Das frühere UPDATE zog bei JEDER Ausführung
+-- fee_amount und interest_amount erneut von original_amount ab (bei abgeschaltetem Schutztrigger
+-- trigger_protect_claim_item_original_amount). Ursprünglicher Inhalt: Git-Historie dieser Datei.
+select 1;

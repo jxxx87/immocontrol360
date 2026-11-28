@@ -163,7 +163,8 @@ try {
             web     = $quelleWeb
             website = $quelleSite
         }
-        $versionInfo | ConvertTo-Json | Set-Content -Path (Join-Path $appDir "version.json") -Encoding UTF8
+        # UTF-8 ohne BOM (Set-Content -Encoding UTF8 schreibt in PowerShell 5.1 ein BOM vor das JSON)
+        [System.IO.File]::WriteAllText((Join-Path $appDir "version.json"), ($versionInfo | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
 
         # 5. Dummy package.json im Root, damit die Hostinger-Prüfung besteht
         Write-Host "Erstelle Hostinger-Dummy-package.json..." -ForegroundColor Cyan

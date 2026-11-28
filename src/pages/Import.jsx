@@ -15,7 +15,6 @@ const HEADER_ROW_INDEX = 4; // Excel-Zeile 5
 const DATA_ROW_INDEX = 5;   // ab Excel-Zeile 6
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 const MAX_ROWS = 5000;
-const INSERT_CHUNK = 200;
 const FAR_FUTURE = '9999-12-31';
 // Der Import läuft in EINER Datenbanktransaktion (import_rows, höchstens 60 s). Grobe Laufzeit je
 // Datensatz inkl. Trigger (gemessen 11/2026, mit Reserve): Vertrag erzeugt zusätzlich je Monat ab
@@ -116,6 +115,11 @@ const mapPropertyType = (val) => {
     const found = Object.entries(PROPERTY_TYPES).find(([, names]) => names.includes(s));
     return found ? { value: found[0] } : { value: 'residential', unknown: true };
 };
+
+// Schrägstriche würden in der Cloud-Ablage zusätzliche Unterordner erzeugen. Neue Immobilien und
+// Einheiten werden daher wie in Properties.jsx abgelehnt; bereits vorhandene (Altbestand) werden
+// weiterhin wiedererkannt, da der Import sie nicht ändert.
+const hasSlash = (v) => /[\\/]/.test(v || '');
 
 const propertyKeyOf = (street, houseNumber, zip, city) => [street, houseNumber, zip, city].map(keyText).join('|');
 const tenantKeyOf = (firstName, lastName, email) =>
@@ -326,9 +330,6 @@ const buildImportPayload = (plan, bookingStartDate) => {
     };
 };
 
-// Funktion import_rows noch nicht eingespielt -> bisheriger schrittweiser Import
-const isMissingImportRpc = (error) => ['PGRST202', '42883'].includes(String(error?.code || ''));
-
 // Fehler der Datenbankfunktion import_rows: bei einem Datenbankfehler wurde die Transaktion
 // vollständig zurückgerollt; ohne Fehlercode (Verbindung/Gateway) ist das Ergebnis unklar.
 const describeImportError = (error, status) => {
@@ -336,6 +337,10 @@ const describeImportError = (error, status) => {
     const message = error?.message || 'Unbekannter Fehler';
     if (code === '57014') {
         return { outcome: 'aborted', text: 'Der Import hat zu lange gedauert und wurde abgebrochen. Bitte die Datei aufteilen (z. B. nach Objekten) und die Teile nacheinander importieren.' };
+    }
+    // Datenbankfunktion nicht gefunden: es wurde nichts ausgeführt
+    if (code === 'PGRST202' || code === '42883') {
+        return { outcome: 'aborted', text: 'Die Importfunktion der Datenbank ist derzeit nicht verfügbar – es wurde nichts gespeichert. Bitte später erneut versuchen.' };
     }
     if (code === 'PGRST301' || code === 'PGRST303' || status === 401) {
         return { outcome: 'aborted', text: 'Die Anmeldung ist abgelaufen. Bitte neu anmelden und den Import erneut starten.' };
@@ -532,6 +537,10 @@ const Import = () => {
                     propertyRef = { id: ep.id };
                     result.existing.properties.add(ep.id);
                 } else {
+                    if (hasSlash(row.property.street) || hasSlash(row.property.house_number)) {
+                        rowError(row.rowNo, `Straße und Hausnummer (Spalten B/C: „${row.property.street} ${row.property.house_number}“) dürfen keine Schrägstriche („/“ oder „\\“) enthalten, da daraus der Ordner in der Cloud-Ablage gebildet wird. Bitte z. B. „12-14“ statt „12/14“ schreiben.`);
+                        return;
+                    }
                     propertyRef = { key: row.propertyKey };
                     const np = result.newProperties.get(row.propertyKey);
                     if (np) {
@@ -555,6 +564,10 @@ const Import = () => {
                     }
                     result.existing.units.add(existingUnits[0].id);
                 } else {
+                    if (hasSlash(row.unit.unit_name)) {
+                        rowError(row.rowNo, `Der Einheitenname „${row.unit.unit_name}“ (Spalte H) darf keine Schrägstriche („/“ oder „\\“) enthalten, da daraus der Ordner in der Cloud-Ablage gebildet wird. Bitte z. B. „-“ verwenden.`);
+                        return;
+                    }
                     unitRef = { key: unitKey };
                     const nu = result.newUnits.get(unitKey);
                     if (nu) nu.rowNos.push(row.rowNo);
@@ -677,103 +690,6 @@ const Import = () => {
         }
     };
 
-    // Tabelle in Blöcken befüllen; scheitert ein Block, werden dessen Zeilen einzeln wiederholt,
-    // damit fehlerhafte Excel-Zeilen benannt werden können (ein Block ist atomar).
-    const insertRows = async (table, items, selectCols, onError) => {
-        const inserted = [];
-        for (let i = 0; i < items.length; i += INSERT_CHUNK) {
-            const chunk = items.slice(i, i + INSERT_CHUNK);
-            const { data, error } = await supabase.from(table).insert(chunk.map(c => c.payload)).select(selectCols);
-            if (!error) {
-                inserted.push(...(data || []));
-                continue;
-            }
-            for (const item of chunk) {
-                const { data: one, error: oneError } = await supabase.from(table).insert([item.payload]).select(selectCols);
-                if (oneError) onError(item, oneError);
-                else inserted.push(...(one || []));
-            }
-        }
-        return inserted;
-    };
-
-    // Bisheriger Weg – nur solange die Datenbankfunktion import_rows noch nicht eingespielt ist:
-    // Tabelle für Tabelle ohne gemeinsame Transaktion; scheitern einzelne Datensätze, werden sie
-    // gemeldet, der Rest bleibt gespeichert.
-    const executeStepwise = async (stats, failed, bookingStartDate) => {
-        // 1. Portfolios
-        setProgress('Schritt 1/5: Portfolios anlegen...');
-        const portfolioIds = new Map();
-        const portItems = [...plan.newPortfolios.entries()].map(([key, p]) => ({ key, rowNos: p.rowNos, payload: { user_id: user.id, name: p.name } }));
-        const newPorts = await insertRows('portfolios', portItems, 'id, name', (item, err) => failed(item.rowNos, `Portfolio „${item.payload.name}“ konnte nicht angelegt werden: ${err.message}`));
-        newPorts.forEach(p => portfolioIds.set(keyText(p.name), p.id));
-        stats.portfolios = newPorts.length;
-        const resolvePortfolio = (ref) => ref.id || portfolioIds.get(ref.key) || null;
-
-        // 2. Immobilien
-        setProgress('Schritt 2/5: Immobilien anlegen...');
-        const propertyIds = new Map();
-        const propItems = [];
-        plan.newProperties.forEach((p, key) => {
-            const portfolioId = resolvePortfolio(p.portfolioRef);
-            if (!portfolioId) { failed(p.rowNos, 'Immobilie übersprungen, weil das Portfolio nicht angelegt werden konnte.'); return; }
-            propItems.push({ key, rowNos: p.rowNos, payload: { user_id: user.id, portfolio_id: portfolioId, ...p.data } });
-        });
-        const newProps = await insertRows('properties', propItems, 'id, street, house_number, zip, city', (item, err) => failed(item.rowNos, `Immobilie ${item.payload.street} ${item.payload.house_number} konnte nicht angelegt werden: ${err.message}`));
-        newProps.forEach(p => propertyIds.set(propertyKeyOf(p.street, p.house_number, p.zip, p.city), p.id));
-        stats.properties = newProps.length;
-        const resolveProperty = (ref) => ref.id || propertyIds.get(ref.key) || null;
-
-        // 3. Einheiten
-        setProgress('Schritt 3/5: Einheiten anlegen...');
-        const unitIds = new Map();
-        const unitItems = [];
-        const unitKeyByPropAndName = new Map();
-        plan.newUnits.forEach((u, key) => {
-            const propertyId = resolveProperty(u.propertyRef);
-            if (!propertyId) { failed(u.rowNos, `Einheit „${u.data.unit_name}“ übersprungen, weil die Immobilie nicht angelegt werden konnte.`); return; }
-            unitKeyByPropAndName.set(`${propertyId}|${keyText(u.data.unit_name)}`, key);
-            unitItems.push({ key, rowNos: u.rowNos, payload: { user_id: user.id, property_id: propertyId, ...u.data } });
-        });
-        const newUnits = await insertRows('units', unitItems, 'id, property_id, unit_name', (item, err) => failed(item.rowNos, `Einheit „${item.payload.unit_name}“ konnte nicht angelegt werden: ${err.message}`));
-        newUnits.forEach(u => {
-            const key = unitKeyByPropAndName.get(`${u.property_id}|${keyText(u.unit_name)}`);
-            if (key) unitIds.set(key, u.id);
-        });
-        stats.units = newUnits.length;
-
-        // 4. Mieter
-        setProgress('Schritt 4/5: Mieter anlegen...');
-        const tenantIds = new Map();
-        const tenantItems = [...plan.newTenants.entries()].map(([key, t]) => {
-            const payload = { user_id: user.id, first_name: t.data.first_name, last_name: t.data.last_name, email: t.data.email, phone: t.data.phone, occupants: t.data.occupants };
-            return { key, rowNos: t.rowNos, payload };
-        });
-        const newTenants = await insertRows('tenants', tenantItems, 'id, first_name, last_name, email', (item, err) => failed(item.rowNos, `Mieter ${item.payload.last_name} konnte nicht angelegt werden: ${err.message}`));
-        newTenants.forEach(t => tenantIds.set(tenantKeyOf(t.first_name, t.last_name, t.email), t.id));
-        stats.tenants = newTenants.length;
-
-        // 5. Mietverträge
-        setProgress('Schritt 5/5: Mietverträge anlegen...');
-        const leaseItems = [];
-        plan.newLeases.forEach(l => {
-            const unitId = l.unitRef.id || unitIds.get(l.unitRef.key);
-            const tenantId = l.tenantRef.id || tenantIds.get(l.tenantRef.key);
-            if (!unitId || !tenantId) {
-                failed([l.rowNo], 'Mietvertrag übersprungen, weil Einheit oder Mieter nicht angelegt werden konnte.');
-                return;
-            }
-            const bookingStart = l.data.start_date && l.data.start_date < bookingStartDate ? { booking_start_date: bookingStartDate } : {};
-            leaseItems.push({ rowNos: [l.rowNo], payload: { user_id: user.id, tenant_id: tenantId, unit_id: unitId, status: 'active', ...l.data, ...bookingStart } });
-        });
-        const newLeases = await insertRows('leases', leaseItems, 'id, booking_start_date', (item, err) => failed(item.rowNos, `Mietvertrag konnte nicht angelegt werden: ${err.message}`));
-        stats.leases = newLeases.length;
-        stats.bookingStart = {
-            date: bookingStartDate,
-            leases: newLeases.filter(l => l.booking_start_date).length
-        };
-    };
-
     // --- Schritt 2: ausführen ---
     // Alles in EINER Datenbanktransaktion (import_rows): scheitert ein Datensatz, wird nichts gespeichert.
     const handleExecute = async () => {
@@ -783,7 +699,7 @@ const Import = () => {
             return;
         }
         setBusy('import');
-        // outcome: 'done' (gespeichert) | 'stepwise' (bisheriger Weg) | 'aborted' (nichts gespeichert) | 'unknown'
+        // outcome: 'done' (gespeichert) | 'aborted' (nichts gespeichert) | 'unknown'
         const stats = { portfolios: 0, properties: 0, units: 0, tenants: 0, leases: 0, errors: [], outcome: 'done' };
         const failed = (rowNos, msg) => {
             stats.errors.push(`${rowNos && rowNos.length ? `Zeile ${rowNos.join(', ')}: ` : ''}${msg}`);
@@ -796,10 +712,7 @@ const Import = () => {
         try {
             setProgress('Alle Datensätze werden gemeinsam gespeichert...');
             const { data, error, status } = await supabase.rpc('import_rows', { p_plan: buildImportPayload(plan, bookingStartDate) });
-            if (error && isMissingImportRpc(error)) {
-                stats.outcome = 'stepwise';
-                await executeStepwise(stats, failed, bookingStartDate);
-            } else if (error) {
+            if (error) {
                 const described = describeImportError(error, status);
                 stats.outcome = described.outcome;
                 failed(null, described.text);
@@ -813,7 +726,7 @@ const Import = () => {
             }
         } catch (error) {
             console.error('Import Error:', error);
-            if (stats.outcome !== 'stepwise') stats.outcome = 'unknown';
+            stats.outcome = 'unknown';
             failed(null, `Import abgebrochen: ${error.message || 'Unbekannter Fehler'}`);
         } finally {
             stats.skippedLeases = plan.skippedLeases;
@@ -1028,7 +941,7 @@ const Import = () => {
                         {importResult.outcome === 'aborted' && (
                             <p style={{ fontSize: '0.9rem' }}>Der Import läuft als Ganzes: Weil ein Datensatz nicht gespeichert werden konnte, wurde nichts übernommen. Bitte die Datei korrigieren und erneut importieren.</p>
                         )}
-                        {(importResult.outcome === 'done' || importResult.outcome === 'stepwise') && (
+                        {importResult.outcome === 'done' && (
                             <>
                                 <p>Neu angelegt:</p>
                                 <ul style={{ listStyle: 'disc', paddingLeft: '20px', marginTop: '5px' }}>
@@ -1052,7 +965,7 @@ const Import = () => {
                         )}
                         {importResult.errors.length > 0 && (
                             <div style={{ marginTop: '10px', color: '#B91C1C' }}>
-                                <p style={{ fontWeight: 600 }}>{importResult.outcome === 'stepwise' ? 'Nicht importiert:' : 'Fehler:'}</p>
+                                <p style={{ fontWeight: 600 }}>Fehler:</p>
                                 <ul style={{ listStyle: 'disc', paddingLeft: '20px' }}>
                                     {importResult.errors.map((e, i) => <li key={i}>{e}</li>)}
                                 </ul>

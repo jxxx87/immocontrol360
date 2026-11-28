@@ -1,7 +1,6 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────
 // sync-applicant-files
 //
 // Überträgt die Bewerberunterlagen aus dem Bucket "applicant-documents" in die
@@ -24,7 +23,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 //  • M2-06: Tokens über cloud_get_tokens/cloud_store_tokens (Vault); Rückfall auf die alten
 //    Spalten, solange die Migration fehlt.
 //  • G18-12: '/' und '\' in Straße/Hausnummer/Einheit werden wie in cloud-sync zu '-'.
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.168.0.
+// ───────────────────────────────────────────────────────────────────────────
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -181,7 +182,7 @@ async function getCaller(req: Request, supabaseAdmin: any) {
   }
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }

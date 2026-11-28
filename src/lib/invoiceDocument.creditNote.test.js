@@ -100,6 +100,17 @@ describe('createCreditNote über create_credit_note', () => {
         expect(update.values).toEqual({ status: INVOICE_STATUS.CREDITED });
     });
 
+    it('Rückfall in der App: Nummer der Gutschrift über get_next_invoice_number, wenn nur create_credit_note fehlt', async () => {
+        db.state.rpcHandler = (name) => (name === 'get_next_invoice_number'
+            ? { data: '2026-002', error: null, status: 200 }
+            : { data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 });
+        const creditNote = await createCreditNote(issued());
+        expect(creditNote.invoice_number).toBe('2026-002');
+        expect(db.state.rpcCalls.map(c => c.name)).toEqual(['create_credit_note', 'get_next_invoice_number']);
+        expect(db.state.rpcCalls[1].args).toMatchObject({ p_portfolio_id: 'pf-1', p_object_unit_id: null });
+        expect(db.state.queries.map(q => q.op)).toEqual(['insert', 'update']);
+    });
+
     it('prüft den Status vor dem Aufruf', async () => {
         await expect(createCreditNote(issued({ status: INVOICE_STATUS.DRAFT }))).rejects.toThrow(/ausgestellten Rechnung/);
         await expect(createCreditNote(issued({ status: INVOICE_STATUS.CREDITED }))).rejects.toThrow(/ausgestellten Rechnung/);

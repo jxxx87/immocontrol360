@@ -10,6 +10,7 @@ import CurrencyInput from '../components/ui/CurrencyInput';
 import { Plus, ArrowUpRight, ArrowDownLeft, Loader2, Filter, Trash2, CircleAlert, CircleCheck, ChevronDown, ChevronRight, EllipsisVertical, Send, Banknote } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { usePortfolio } from '../context/PortfolioContext';
+import { usePermission } from '../context/PermissionContext';
 import { useAuth } from '../context/AuthContext';
 import { translateError } from '../lib/errorTranslator';
 import ExportDropdown from '../components/ExportDropdown';
@@ -104,13 +105,32 @@ const getEmptyIncomeForm = () => ({
 });
 
 const MAHN_HINT = 'Dieser Monat ist Teil einer laufenden Forderungsakte. Bitte die Zahlung in der Forderungsakte erfassen, damit Forderung und Mietkonto übereinstimmen.';
+const READ_ONLY_HINT = 'Für dieses Portfolio haben Sie nur Leserechte (Freigabe). Buchungen können nur mit Schreibrecht „Finanzen“ (Mieteingänge auch „Mietverhältnisse“) erfasst oder gelöscht werden.';
+const ReadOnlyLabel = () => (
+    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title="Freigabe nur zum Lesen">Nur lesen</span>
+);
 
 const Finance = () => {
     const { user } = useAuth();
     const userId = user?.id;
     const { selectedPortfolioID, portfolios } = usePortfolio();
+    const perm = usePermission();
     const location = useLocation();
     const navigate = useNavigate();
+
+    // Schreibrecht je Portfolio des Datensatzes (wie die RLS): Ausgaben „Finanzen“ über das Objekt,
+    // Mieteingänge „Finanzen“ oder „Mietverhältnisse“ über den Mietvertrag; ohne Portfolio: aktueller
+    // Bereich. Während die Rechte laden, optimistisch; die Datenbank prüft zusätzlich.
+    const canWriteFinance = useCallback((portfolioId, alsoTenancy = false) => {
+        if (!perm || perm.loadingPermissions) return true;
+        const pid = portfolioId || undefined;
+        return perm.canWrite('finanzen', pid) || (alsoTenancy && perm.canWrite('mietverhaeltnisse', pid));
+    }, [perm]);
+    const canWriteLease = useCallback(
+        (lease) => canWriteFinance(lease?.unit?.property?.portfolio_id || null, true),
+        [canWriteFinance]
+    );
+    const canCreateBooking = canWriteFinance(selectedPortfolioID || null, true);
 
     const [loading, setLoading] = useState(true);
     const [hasLoaded, setHasLoaded] = useState(false);
@@ -264,6 +284,28 @@ const Finance = () => {
     const propertyById = useMemo(() => new Map(rawProperties.map(p => [p.id, p])), [rawProperties]);
     const tenantsById = useMemo(() => new Map(tenants.map(t => [t.id, t])), [tenants]);
     const rentIndex = useMemo(() => buildRentIndex({ ledgerRows, payments: rawPayments }), [ledgerRows, rawPayments]);
+    const unitById = useMemo(() => new Map(rawUnits.map(u => [u.id, u])), [rawUnits]);
+
+    // Ausgabe ohne Objekt/Einheit: nur der Ersteller (wie die RLS von expenses)
+    const canWriteExpense = (row) => {
+        if (!row.property_id && !row.unit_id) return !perm || perm.loadingPermissions || row.user_id === userId;
+        const portfolioId = row.property_id
+            ? propertyById.get(row.property_id)?.portfolio_id
+            : unitById.get(row.unit_id)?.property?.portfolio_id;
+        return canWriteFinance(portfolioId || null);
+    };
+    const canWriteBooking = (row) => (row.type === 'expense' ? canWriteExpense(row) : canWriteLease(row.lease));
+
+    // Neuanlage nur in Portfolios mit Schreibrecht
+    const expenseProperties = useMemo(
+        () => properties.filter(p => canWriteFinance(p.portfolio_id)),
+        [properties, canWriteFinance]
+    );
+    const incomeProperties = useMemo(
+        () => properties.filter(p => canWriteFinance(p.portfolio_id, true)),
+        [properties, canWriteFinance]
+    );
+    const writableLeases = useMemo(() => leases.filter(l => canWriteLease(l)), [leases, canWriteLease]);
 
     const filterUnits = useMemo(
         () => (filterPropertyId ? allUnits.filter(u => u.property_id === filterPropertyId) : []),
@@ -432,11 +474,11 @@ const Finance = () => {
             .filter(Boolean);
     }, [isPaidDetailsOpen, filterStartDate, filterEndDate, filterPropertyId, filterUnitId, leases, rentIndex, tenantsById, mahnverfahrenMonths]);
 
-    // --- Mieteingang: Auswahl von Mieter / Einheit / Vertrag ---
+    // --- Mieteingang: Auswahl von Mieter / Einheit / Vertrag (nur Verträge mit Schreibrecht) ---
     const tenantOptions = useMemo(() => {
         const todayStr = toLocalDateStr();
         const byTenant = new Map();
-        leases.forEach(l => {
+        writableLeases.forEach(l => {
             if (!l.tenant_id) return;
             const current = isCurrentLease(l, todayStr);
             const prev = byTenant.get(l.tenant_id);
@@ -455,12 +497,12 @@ const Finance = () => {
                 };
             })
             .sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'de'));
-    }, [leases, tenantsById]);
+    }, [writableLeases, tenantsById]);
 
     const incomeLeaseCandidates = useMemo(() => {
         if (!incomeForm.tenant_id || !incomeForm.unit_id) return [];
-        return leases.filter(l => l.tenant_id === incomeForm.tenant_id && l.unit_id === incomeForm.unit_id);
-    }, [leases, incomeForm.tenant_id, incomeForm.unit_id]);
+        return writableLeases.filter(l => l.tenant_id === incomeForm.tenant_id && l.unit_id === incomeForm.unit_id);
+    }, [writableLeases, incomeForm.tenant_id, incomeForm.unit_id]);
 
     const selectedIncomeLease = useMemo(() => {
         if (incomeForm.lease_id) {
@@ -491,7 +533,7 @@ const Finance = () => {
     const handleTenantChange = (e) => {
         const newTenantId = e.target.value;
         const todayStr = toLocalDateStr();
-        const tenantLeases = leases.filter(l => l.tenant_id === newTenantId);
+        const tenantLeases = writableLeases.filter(l => l.tenant_id === newTenantId);
         const preferred = tenantLeases.find(l => isCurrentLease(l, todayStr)) || pickLeaseForMonth(tenantLeases, null);
         setIncomeForm(prev => {
             const next = { ...prev, tenant_id: newTenantId, lease_id: '' };
@@ -509,7 +551,7 @@ const Finance = () => {
         setIncomeForm(prev => {
             const next = { ...prev, unit_id: newUnitId, lease_id: '' };
             if (!newUnitId) return next;
-            const unitLeases = leases.filter(l => l.unit_id === newUnitId);
+            const unitLeases = writableLeases.filter(l => l.unit_id === newUnitId);
             // Gewählten Mieter behalten, wenn er (auch früher) in dieser Einheit gewohnt hat
             if (prev.tenant_id && unitLeases.some(l => l.tenant_id === prev.tenant_id)) return next;
             const current = unitLeases.find(l => isCurrentLease(l, todayStr));
@@ -519,6 +561,7 @@ const Finance = () => {
     };
 
     const openBookingModal = () => {
+        if (!canCreateBooking) return alert(READ_ONLY_HINT);
         setExpenseForm(getEmptyExpenseForm());
         setIncomeForm(getEmptyIncomeForm());
         setBookingType('expense');
@@ -533,6 +576,8 @@ const Finance = () => {
         if (expenseForm.scope === 'unit' && (!expenseForm.property_id || !expenseForm.unit_id)) {
             return alert('Bitte Immobilie und Einheit wählen (oder Zuordnung „Allgemein“).');
         }
+        const expensePortfolioId = expenseForm.property_id ? (propertyById.get(expenseForm.property_id)?.portfolio_id || null) : (selectedPortfolioID || null);
+        if (!canWriteFinance(expensePortfolioId)) return alert(READ_ONLY_HINT);
 
         setIsSaving(true);
         try {
@@ -571,6 +616,7 @@ const Finance = () => {
         if (!(amount > 0)) return alert('Bitte einen Betrag größer 0 eingeben.');
         const lease = selectedIncomeLease;
         if (!lease) return alert('Für diesen Mieter wurde in dieser Einheit kein Mietvertrag gefunden.');
+        if (!canWriteLease(lease)) return alert(READ_ONLY_HINT);
         if (mahnverfahrenMonths.has(ledgerKey(lease.id, incomeForm.period_month))) return alert(MAHN_HINT);
 
         setIsSaving(true);
@@ -608,6 +654,10 @@ const Finance = () => {
 
     const handleMarkAsPaid = async (lease, monthStr, amount, opening = false) => {
         if (!lease || !(num(amount) > 0)) return;
+        if (!canWriteLease(lease)) {
+            alert(READ_ONLY_HINT);
+            return;
+        }
         if (mahnverfahrenMonths.has(ledgerKey(lease.id, monthStr))) {
             alert(MAHN_HINT);
             return;
@@ -625,8 +675,8 @@ const Finance = () => {
     };
 
     const handleBatchMarkAsPaid = async (entries) => {
-        // Monate im Mahnverfahren nur über die Forderungsakte buchen
-        const bookable = (entries || []).filter(e => !e.isMahn && num(e.open) > 0);
+        // Monate im Mahnverfahren nur über die Forderungsakte buchen; nur Verträge mit Schreibrecht
+        const bookable = (entries || []).filter(e => !e.isMahn && num(e.open) > 0 && canWriteLease(e.lease));
         if (bookable.length === 0) return;
         try {
             setProcessingPaymentId('batch');
@@ -650,6 +700,11 @@ const Finance = () => {
     };
 
     const handleDeleteBooking = async (row) => {
+        if (!canWriteBooking(row)) {
+            setDeletingBookingId(null);
+            alert(READ_ONLY_HINT);
+            return;
+        }
         try {
             setDeletingBookingId('deleting-' + row.id);
             const table = row.type === 'expense' ? 'expenses' : 'rent_payments';
@@ -722,7 +777,9 @@ const Finance = () => {
                     <span style={{ fontWeight: 600, color: row.amount > 0 ? 'var(--success-color)' : 'var(--danger-color)' }}>
                         {row.amount > 0 ? '+' : ''}{Math.abs(num(row.amount)).toFixed(2)} €
                     </span>
-                    {deletingBookingId === row.id ? (
+                    {!canWriteBooking(row) ? (
+                        <ReadOnlyLabel />
+                    ) : deletingBookingId === row.id ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, color: '#EF4444' }}>
                             Löschen?
                             <button
@@ -818,7 +875,7 @@ const Finance = () => {
                         currentFilters={{ property_id: filterPropertyId, start_date: filterStartDate, end_date: filterEndDate }}
                         totalRows={allBookings.length}
                     />
-                    <Button icon={Plus} onClick={openBookingModal}>Buchung erfassen</Button>
+                    {canCreateBooking && <Button icon={Plus} onClick={openBookingModal}>Buchung erfassen</Button>}
                 </div>
             </div>
 
@@ -937,6 +994,7 @@ const Finance = () => {
                     tenantsById={tenantsById}
                     onMarkPaid={handleMarkAsPaid}
                     onMarkAllPaid={handleBatchMarkAsPaid}
+                    canWriteLease={canWriteLease}
                     processingPaymentId={processingPaymentId}
                     mahnverfahrenClaims={mahnverfahrenClaims}
                     navigate={navigate}
@@ -997,7 +1055,9 @@ const Finance = () => {
 
                                             {/* Delete Logic in Card */}
                                             <div onClick={(e) => e.stopPropagation()}>
-                                                {deletingBookingId === row.id ? (
+                                                {!canWriteBooking(row) ? (
+                                                    <ReadOnlyLabel />
+                                                ) : deletingBookingId === row.id ? (
                                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, color: '#EF4444' }}>
                                                         Löschen?
                                                         <button
@@ -1122,6 +1182,8 @@ const Finance = () => {
                                                 <span style={{ fontSize: '0.8rem' }}>{formatMonthDE(m.str)}</span>
                                                 {m.isMahn ? (
                                                     <span style={{ fontSize: '0.7rem', fontWeight: 600, color: '#DC2626' }}>Im Mahnverfahren</span>
+                                                ) : !canWriteLease(r.lease) ? (
+                                                    <ReadOnlyLabel />
                                                 ) : (
                                                     <Button
                                                         size="sm"
@@ -1214,7 +1276,7 @@ const Finance = () => {
                                     onChange={e => setExpenseForm({ ...expenseForm, property_id: e.target.value, unit_id: '' })}
                                 >
                                     <option value="">{expenseForm.scope === 'unit' ? 'Wählen...' : 'Keine (objektübergreifend)'}</option>
-                                    {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
+                                    {expenseProperties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
                                 </select>
                             </div>
                             {expenseForm.scope === 'unit' && (
@@ -1276,7 +1338,7 @@ const Finance = () => {
                                     onChange={e => setIncomeForm({ ...incomeForm, property_id: e.target.value, unit_id: '', lease_id: '' })}
                                 >
                                     <option value="">Wählen...</option>
-                                    {properties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
+                                    {incomeProperties.map(p => <option key={p.id} value={p.id}>{p.street} {p.house_number}</option>)}
                                 </select>
                             </div>
                             <div>
@@ -1330,7 +1392,7 @@ const Finance = () => {
 };
 
 // --- SUB-COMPONENTS FOR OVERDUE VIEW ---
-const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, processingPaymentId, mahnverfahrenClaims, navigate, hidden, includeBeforeBookingStart, onToggleBeforeBookingStart }) => {
+const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, canWriteLease, processingPaymentId, mahnverfahrenClaims, navigate, hidden, includeBeforeBookingStart, onToggleBeforeBookingStart }) => {
     const [expandedIds, setExpandedIds] = useState(() => new Set());
     const [confirmingAllId, setConfirmingAllId] = useState(null);
     const [markingAllId, setMarkingAllId] = useState(null);
@@ -1345,6 +1407,7 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
     const toggleEntrySelection = (entry, e) => {
         e.stopPropagation();
         if (entry.isMahn) return; // Mahnverfahren: nur über die Forderungsakte
+        if (!canWriteLease(entry.lease)) return; // Freigabe nur zum Lesen
         const newSet = new Set(selectedEntries);
         if (newSet.has(entry.id)) newSet.delete(entry.id);
         else newSet.add(entry.id);
@@ -1385,13 +1448,17 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
             group.entries.push({ ...entry, claimId: entry.isMahn ? mahnverfahrenClaims.get(entry.key) : undefined });
         });
         return Array.from(groupMap.values())
-            .map(g => ({
-                ...g,
-                entries: [...g.entries].sort((a, b) => b.monthStr.localeCompare(a.monthStr)),
-                selectable: g.entries.filter(en => !en.isMahn)
-            }))
+            .map(g => {
+                const writable = canWriteLease(g.lease);
+                return {
+                    ...g,
+                    writable,
+                    entries: [...g.entries].sort((a, b) => b.monthStr.localeCompare(a.monthStr)),
+                    selectable: writable ? g.entries.filter(en => !en.isMahn) : []
+                };
+            })
             .sort((a, b) => b.totalOverdue - a.totalOverdue);
-    }, [entries, tenantsById, mahnverfahrenClaims]);
+    }, [entries, tenantsById, mahnverfahrenClaims, canWriteLease]);
 
     const shownBeforeStart = useMemo(() => entries.filter(e => e.beforeBookingStart).length, [entries]);
 
@@ -1528,7 +1595,7 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
                                                 onClick={(e) => toggleEntrySelection(entry, e)}
                                                 style={{
                                                     display: 'grid', gridTemplateColumns: 'auto 2fr 1fr 1fr 1fr 0.6fr', gap: '8px',
-                                                    padding: '10px 8px', alignItems: 'center', cursor: entry.isMahn ? 'default' : 'pointer',
+                                                    padding: '10px 8px', alignItems: 'center', cursor: (entry.isMahn || !group.writable) ? 'default' : 'pointer',
                                                     borderBottom: '1px solid #F3F4F6',
                                                     fontSize: '0.88rem',
                                                     backgroundColor: selectedEntries.has(entry.id) ? 'rgba(59,130,246,0.05)' : 'transparent',
@@ -1539,10 +1606,10 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
                                                     <input
                                                         type="checkbox"
                                                         checked={selectedEntries.has(entry.id)}
-                                                        disabled={entry.isMahn}
+                                                        disabled={entry.isMahn || !group.writable}
                                                         readOnly
-                                                        title={entry.isMahn ? 'Im Mahnverfahren – Zahlung bitte in der Forderungsakte erfassen' : undefined}
-                                                        style={{ cursor: entry.isMahn ? 'not-allowed' : 'pointer', accentColor: 'var(--primary-color)', width: '14px', height: '14px' }}
+                                                        title={entry.isMahn ? 'Im Mahnverfahren – Zahlung bitte in der Forderungsakte erfassen' : (!group.writable ? 'Freigabe nur zum Lesen' : undefined)}
+                                                        style={{ cursor: (entry.isMahn || !group.writable) ? 'not-allowed' : 'pointer', accentColor: 'var(--primary-color)', width: '14px', height: '14px' }}
                                                     />
                                                 </div>
                                                 <span style={{ fontWeight: 600 }}>
@@ -1575,6 +1642,8 @@ const OverdueRentsView = ({ entries, tenantsById, onMarkPaid, onMarkAllPaid, pro
                                                                 </Button>
                                                             )}
                                                         </div>
+                                                    ) : !group.writable ? (
+                                                        <ReadOnlyLabel />
                                                     ) : (
                                                         <OverdueActionMenu
                                                             onMarkPaid={(customAmount) => onMarkPaid(entry.lease, entry.monthStr, customAmount !== undefined ? customAmount : entry.open, entry.beforeBookingStart)}

@@ -1,8 +1,7 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 import nodemailer from "npm:nodemailer@6.9.13"
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────
 // send-letting-email
 //
 // Sicherheitsmodell (Komplett-Check 2026-11-27):
@@ -21,7 +20,8 @@ import nodemailer from "npm:nodemailer@6.9.13"
 //  • Fachliche Fehler werden mit HTTP 200 und { success: false, error } beantwortet,
 //    damit die App die deutsche Meldung anzeigen kann (supabase.functions.invoke
 //    liefert bei Nicht-2xx nur eine generische Fehlermeldung).
-// ─────────────────────────────────────────────────────────────────────────────
+//  • Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.168.0.
+// ───────────────────────────────────────────────────────────────────────────
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -803,7 +803,7 @@ function inviteMailHtml(salutation: string, link: string) {
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }

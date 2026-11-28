@@ -30,10 +30,8 @@ DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (...)'; END $$;
 - Supabase-SQL-Editor, `node-postgres` u. ä.: Die Zeile `\set …` ist dort kein gültiges SQL. Der ganze Text wird
   abgelehnt, es läuft gar nichts.
 
-Stand 27.11.2026: Die beiden Schutzzeilen tragen bisher nur `create_floor_plans.sql`,
-`create_utility_settlements.sql`, `draft_claims_migration.sql`, `draft_claims_migration_v4.sql`,
-`supabase_migration_portfolio_shares.sql` und `update_rls_additive.sql`. Die übrigen Dateien haben nur die
-`DO`-Zeile – dort wäre `psql -f` ohne `ON_ERROR_STOP` nach dem Fehler weitergelaufen. Also auch dort nicht ausführen.
+Stand 28.11.2026: Alle Dateien hier tragen beide Schutzzeilen (`\set ON_ERROR_STOP on` steht in Zeile 1,
+danach folgen die Kopfzeile `-- ARCHIV …` und in Zeile 3 die `DO`-Zeile). Trotzdem gilt: nicht ausführen.
 
 Gelöscht (ohne Nachschlagewert, gefährlich beim Ausführen; in der Git-Historie weiterhin vorhanden):
 `teardown_claims.sql` (löschte das gesamte Forderungs-Schema per `DROP … CASCADE`) und

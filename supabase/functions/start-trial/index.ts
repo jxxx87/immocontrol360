@@ -9,17 +9,16 @@
  *
  * Die Funktion antwortet daher immer mit 410 Gone und schreibt nichts.
  * Empfehlung: im Supabase-Dashboard ganz löschen (`supabase functions delete start-trial`).
+ *
+ * Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0 (keine externen Importe mehr).
  */
-
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-serve((req: Request) => {
+Deno.serve((req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }

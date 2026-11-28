@@ -94,10 +94,8 @@ export const REPORT_CONFIGS = {
         dsgvoRelevant: true,
         hasCoverPage: true,
         sumColumns: ['kaufpreis', 'marktpreis', 'restschuld', 'miete_monat', 'bankrate', 'cashflow_monat'],
-        extraOptions: [
-            { key: 'mieterliste_anhaengen', label: 'Mieterliste pseudonymisiert anhängen', default: false },
-            { key: 'transaktionen_anhaengen', label: 'Transaktionen anhängen', default: false },
-        ],
+        // Keine extraOptions: "Mieterliste/Transaktionen anhängen" wurde nie ausgewertet (pdfGenerator.js kennt
+        // nur includeUnits) und ist entfallen, damit der Dialog keinen Schalter ohne Wirkung anbietet.
         columns: [
             { key: 'objekt', label: 'Objekt', always: true },
             // Schlüssel 'kaufpreis' bleibt (Export-Auswahl), befüllt wird die Gesamtinvestition des Objekts
@@ -140,10 +138,8 @@ export const REPORT_CONFIGS = {
         groupByProperty: true,
         dsgvoRelevant: false,
         sumColumns: ['betrag'],
-        extraOptions: [
-            { key: 'einnahmen_ausgaben_trennen', label: 'Einnahmen/Ausgaben getrennt', default: true },
-            { key: 'nach_immobilie_gruppieren', label: 'Gruppieren nach Immobilie', default: false },
-        ],
+        // Keine extraOptions: "Einnahmen/Ausgaben getrennt" und ein zweites "Gruppieren nach Immobilie" wurden nie
+        // ausgewertet; Gruppieren bietet der Dialog bereits über groupByProperty an.
         columns: [
             { key: 'datum', label: 'Datum', always: true, format: 'date' },
             { key: 'empfaenger', label: 'Empfänger/Absender', compact: true },
@@ -227,9 +223,7 @@ export const REPORT_CONFIGS = {
         groupByProperty: false,
         dsgvoRelevant: false,
         sumColumns: ['summe'],
-        extraOptions: [
-            { key: 'positionen_anzeigen', label: 'Positionen anzeigen', default: false },
-        ],
+        // Positionen steuert die Spaltenauswahl ('positionen'); eine Zusatzoption dafür wurde nie ausgewertet.
         columns: [
             { key: 'gewerk', label: 'Gewerk', always: true },
             { key: 'summe', label: 'Summe', compact: true, format: 'currency' },

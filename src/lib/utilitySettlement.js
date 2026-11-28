@@ -295,6 +295,21 @@ export const isHeatingCostName = (name) =>
 export const tenantDisplayName = (t) => (t ? (joinNonEmpty([t.last_name, t.first_name], ', ') || 'Unbekannt') : 'Unbekannt');
 export const tenantFullName = (t) => (t ? (joinNonEmpty([t.first_name, t.last_name], ' ') || 'Unbekannt') : 'Unbekannt');
 
+// Anrede des Mieters (Spalte tenants.salutation, wie TENANT_SALUTATIONS in lib/leaseRentPeriods.js)
+const LETTER_SALUTATIONS = ['female', 'male', 'diverse'];
+export const tenantSalutation = (t) => (LETTER_SALUTATIONS.includes(t?.salutation) ? t.salutation : null);
+
+// Briefanrede (Variable „mieter_anrede") – dieselbe Regel wie im Vorlagen-Editor (buildVariableValues in
+// DocumentTemplates.jsx): Anrede „Frau"/„Herr" mit Nachname, sonst (keine Angabe/divers) neutral.
+export const buildLetterSalutation = ({ fullName, lastName, salutation } = {}) => {
+    const full = String(fullName || '').trim();
+    const last = String(lastName || '').trim();
+    if (!full) return 'Sehr geehrte Damen und Herren';
+    if (salutation === 'female' && last) return `Sehr geehrte Frau ${last}`;
+    if (salutation === 'male' && last) return `Sehr geehrter Herr ${last}`;
+    return `Sehr geehrte/r ${full}`;
+};
+
 // Belegung einer Einheit im Abrechnungszeitraum: je Mietvertrag ein Abschnitt („Zelle"),
 // dazu ein zusammengefasster Leerstands-Abschnitt. Personen je Vertrag (Personentage).
 export const buildUnitOccupancy = ({ unitId, leases, tenantsById, periodStart, periodEnd, vacancyPersons = 1 }) => {
@@ -319,7 +334,7 @@ export const buildUnitOccupancy = ({ unitId, leases, tenantsById, periodStart, p
             key: l.id, kind: 'lease', leaseId: l.id, lease: l,
             tenantId: tenant?.id || l.tenant_id || null, tenant,
             displayName: tenantDisplayName(tenant), fullName: tenantFullName(tenant),
-            lastName: tenant?.last_name || '',
+            lastName: tenant?.last_name || '', salutation: tenantSalutation(tenant),
             start, end, days: daysInclusive(start, end),
             persons: personsMissing ? 1 : occ, personsMissing
         });
@@ -780,6 +795,7 @@ export const computeSettlement = ({
                 key: `${uid}:${cell.leaseId}`, unitId: uid, unitName: unit.unit_name, propertyId: unit.property_id,
                 leaseId: cell.leaseId, tenantId: cell.tenantId,
                 tenantDisplayName: cell.displayName, tenantFullName: cell.fullName, tenantLastName: cell.lastName,
+                tenantSalutation: cell.salutation || null,
                 start: cell.start, end: cell.end, days: cell.days, totalDays: occ.totalDays, ratio: cell.ratio,
                 persons: cell.persons, personsMissing: cell.personsMissing,
                 sqm: parseNumber(unit.sqm),
@@ -1034,6 +1050,7 @@ export const DEFAULT_UTILITY_TEMPLATE = DEFAULT_TEMPLATES.utility_costs.content_
 // Seitenhöhe 295 mm statt 297 mm: die PDF-Erzeugung (lib/htmlToPdf) rundet die Blatthöhe auf 1122 px ab und
 // würde sonst einen Streifen auf eine zusätzliche Leerseite schneiden; der Umbruch
 // vor jeder Folgeseite (Abstandshalter ≈ 7 px) setzt jede Seite exakt an den Blattanfang.
+// Dunkelmodus der App: index.css färbt Tabellenköpfe und Überschriften mit !important – auf dem Blatt zurücksetzen.
 export const SETTLEMENT_DOC_CSS = `
 .nk-doc { width: 210mm; background: #ffffff; color: #000000; }
 .nk-doc * { transition: none !important; }
@@ -1041,6 +1058,8 @@ export const SETTLEMENT_DOC_CSS = `
 .nk-doc .letter-page ~ .letter-page { page-break-before: always; break-before: page; }
 .nk-doc table { background: transparent !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; border-radius: 0 !important; overflow: visible !important; border: none; }
 .nk-doc th, .nk-doc td { color: #000000; background-color: transparent; font-size: inherit; }
+[data-theme="dark"] .nk-doc th { background-color: transparent !important; color: #000000; }
+[data-theme="dark"] .nk-doc h1, [data-theme="dark"] .nk-doc h2, [data-theme="dark"] .nk-doc h3, [data-theme="dark"] .nk-doc h4 { color: #000000 !important; }
 .nk-doc.is-draft .letter-page::after { content: 'ENTWURF'; position: absolute; left: 0; right: 0; top: 42%; text-align: center; font-size: 72pt; font-weight: 700; letter-spacing: 6mm; color: rgba(220, 38, 38, 0.12); transform: rotate(-30deg); pointer-events: none; z-index: 5; }
 `;
 
@@ -1061,7 +1080,7 @@ export const buildTemplateVariables = (page, { periodStart, periodEnd, letterDat
     return {
         mieter_name: val.text(name),
         mieter_nachname: val.text(page.tenantLastName || ''),
-        mieter_anrede: val.text(name ? `Sehr geehrte/r ${name}` : 'Sehr geehrte Damen und Herren'),
+        mieter_anrede: val.text(buildLetterSalutation({ fullName: name, lastName: page.tenantLastName, salutation: page.tenantSalutation })),
         __anrede_name: val.text(name || 'Damen und Herren'),
         mieter_adresse: val.lines(L.recipientLines),
         objekt_name: val.text(L.propertyName),
@@ -1099,6 +1118,17 @@ const precededBySalutation = (el) => {
         if (!node || node.nodeName === 'P' || node.nodeName === 'DIV' || node.nodeName === 'BODY') break;
     }
     return false;
+};
+
+// Alte Vorlage mit „Sehr geehrte/r " als Text direkt vor der Variable: diesen Text entfernen,
+// damit die vollständige Briefanrede (ggf. „Sehr geehrte Frau …") eingesetzt werden kann.
+// Liefert false, wenn der Anredetext nicht direkt davor steht (dann wird nur der Name eingesetzt).
+const stripSalutationBefore = (el) => {
+    let prev = el.previousSibling;
+    while (prev && prev.nodeType === 3 && !prev.nodeValue.trim()) prev = prev.previousSibling;
+    if (!prev || prev.nodeType !== 3 || !SALUTATION_BEFORE.test(prev.nodeValue)) return false;
+    prev.nodeValue = prev.nodeValue.replace(SALUTATION_BEFORE, '');
+    return true;
 };
 
 // Setzt die Werte per DOM ein (keine Regex-Ersetzung: kein $-Muster-Problem, keine
@@ -1147,7 +1177,10 @@ export const fillTemplate = (templateHtml, vars) => {
             const key = m[1];
             if (!hasOwn(vars, key) || key.startsWith('__')) continue;
             changed = true;
-            frag.appendChild(doc.createTextNode(s.slice(last, m.index)));
+            let before = s.slice(last, m.index);
+            // „Sehr geehrte/r {mieter_anrede}": die Variable enthält die Anrede bereits
+            if (key === 'mieter_anrede') before = before.replace(SALUTATION_BEFORE, '');
+            frag.appendChild(doc.createTextNode(before));
             frag.appendChild(makeNodes(vars[key]));
             last = m.index + m[0].length;
         }
@@ -1163,7 +1196,7 @@ export const fillTemplate = (templateHtml, vars) => {
         const key = el.getAttribute('data-id');
         if (!hasOwn(vars, key) || key.startsWith('__')) return;
         let v = vars[key];
-        if (key === 'mieter_anrede' && precededBySalutation(el)) v = vars.__anrede_name;
+        if (key === 'mieter_anrede' && precededBySalutation(el) && !stripSalutationBefore(el)) v = vars.__anrede_name;
         const parent = el.parentNode;
         // Tabelle als einziger Inhalt eines Absatzes: Absatz ersetzen (kein <table> in <p>)
         if (v?.html !== undefined && parent && parent.nodeName === 'P' && parent.textContent.trim() === el.textContent.trim()) {
@@ -1224,6 +1257,7 @@ export const buildCalculationSnapshot = ({ result, costItems, periodStart, perio
         key: p.key, unitId: p.unitId, unitName: p.unitName, propertyId: p.propertyId,
         leaseId: p.leaseId, tenantId: p.tenantId,
         tenantDisplayName: p.tenantDisplayName, tenantFullName: p.tenantFullName, tenantLastName: p.tenantLastName,
+        tenantSalutation: p.tenantSalutation || null,
         start: p.start, end: p.end, days: p.days, totalDays: p.totalDays,
         persons: p.persons, personsMissing: p.personsMissing, sqm: p.sqm,
         items: p.items.map(it => ({

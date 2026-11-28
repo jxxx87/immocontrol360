@@ -23,10 +23,9 @@
  *   als Systemnotiz (portal_event = checkout_started) in der Forderungsakte vermerkt.
  * - metadata.quote_date = Berliner Kalendertag, zu dem der Betrag berechnet wurde; der Webhook
  *   bucht die Zahlung zu diesem Stichtag (sonst fehlt bei Zahlung nach Mitternacht ein Tageszins).
+ *
+ * Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0 (keine externen Importe mehr).
  */
-
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -193,7 +192,7 @@ async function recordCheckoutStarted(claimId: string, landlordId: string, sessio
     }
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }

@@ -21,6 +21,17 @@ const APPLICANT_BUCKET = 'applicant-documents';
 const isMissingRpc = (error, status) =>
   !!error && (error.code === 'PGRST202' || error.code === '42883' || status === 404);
 
+// Anrede aus dem Bewerbungsportal ("Herr"/"Frau") als tenants.salutation; "Divers"/leer = keine Angabe (neutrale Briefanrede)
+const applicantSalutation = (app) => {
+  const s = String(app?.salutation || '').trim().toLowerCase();
+  if (s === 'frau') return 'female';
+  if (s === 'herr') return 'male';
+  return null;
+};
+
+// Spalte tenants.salutation fehlt (Migration noch nicht eingespielt): PostgREST-Schema-Cache bzw. Postgres
+const isMissingSalutationColumn = (error) => !!error && (error.code === 'PGRST204' || error.code === '42703') && /salutation/i.test(error.message || '');
+
 // Lokales Datum (nicht UTC) als YYYY-MM-DD
 const localDateString = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -551,18 +562,31 @@ const Letting = () => {
     }
 
     // 1. Create tenant row
-    const { data: tenantData, error: tenantErr } = await supabase
+    const tenantRow = {
+      user_id: user.id,
+      first_name: app.first_name,
+      last_name: app.last_name,
+      email: app.email,
+      phone: app.phone,
+      occupants: app.additional_persons_count ? app.additional_persons_count + 1 : 1
+    };
+    // Anrede (für die Briefanrede in Schreibvorlagen) nur mitsenden, wenn im Portal "Herr"/"Frau" gewählt
+    const salutation = applicantSalutation(app);
+    if (salutation) tenantRow.salutation = salutation;
+    let { data: tenantData, error: tenantErr } = await supabase
       .from('tenants')
-      .insert([{
-        user_id: user.id,
-        first_name: app.first_name,
-        last_name: app.last_name,
-        email: app.email,
-        phone: app.phone,
-        occupants: app.additional_persons_count ? app.additional_persons_count + 1 : 1
-      }])
+      .insert([tenantRow])
       .select()
       .single();
+    if (tenantErr && tenantRow.salutation && isMissingSalutationColumn(tenantErr)) {
+      // Datenbank kennt die Spalte noch nicht: ohne Anrede speichern (neutrale Briefanrede)
+      const { salutation: _salutation, ...withoutSalutation } = tenantRow;
+      ({ data: tenantData, error: tenantErr } = await supabase
+        .from('tenants')
+        .insert([withoutSalutation])
+        .select()
+        .single());
+    }
 
     if (tenantErr) throw tenantErr;
 
@@ -624,7 +648,7 @@ const Letting = () => {
 
     try {
       setIsSaving(true);
-      const { error, status } = await supabase.rpc('convert_rental_applicant_to_tenant', {
+      const { data: rpcResult, error, status } = await supabase.rpc('convert_rental_applicant_to_tenant', {
         p_applicant_id: dialog.app.id,
         p_start_date: dialog.start_date,
         p_cold_rent: toAmount(dialog.cold_rent),
@@ -637,10 +661,22 @@ const Letting = () => {
       if (error && !isMissingRpc(error, status)) throw error;
       if (error) await convertApplicantLegacy({ ...dialog, payment_due_day: dueDay });
 
+      // Die Datenbank-Funktion übernimmt die Anrede nicht: hier nachtragen (Mieter und Vertrag sind bereits angelegt)
+      let salutationHint = '';
+      const salutation = applicantSalutation(dialog.app);
+      const newTenantId = !error ? rpcResult?.tenant_id : null;
+      if (salutation && newTenantId) {
+        const { data: salRows, error: salErr } = await supabase.from('tenants').update({ salutation }).eq('id', newTenantId).select('id');
+        if (salErr ? !isMissingSalutationColumn(salErr) : !(salRows && salRows.length)) {
+          console.warn('Anrede konnte nicht übernommen werden:', salErr || 'keine Zeile aktualisiert');
+          salutationHint = '\n\nHinweis: Die Anrede aus der Bewerbung konnte nicht übernommen werden – bitte beim Mieter ergänzen.';
+        }
+      }
+
       setConvertDialog(null);
       setIsDetailModalOpen(false);
       fetchData();
-      alert('Der Mieter wurde erfolgreich angelegt und das Mietverhältnis gestartet!');
+      alert('Der Mieter wurde erfolgreich angelegt und das Mietverhältnis gestartet!' + salutationHint);
     } catch (err) {
       alert('Fehler beim Erstellen des Mietverhältnisses: ' + err.message);
     } finally {

@@ -1,7 +1,9 @@
 # ImmoControl360 Web-App (app.immocontrol360.de)
 # Wird beim Build nach dist/ kopiert und liegt im production-Branch unter /app (= Docroot der Subdomain).
 # Komplett-Check 2026-11-27: Sicherheits-Header, Cache-Regeln, echtes 404 fuer fehlende Assets,
-# Umleitung von immocontrol360.de/app/ auf die Subdomain. Eine Content-Security-Policy folgt separat.
+# Umleitung von immocontrol360.de/app/ auf die Subdomain.
+# Welle 4 (28.11.2026): zusaetzliche, risikoarme Content-Security-Policy (siehe unten), Permissions-Policy wie
+# bei der Marketing-Seite (usb=()). Eine CSP mit script-src/connect-src folgt separat.
 
 # JavaScript-Module (.mjs, z. B. der PDF-Worker) mit JavaScript-MIME-Typ ausliefern
 <IfModule mod_mime.c>
@@ -14,7 +16,17 @@
   Header always set X-Frame-Options "SAMEORIGIN"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
   Header always set Strict-Transport-Security "max-age=31536000"
-  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), usb=()"
+  # Content-Security-Policy ohne script-src/connect-src (nichts, was Skripte, Supabase oder Stripe bremst):
+  # - frame-ancestors 'self': keine Einbettung in fremde Seiten (gleiche Wirkung wie X-Frame-Options oben)
+  # - base-uri 'self': ein eingeschleustes <base> kann relative Adressen nicht auf eine fremde Seite umbiegen
+  #   (die App und ihre Druckfenster setzen selbst kein <base>)
+  # - object-src bewusst NICHT: Mahnungs-PDFs werden als blob:-Adresse in einem neuen Tab geoeffnet
+  #   (src/lib/claimPdfGenerator.js); das Fenster erbt diese CSP, und Chromes PDF-Anzeige zaehlt als Plugin.
+  # - upgrade-insecure-requests setzt Hostinger bereits selbst; hier wiederholt, damit es erhalten bleibt,
+  #   falls dieses "set" den Hostinger-Header ersetzt (bei zwei CSP-Headern gelten beide).
+  # Ersetzt fuer die App die CSP der Marketing-Seite (deren .htaccess gilt sonst auch fuer diesen Unterordner).
+  Header always set Content-Security-Policy "upgrade-insecure-requests; frame-ancestors 'self'; base-uri 'self'"
 
   # index.html (auch als SPA-Fallback) immer beim Server nachfragen,
   # damit nach einem Deploy sofort die neuen Asset-Namen geladen werden

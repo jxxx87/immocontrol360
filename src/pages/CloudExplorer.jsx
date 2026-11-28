@@ -39,6 +39,11 @@ const getErrorMessage = async (err) => (await getFunctionError(err)).message;
 
 const providerLabel = (provider) => (provider === 'googledrive' ? 'Google Drive' : 'OneDrive');
 
+// Ein Name ergibt genau EIN Cloud-Ordnersegment: '/' und '\' würden sonst Unterordner erzeugen.
+// Gleiche Regel wie folderSegment in cloud-sync (ebenso in Properties.jsx und TenantDetail.jsx),
+// sonst sucht der Explorer einen anderen Ordner als den, den cloud-sync angelegt hat.
+const cloudFolderSegment = (value) => String(value ?? '').replace(/[\\/]/g, '-');
+
 const CloudExplorer = () => {
     const { user } = useAuth();
     const userId = user?.id;
@@ -176,16 +181,16 @@ const CloudExplorer = () => {
                     const parts = Object.keys(groupedByStreet).map(street => {
                         const nums = groupedByStreet[street];
                         if (nums.length > 0) {
-                            return `${street} ${nums.join(' & ')}`;
+                            return `${cloudFolderSegment(street)} ${nums.map(cloudFolderSegment).join(' & ')}`;
                         }
-                        return street;
+                        return cloudFolderSegment(street);
                     });
                     const displayNames = parts.slice(0, 2).join(' | ');
                     const groupName = parts.length > 2 ? `${displayNames} u.a.` : displayNames;
                     item.displayFolderName = `WG: ${groupName || 'Wirtschaftsgemeinschaft'}`;
                 } else {
                     conn = item.cloud_connection;
-                    item.displayFolderName = `${item.street} ${item.house_number || ''}`.trim();
+                    item.displayFolderName = `${cloudFolderSegment(item.street)} ${cloudFolderSegment(item.house_number || '')}`.trim();
                 }
                 item.cloud_connection = conn || null;
                 item.provider = conn ? conn.provider : null;
@@ -709,7 +714,8 @@ const CloudExplorer = () => {
                                             const parentName = pathNames[0];
                                             if (parentName === 'Einheiten') {
                                                 if (selectedProperty?.isGroup) {
-                                                    const hasMatchingHouseNumber = selectedProperty.members?.some(m => m.house_number === file.name);
+                                                    // Ordnername wie in cloud-sync: Hausnummer als ein Segment, sonst 'Ohne Hausnummer'
+                                                    const hasMatchingHouseNumber = selectedProperty.members?.some(m => cloudFolderSegment(m.house_number || 'Ohne Hausnummer') === file.name);
                                                     if (hasMatchingHouseNumber) {
                                                         isProtected = true;
                                                     }

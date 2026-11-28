@@ -1,3 +1,4 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/update_rls_claims_portal.sql. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
 -- RLS Policies for claim_access_links

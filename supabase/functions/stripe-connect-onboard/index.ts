@@ -8,10 +8,9 @@
  * - Mieter-Konten dürfen kein Connect-Konto anlegen; ohne Profilzeile wird kein Konto angelegt.
  * - Body wird VOR jedem Seiteneffekt gelesen; Redirect-Ziele nur eigene Origins.
  * - Kontoanlage mit Idempotency-Key, Profil-Update wird auf tatsächlich geänderte Zeile geprüft.
+ *
+ * Wave 4 (E3-21): eingebautes Deno.serve statt deno.land/std@0.131.0 (keine externen Importe mehr).
  */
-
-// @ts-ignore
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -137,7 +136,7 @@ const serviceHeaders = {
     Authorization: `Bearer ${SUPABASE_KEY}`,
 };
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
     }

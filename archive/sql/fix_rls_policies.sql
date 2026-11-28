@@ -1,3 +1,4 @@
+\set ON_ERROR_STOP on
 -- ARCHIV (historisch) – NICHT AUSFÜHREN. Ursprung: immo-web/fix_rls.cjs. Siehe immo-web/archive/sql/README.md.
 DO $$ BEGIN RAISE EXCEPTION 'Archivdatei - nicht ausfuehren (siehe immo-web/archive/sql/README.md)'; END $$;
 -- Aus dem geloeschten Runner-Skript fix_rls.cjs uebernommen (Komplett-Check 2026-11-27). Das Skript hatte dieses SQL
