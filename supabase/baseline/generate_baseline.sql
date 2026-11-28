@@ -503,11 +503,14 @@ begin
       from (values ('live', 'public'), ('neu', 'w3bl_public')) s(side, nsp)
       join pg_proc p on p.pronamespace = s.nsp::regnamespace;
 
+    -- Spaltenkommentare über den Spaltennamen zuordnen, nicht über die Nummer (objsubid): gelöschte
+    -- Spalten verschieben live die Nummern, im Neubau gibt es sie nicht (z. B. invoices.sender_snapshot)
     insert into w3bl_fp
-    select s.side, 'kommentare', c.relname || '.' || ds.objsubid, ds.description
+    select s.side, 'kommentare', c.relname || '.' || coalesce(a.attname::text, ds.objsubid::text), ds.description
       from (values ('live', 'public'), ('neu', 'w3bl_public')) s(side, nsp)
       join pg_class c on c.relnamespace = s.nsp::regnamespace
       join pg_description ds on ds.classoid = 'pg_class'::regclass and ds.objoid = c.oid
+      left join pg_attribute a on a.attrelid = c.oid and a.attnum = ds.objsubid and ds.objsubid > 0
     union all
     select s.side, 'kommentare', p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', ds.description
       from (values ('live', 'public'), ('neu', 'w3bl_public')) s(side, nsp)

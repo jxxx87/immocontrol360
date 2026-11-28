@@ -1,8 +1,8 @@
 -- =============================================================================
 -- ImmoControl360 · Ausgangsschema (Baseline) der Live-Datenbank – Schema public (+ Storage-Policies)
 -- Erzeugt mit supabase/baseline/generate_baseline.sql aus dem Live-Katalog (nur lesend).
--- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128092217
--- Inhalt: 74 Tabellen, 3 Sichten, 159 Funktionen, 291 Policies (public), 32 Storage-Policies
+-- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128120027
+-- Inhalt: 74 Tabellen, 3 Sichten, 163 Funktionen, 291 Policies (public), 32 Storage-Policies
 --
 -- NUR AUF EINER LEEREN DATENBANK (frisches Supabase-Projekt) ausführen, als eine Transaktion:
 --   psql "<db-url>" -v ON_ERROR_STOP=1 --single-transaction -f baseline_public.sql
@@ -430,6 +430,7 @@ create table public.invoices (
     recipient_zip text,
     recipient_city text,
     vat_amount numeric(10,2) default 0 not null,
+    sender_snapshot jsonb,
     constraint invoices_pkey PRIMARY KEY (id),
     constraint invoices_user_id_invoice_number_portfolio_id_key UNIQUE (user_id, invoice_number, portfolio_id),
     constraint invoices_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'issued'::text, 'credited'::text, 'credit_note'::text])))
@@ -1902,6 +1903,93 @@ AS $function$
      )
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.cancel_claim(p_claim_id uuid, p_reason text, p_write_off boolean DEFAULT false)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  v_caller uuid := auth.uid();
+  v_claim public.claims%rowtype;
+  v_reason text := nullif(btrim(coalesce(p_reason, '')), '');
+  v_write_off boolean := coalesce(p_write_off, false);
+  v_now timestamptz := now();
+  v_plan_ids uuid[];
+  v_links integer := 0;
+begin
+  if v_caller is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  if v_reason is null then
+    raise exception 'Bitte geben Sie einen Grund an.';
+  end if;
+
+  select * into v_claim from public.claims where id = p_claim_id for update;
+  if not found
+     or (v_claim.user_id <> v_caller and not public.has_claim_access(p_claim_id, 'finanzen', 'write')) then
+    raise exception 'Forderung nicht gefunden oder keine Berechtigung.';
+  end if;
+
+  if v_claim.status in ('cancelled', 'archived') then
+    raise exception 'Diese Forderung ist bereits storniert bzw. archiviert.';
+  end if;
+
+  select coalesce(array_agg(pp.id order by pp.created_at), '{}'::uuid[]) into v_plan_ids
+    from public.payment_plans pp
+   where pp.claim_id = p_claim_id and pp.status = 'active';
+
+  if v_write_off and cardinality(v_plan_ids) > 0 then
+    raise exception 'Für diese Forderung läuft ein Ratenplan. Bitte beenden Sie den Ratenplan zuerst in der Forderungsakte (Details), bevor Sie einen Forderungsausfall buchen.';
+  end if;
+
+  if cardinality(v_plan_ids) > 0 then
+    -- reine Stornierung (vom Schutz-Trigger zugelassen): nur Status/Zeitstempel/Grund
+    update public.payment_plan_installments
+       set status = 'cancelled', updated_at = v_now
+     where payment_plan_id = any(v_plan_ids)
+       and status in ('open', 'partial', 'overdue');
+    update public.payment_plans
+       set status = 'cancelled', cancelled_at = v_now, cancelled_by = v_caller,
+           cancellation_reason = v_reason, updated_at = v_now
+     where id = any(v_plan_ids);
+  end if;
+
+  update public.claim_access_links
+     set is_active = false, revoked_at = coalesce(revoked_at, v_now)
+   where claim_id = p_claim_id and is_active = true;
+  get diagnostics v_links = row_count;
+
+  update public.claims
+     set status = 'cancelled',
+         cancelled_at = v_now,
+         cancelled_by = v_caller,
+         cancellation_reason = case when v_write_off then 'Forderungsausfall: ' || v_reason else v_reason end,
+         updated_at = v_now
+   where id = p_claim_id;
+
+  insert into public.claim_events (user_id, claim_id, event_type, description, event_metadata)
+  values (v_claim.user_id, p_claim_id,
+          case when v_write_off then 'status_changed' else 'cancelled' end,
+          case when v_write_off then 'Forderungsausfall gebucht' else 'Forderung storniert' end,
+          jsonb_build_object(
+              'old_status', v_claim.status,
+              'new_status', 'cancelled',
+              'reason', v_reason,
+              'write_off', v_write_off,
+              'cancelled_payment_plan_ids', to_jsonb(v_plan_ids),
+              'revoked_portal_links', v_links,
+              'source', 'cancel_claim'));
+
+  return json_build_object(
+      'claim_id', p_claim_id,
+      'old_status', v_claim.status,
+      'cancelled_payment_plan_ids', to_jsonb(v_plan_ids),
+      'revoked_portal_links', v_links);
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.cancel_viewing_booking(p_token text, p_booking_id uuid, p_applicant_id uuid)
  RETURNS json
  LANGUAGE plpgsql
@@ -2306,6 +2394,54 @@ AS $function$
       from public.claims c
      where c.id = p_claim_id
   ), 0::numeric)
+$function$
+;
+CREATE OR REPLACE FUNCTION public.claim_portal_bank_details(p_claim_id uuid)
+ RETURNS json
+ LANGUAGE sql
+ STABLE
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  -- Gleiche Regel wie claimPdfGenerator.js (generateClaimPdf, "5. Bankverbindung"): Portfolio vor Profil
+  with src as (
+    select pf.company_name as pf_company,
+           pf.bank_name    as pf_bank_name,
+           pf.iban         as pf_iban,
+           pf.bic          as pf_bic,
+           p.company       as p_company,
+           p.first_name    as p_first_name,
+           p.last_name     as p_last_name,
+           p.bank_account_holder as p_holder,
+           p.bank_name     as p_bank_name,
+           p.iban          as p_iban,
+           p.bic           as p_bic
+      from public.claims c
+      left join public.leases l      on l.id = c.lease_id
+      left join public.units u       on u.id = l.unit_id
+      left join public.properties pr on pr.id = u.property_id
+      left join public.portfolios pf on pf.id = pr.portfolio_id
+      left join public.profiles p    on p.id = c.user_id
+     where c.id = p_claim_id
+  ), x as (
+    select s.*,
+           coalesce(nullif(btrim(s.p_company), ''),
+                    nullif(concat_ws(' ', nullif(btrim(s.p_first_name), ''), nullif(btrim(s.p_last_name), '')), ''),
+                    nullif(btrim(s.pf_company), '')) as sender_name,
+           case when nullif(btrim(s.pf_iban), '') is not null then 'portfolio'
+                when nullif(btrim(s.p_iban), '') is not null then 'profile'
+                else 'none' end as source
+      from src s
+  )
+  select json_build_object(
+           'account_holder', case x.source
+                               when 'portfolio' then coalesce(nullif(btrim(x.pf_company), ''), x.sender_name, '')
+                               when 'profile'   then coalesce(nullif(btrim(x.p_holder), ''), x.sender_name, '')
+                               else '' end,
+           'iban',      case x.source when 'portfolio' then coalesce(x.pf_iban, '') when 'profile' then coalesce(x.p_iban, '') else '' end,
+           'bic',       case x.source when 'portfolio' then coalesce(x.pf_bic, '') when 'profile' then coalesce(x.p_bic, '') else '' end,
+           'bank_name', case x.source when 'portfolio' then coalesce(x.pf_bank_name, '') when 'profile' then coalesce(x.p_bank_name, '') else '' end,
+           'source',    x.source)
+    from x
 $function$
 ;
 CREATE OR REPLACE FUNCTION public.claim_portal_check_access(p_token text, p_pin text)
@@ -3199,7 +3335,7 @@ begin
                 sender_name, sender_street, sender_zip, sender_city,
                 recipient_name, recipient_street, recipient_zip, recipient_city,
                 move_in, move_out, persons, nights, vat_rate, positions,
-                net_amount, vat_amount, gross_amount, status)
+                net_amount, vat_amount, gross_amount, status, sender_snapshot)
             values (
                 v_orig.user_id, v_orig.portfolio_id, v_orig.property_id, v_orig.unit_id, v_orig.contact_id,
                 v_today, v_number,
@@ -3210,7 +3346,7 @@ begin
                 round(-coalesce(v_orig.net_amount, 0), 2),
                 round(-coalesce(v_orig.vat_amount, 0), 2),
                 round(-coalesce(v_orig.gross_amount, 0), 2),
-                'credit_note')
+                'credit_note', v_orig.sender_snapshot)
             returning * into v_new;
             exit;
         exception when unique_violation then
@@ -3901,6 +4037,34 @@ AS $function$
      and (uid = auth.uid() or public.has_property_access(pr.id, '*', 'read'));
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.get_message_partners()
+ RETURNS TABLE(user_id uuid, tenant_id uuid, unit_id uuid, property_id uuid, portfolio_id uuid, first_name text, last_name text, unit_name text, street text, house_number text, can_write boolean)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+    select ur.user_id,
+           ur.tenant_id,
+           ur.unit_id,
+           ur.property_id,
+           pr.portfolio_id,
+           t.first_name,
+           t.last_name,
+           u.unit_name,
+           pr.street,
+           pr.house_number,
+           public.has_property_access(ur.property_id, 'mieterportal', 'write') as can_write
+    from public.user_roles ur
+    join public.properties pr on pr.id = ur.property_id
+    left join public.units u on u.id = ur.unit_id and u.property_id = ur.property_id
+    left join public.tenants t on t.id = ur.tenant_id
+    where (select auth.uid()) is not null
+      and ur.role = 'tenant'
+      and ur.user_id <> (select auth.uid())
+      and public.has_property_access(ur.property_id, 'mieterportal', 'read')
+    order by ur.created_at desc nulls last
+$function$
+;
 CREATE OR REPLACE FUNCTION public.get_my_landlord_info(p_property_id uuid DEFAULT NULL::uuid)
  RETURNS json
  LANGUAGE plpgsql
@@ -4026,6 +4190,9 @@ begin
     from public.tenants t
     where t.id = v_role.tenant_id;
 
+    -- B-43: Beträge aus dem Mietzeitraum zum heutigen Tag (Mietänderung „gültig ab“), nicht aus den
+    -- Vertragsspalten, die erst beim nächsten Abgleich (sync_lease_rent_from_periods) nachziehen.
+    -- Ohne Mietzeitraum (rp.id is null) gelten die Vertragsspalten.
     select coalesce(json_agg(x.obj order by x.sort_active, x.start_date desc), '[]'::json)
       into v_leases
     from (
@@ -4036,12 +4203,12 @@ begin
                    'status', l.status,
                    'start_date', l.start_date,
                    'end_date', l.end_date,
-                   'cold_rent', l.cold_rent,
-                   'service_charge', l.service_charge,
-                   'heating_cost', l.heating_cost,
-                   'other_costs', l.other_costs,
+                   'cold_rent', case when rp.id is not null then rp.cold_rent else l.cold_rent end,
+                   'service_charge', case when rp.id is not null then rp.service_charge else l.service_charge end,
+                   'heating_cost', case when rp.id is not null then rp.heating_cost else l.heating_cost end,
+                   'other_costs', case when rp.id is not null then rp.other_costs else l.other_costs end,
                    'deposit', l.deposit,
-                   'payment_due_day', l.payment_due_day,
+                   'payment_due_day', case when rp.id is not null then rp.payment_due_day else l.payment_due_day end,
                    'unit', json_build_object(
                        'id', u.id,
                        'unit_name', u.unit_name,
@@ -4060,6 +4227,7 @@ begin
         from public.leases l
         join public.units u on u.id = l.unit_id
         join public.properties p on p.id = u.property_id
+        left join lateral public.lease_rent_period_for_month(l.id, current_date) rp on true
         where l.tenant_id = v_role.tenant_id
     ) x;
 
@@ -4271,6 +4439,8 @@ begin
               'description', ci.description,
               'original_amount', ci.original_amount,
               'created_at', ci.created_at,
+              'due_date', ci.due_date,
+              'period_month', ci.period_month,
               'fee_amount', ci.fee_amount,
               'interest_amount', ci.interest_amount,
               'open_amount', cv.open_amount
@@ -4294,14 +4464,8 @@ begin
       ),
       'payment_plan_request_open', v_request_open,
       'payment_plan_request_allowed', v_request_allowed,
-      'bank_details', (
-          select json_build_object(
-              'account_holder', coalesce(p.bank_account_holder, ''),
-              'iban', coalesce(p.iban, ''),
-              'bic', coalesce(p.bic, '')
-          )
-          from public.profiles p where p.id = v_claim.user_id
-      )
+      -- A-1 (Welle 7): gleiche Bankverbindung wie im Mahnschreiben (Portfolio vor Profil)
+      'bank_details', public.claim_portal_bank_details(v_claim.id)
   ) into v_result;
 
   return v_result;
@@ -4996,6 +5160,58 @@ begin
         'leases', v_leases,
         'booking_start_leases', v_booking
     );
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.invoices_freeze_sender_snapshot()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+-- SECURITY DEFINER nur zum Lesen der Absenderdaten des Portfolios der Rechnung ohne RLS des
+-- Aufrufers (Schreibrechte auf die Rechnung prüft weiterhin RLS). Ändert nur NEW.sender_snapshot.
+declare
+    v_p public.portfolios%rowtype;
+begin
+    -- Festgeschriebene Belege: nichts ändern (protect_issued_invoice sperrt alle Spalten)
+    if tg_op = 'UPDATE' and old.status is distinct from 'draft' then
+        return new;
+    end if;
+
+    -- Entwürfe zeigen die aktuellen Portfolio-Daten
+    if new.status is not distinct from 'draft' then
+        new.sender_snapshot := null;
+        return new;
+    end if;
+
+    -- Gutschrift: Absenderdaten der Originalrechnung (von create_credit_note übernommen)
+    if tg_op = 'INSERT' and new.status = 'credit_note' and jsonb_typeof(new.sender_snapshot) = 'object' then
+        return new;
+    end if;
+
+    select * into v_p from public.portfolios p where p.id = new.portfolio_id;
+    if not found then
+        new.sender_snapshot := null;
+        return new;
+    end if;
+
+    new.sender_snapshot := jsonb_build_object(
+        'name', v_p.name,
+        'company_name', v_p.company_name,
+        'street', v_p.street,
+        'house_number', v_p.house_number,
+        'zip', v_p.zip,
+        'city', v_p.city,
+        'email', v_p.email,
+        'phone', v_p.phone,
+        'bank_name', v_p.bank_name,
+        'iban', v_p.iban,
+        'bic', v_p.bic,
+        'tax_number', v_p.tax_number,
+        'vat_id', v_p.vat_id,
+        'frozen_at', now());
+    return new;
 end;
 $function$
 ;
@@ -7606,6 +7822,57 @@ declare
     v_owner uuid;
     v_moved boolean := false;
 begin
+    -- Darlehen, Mieteingänge, Ausgaben, Dokumente (W7 A-20): user_id = Eigentümer des Portfolios
+    if tg_table_name in ('loans', 'rent_payments', 'expenses', 'documents') then
+        if tg_table_name = 'loans' then
+            select po.user_id into v_owner
+              from public.portfolios po
+             where po.id = new.portfolio_id;
+            if tg_op = 'UPDATE' then
+                v_moved := new.portfolio_id is distinct from old.portfolio_id;
+            end if;
+        elsif tg_table_name = 'rent_payments' then
+            select po.user_id into v_owner
+              from public.leases l
+              join public.units u on u.id = l.unit_id
+              join public.properties pr on pr.id = u.property_id
+              join public.portfolios po on po.id = pr.portfolio_id
+             where l.id = new.lease_id;
+            if tg_op = 'UPDATE' then
+                v_moved := new.lease_id is distinct from old.lease_id;
+            end if;
+        else
+            -- expenses, documents: wie deren RLS zuerst property_id, sonst unit_id
+            if new.property_id is not null then
+                select po.user_id into v_owner
+                  from public.properties pr
+                  join public.portfolios po on po.id = pr.portfolio_id
+                 where pr.id = new.property_id;
+            elsif new.unit_id is not null then
+                select po.user_id into v_owner
+                  from public.units u
+                  join public.properties pr on pr.id = u.property_id
+                  join public.portfolios po on po.id = pr.portfolio_id
+                 where u.id = new.unit_id;
+            end if;
+            if tg_op = 'UPDATE' then
+                v_moved := new.property_id is distinct from old.property_id
+                        or new.unit_id is distinct from old.unit_id;
+            end if;
+        end if;
+
+        if tg_op = 'INSERT' then
+            if v_owner is not null then
+                new.user_id := v_owner;
+            end if;
+        elsif v_moved and v_owner is not null then
+            new.user_id := v_owner;
+        else
+            new.user_id := old.user_id;
+        end if;
+        return new;
+    end if;
+
     if tg_table_name = 'properties' then
         select po.user_id into v_owner
           from public.portfolios po
@@ -9365,12 +9632,15 @@ CREATE TRIGGER cloud_connections_delete_secrets AFTER DELETE ON public.cloud_con
 CREATE TRIGGER trg_sync_contact_to_tenant AFTER UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION public.sync_contact_to_tenant();
 CREATE TRIGGER trigger_update_document_templates_updated_at BEFORE UPDATE ON public.document_templates FOR EACH ROW EXECUTE FUNCTION public.update_document_templates_updated_at();
 CREATE TRIGGER push_on_document AFTER INSERT ON public.documents FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_document();
+CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.economic_units FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
+CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.expenses FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.expenses FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
 CREATE TRIGGER trg_floor_plans_user_id_guard BEFORE UPDATE ON public.floor_plans FOR EACH ROW WHEN (((old.user_id IS DISTINCT FROM new.user_id) OR (old.property_id IS DISTINCT FROM new.property_id) OR (old.unit_id IS DISTINCT FROM new.unit_id))) EXECUTE FUNCTION public.floor_plans_user_id_guard();
 CREATE TRIGGER trg_invoices_contact_guard_ins BEFORE INSERT ON public.invoices FOR EACH ROW WHEN ((new.contact_id IS NOT NULL)) EXECUTE FUNCTION public.contact_reference_guard();
 CREATE TRIGGER trg_invoices_contact_guard_upd BEFORE UPDATE ON public.invoices FOR EACH ROW WHEN (((new.contact_id IS NOT NULL) AND (old.contact_id IS DISTINCT FROM new.contact_id))) EXECUTE FUNCTION public.contact_reference_guard();
 CREATE TRIGGER trg_invoices_protect_issued BEFORE DELETE OR UPDATE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.protect_issued_invoice();
+CREATE TRIGGER trg_invoices_sender_snapshot BEFORE INSERT OR UPDATE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.invoices_freeze_sender_snapshot();
 CREATE TRIGGER trg_lease_notes_set_meta BEFORE INSERT OR UPDATE ON public.lease_notes FOR EACH ROW EXECUTE FUNCTION public.lease_notes_set_meta();
 CREATE TRIGGER trigger_lease_rent_periods_before_write BEFORE INSERT OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.lease_rent_periods_before_write();
 CREATE TRIGGER trigger_on_lease_rent_period_change AFTER INSERT OR DELETE OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.on_lease_rent_period_change();
@@ -9380,6 +9650,7 @@ CREATE TRIGGER trg_leases_owner_sync AFTER INSERT OR UPDATE OF tenant_id, unit_i
 CREATE TRIGGER trg_sync_lease_to_contact AFTER INSERT OR UPDATE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.sync_lease_to_contact();
 CREATE TRIGGER trigger_lease_before_delete BEFORE DELETE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.lease_before_delete();
 CREATE TRIGGER trigger_on_lease_change AFTER INSERT OR UPDATE ON public.leases FOR EACH ROW EXECUTE FUNCTION public.on_lease_change();
+CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.loans FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER push_on_message AFTER INSERT ON public.messages FOR EACH ROW EXECUTE FUNCTION public.trigger_push_on_message();
 CREATE TRIGGER on_reading_change AFTER INSERT OR DELETE OR UPDATE OF meter_id, reading_value, reading_date ON public.meter_readings FOR EACH ROW EXECUTE FUNCTION public.update_meter_last_reading();
 CREATE TRIGGER handle_payment_plan_installments_updated_at BEFORE UPDATE ON public.payment_plan_installments FOR EACH ROW EXECUTE FUNCTION public.set_forderungsmanagement_updated_at();
@@ -9418,6 +9689,7 @@ CREATE TRIGGER trg_renovation_tasks_user_id_guard BEFORE UPDATE ON public.renova
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_trades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER trigger_rent_ledger_block_claimed_delete BEFORE DELETE ON public.rent_ledger FOR EACH ROW EXECUTE FUNCTION public.rent_ledger_block_claimed_delete();
 CREATE TRIGGER block_claim_rent_payments_modification BEFORE INSERT OR DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.protect_claim_rent_payments();
+CREATE TRIGGER set_owner_user_id BEFORE INSERT OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.set_owner_user_id();
 CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
 CREATE TRIGGER trigger_on_rent_payment_change AFTER INSERT OR DELETE OR UPDATE ON public.rent_payments FOR EACH ROW EXECUTE FUNCTION public.on_rent_payment_change();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.rental_processes FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
@@ -10787,6 +11059,9 @@ grant execute on function public.can_write_lease_rent(uuid) to service_role;
 revoke all on function public.can_write_rent_ledger(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.can_write_rent_ledger(uuid) to authenticated;
 grant execute on function public.can_write_rent_ledger(uuid) to service_role;
+revoke all on function public.cancel_claim(uuid,text,boolean) from public, anon, authenticated, service_role;
+grant execute on function public.cancel_claim(uuid,text,boolean) to authenticated;
+grant execute on function public.cancel_claim(uuid,text,boolean) to service_role;
 revoke all on function public.cancel_viewing_booking(text,uuid,uuid) from public, anon, authenticated, service_role;
 grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to anon;
 grant execute on function public.cancel_viewing_booking(text,uuid,uuid) to authenticated;
@@ -10815,6 +11090,8 @@ grant execute on function public.claim_interest_amount(numeric,numeric,date,date
 revoke all on function public.claim_live_interest(uuid,date) from public, anon, authenticated, service_role;
 grant execute on function public.claim_live_interest(uuid,date) to authenticated;
 grant execute on function public.claim_live_interest(uuid,date) to service_role;
+revoke all on function public.claim_portal_bank_details(uuid) from public, anon, authenticated, service_role;
+grant execute on function public.claim_portal_bank_details(uuid) to service_role;
 revoke all on function public.claim_portal_check_access(text,text) from public, anon, authenticated, service_role;
 grant execute on function public.claim_portal_check_access(text,text) to service_role;
 revoke all on function public.claim_portal_installment_options(jsonb) from public, anon, authenticated, service_role;
@@ -10887,6 +11164,9 @@ grant execute on function public.get_auth_user_id_by_email(text) to service_role
 revoke all on function public.get_investor_properties(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.get_investor_properties(uuid) to authenticated;
 grant execute on function public.get_investor_properties(uuid) to service_role;
+revoke all on function public.get_message_partners() from public, anon, authenticated, service_role;
+grant execute on function public.get_message_partners() to authenticated;
+grant execute on function public.get_message_partners() to service_role;
 revoke all on function public.get_my_landlord_info(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.get_my_landlord_info(uuid) to authenticated;
 grant execute on function public.get_my_landlord_info(uuid) to service_role;
@@ -10962,6 +11242,8 @@ grant execute on function public.has_unit_access(uuid,text,text) to service_role
 revoke all on function public.import_rows(jsonb) from public, anon, authenticated, service_role;
 grant execute on function public.import_rows(jsonb) to authenticated;
 grant execute on function public.import_rows(jsonb) to service_role;
+revoke all on function public.invoices_freeze_sender_snapshot() from public, anon, authenticated, service_role;
+grant execute on function public.invoices_freeze_sender_snapshot() to service_role;
 revoke all on function public.is_applicant_document_owner(text) from public, anon, authenticated, service_role;
 grant execute on function public.is_applicant_document_owner(text) to authenticated;
 grant execute on function public.is_applicant_document_owner(text) to service_role;
@@ -11200,6 +11482,7 @@ comment on column public.floor_plans.room_count is 'Generiert aus plan_data: Anz
 comment on column public.floor_plans.total_area_mm2 is 'Generiert aus plan_data: Summe der Raumflächen in mm² (netto, wie im Editor).';
 comment on column public.floor_plans.storey_labels is 'Generiert aus plan_data: Geschoss-Bezeichnungen in Reihenfolge.';
 comment on column public.invoice_counters.object_unit_id is 'Veraltet: wird von get_next_invoice_number ignoriert (ein Zähler je Portfolio und Jahr, object_unit_id NULL).';
+comment on column public.invoices.sender_snapshot is 'Beim Ausstellen eingefrorene Absenderdaten des Portfolios (Kontakt, Bank, Steuernummer/USt-IdNr.) für den unveränderten Nachdruck; null bei Entwürfen und Altbestand. Gesetzt durch trg_invoices_sender_snapshot.';
 comment on column public.leases.tenant_id is 'Mieter des Vertrags; bewusst nullable: delete_tenant_completely löst den Bezug (Lösch-Regel D2-17), Vertrag und Mietkonto bleiben erhalten.';
 comment on column public.leases.booking_start_date is 'Beginn der Mietkonto-Führung in ImmoControl360 (z. B. Importmonat bei Bestandsverträgen). Monate vor diesem Stichtag gelten in der App nicht als Mietrückstand (einblendbar). NULL = Heuristik über den Erfassungszeitpunkt des Vertrags.';
 comment on column public.loans.bank_name is 'Bank / Co-Invest / sonstiges Darlehen';
@@ -11242,8 +11525,10 @@ comment on column public.user_smtp_settings.smtp_pass is 'Nur Eingabekanal: wird
 comment on column public.user_smtp_settings.smtp_pass_secret_id is 'Verweis auf vault.secrets (Name smtp_pass:<user_id>). Nur über get_smtp_password (service_role) lesbar.';
 comment on column public.utility_settlements.calculation_snapshot is 'Festschreibung beim Fertigstellen (status = done): alle Rechengrundlagen und Ergebnisse je Mieter. Das PDF einer fertigen Abrechnung wird ausschließlich hieraus erzeugt.';
 comment on function public.bank_transactions_unmatch_deleted_target() is 'Setzt Bankumsätze auf pending zurück, wenn die zugeordnete Mietzahlung (income) bzw. Ausgabe (expense) gelöscht wird.';
+comment on function public.cancel_claim(uuid,text,boolean) is 'Forderung stornieren (p_write_off=false) bzw. Forderungsausfall buchen (true) in einer Transaktion: Ratenplan, Portal-Links, Status, Historie.';
 comment on function public.claim_interest_amount(numeric,numeric,date,date) is 'Einzige Zinsformel des Forderungsmoduls: Kapital x Satz/100 x Tage/365, auf Cent gerundet. Bewusste Vereinfachung: immer 365 Tage (auch in Schaltjahren). Stichtag der Sichten und RPCs ist claim_today() (Kalendertag Europe/Berlin).';
 comment on function public.claim_live_interest(uuid,date) is 'Laufende Zinsen einer Forderung seit interest_start_date bis zum Stichtag (ohne Positionen eines aktiven Ratenplans).';
+comment on function public.claim_portal_bank_details(uuid) is 'Bankverbindung einer Forderung für Forderungsportal/GiroCode: Portfolio vor Profil (gleiche Regel wie das Mahn-PDF). Nur intern (get_public_claim_by_token).';
 comment on function public.claim_portal_check_access(text,text) is 'Interne Prüfung des Mieterportal-Zugangs (Token-SHA-256 + PIN-bcrypt, Fehlversuchs-Sperre). Nur über get_public_claim_by_token / submit_public_payment_plan_request aufrufen.';
 comment on function public.claim_today() is 'Heutiger Kalendertag des Forderungsmoduls (Europe/Berlin, Transaktionsbeginn). Stichtag für Zinsen in claim_totals_view und den Forderungs-RPCs (D1b-16).';
 comment on function public.create_claim_portal_link(uuid,integer) is 'Erzeugt einen Mieterportal-Link (Token + PIN) für eine Forderung. Gespeichert werden nur Hashes; Token und PIN werden nur in dieser Antwort geliefert (G15-05, G17b-12, R1-08, D3a-16).';
@@ -11254,6 +11539,7 @@ comment on function public.floor_plan_room_count(jsonb) is 'FLOORPLAN G29-05: An
 comment on function public.floor_plan_storey_labels(jsonb) is 'FLOORPLAN G29-05: Geschoss-Bezeichnungen in Reihenfolge (für floor_plans.storey_labels).';
 comment on function public.floor_plan_total_area_mm2(jsonb) is 'FLOORPLAN G29-05: Summe area_mm2 aller Räume in plan_data (für floor_plans.total_area_mm2).';
 comment on function public.generate_claim_access_link(uuid,text,text,integer) is 'Altweg (App bis 27.11.2026): legt einen Portal-Link mit vom Aufrufer erzeugtem Token/PIN an; gespeichert werden nur Hashes. Neue App: create_claim_portal_link.';
+comment on function public.get_message_partners() is 'Nachrichten (Vermieter-Ansicht): Mieter-Konten in Objekten mit Leserecht mieterportal, can_write = Schreibrecht mieterportal (W7, C-19/C-21).';
 comment on function public.get_my_landlord_info(uuid) is 'Mieterportal: Vermieter-ID (Nachrichten-Empfänger) und Öffnungszeiten für das eigene Objekt. Keine weiteren Profil-, Portfolio- oder Objektspalten.';
 comment on function public.get_next_invoice_number(uuid,uuid,integer) is 'Nächste Rechnungsnummer „JJJJ-NNN“ je Portfolio und Jahr (p_object_unit_id wird ignoriert). Berücksichtigt Zähler und bereits vergebene Nummern. Aufruf: create_credit_note.';
 comment on function public.import_rows(jsonb) is 'Excel-Import (Import.jsx): legt Portfolios, Immobilien, Einheiten, Mieter und Mietverträge aus dem geprüften Importplan in einer Transaktion an (alles oder nichts). SECURITY INVOKER – RLS des Aufrufers.';
@@ -11401,4 +11687,4 @@ alter default privileges for role postgres in schema public grant delete, insert
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to postgres;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to service_role;
 
--- Prüfsumme (md5 des Inhalts vor dieser Zeile): d23940e056306195be61b68e2fb9e343
+-- Prüfsumme (md5 des Inhalts vor dieser Zeile): beac180a54f6bc8ecc346c12abdfa383
