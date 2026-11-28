@@ -1,8 +1,8 @@
 -- =============================================================================
 -- ImmoControl360 · Ausgangsschema (Baseline) der Live-Datenbank – Schema public (+ Storage-Policies)
 -- Erzeugt mit supabase/baseline/generate_baseline.sql aus dem Live-Katalog (nur lesend).
--- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128082403
--- Inhalt: 74 Tabellen, 3 Sichten, 157 Funktionen, 291 Policies (public), 32 Storage-Policies
+-- Stand: 2026-11-28 · PostgreSQL 17.6 · letzte eingetragene Migration: 20261128092217
+-- Inhalt: 74 Tabellen, 3 Sichten, 159 Funktionen, 291 Policies (public), 32 Storage-Policies
 --
 -- NUR AUF EINER LEEREN DATENBANK (frisches Supabase-Projekt) ausführen, als eine Transaktion:
 --   psql "<db-url>" -v ON_ERROR_STOP=1 --single-transaction -f baseline_public.sql
@@ -2642,6 +2642,43 @@ begin
   end if;
 
   return vault.create_secret(p_value, p_name, 'ImmoControl360: OAuth-Token einer Cloud-Verbindung');
+end;
+$function$
+;
+CREATE OR REPLACE FUNCTION public.contact_reference_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_contact uuid;
+begin
+    -- Nur direkte Änderungen angemeldeter Nutzer; RPCs (SECURITY DEFINER), Server, Admin und
+    -- ON DELETE SET NULL bleiben unberührt.
+    if current_user <> 'authenticated' or auth.uid() is null then
+        return new;
+    end if;
+
+    case tg_table_name
+        when 'invoices' then
+            v_contact := new.contact_id;
+        when 'renovation_project_subtrades' then
+            v_contact := new.responsible_contact_id;
+        else
+            raise exception 'contact_reference_guard: Tabelle % ist nicht vorgesehen', tg_table_name;
+    end case;
+
+    if v_contact is null then
+        return new;
+    end if;
+
+    -- SECURITY INVOKER: contacts_select des Bearbeiters entscheidet. Der neue Verweis ist im
+    -- BEFORE-Trigger noch nicht gespeichert und verschafft daher selbst kein Leserecht.
+    if not exists (select 1 from public.contacts c where c.id = v_contact) then
+        raise exception 'Der Kontakt kann nicht verknüpft werden: Er wurde nicht gefunden oder Sie haben keinen Zugriff darauf.'
+            using errcode = '42501';
+    end if;
+    return new;
 end;
 $function$
 ;
@@ -6431,20 +6468,33 @@ begin
         return new;
     end if;
 
-    select po.user_id into v_old_owner
-      from public.properties pr
-      join public.portfolios po on po.id = pr.portfolio_id
-     where pr.id = old.property_id;
     select po.user_id into v_new_owner
       from public.properties pr
       join public.portfolios po on po.id = pr.portfolio_id
      where pr.id = new.property_id;
 
-    -- Wie bei Objekten/Einheiten/Mietverträgen (set_owner_user_id): nur innerhalb desselben
-    -- Eigentümers. Sonst bliebe die alte user_id stehen und der bisherige Eigentümer behielte
-    -- über has_renovation_project_access Zugriff auf Projekt und Unterdaten.
-    if v_old_owner is null or v_new_owner is null or v_old_owner <> v_new_owner then
-        raise exception 'Sanierungsprojekte können nur zu Objekten desselben Eigentümers verschoben werden.'
+    if old.property_id is distinct from new.property_id then
+        select po.user_id into v_old_owner
+          from public.properties pr
+          join public.portfolios po on po.id = pr.portfolio_id
+         where pr.id = old.property_id;
+
+        -- Wie bei Objekten/Einheiten/Mietverträgen (set_owner_user_id): nur innerhalb desselben
+        -- Eigentümers. Sonst bliebe die alte user_id stehen und der bisherige Eigentümer behielte
+        -- über has_renovation_project_access Zugriff auf Projekt und Unterdaten.
+        if v_old_owner is null or v_new_owner is null or v_old_owner <> v_new_owner then
+            raise exception 'Sanierungsprojekte können nur zu Objekten desselben Eigentümers verschoben werden.'
+                using errcode = '42501';
+        end if;
+    end if;
+
+    -- user_id geändert: nur der Eigentümer des Objekts. Das eigene Konto eines Mitnutzers nicht,
+    -- sonst behielte er über has_renovation_project_access (p.user_id = auth.uid()) nach Entzug
+    -- der Freigabe Zugriff auf Projekt und Unterdaten. Eine unveränderte user_id (Altbestand
+    -- eines Teammitglieds) kommt hier nicht an.
+    if old.user_id is distinct from new.user_id
+       and (v_new_owner is null or new.user_id is distinct from v_new_owner) then
+        raise exception 'Sanierungsprojekte können nur dem Eigentümer des Objekts zugeordnet werden.'
             using errcode = '42501';
     end if;
     return new;
@@ -6479,6 +6529,40 @@ begin
 end;
 $function$
 ;
+CREATE OR REPLACE FUNCTION public.renovation_unit_matches_property()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+    v_unit_property uuid;
+begin
+    -- Ohne Objekt oder ohne Einheit nichts zu prüfen (auch ON DELETE SET NULL).
+    if new.unit_id is null or new.property_id is null then
+        return new;
+    end if;
+
+    -- Beim Ändern nur, wenn sich Einheit oder Objekt ändern; Altbestand bleibt bearbeitbar.
+    if tg_op = 'UPDATE'
+       and new.unit_id is not distinct from old.unit_id
+       and new.property_id is not distinct from old.property_id then
+        return new;
+    end if;
+
+    -- Angemeldete Bearbeiter sehen alle Einheiten des Objekts (units_select); eine nicht lesbare
+    -- Einheit gehört also nicht zu diesem Objekt.
+    select u.property_id into v_unit_property
+      from public.units u
+     where u.id = new.unit_id;
+
+    if v_unit_property is distinct from new.property_id then
+        raise exception 'Die gewählte Einheit gehört nicht zum gewählten Objekt.'
+            using errcode = '23514';
+    end if;
+    return new;
+end;
+$function$
+;
 CREATE OR REPLACE FUNCTION public.renovation_user_id_guard()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -6487,6 +6571,8 @@ AS $function$
 declare
     v_kind text;
     v_ref uuid;
+    v_parent_user uuid;
+    v_owner uuid;
 begin
     -- Nur direkte Änderungen angemeldeter Nutzer; RPCs (SECURITY DEFINER), Server und Admin
     -- bleiben unberührt.
@@ -6517,10 +6603,28 @@ begin
             raise exception 'renovation_user_id_guard: Tabelle % ist nicht vorgesehen', tg_table_name;
     end case;
 
-    -- Neue user_id: eigenes Konto, Eigentümer oder user_id des Projekts/der Kalkulation
-    -- (wie beim Anlegen). Ein beliebiges fremdes Konto nicht.
-    if not public.rls_user_ok(new.user_id, v_kind, v_ref) then
-        raise exception 'user_id kann nur auf das eigene Konto oder den Eigentümer der Daten geändert werden.'
+    -- user_id und Objekt-Eigentümer des übergeordneten Datensatzes. Gelesen wird mit den Rechten
+    -- des Bearbeiters: USING hat ihm Schreibrecht darauf bescheinigt, er sieht ihn also. Ist er
+    -- nicht lesbar, bleiben beide Werte leer und die Änderung wird abgelehnt.
+    if v_kind = 'renovation_project' then
+        select rp.user_id, po.user_id into v_parent_user, v_owner
+          from public.renovation_projects rp
+          left join public.properties pr on pr.id = rp.property_id
+          left join public.portfolios po on po.id = pr.portfolio_id
+         where rp.id = v_ref;
+    else
+        select rc.user_id, po.user_id into v_parent_user, v_owner
+          from public.renovation_calculations rc
+          left join public.properties pr on pr.id = rc.property_id
+          left join public.portfolios po on po.id = pr.portfolio_id
+         where rc.id = v_ref;
+    end if;
+
+    -- Neue user_id: Eigentümer des Objekts oder user_id des Projekts/der Kalkulation. Das eigene
+    -- Konto des Bearbeiters nur, wenn es eines von beiden ist; ein fremdes Konto nie.
+    if new.user_id is null
+       or (new.user_id is distinct from v_owner and new.user_id is distinct from v_parent_user) then
+        raise exception 'user_id kann nur auf den Eigentümer der Daten geändert werden.'
             using errcode = '42501';
     end if;
     return new;
@@ -9264,6 +9368,8 @@ CREATE TRIGGER push_on_document AFTER INSERT ON public.documents FOR EACH ROW EX
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.economic_units FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER trigger_bank_tx_unmatch_on_delete AFTER DELETE ON public.expenses FOR EACH ROW EXECUTE FUNCTION public.bank_transactions_unmatch_deleted_target();
 CREATE TRIGGER trg_floor_plans_user_id_guard BEFORE UPDATE ON public.floor_plans FOR EACH ROW WHEN (((old.user_id IS DISTINCT FROM new.user_id) OR (old.property_id IS DISTINCT FROM new.property_id) OR (old.unit_id IS DISTINCT FROM new.unit_id))) EXECUTE FUNCTION public.floor_plans_user_id_guard();
+CREATE TRIGGER trg_invoices_contact_guard_ins BEFORE INSERT ON public.invoices FOR EACH ROW WHEN ((new.contact_id IS NOT NULL)) EXECUTE FUNCTION public.contact_reference_guard();
+CREATE TRIGGER trg_invoices_contact_guard_upd BEFORE UPDATE ON public.invoices FOR EACH ROW WHEN (((new.contact_id IS NOT NULL) AND (old.contact_id IS DISTINCT FROM new.contact_id))) EXECUTE FUNCTION public.contact_reference_guard();
 CREATE TRIGGER trg_invoices_protect_issued BEFORE DELETE OR UPDATE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.protect_issued_invoice();
 CREATE TRIGGER trg_lease_notes_set_meta BEFORE INSERT OR UPDATE ON public.lease_notes FOR EACH ROW EXECUTE FUNCTION public.lease_notes_set_meta();
 CREATE TRIGGER trigger_lease_rent_periods_before_write BEFORE INSERT OR UPDATE ON public.lease_rent_periods FOR EACH ROW EXECUTE FUNCTION public.lease_rent_periods_before_write();
@@ -9289,18 +9395,22 @@ CREATE TRIGGER trg_renovation_calc_subtrades_user_id_guard BEFORE UPDATE ON publ
 CREATE TRIGGER trg_renovation_calc_trades_user_id_guard BEFORE UPDATE ON public.renovation_calc_trades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_calculations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_calculations_owner BEFORE UPDATE ON public.renovation_calculations FOR EACH ROW WHEN ((old.property_id IS DISTINCT FROM new.property_id)) EXECUTE FUNCTION public.renovation_calculations_owner_follows_property();
+CREATE TRIGGER trg_renovation_calculations_unit_property BEFORE INSERT OR UPDATE OF property_id, unit_id ON public.renovation_calculations FOR EACH ROW EXECUTE FUNCTION public.renovation_unit_matches_property();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_invoices_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_invoices FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
 CREATE TRIGGER trg_renovation_invoices_user_id_guard BEFORE UPDATE ON public.renovation_invoices FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_milestone_templates FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER trg_renovation_milestones_user_id_guard BEFORE UPDATE ON public.renovation_milestones FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+CREATE TRIGGER trg_renovation_project_subtrades_contact_guard_ins BEFORE INSERT ON public.renovation_project_subtrades FOR EACH ROW WHEN ((new.responsible_contact_id IS NOT NULL)) EXECUTE FUNCTION public.contact_reference_guard();
+CREATE TRIGGER trg_renovation_project_subtrades_contact_guard_upd BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW WHEN (((new.responsible_contact_id IS NOT NULL) AND (old.responsible_contact_id IS DISTINCT FROM new.responsible_contact_id))) EXECUTE FUNCTION public.contact_reference_guard();
 CREATE TRIGGER trg_renovation_project_subtrades_user_id_guard BEFORE UPDATE ON public.renovation_project_subtrades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_project_trades FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_project_trades_user_id_guard BEFORE UPDATE ON public.renovation_project_trades FOR EACH ROW WHEN ((old.user_id IS DISTINCT FROM new.user_id)) EXECUTE FUNCTION public.renovation_user_id_guard();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_projects_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
-CREATE TRIGGER trg_renovation_projects_same_owner BEFORE UPDATE ON public.renovation_projects FOR EACH ROW WHEN ((old.property_id IS DISTINCT FROM new.property_id)) EXECUTE FUNCTION public.renovation_projects_same_owner_on_move();
+CREATE TRIGGER trg_renovation_projects_same_owner BEFORE UPDATE ON public.renovation_projects FOR EACH ROW WHEN (((old.property_id IS DISTINCT FROM new.property_id) OR (old.user_id IS DISTINCT FROM new.user_id))) EXECUTE FUNCTION public.renovation_projects_same_owner_on_move();
+CREATE TRIGGER trg_renovation_projects_unit_property BEFORE INSERT OR UPDATE OF property_id, unit_id ON public.renovation_projects FOR EACH ROW EXECUTE FUNCTION public.renovation_unit_matches_property();
 CREATE TRIGGER keep_user_id_on_update BEFORE UPDATE ON public.renovation_subtrades FOR EACH ROW EXECUTE FUNCTION public.keep_user_id_on_update();
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_renovation_tasks_created_by BEFORE INSERT OR UPDATE OF created_by ON public.renovation_tasks FOR EACH ROW EXECUTE FUNCTION public.renovation_set_created_by();
@@ -10723,6 +10833,8 @@ revoke all on function public.cloud_store_tokens(uuid,uuid,text,text,timestamp w
 grant execute on function public.cloud_store_tokens(uuid,uuid,text,text,timestamp with time zone) to service_role;
 revoke all on function public.cloud_tokens_keep_plaintext() from public, anon, authenticated, service_role;
 revoke all on function public.cloud_vault_put(uuid,text,text) from public, anon, authenticated, service_role;
+revoke all on function public.contact_reference_guard() from public, anon, authenticated, service_role;
+grant execute on function public.contact_reference_guard() to service_role;
 revoke all on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) from public, anon, authenticated, service_role;
 grant execute on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) to authenticated;
 grant execute on function public.convert_rental_applicant_to_tenant(uuid,date,numeric,numeric,numeric,numeric,integer) to service_role;
@@ -10914,6 +11026,8 @@ grant execute on function public.renovation_projects_same_owner_on_move() to ser
 revoke all on function public.renovation_set_created_by() from public, anon, authenticated, service_role;
 grant execute on function public.renovation_set_created_by() to authenticated;
 grant execute on function public.renovation_set_created_by() to service_role;
+revoke all on function public.renovation_unit_matches_property() from public, anon, authenticated, service_role;
+grant execute on function public.renovation_unit_matches_property() to service_role;
 revoke all on function public.renovation_user_id_guard() from public, anon, authenticated, service_role;
 grant execute on function public.renovation_user_id_guard() to service_role;
 revoke all on function public.rent_ledger_block_claimed_delete() from public, anon, authenticated, service_role;
@@ -11287,4 +11401,4 @@ alter default privileges for role postgres in schema public grant delete, insert
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to postgres;
 alter default privileges for role postgres in schema public grant delete, insert, maintain, references, select, trigger, truncate, update on tables to service_role;
 
--- Prüfsumme (md5 des Inhalts vor dieser Zeile): 2464c53455a7277f40e991958c9f1e04
+-- Prüfsumme (md5 des Inhalts vor dieser Zeile): d23940e056306195be61b68e2fb9e343
